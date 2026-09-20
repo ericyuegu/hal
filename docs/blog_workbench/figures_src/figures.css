@@ -154,3 +154,13 @@
 .codec-trigger-map .trig-fuse{fill:none;stroke:var(--ink-faint);stroke-width:1}
 /* mini effect panel beside a mechanism diagram */
 .effect-mini .diagram-note{font-size:11px}
+/* iso-FLOP figure: hover dims the other series; a pointer cursor sweeps the compute-optimal line; optima as numbers */
+.model-diagram [data-series].dim{opacity:.22}
+.model-diagram .iso-cursor line{stroke:var(--oxblood);stroke-width:1;stroke-dasharray:3 3}
+.model-diagram .iso-cursor circle{fill:var(--oxblood);stroke:var(--paper);stroke-width:1.5}
+#iso-optimal-diagram{touch-action:pan-y;cursor:crosshair}
+.iso-table{width:100%;border-collapse:collapse;margin:12px 0;font:400 .78rem/1.5 var(--mono);color:var(--ink-mono);font-variant-numeric:tabular-nums}
+.iso-table th{font-weight:500;color:var(--ink);text-align:left;padding:4px 6px 6px 0;border-bottom:1px solid var(--ink)}
+.iso-table td{padding:5px 6px 5px 0;border-bottom:1px solid var(--rule);vertical-align:top}
+.iso-table tr.accent td{color:var(--oxblood)}
+.iso-table td:last-child{color:var(--ink-faint)}

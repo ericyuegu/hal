@@ -1,12 +1,14 @@
-<figure class="breakout architecture-figure effects-figure" id="iso-flop">
-  <div class="artifact interactive">
-    <div class="figure-head">
-      <div>
-        <h4>Validation loss against model size and data</h4>
-        <p>33 runs on a grid of seven sizes and five data budgets, and the one curve fitted through them. Compute-optimal sizes fall where a fixed-compute line is lowest.</p>
-      </div>
-    </div>
-    <svg class="model-diagram chart-hover" id="iso-flop-diagram" role="img" aria-label="Left: validation NLL against effective parameters on a log axis. Five fitted curves, one per data budget from 2 to the 26 to 2 to the 30 positions, each darker than the last, with the measured points sitting on them; the measured size range is shaded and the curves are dashed beyond it. Two dotted fixed-compute lines for 10 to the 17 and 10 to the 18 FLOPs have their minimum marked. Right: fitted against measured NLL for every run, all within 0.012 of the identity line."></svg>
-    <div class="chart-readout" id="iso-flop-readout"></div>
+<figure class="breakout effects-figure" id="iso-flop">
+ <div class="artifact interactive">
+  <div class="figure-head"><div><h4>Fitting loss, then allocating compute</h4><p>O39: 33 completed runs. The model-and-data fit uses all points; none were held out. N is compute-equivalent parameters: trunk + 36 × decoder, because each decoder weight runs 36 times per frame. C = 6ND.</p></div></div>
+  <div class="scaling-grid">
+   <section><h5>Measured size and data</h5><svg id="iso-flop-diagram" class="model-diagram reflow-chart" role="img" aria-label="Measured validation loss versus compute-equivalent model size, with five fitted data-budget curves."></svg></section>
+   <section><h5>Iso-FLOP parabolas</h5><svg id="iso-compute-diagram" class="model-diagram reflow-chart" role="img" aria-label="Fitted loss along four fixed compute budgets, with the measured runs at each budget and the predicted minimum of each parabola."></svg></section>
+   <section><h5>Compute-optimal capacity</h5><svg id="iso-optimal-diagram" class="model-diagram reflow-chart" role="img" aria-label="Predicted compute-optimal model size against training compute, extrapolated to the production budget."></svg></section>
+   <section><h5>Predicted optima</h5><table class="iso-table" id="iso-optimal-table"><thead><tr><th>C</th><th>N</th><th>D</th><th>epochs</th><th>NLL</th><th></th></tr></thead><tbody></tbody></table></section>
   </div>
+  <div class="chart-readout" id="iso-flop-readout" aria-live="polite"></div>
+  <p class="figure-note">Filled points are runs trained to the budget exactly; hollow points are interpolated between a model's neighbouring runs. Solid curve segments keep both N and D inside the observed ranges; dashed segments extrapolate. The star is the fit's optimum at the O50 production budget (D = 2³³, N = trunk + 20 × decoder for that architecture); the ring is where O50 actually sat. Hover or tab through the points; move along the compute-optimal panel for any budget.</p>
+  <details class="figure-options"><summary>Fit equation and residuals</summary><p class="figure-note">L(N,D) = 1.635 + 89.1/N⁰·³⁶⁸ + 2009/D⁰·⁴⁹⁸. D is supervised positions. Residual = measured NLL − fitted NLL; all points were used in fitting.</p><svg id="iso-residual-diagram" class="model-diagram reflow-chart" role="img" aria-label="Fit residuals centered around zero; no held-out points."></svg></details>
+ </div>
 </figure>

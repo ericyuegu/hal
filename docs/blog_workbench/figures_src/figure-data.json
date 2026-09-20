@@ -777,7 +777,595 @@
     "fit_nll": 1.7811771461666548,
     "residual": -0.00018997720463698187
    }
-  ]
+  ],
+  "checkpoints": [
+   {
+    "run": "ldlin05b",
+    "model": "L3",
+    "n_eff": 23742936,
+    "positions": 350981584.0,
+    "training_flops": 4.999999971654374e+16,
+    "nll": 1.9237731207336688,
+    "exact": true
+   },
+   {
+    "run": "ui30df7n",
+    "model": "L3",
+    "n_eff": 23742936,
+    "positions": 701963168.0,
+    "training_flops": 9.999999943308749e+16,
+    "nll": 1.8892911459614743,
+    "exact": true
+   },
+   {
+    "run": "9h8otw5m",
+    "model": "L4",
+    "n_eff": 26696984,
+    "positions": 312145120.0,
+    "training_flops": 4.999999964590848e+16,
+    "nll": 1.916986007707574,
+    "exact": true
+   },
+   {
+    "run": "vea6s9sm",
+    "model": "L4",
+    "n_eff": 26696984,
+    "positions": 624290248.0,
+    "training_flops": 1.000000005732722e+17,
+    "nll": 1.882034288426402,
+    "exact": true
+   },
+   {
+    "run": "dt361n1f",
+    "model": "L5",
+    "n_eff": 30830680,
+    "positions": 67108864.0,
+    "training_flops": 1.241407146688512e+16,
+    "nll": 2.04296626119388,
+    "exact": true
+   },
+   {
+    "run": "accppjyl",
+    "model": "L5",
+    "n_eff": 30830680,
+    "positions": 134217728.0,
+    "training_flops": 2.482814293377024e+16,
+    "nll": 1.969640321004709,
+    "exact": true
+   },
+   {
+    "run": "5tewqgz7",
+    "model": "L5",
+    "n_eff": 30830680,
+    "positions": 268435456.0,
+    "training_flops": 4.965628586754048e+16,
+    "nll": 1.9181448393649845,
+    "exact": true
+   },
+   {
+    "run": "d7zifq1s",
+    "model": "L5",
+    "n_eff": 30830680,
+    "positions": 536870912.0,
+    "training_flops": 9.931257173508096e+16,
+    "nll": 1.878577972742213,
+    "exact": true
+   },
+   {
+    "run": "oixqvhj2",
+    "model": "L5",
+    "n_eff": 30830680,
+    "positions": 1073741824.0,
+    "training_flops": 1.9862514347016192e+17,
+    "nll": 1.848850233358216,
+    "exact": true
+   },
+   {
+    "run": "p4sqr8hx",
+    "model": "L5",
+    "n_eff": 30830680,
+    "positions": 1621761184.0,
+    "training_flops": 3.000000006019507e+17,
+    "nll": 1.8360281943763683,
+    "exact": true
+   },
+   {
+    "run": "la5p7wpo",
+    "model": "L7",
+    "n_eff": 43816664,
+    "positions": 67108864.0,
+    "training_flops": 1.7642919271858176e+16,
+    "nll": 2.03654572370649,
+    "exact": true
+   },
+   {
+    "run": "54gkmcl9",
+    "model": "L7",
+    "n_eff": 43816664,
+    "positions": 134217728.0,
+    "training_flops": 3.528583854371635e+16,
+    "nll": 1.9621021836340145,
+    "exact": true
+   },
+   {
+    "run": "zzwng0rb",
+    "model": "L7",
+    "n_eff": 43816664,
+    "positions": 268435456.0,
+    "training_flops": 7.05716770874327e+16,
+    "nll": 1.907247679181244,
+    "exact": true
+   },
+   {
+    "run": "jgqts6t4",
+    "model": "L7",
+    "n_eff": 43816664,
+    "positions": 536870912.0,
+    "training_flops": 1.411433541748654e+17,
+    "nll": 1.868542129334363,
+    "exact": true
+   },
+   {
+    "run": "kwzr1hp4",
+    "model": "L7",
+    "n_eff": 43816664,
+    "positions": 1073741824.0,
+    "training_flops": 2.822867083497308e+17,
+    "nll": 1.8402611210082496,
+    "exact": true
+   },
+   {
+    "run": "2ubngnfw",
+    "model": "L7",
+    "n_eff": 43816664,
+    "positions": 1141118368.0,
+    "training_flops": 3.000000006893061e+17,
+    "nll": 1.838295597502493,
+    "exact": true
+   },
+   {
+    "run": "24m9fz5k",
+    "model": "L10",
+    "n_eff": 111580568,
+    "positions": 67108864.0,
+    "training_flops": 4.492827097772851e+16,
+    "nll": 1.984402606095476,
+    "exact": true
+   },
+   {
+    "run": "9idtvi78",
+    "model": "L10",
+    "n_eff": 111580568,
+    "positions": 134217728.0,
+    "training_flops": 8.985654195545702e+16,
+    "nll": 1.912155025529341,
+    "exact": true
+   },
+   {
+    "run": "2g1pgvvz",
+    "model": "L10",
+    "n_eff": 111580568,
+    "positions": 268435456.0,
+    "training_flops": 1.7971308391091405e+17,
+    "nll": 1.8587825080113989,
+    "exact": true
+   },
+   {
+    "run": "79d8l0af",
+    "model": "L10",
+    "n_eff": 111580568,
+    "positions": 536870912.0,
+    "training_flops": 3.594261678218281e+17,
+    "nll": 1.8218180628041216,
+    "exact": true
+   },
+   {
+    "run": "9885eba2",
+    "model": "L10",
+    "n_eff": 111580568,
+    "positions": 1073741824.0,
+    "training_flops": 7.188523356436562e+17,
+    "nll": 1.7956324093955631,
+    "exact": true
+   },
+   {
+    "run": "u7t65xfs",
+    "model": "L13",
+    "n_eff": 230364248,
+    "positions": 67108864.0,
+    "training_flops": 9.275689793696563e+16,
+    "nll": 1.9601956102725355,
+    "exact": true
+   },
+   {
+    "run": "m2cpo3rn",
+    "model": "L13",
+    "n_eff": 230364248,
+    "positions": 134217728.0,
+    "training_flops": 1.8551379587393126e+17,
+    "nll": 1.8862407563798804,
+    "exact": true
+   },
+   {
+    "run": "z2h1ain0",
+    "model": "L13",
+    "n_eff": 230364248,
+    "positions": 268435456.0,
+    "training_flops": 3.710275917478625e+17,
+    "nll": 1.8335726348811832,
+    "exact": true
+   },
+   {
+    "run": "2epkrfmj",
+    "model": "L13",
+    "n_eff": 230364248,
+    "positions": 536870912.0,
+    "training_flops": 7.42055183495725e+17,
+    "nll": 1.797502125240838,
+    "exact": true
+   },
+   {
+    "run": "piba1f7t",
+    "model": "L13",
+    "n_eff": 230364248,
+    "positions": 723491896.0,
+    "training_flops": 9.999999993368052e+17,
+    "nll": 1.784338300827231,
+    "exact": true
+   },
+   {
+    "run": "spwekixh",
+    "model": "L16",
+    "n_eff": 327994904,
+    "positions": 67108864.0,
+    "training_flops": 1.3206819243137434e+17,
+    "nll": 1.9580559016337016,
+    "exact": true
+   },
+   {
+    "run": "t2o011wf",
+    "model": "L16",
+    "n_eff": 327994904,
+    "positions": 134217728.0,
+    "training_flops": 2.6413638486274867e+17,
+    "nll": 1.8843847255524508,
+    "exact": true
+   },
+   {
+    "run": "0ls85skw",
+    "model": "L16",
+    "n_eff": 327994904,
+    "positions": 268435456.0,
+    "training_flops": 5.282727697254973e+17,
+    "nll": 1.8317713941546805,
+    "exact": true
+   },
+   {
+    "run": "to0fx9ig",
+    "model": "L16",
+    "n_eff": 327994904,
+    "positions": 536870912.0,
+    "training_flops": 1.0565455394509948e+18,
+    "nll": 1.7966224093384078,
+    "exact": true
+   },
+   {
+    "run": "tlgvpsqh",
+    "model": "L16",
+    "n_eff": 327994904,
+    "positions": 1073741824.0,
+    "training_flops": 2.113091078901989e+18,
+    "nll": 1.7711337818716562,
+    "exact": true
+   },
+   {
+    "run": "wcdj8arn",
+    "model": "L18",
+    "n_eff": 503691672,
+    "positions": 67108864.0,
+    "training_flops": 2.0281305548508365e+17,
+    "nll": 1.9470057232359543,
+    "exact": true
+   },
+   {
+    "run": "84z3js0r",
+    "model": "L18",
+    "n_eff": 503691672,
+    "positions": 134217728.0,
+    "training_flops": 4.056261109701673e+17,
+    "nll": 1.8677958767601075,
+    "exact": true
+   },
+   {
+    "run": "rz25c5pr",
+    "model": "L18",
+    "n_eff": 503691672,
+    "positions": 268435456.0,
+    "training_flops": 8.112522219403346e+17,
+    "nll": 1.815900191321837,
+    "exact": true
+   },
+   {
+    "run": "03f39e4a",
+    "model": "L18",
+    "n_eff": 503691672,
+    "positions": 536870912.0,
+    "training_flops": 1.6225044438806692e+18,
+    "nll": 1.7809871689620178,
+    "exact": true
+   }
+  ],
+  "levels": [
+   {
+    "c": 5e+16,
+    "points": [
+     {
+      "model": "L3",
+      "n_eff": 23742936,
+      "nll": 1.9237731207336688,
+      "exact": true,
+      "runs": [
+       "ldlin05b"
+      ]
+     },
+     {
+      "model": "L4",
+      "n_eff": 26696984,
+      "nll": 1.916986007707574,
+      "exact": true,
+      "runs": [
+       "9h8otw5m"
+      ]
+     },
+     {
+      "model": "L5",
+      "n_eff": 30830680,
+      "nll": 1.9181448393649845,
+      "exact": true,
+      "runs": [
+       "5tewqgz7"
+      ]
+     },
+     {
+      "model": "L7",
+      "n_eff": 43816664,
+      "nll": 1.9345192104495925,
+      "exact": false,
+      "runs": [
+       "54gkmcl9",
+       "zzwng0rb"
+      ],
+      "between_positions": [
+       134217728.0,
+       268435456.0
+      ]
+     },
+     {
+      "model": "L10",
+      "n_eff": 111580568,
+      "nll": 1.9732544754911112,
+      "exact": false,
+      "runs": [
+       "24m9fz5k",
+       "9idtvi78"
+      ],
+      "between_positions": [
+       67108864.0,
+       134217728.0
+      ]
+     }
+    ]
+   },
+   {
+    "c": 1e+17,
+    "points": [
+     {
+      "model": "L3",
+      "n_eff": 23742936,
+      "nll": 1.8892911459614743,
+      "exact": true,
+      "runs": [
+       "ui30df7n"
+      ]
+     },
+     {
+      "model": "L4",
+      "n_eff": 26696984,
+      "nll": 1.882034288426402,
+      "exact": true,
+      "runs": [
+       "vea6s9sm"
+      ]
+     },
+     {
+      "model": "L5",
+      "n_eff": 30830680,
+      "nll": 1.878577972742213,
+      "exact": true,
+      "runs": [
+       "d7zifq1s"
+      ]
+     },
+     {
+      "model": "L7",
+      "n_eff": 43816664,
+      "nll": 1.8877850269493925,
+      "exact": false,
+      "runs": [
+       "zzwng0rb",
+       "jgqts6t4"
+      ],
+      "between_positions": [
+       268435456.0,
+       536870912.0
+      ]
+     },
+     {
+      "model": "L10",
+      "n_eff": 111580568,
+      "nll": 1.9039194030861901,
+      "exact": false,
+      "runs": [
+       "9idtvi78",
+       "2g1pgvvz"
+      ],
+      "between_positions": [
+       134217728.0,
+       268435456.0
+      ]
+     },
+     {
+      "model": "L13",
+      "n_eff": 230364248,
+      "nll": 1.952173466797727,
+      "exact": false,
+      "runs": [
+       "u7t65xfs",
+       "m2cpo3rn"
+      ],
+      "between_positions": [
+       67108864.0,
+       134217728.0
+      ]
+     }
+    ]
+   },
+   {
+    "c": 3e+17,
+    "points": [
+     {
+      "model": "L5",
+      "n_eff": 30830680,
+      "nll": 1.8360281943763683,
+      "exact": true,
+      "runs": [
+       "p4sqr8hx"
+      ]
+     },
+     {
+      "model": "L7",
+      "n_eff": 43816664,
+      "nll": 1.838295597502493,
+      "exact": true,
+      "runs": [
+       "2ubngnfw"
+      ]
+     },
+     {
+      "model": "L10",
+      "n_eff": 111580568,
+      "nll": 1.8314559115209248,
+      "exact": false,
+      "runs": [
+       "2g1pgvvz",
+       "79d8l0af"
+      ],
+      "between_positions": [
+       268435456.0,
+       536870912.0
+      ]
+     },
+     {
+      "model": "L13",
+      "n_eff": 230364248,
+      "nll": 1.8497187836807258,
+      "exact": false,
+      "runs": [
+       "m2cpo3rn",
+       "z2h1ain0"
+      ],
+      "between_positions": [
+       134217728.0,
+       268435456.0
+      ]
+     },
+     {
+      "model": "L16",
+      "n_eff": 327994904,
+      "nll": 1.8747207375749384,
+      "exact": false,
+      "runs": [
+       "t2o011wf",
+       "0ls85skw"
+      ],
+      "between_positions": [
+       134217728.0,
+       268435456.0
+      ]
+     },
+     {
+      "model": "L18",
+      "n_eff": 503691672,
+      "nll": 1.9022670533131452,
+      "exact": false,
+      "runs": [
+       "wcdj8arn",
+       "84z3js0r"
+      ],
+      "between_positions": [
+       67108864.0,
+       134217728.0
+      ]
+     }
+    ]
+   },
+   {
+    "c": 1e+18,
+    "points": [
+     {
+      "model": "L13",
+      "n_eff": 230364248,
+      "nll": 1.784338300827231,
+      "exact": true,
+      "runs": [
+       "piba1f7t"
+      ]
+     },
+     {
+      "model": "L16",
+      "n_eff": 327994904,
+      "nll": 1.7994116553400201,
+      "exact": false,
+      "runs": [
+       "0ls85skw",
+       "to0fx9ig"
+      ],
+      "between_positions": [
+       268435456.0,
+       536870912.0
+      ]
+     },
+     {
+      "model": "L18",
+      "n_eff": 503691672,
+      "nll": 1.8053642242598231,
+      "exact": false,
+      "runs": [
+       "rz25c5pr",
+       "03f39e4a"
+      ],
+      "between_positions": [
+       268435456.0,
+       536870912.0
+      ]
+     }
+    ]
+   }
+  ],
+  "family": {
+   "n_min": 23742936,
+   "n_max": 503691672
+  },
+  "u_total": 2409583026.0,
+  "production": {
+   "run": "p1fyyp1z",
+   "positions": 8589934592,
+   "trunk": 203606471,
+   "decoder": 12890323,
+   "passes": 20,
+   "n_eff": 461412931,
+   "flops": 2.3781041383158055e+19
+  }
  },
  "tier": {
   "fit_through_d_exp": 30,

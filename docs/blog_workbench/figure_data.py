@@ -8,6 +8,15 @@ Writes figures_src/figure-data.json (inlined by build.py as ``window.HALFIG_DATA
 * ``iso_flop``   — the 33 O39 capacity-sweep runs: N_eff, D, validation NLL, the published fit
                    L(N, D) and each point's residual. N_eff = trunk + 36 · decoder, the parameter count
                    the run's own FLOP formula 6 · D · N_eff uses (results/039_capacity_scaling).
+                   Also ``checkpoints`` (every non-diverged scaled-family cooldown checkpoint, exact
+                   iso-FLOP endpoints included), ``levels`` (measured NLL per model at four compute
+                   budgets, read off exact hits or log-interpolated inside the model's range, as in
+                   notebooks/039_scaling_viz.py), ``family`` (the N_eff range the fit saw),
+                   ``u_total`` (distinct corpus positions) and ``production`` — the O50 run's budget in
+                   the fit's units: D = 2³³ supervised positions (131,072 updates × 512 × 128), N_eff =
+                   trunk + 20 · decoder with decoder = temporal decoder + group heads (the modules O39
+                   counts as codec + temporal) and 20 = its sample_chunk_length, from the
+                   parameter_count_contract in experiments/050_scaled_temporal_awr.py.
 * ``tier``       — O54: S(D) = S₂₈ + A · (1 − (D/2²⁸)^−α) fitted per model through D = 2³⁰, and the
                    D = 2³¹ prediction next to the observation.
 
@@ -32,6 +41,19 @@ EVIDENCE = json.loads((HERE / "evidence.json").read_text())
 STUDIES = {s["id"]: s for s in EVIDENCE["studies"]}
 OUT = HERE / "figures_src" / "figure-data.json"
 FIT = {"base": 1.6350, "aScale": 89.11, "aPower": 0.368, "dScale": 2009, "dPower": 0.498}
+FLOP_LEVELS = [5e16, 1e17, 3e17, 1e18]
+DIVERGENCE_NLL_MARGIN = 0.01
+# experiments/050_scaled_temporal_awr.py Architecture.parameter_count_contract, run p1fyyp1z
+O50 = {
+    "trunk": 201_326_592,
+    "temporal_decoder": 11_296_112,
+    "group_heads": 1_594_211,
+    "value_head": 1_049_089,
+    "other": 1_230_790,
+}
+O50_TOTAL = 216_496_794
+O50_POSITIONS = 131_072 * 512 * 128
+O50_DECODER_PASSES = 20
 
 
 def val_series(api: wandb.Api, run_id: str, key: str) -> list[tuple[int, float]]:
@@ -131,12 +153,103 @@ def iso_flop(csv: Path) -> dict:
             }
         )
     assert len(pts) == 33, f"expected the 33 cooled-down O39 grid runs, got {len(pts)}"
+
+    u_total = float(runs.unique_loss_positions.iloc[0])
+    assert (df[df.record_type == "run"].unique_loss_positions.dropna() == u_total).all(), (
+        "runs disagree on corpus size"
+    )
+
+    # every scaled-family cooldown checkpoint the notebook's fit and iso-FLOP profiles use: exact
+    # endpoints at non-power-of-two D included, checkpoints that regressed past the model's best
+    # earlier NLL (the optimizer-failed L10 1e18 endpoint) excluded
+    ck = df[df.record_type == "run"].drop_duplicates("run_id").set_index("run_id")
+    ck = ck[
+        (ck.model_family == "scaled")
+        & (ck.phase == "cooldown")
+        & (ck.wandb_state == "finished")
+        & ck.validation_nll.notna()
+        & ~ck.analysis_excluded.eq(True)
+    ]
+    ck = ck.drop_duplicates(subset=["model", "processed_positions"]).sort_values(["model", "processed_positions"])
+    best_prior = ck.groupby("model").validation_nll.cummin().groupby(ck.model).shift(1)
+    ck = ck[~(ck.validation_nll - best_prior > DIVERGENCE_NLL_MARGIN).fillna(False)]
+    checkpoints = []
+    for r in ck.sort_values(["total_parameters", "processed_positions"]).itertuples():
+        n_eff = int(r.trunk_parameters + 36 * r.decoder_parameters)
+        assert abs(n_eff - r.training_flops / (6 * r.processed_positions)) / n_eff < 1e-6, r.Index
+        checkpoints.append(
+            {
+                "run": r.Index,
+                "model": str(r.model),
+                "n_eff": n_eff,
+                "positions": float(r.processed_positions),
+                "training_flops": float(r.training_flops),
+                "nll": float(r.validation_nll),
+                "exact": bool(r.endpoint_exact),
+            }
+        )
+    assert len(checkpoints) == 35, f"expected 35 non-diverged scaled-family checkpoints, got {len(checkpoints)}"
+
+    levels = []
+    for c in FLOP_LEVELS:
+        level = []
+        for model, rows in ck.groupby("model", sort=False):
+            rows = rows.sort_values("training_flops")
+            exact = rows[np.isclose(rows.training_flops, c, rtol=0.01)]
+            if not exact.empty:
+                hit = exact.iloc[0]
+                point = {"nll": float(hit.validation_nll), "exact": True, "runs": [hit.name]}
+            elif len(rows) >= 2 and rows.training_flops.min() <= c <= rows.training_flops.max():
+                above = int(np.searchsorted(rows.training_flops.to_numpy(), c))
+                lo, hi = rows.iloc[above - 1], rows.iloc[above]
+                nll = float(
+                    np.interp(
+                        np.log10(c),
+                        np.log10([lo.training_flops, hi.training_flops]),
+                        [lo.validation_nll, hi.validation_nll],
+                    )
+                )
+                point = {
+                    "nll": nll,
+                    "exact": False,
+                    "runs": [lo.name, hi.name],
+                    "between_positions": [float(lo.processed_positions), float(hi.processed_positions)],
+                }
+            else:
+                continue
+            level.append(
+                {
+                    "model": str(model),
+                    "n_eff": int(rows.trunk_parameters.iloc[0] + 36 * rows.decoder_parameters.iloc[0]),
+                    **point,
+                }
+            )
+        level.sort(key=lambda p: p["n_eff"])
+        levels.append({"c": c, "points": level})
+    assert [len(level["points"]) for level in levels] == [5, 6, 6, 3], [len(level["points"]) for level in levels]
+
+    decoder = O50["temporal_decoder"] + O50["group_heads"]
+    assert sum(O50.values()) == O50_TOTAL
+    o50_n_eff = O50_TOTAL - decoder + O50_DECODER_PASSES * decoder
     return {
         "fit": FIT,
         "compute": "6 · D · N_eff",
         "n_eff": "trunk + 36 · decoder",
         "source_csv": str(csv),
         "points": pts,
+        "checkpoints": checkpoints,
+        "levels": levels,
+        "family": {"n_min": min(c["n_eff"] for c in checkpoints), "n_max": max(c["n_eff"] for c in checkpoints)},
+        "u_total": u_total,
+        "production": {
+            "run": "p1fyyp1z",
+            "positions": O50_POSITIONS,
+            "trunk": O50_TOTAL - decoder,
+            "decoder": decoder,
+            "passes": O50_DECODER_PASSES,
+            "n_eff": o50_n_eff,
+            "flops": 6.0 * O50_POSITIONS * o50_n_eff,
+        },
     }
 
 
