@@ -179,7 +179,7 @@ from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v2"
+_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v3"
 _CHECKPOINT_FORMAT_VERSION: Final[int] = 2
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
@@ -772,11 +772,6 @@ def decoder_rmsnorm(x: Tensor) -> Tensor:
     return F.rms_norm(x, (x.shape[-1],), eps=1e-6)
 
 
-def action_rmsnorm(x: Tensor) -> Tensor:
-    """Normalize an action-boundary tensor with a safer near-zero Jacobian."""
-    return F.rms_norm(x, (x.shape[-1],), eps=1e-5)
-
-
 class SwiGLU(nn.Module):
     """Gated MLP used by every nonlinear projection in the policy."""
 
@@ -799,27 +794,24 @@ class SwiGLU(nn.Module):
 class NonlinearActionHead(nn.Module):
     """O26 RMSNorm-SiLU controller readout."""
 
-    def __init__(self, d_model: int, d_hidden: int, vocab: int) -> None:
+    def __init__(self, d_model: int, d_hidden: int, vocab: int, *, norm_eps: float = 1e-6) -> None:
         super().__init__()
+        self.norm_eps = norm_eps
         self.up = nn.Linear(d_model, d_hidden, bias=False)
         self.down = nn.Linear(d_hidden, vocab)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.down(F.silu(self.up(decoder_rmsnorm(x))))
+        normalized = F.rms_norm(x, (x.shape[-1],), eps=self.norm_eps)
+        return self.down(F.silu(self.up(normalized)))
 
     def forward_with_input(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """Return logits and the normalized tensor read by the hidden layer."""
-        logits, normalized, _up_output, _down_input = self.projection_activations(x, safer_norm=True)
+        logits, normalized, _up_output, _down_input = self.projection_activations(x)
         return logits, normalized
 
-    def projection_activations(
-        self,
-        x: Tensor,
-        *,
-        safer_norm: bool = False,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def projection_activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Return the output and the tensors at both projection boundaries."""
-        normalized = action_rmsnorm(x) if safer_norm else decoder_rmsnorm(x)
+        normalized = F.rms_norm(x, (x.shape[-1],), eps=self.norm_eps)
         up_output = self.up(normalized)
         down_input = F.silu(up_output)
         return self.down(down_input), normalized, up_output, down_input
@@ -1083,7 +1075,11 @@ class CausalTemporalDecoder(nn.Module):
         self.outputs = nn.ModuleDict(
             {
                 name: NonlinearActionHead(
-                    self.d_model, cfg.arch.group_head_dim, CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]]
+                    self.d_model,
+                    cfg.arch.group_head_dim,
+                    CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]],
+                    # Keep the near-zero button Jacobian bounded in every path.
+                    norm_eps=1e-5 if name == "buttons" else 1e-6,
                 )
                 for name in CONTROLLER_GROUP_NAMES
             }
@@ -1229,10 +1225,7 @@ class CausalTemporalDecoder(nn.Module):
         for name in CONTROLLER_GROUP_NAMES:
             features = self.group_features(states, name, embedded)
             head = cast(NonlinearActionHead, self.outputs[name])
-            head_output, head_input, up_output, down_input = head.projection_activations(
-                features,
-                safer_norm=name == "buttons",
-            )
+            head_output, head_input, up_output, down_input = head.projection_activations(features)
             trunk_head = cast(NonlinearActionHead, self.trunk_outputs[name])
             trunk_output, trunk_input, trunk_up_output, trunk_down_input = trunk_head.projection_activations(
                 selected_hidden

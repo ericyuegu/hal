@@ -174,10 +174,38 @@ def test_history_attention_is_causal_and_has_backward_parity() -> None:
     torch.testing.assert_close(output[:, 0], isolated[:, 0])
 
 
-def test_teacher_forced_and_stepwise_decoding_match() -> None:
+@pytest.mark.parametrize("norm_eps", [1e-6, 1e-5])
+def test_action_head_forward_and_diagnostics_have_gradient_parity(norm_eps: float) -> None:
+    torch.manual_seed(5)
+    head = exp.NonlinearActionHead(32, 32, 8, norm_eps=norm_eps)
+    inputs = (torch.randn(2, 32) * 1e-3).requires_grad_()
+    direct = head(inputs)
+    diagnostic, _ = head.forward_with_input(inputs)
+    parameters = (inputs, *head.parameters())
+    direct_gradients = torch.autograd.grad(direct.square().sum(), parameters)
+    diagnostic_gradients = torch.autograd.grad(diagnostic.square().sum(), parameters)
+
+    torch.testing.assert_close(direct, diagnostic, rtol=0, atol=0)
+    for actual, expected in zip(direct_gradients, diagnostic_gradients, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("button_input_scale", [1.0, 1e-3])
+def test_teacher_forced_and_stepwise_decoding_match(button_input_scale: float) -> None:
     torch.manual_seed(5)
     cfg = _tiny_cfg(batch_size=1)
     decoder = exp.CausalTemporalDecoder(cfg, exp.DiscreteControllerCodec(cfg.arch.action_embed_dim)).eval()
+    assert decoder.outputs["buttons"].norm_eps == 1e-5
+    assert all(head.norm_eps == 1e-6 for head in decoder.trunk_outputs.values())
+    if button_input_scale != 1.0:
+        # Small conditioned states expose normalization differences at the head.
+        condition = decoder.group_condition["buttons"]
+        with torch.no_grad():
+            condition.weight.zero_()
+            condition.bias.zero_()
+            condition.bias[: cfg.arch.temporal_d_model].fill_(
+                torch.atanh(torch.tensor(button_input_scale - 1.0)).item()
+            )
     hidden = torch.randn(1, 8, 32)
     ctx_pad = torch.tensor([2])
     prefix = torch.tensor([[7]])
@@ -716,7 +744,7 @@ def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
     cfg = replace(exp.TrainConfig(), train_compile_mode="max-autotune")
     exp.validate_config(cfg)
     payload = exp._checkpoint_config(cfg)
-    assert payload["experiment_id"] == "059_muon_history_decoder_v2"
+    assert payload["experiment_id"] == "059_muon_history_decoder_v3"
     assert payload["checkpoint_format_version"] == 2
     assert exp.config_from_state(payload).train_compile_mode == "max-autotune"
     legacy = {key: value for key, value in payload.items() if key != "train_compile_mode"}
@@ -727,7 +755,8 @@ def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
         exp.config_from_state({**payload, "checkpoint_format_version": 1})
     with pytest.raises(ValueError, match="checkpoint config mismatch"):
         exp.config_from_state({**legacy, "checkpoint_format_version": 2})
-    with pytest.raises(ValueError, match="checkpoint experiment_id"):
-        exp.config_from_state({**payload, "experiment_id": "059_muon_history_decoder_v1"})
+    for previous in ("059_muon_history_decoder_v1", "059_muon_history_decoder_v2"):
+        with pytest.raises(ValueError, match="checkpoint experiment_id"):
+            exp.config_from_state({**payload, "experiment_id": previous})
     with pytest.raises(ValueError, match="unsupported training compile mode"):
         exp.validate_config(replace(cfg, train_compile_mode="unsupported"))
