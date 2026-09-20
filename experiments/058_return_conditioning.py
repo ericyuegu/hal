@@ -219,6 +219,11 @@ class ReturnLabels:
 
     def __call__(self, compact: Mapping[str, object]) -> dict[str, np.ndarray]:
         labels = self.full_match(compact)
+        frames = int(np.asarray(compact["num_frames"]).item())
+        labels = {
+            name: np.full(frames, value.item(), dtype=value.dtype) if value.shape == () else value
+            for name, value in labels.items()
+        }
         sample = {}
         for port in ("p1", "p2"):
             sample[f"{port}_percent"] = np.asarray(compact[f"{port}_percent"], dtype=np.float32)

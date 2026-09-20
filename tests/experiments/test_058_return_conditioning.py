@@ -431,7 +431,11 @@ def test_compact_labels_preserve_full_match_awr_and_are_pickleable() -> None:
     expected = original(compact)
     actual = callback(compact)
     for name, value in expected.items():
-        np.testing.assert_array_equal(actual[name], value)
+        if value.shape == ():
+            assert actual[name].shape == (130,)
+            np.testing.assert_array_equal(actual[name], np.full(130, value.item(), dtype=value.dtype))
+        else:
+            np.testing.assert_array_equal(actual[name], value)
     assert actual["p1_return60"][0] == pytest.approx(12 * 0.99855**29)
     assert actual["p1_awr_return"][1] > actual["p1_return60"][0]
 
