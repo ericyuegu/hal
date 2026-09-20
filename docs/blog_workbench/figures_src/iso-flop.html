@@ -7,8 +7,17 @@
    <section><h5>Compute-optimal capacity</h5><svg id="iso-optimal-diagram" class="model-diagram reflow-chart" role="img" aria-label="Predicted compute-optimal model size against training compute, extrapolated to the production budget."></svg></section>
    <section><h5>Predicted optima</h5><table class="iso-table" id="iso-optimal-table"><thead><tr><th>C</th><th>N</th><th>D</th><th>epochs</th><th>NLL</th><th></th></tr></thead><tbody></tbody></table></section>
   </div>
+  <ul class="iso-legend" aria-label="Marker key">
+   <li><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="4.5" class="k-run"/></svg>run trained at that budget</li>
+   <li><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="4.5" class="k-interp"/></svg>interpolated between the model's neighbouring runs</li>
+   <li><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 3.5L14.5 9L9 14.5L3.5 9Z" class="k-opt"/></svg>predicted optimum of the fit</li>
+   <li><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 1.5L11.1 6.6L16.6 6.9L12.4 10.4L13.7 15.7L9 12.8L4.3 15.7L5.6 10.4L1.4 6.9L6.9 6.6Z" class="k-star"/></svg>predicted optimum at the O50 budget</li>
+   <li><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="4.5" class="k-measured"/></svg>measured run, shaded by D</li>
+   <li><svg viewBox="0 0 26 18" aria-hidden="true"><line x1="2" y1="9" x2="24" y2="9" class="k-solid"/></svg>inside the observed N and D ranges</li>
+   <li><svg viewBox="0 0 26 18" aria-hidden="true"><line x1="2" y1="9" x2="24" y2="9" class="k-dashed"/></svg>extrapolated</li>
+  </ul>
   <div class="chart-readout" id="iso-flop-readout" aria-live="polite"></div>
-  <p class="figure-note">Filled points are runs trained to the budget exactly; hollow points are interpolated between a model's neighbouring runs. Solid curve segments keep both N and D inside the observed ranges; dashed segments extrapolate. The star is the fit's optimum at the O50 production budget (D = 2³³, N = trunk + 20 × decoder for that architecture); the ring is where O50 actually sat. Hover or tab through the points; move along the compute-optimal panel for any budget.</p>
+  <p class="figure-note">Hover or tab to any point for its exact numbers; move along the compute-optimal panel for any budget. The O50 budget is C = 6·D·N with D = 2³³ supervised positions and N = trunk + 20 × decoder for that architecture.</p>
   <details class="figure-options"><summary>Fit equation and residuals</summary><p class="figure-note">L(N,D) = 1.635 + 89.1/N⁰·³⁶⁸ + 2009/D⁰·⁴⁹⁸. D is supervised positions. Residual = measured NLL − fitted NLL; all points were used in fitting.</p><svg id="iso-residual-diagram" class="model-diagram reflow-chart" role="img" aria-label="Fit residuals centered around zero; no held-out points."></svg></details>
  </div>
 </figure>

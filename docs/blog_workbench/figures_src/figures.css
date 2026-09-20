@@ -164,3 +164,19 @@
 .iso-table td{padding:5px 6px 5px 0;border-bottom:1px solid var(--rule);vertical-align:top}
 .iso-table tr.accent td{color:var(--oxblood)}
 .iso-table td:last-child{color:var(--ink-faint)}
+.iso-legend{display:flex;flex-wrap:wrap;gap:4px 18px;list-style:none;margin:14px 0 0;padding:10px 0 0;border-top:1px solid var(--rule);font:400 .72rem/1.5 var(--mono);color:var(--ink-mono)}
+.iso-legend li{display:flex;align-items:center;gap:6px;margin:0}
+.iso-legend svg{width:18px;height:18px;flex:none;overflow:visible}
+.iso-legend .k-run{fill:var(--oxblood)}
+.iso-legend .k-interp{fill:var(--paper);stroke:var(--oxblood);stroke-width:1.6}
+.iso-legend .k-opt{fill:var(--paper);stroke:var(--ink);stroke-width:1.8}
+.iso-legend .k-star{fill:var(--oxblood)}
+.iso-legend .k-measured{fill:var(--ink)}
+.iso-legend .k-solid{stroke:var(--ink);stroke-width:1.6}
+.iso-legend .k-dashed{stroke:var(--ink);stroke-width:1.6;stroke-dasharray:4 4}
+.iso-legend svg[viewBox="0 0 26 18"]{width:26px}
+.iso-hit{cursor:crosshair;outline:none}
+.iso-hit:focus-visible{stroke:var(--ink);stroke-width:1.5}
+.iso-tip{position:fixed;z-index:30;max-width:340px;padding:8px 10px;background:var(--white);border:1px solid var(--ink);box-shadow:2px 2px 0 var(--shadow-ink-12);font:400 .7rem/1.5 var(--mono);color:var(--ink);font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transform:translateY(3px);transition:opacity .12s ease,transform .12s ease}
+.iso-tip.on{opacity:1;transform:none}
+.iso-tip-title{font-weight:600;margin-bottom:2px}
