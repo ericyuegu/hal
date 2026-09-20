@@ -576,18 +576,20 @@ def _relative_name(name: str, controlled_port: int) -> str:
     return name
 
 
+_OBSERVATION_ROUTES: Final[dict[int, tuple[tuple[str, str], ...]]] = {
+    port: tuple((name, _relative_name(name, port)) for name in O50_REQUIRED_OBSERVATION_FIELDS) for port in (1, 2)
+}
+for _routes in _OBSERVATION_ROUTES.values():
+    if {relative for _, relative in _routes} != _MODEL_OBSERVATION_FIELDS:
+        raise RuntimeError("O50 flat observation adapter does not match its feature projection")
+
+
 def _relative_observation(item: PolicyInput) -> dict[str, ObservationScalar]:
     # The public caller validates numeric types and finiteness before this conversion.
     output: dict[str, ObservationScalar] = {}
-    for name in O50_REQUIRED_OBSERVATION_FIELDS:
+    for name, relative in _OBSERVATION_ROUTES[item.controlled_port]:
         value = item.observation[name]
-        output[_relative_name(name, item.controlled_port)] = (
-            int(value) if isinstance(value, (int, np.integer)) else float(value)
-        )
-    action = _action_vector(item.applied_action)
-    output.update({f"ego_{name}": float(value) for name, value in zip(ACTION_CHANNELS, action, strict=True)})
-    if set(output) != BASE_ITEMS_PROJECTION.columns:
-        raise RuntimeError("O50 flat observation adapter does not match its feature projection")
+        output[relative] = int(value) if isinstance(value, (int, np.integer)) else float(value)
     return output
 
 
@@ -858,8 +860,7 @@ class O50Policy:
         state.player_id = player_id
         state.transport_delay = delay
         state.last_frame_id = item.frame_id
-        observation = _relative_observation(item)
-        flat = {name: observation[name] for name in _MODEL_OBSERVATION_FIELDS}
+        flat = _relative_observation(item)
         numeric_types = {name: isinstance(value, int) for name, value in flat.items()}
         if state.history is None:
             state.observation_types = numeric_types

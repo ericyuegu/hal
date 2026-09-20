@@ -32,11 +32,13 @@ from hal.inference.o50_model import O50Model
 from hal.netplay_service.inference import ContinuousBatcher
 from hal.netplay_service.inference import RemotePolicy
 from hal.netplay_service.inference import ServingArena
+from hal.training.features import ACTION_CHANNELS
 from hal.training.features import preprocess
 from hal.training.physical_shard_loader import PhysicalRow
 from hal.training.physical_shard_loader import RingSlotDescriptor
 from hal.training.player_identity import FIRST_CONNECT_CODE_ID
 from hal.training.player_identity import encode_player_codes
+from hal.wire import BUTTON_BITS
 
 
 def _architecture() -> O50Architecture:
@@ -742,22 +744,24 @@ def test_port_relative_adapter_and_applied_action_alignment() -> None:
     observation["p1_position_x"] = 1.0
     observation["p2_position_x"] = 2.0
     applied = ControllerAction(0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0)
-    relative = o50._relative_observation(
-        PolicyInput(
-            stream_id=item.stream_id,
-            frame_id=item.frame_id,
-            controlled_port=item.controlled_port,
-            observation=observation,
-            applied_action=applied,
-            pending_actions=item.pending_actions,
-            player_identity=item.player_identity,
-            reset=True,
-        )
+    converted = PolicyInput(
+        stream_id=item.stream_id,
+        frame_id=item.frame_id,
+        controlled_port=item.controlled_port,
+        observation=observation,
+        applied_action=applied,
+        pending_actions=item.pending_actions,
+        player_identity=item.player_identity,
+        reset=True,
     )
+    relative = o50._relative_observation(converted)
     assert relative["ego_position_x"] == 2.0
     assert relative["opp_position_x"] == 1.0
-    assert relative["ego_main_stick_x"] == 0.5
-    assert relative["ego_main_stick_y"] == -0.5
+    assert set(relative) == o50._MODEL_OBSERVATION_FIELDS
+    state = policy._ingest(converted)
+    context = policy._context([(converted, state)])
+    assert context.features["ego_main_stick_x"][0, -1] == 0.5
+    assert context.features["ego_main_stick_y"][0, -1] == -0.5
 
 
 def test_new_stream_requires_reset_and_frame_gap_clears_context() -> None:
@@ -794,16 +798,43 @@ def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None
     assert context.features["item0_state"][0, -1].item() == 0
 
 
-def _reference_context_features(policy: O50Policy, histories: list[list[dict[str, float | int]]]) -> dict[str, Tensor]:
-    """Window reconstruction used before the shared incremental context builder."""
+def _reference_context_features(policy: O50Policy, histories: list[list[PolicyInput]]) -> dict[str, Tensor]:
+    """Build observation columns and controller history independently of ingestion."""
     length = policy._config.architecture.L_ctx
     columns = {}
-    for name in sorted(o50.BASE_ITEMS_PROJECTION.columns):
-        dtype = np.int32 if isinstance(histories[0][0][name], int) else np.float32
+    for name in sorted(o50.BASE_ITEMS_PROJECTION.columns - {f"ego_{channel}" for channel in ACTION_CHANNELS}):
+        rows = []
+        for history in histories:
+            values = []
+            for item in history:
+                if name.startswith("ego_"):
+                    canonical = f"p{item.controlled_port}_{name[4:]}"
+                elif name.startswith("opp_"):
+                    canonical = f"p{3 - item.controlled_port}_{name[4:]}"
+                else:
+                    canonical = name
+                values.append(item.observation[canonical])
+            rows.append(values)
+        dtype = np.int32 if isinstance(rows[0][0], (int, np.integer)) else np.float32
         column = np.zeros((len(histories), length), dtype=dtype)
-        for row, history in enumerate(histories):
-            column[row, length - len(history) :] = [frame[name] for frame in history]
+        for row, values in enumerate(rows):
+            column[row, length - len(values) :] = values
         columns[name] = column
+    action_rows = np.zeros((len(histories), length, len(ACTION_CHANNELS)), dtype=np.float32)
+    for row, history in enumerate(histories):
+        for position, item in enumerate(history, start=length - len(history)):
+            action = item.applied_action
+            action_rows[row, position, :6] = (
+                action.main_x,
+                action.main_y,
+                action.c_x,
+                action.c_y,
+                action.trigger_l,
+                action.trigger_r,
+            )
+            for channel, name in enumerate(ACTION_CHANNELS[6:], start=6):
+                action_rows[row, position, channel] = bool(action.buttons & BUTTON_BITS[name.removeprefix("button_")])
+    columns.update({f"ego_{name}": action_rows[:, :, channel] for channel, name in enumerate(ACTION_CHANNELS)})
     features = preprocess(columns, policy._stats, extra=o50.ITEM_COLUMNS, projection=o50.BASE_ITEMS_PROJECTION)
     for prefix in o50.BASE_PLAYER_PREFIXES:
         for name in o50.FLOAT_FEATURES:
@@ -820,7 +851,7 @@ def _reference_context_features(policy: O50Policy, histories: list[list[dict[str
 def test_incremental_context_matches_previous_window_builder() -> None:
     policy = _policy()
     policy._stats = {name: FeatureStats(mean=0.17, std=0.73, min=-3.1, max=4.7) for name in policy._stats}
-    histories: dict[int, list[dict[str, float | int]]] = {1: [], 2: []}
+    histories: dict[int, list[PolicyInput]] = {1: [], 2: []}
     for frame_id in range(15):
         due = []
         # Change batch order; reset one stream without touching the other.
@@ -838,7 +869,7 @@ def test_incremental_context_matches_previous_window_builder() -> None:
             item = replace(item, observation=observation, applied_action=action)
             if reset:
                 histories[port].clear()
-            histories[port].append(o50._relative_observation(item))
+            histories[port].append(item)
             histories[port] = histories[port][-policy._config.architecture.L_ctx :]
             due.append((item, policy._ingest(item)))
         context = policy._context(due)
