@@ -89,21 +89,26 @@ def test_wsd_is_flat_when_stable_training_is_extended() -> None:
     assert schedule(131_071) == pytest.approx(1 / 170)
 
 
-def test_prefix_sampling_is_distinct_uniform_and_exactly_resumable() -> None:
-    sampler = exp.PrefixSampler(7, "cpu")
-    ctx_pad = torch.tensor([0, 128])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_prefix_sampling_is_distinct_uniform_and_exactly_resumable(device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for device prefix RNG resume")
+    sampler = exp.PrefixSampler(7, device)
+    ctx_pad = torch.tensor([0, 128], device=device)
     first = sampler.sample(ctx_pad, length=256, suffix_start=128)
     state = sampler.state_dict()
     expected_next = sampler.sample(ctx_pad, length=256, suffix_start=128)
 
-    restored = exp.PrefixSampler(999, "cpu")
-    restored.load_state_dict(state)
-    actual_next = restored.sample(ctx_pad, length=256, suffix_start=128)
+    # Check both ordinary CPU state and a checkpoint loaded with map_location.
+    for state_device in ("cpu", device):
+        restored = exp.PrefixSampler(999, device)
+        restored.load_state_dict({"generator": state["generator"].to(state_device)})
+        actual_next = restored.sample(ctx_pad, length=256, suffix_start=128)
+        assert torch.equal(actual_next, expected_next)
 
     assert first.shape == (2, 32)
     assert torch.all(first[:, 1:] > first[:, :-1])
     assert int(first.min()) >= 128 and int(first.max()) < 256
-    assert torch.equal(actual_next, expected_next)
 
 
 def test_global_rng_state_is_exactly_resumable() -> None:
@@ -505,3 +510,200 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
     assert selected["emulator_fps"] == 75.0
     assert selected["broker_inference_latency_p95_ms"] == 300.0
     assert "decode_executed_frames_per_s" in exp.DecodeTelemetry().metrics()
+
+
+@pytest.mark.parametrize("batch_size", [512, 1024, 2048])
+def test_cpu_validated_prefix_sampling_preserves_draws_and_rng(batch_size: int) -> None:
+    padding = torch.arange(batch_size) % 129
+    checked = exp.PrefixSampler(7, "cpu")
+    trusted = exp.PrefixSampler(7, "cpu")
+    for _ in range(3):
+        expected = checked.sample(padding, length=256, suffix_start=128)
+        actual = trusted.sample(padding, length=256, suffix_start=128, validated_on_cpu=True)
+        assert torch.equal(expected, actual)
+        assert torch.equal(checked.generator.get_state(), trusted.generator.get_state())
+
+
+def test_direct_prefix_sampling_rejects_short_suffix_before_drawing() -> None:
+    sampler = exp.PrefixSampler(7, "cpu")
+    before = sampler.generator.get_state()
+    with pytest.raises(ValueError, match="32 real suffix"):
+        sampler.sample(torch.tensor([225]), length=256, suffix_start=128)
+    assert torch.equal(before, sampler.generator.get_state())
+
+
+@pytest.mark.parametrize("batch_size", [512, 1024, 2048])
+def test_benchmark_optimizer_uses_reference_batch_hyperparameters(batch_size: int) -> None:
+    cfg = _tiny_cfg(batch_size=batch_size)
+    model = exp.GPT(cfg)
+    actual = exp._benchmark_optimizer(model, cfg, compiled_muon=False)
+    expected = exp.make_optimizer(model, replace(cfg, batch_size=512))
+    assert [{key: value for key, value in group.items() if key != "params"} for group in actual.param_groups] == [
+        {key: value for key, value in group.items() if key != "params"} for group in expected.param_groups
+    ]
+    if batch_size != 512:
+        with pytest.raises(ValueError, match="batch_size=512"):
+            exp.validate_config(replace(exp.TrainConfig(), batch_size=batch_size))
+
+
+def _benchmark_result(batch: int, speed: float, free: float = 0.2) -> dict:
+    return {
+        "status": "complete",
+        "batch_size": batch,
+        "windows": [
+            {
+                "transport": "prefetch",
+                "awr_active": True,
+                "samples_per_second": speed * factor,
+                "free_memory_fraction": free,
+            }
+            for factor in (0.99, 1.0, 1.01)
+        ],
+    }
+
+
+def test_benchmark_selection_requires_memory_and_five_percent_proximity() -> None:
+    assert exp.recommend_benchmark_batch([_benchmark_result(512, 96), _benchmark_result(1024, 100)]) == 512
+    assert exp.recommend_benchmark_batch([_benchmark_result(512, 90), _benchmark_result(1024, 100)]) == 1024
+    assert exp.recommend_benchmark_batch([_benchmark_result(512, 100, 0.09)]) is None
+    assert exp.recommend_benchmark_batch([]) is None
+    with pytest.raises(ValueError, match="three completed"):
+        exp.benchmark_score({"status": "failed", "windows": []})
+
+
+def test_benchmark_validation_keeps_production_contract_separate() -> None:
+    exp.validate_benchmark_args(exp.BenchmarkArgs())
+    for changes in ({"batch_sizes": (1024,)}, {"budget_seconds": 7201}, {"bank_examples": 512}, {"case": "fp8"}):
+        with pytest.raises(ValueError):
+            exp.validate_benchmark_args(replace(exp.BenchmarkArgs(), **changes))
+
+
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_training_validation_change_and_next_update_resume_are_exact(
+    active: bool, device: str, tmp_path: Path
+) -> None:
+    import copy
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for device next-update resume")
+    cfg = _tiny_cfg(batch_size=1)
+    cfg = replace(
+        cfg,
+        arch=replace(cfg.arch, L_ctx=128, n_heads=2, temporal_heads=2),
+        amp_dtype="bfloat16" if device == "cuda" else "float32",
+    )
+    torch.manual_seed(13)
+    batch = exp.synthetic_awr_batch(cfg, torch.device(device))
+    batch = replace(batch, batch=replace(batch.batch, context=replace(batch.context, slot_ids=None, reset=None)))
+    checked_model = exp.GPT(cfg).to(device)
+    trusted_model = copy.deepcopy(checked_model)
+
+    def setup(model):
+        optimizer = exp._benchmark_optimizer(model, cfg, compiled_muon=False)
+        scheduler = exp.LambdaLR(optimizer, exp.lr_schedule(cfg))
+        sampler = exp.PrefixSampler(7, device)
+        return optimizer, scheduler, sampler
+
+    def update(model, state, index, trusted, selected_batch):
+        optimizer, scheduler, sampler = state
+        return exp.train_step(
+            model,
+            selected_batch,
+            cfg,
+            step=(4096 if active else 0) + index,
+            update=index + 1,
+            valid_prefixes=32,
+            trunk_fn=model.forward,
+            temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            prefix_sampler=sampler,
+            prefix_validated_on_cpu=trusted,
+        )
+
+    checked = setup(checked_model)
+    trusted = setup(trusted_model)
+    for index in range(2):
+        left = update(checked_model, checked, index, False, batch)
+        right = update(trusted_model, trusted, index, True, batch)
+        differences = exp._benchmark_difference(
+            exp._benchmark_state(checked_model, left, checked[2]),
+            exp._benchmark_state(trusted_model, right, trusted[2]),
+        )
+        assert not any(differences.values())
+    checkpoint = tmp_path / "benchmark-resume.pt"
+    next_batch = copy.deepcopy(batch)
+    next_batch.context.features["ego_position_x"].fill_(0.5)
+    next_batch = replace(next_batch, returns=next_batch.returns + 1)
+    assert exp._train_batch_sha256(next_batch.batch) != exp._train_batch_sha256(batch.batch)
+    torch.save(
+        {
+            "model": trusted_model.state_dict(),
+            "optimizer": trusted[0].state_dict(),
+            "scheduler": trusted[1].state_dict(),
+            "prefix": trusted[2].state_dict(),
+            "rng": exp.rng_state(),
+            "batch": exp._train_batch_state(next_batch.batch),
+            "returns": next_batch.returns,
+            "eligible": next_batch.eligible,
+        },
+        checkpoint,
+    )
+    expected = update(trusted_model, trusted, 2, True, next_batch)
+    expected_state = exp._benchmark_state(trusted_model, expected, trusted[2])
+    saved = torch.load(checkpoint, weights_only=False)
+    restored_model = exp.GPT(cfg).to(device)
+    restored = setup(restored_model)
+    restored_model.load_state_dict(saved["model"])
+    restored[0].load_state_dict(saved["optimizer"])
+    restored[1].load_state_dict(saved["scheduler"])
+    restored[2].load_state_dict(saved["prefix"])
+    exp.restore_rng(saved["rng"])
+    restored_batch = exp.AWRBatch(exp._train_batch_from_state(saved["batch"]), saved["returns"], saved["eligible"]).to(
+        device
+    )
+    assert exp._train_batch_sha256(restored_batch.batch) == exp._train_batch_sha256(next_batch.batch)
+    assert torch.equal(restored_batch.returns, next_batch.returns)
+    assert torch.equal(restored_batch.eligible, next_batch.eligible)
+    actual = update(restored_model, restored, 2, True, restored_batch)
+    assert not any(
+        exp._benchmark_difference(expected_state, exp._benchmark_state(restored_model, actual, restored[2])).values()
+    )
+
+
+def test_validation_parity_allows_only_fp32_gradient_roundoff() -> None:
+    differences = {
+        "parameters_max_abs": 0.0,
+        "objective_abs": 0.0,
+        "gradients_relative_l2": 1.5e-7,
+        "gradients_max_abs": 6e-8,
+    }
+    exp._require_validation_parity(differences)
+    for name in differences:
+        with pytest.raises(AssertionError, match="changed the update"):
+            exp._require_validation_parity({**differences, name: 0.001})
+
+
+def test_execution_gain_must_exceed_control_variation() -> None:
+    control = _benchmark_result(512, 100)
+    assert not exp.benchmark_repeatable_gain(control, _benchmark_result(512, 101))
+    assert exp.benchmark_repeatable_gain(control, _benchmark_result(512, 105))
+
+
+def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
+    cfg = replace(exp.TrainConfig(), train_compile_mode="max-autotune")
+    exp.validate_config(cfg)
+    payload = exp._checkpoint_config(cfg)
+    assert payload["checkpoint_format_version"] == 2
+    assert exp.config_from_state(payload).train_compile_mode == "max-autotune"
+    legacy = {key: value for key, value in payload.items() if key != "train_compile_mode"}
+    legacy["checkpoint_format_version"] = 1
+    assert exp.config_from_state(legacy).train_compile_mode == "reduce-overhead"
+    assert "train_compile_mode" not in legacy
+    with pytest.raises(ValueError, match="version 1 checkpoints"):
+        exp.config_from_state({**payload, "checkpoint_format_version": 1})
+    with pytest.raises(ValueError, match="checkpoint config mismatch"):
+        exp.config_from_state({**legacy, "checkpoint_format_version": 2})
+    with pytest.raises(ValueError, match="unsupported training compile mode"):
+        exp.validate_config(replace(cfg, train_compile_mode="unsupported"))

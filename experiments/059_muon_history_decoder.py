@@ -179,7 +179,7 @@ from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v1"
-_CHECKPOINT_FORMAT_VERSION: Final[int] = 1
+_CHECKPOINT_FORMAT_VERSION: Final[int] = 2
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (
@@ -333,7 +333,6 @@ class TrainConfig:
     inference_buckets: ClassVar[tuple[int, ...]] = (1, 2, 4, 8, 16, 32, 64)
     train_metrics_every: ClassVar[int] = 25
     train_prefetch_factor: ClassVar[int] = 4
-    train_compile_mode: ClassVar[str] = "reduce-overhead"
     raw_shard_materialization_threads: ClassVar[int] = 64
     materialization_threads_env: ClassVar[str] = "HAL_O59_MATERIALIZATION_THREADS"
     data_protocol: ClassVar[str] = "o59-replay-ring-v1"
@@ -373,6 +372,7 @@ class TrainConfig:
     allow_tf32: bool = True
     compile_trunk: bool = True
     compile_temporal: bool = True
+    train_compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
 
     wandb_log_code: bool = True
     val_every: int = 4096
@@ -471,6 +471,8 @@ class TrainConfig:
 def validate_config(cfg: TrainConfig) -> None:
     if cfg.optimizer != "muon":
         raise ValueError("O59 requires Muon")
+    if cfg.train_compile_mode not in ("reduce-overhead", "max-autotune"):
+        raise ValueError("unsupported training compile mode")
     production = Architecture()
     proxy = proxy_config().arch
     if cfg.arch not in (production, proxy):
@@ -1709,13 +1711,14 @@ class PrefixSampler:
         self.device = torch.device(device)
         self.generator = torch.Generator(device=self.device).manual_seed(seed)
 
-    def sample(self, ctx_pad: Tensor, *, length: int, suffix_start: int) -> Tensor:
+    def sample(self, ctx_pad: Tensor, *, length: int, suffix_start: int, validated_on_cpu: bool = False) -> Tensor:
         if ctx_pad.ndim != 1:
             raise ValueError("ctx_pad must be one-dimensional")
         positions = torch.arange(suffix_start, length, device=ctx_pad.device)
         valid = positions[None, :] >= ctx_pad[:, None]
-        counts = valid.sum(dim=1)
-        if not bool((counts >= POLICY_PREFIXES_PER_WINDOW).all()):
+        if length - suffix_start < POLICY_PREFIXES_PER_WINDOW:
+            raise ValueError("every O59 window must expose at least 32 real suffix positions")
+        if not validated_on_cpu and not bool((valid.sum(dim=1) >= POLICY_PREFIXES_PER_WINDOW).all()):
             raise ValueError("every O59 window must expose at least 32 real suffix positions")
         draws = torch.rand(ctx_pad.shape[0], positions.numel(), device=ctx_pad.device, generator=self.generator)
         draws = draws.masked_fill(~valid, torch.inf)
@@ -1729,7 +1732,8 @@ class PrefixSampler:
         generator = state.get("generator")
         if not isinstance(generator, Tensor):
             raise TypeError("prefix RNG state must be a tensor")
-        self.generator.set_state(generator.to(self.device))
+        # CUDA generators also require their serialized ByteTensor on the CPU.
+        self.generator.set_state(generator.cpu())
 
 
 @jaxtyped(typechecker=beartype)
@@ -4669,10 +4673,15 @@ def _log_training_summary(
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
-def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callable]:
+def _training_functions(
+    model: GPT, cfg: TrainConfig, *, compile_mode: str | None = None, diagnostics: bool = True
+) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
-    temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
+    temporal_fn: Callable = (
+        model.temporal.teacher_forced_nll_with_diagnostics if diagnostics else model.temporal.teacher_forced_nll
+    )
+    mode = cfg.train_compile_mode if compile_mode is None else compile_mode
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.
@@ -4681,20 +4690,20 @@ def _training_functions(model: GPT, cfg: TrainConfig) -> tuple[Callable, Callabl
             raise RuntimeError(
                 f"compiled CUDA training requires a fused attention path, resolved {model.trunk.attn_path!r} instead"
             )
-        print(f"[compile] calling torch.compile for trunk (mode={cfg.train_compile_mode})", flush=True)
+        print(f"[compile] calling torch.compile for trunk (mode={mode})", flush=True)
         trunk_fn = torch.compile(
             trunk_fn,
             dynamic=False,
             fullgraph=True,
-            mode=cfg.train_compile_mode,
+            mode=mode,
         )
     if DEVICE == "cuda" and cfg.compile_temporal:
-        print(f"[compile] calling torch.compile for temporal model (mode={cfg.train_compile_mode})", flush=True)
+        print(f"[compile] calling torch.compile for temporal model (mode={mode})", flush=True)
         temporal_fn = torch.compile(
             temporal_fn,
             dynamic=False,
             fullgraph=True,
-            mode=cfg.train_compile_mode,
+            mode=mode,
         )
     return trunk_fn, temporal_fn
 
@@ -4799,6 +4808,8 @@ def train_step(
     prefix_sampler: PrefixSampler,
     phase_timer: CudaPhaseTimer | None = None,
     optimizer_diagnostics: OptimizerStepDiagnostics | AdamWStepDiagnostics | None = None,
+    prefix_validated_on_cpu: bool = False,
+    diagnostics: bool = True,
 ) -> TrainStepResult:
     """Run one complete optimization step on a device-resident batch."""
     if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
@@ -4808,6 +4819,7 @@ def train_step(
         batch.context.ctx_pad,
         length=cfg.arch.L_ctx,
         suffix_start=cfg.arch.direct_loss_start,
+        validated_on_cpu=prefix_validated_on_cpu,
     )
     loss, nll_sum, metrics = microbatch_loss(
         model,
@@ -4823,7 +4835,8 @@ def train_step(
     loss.backward()
     if phase_timer is not None:
         phase_timer.record("backward_end")
-    metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
+    if diagnostics:
+        metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
     if optimizer_diagnostics is not None:
         optimizer_diagnostics.begin()
     gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -5257,6 +5270,7 @@ def train(
                 prefix_sampler=prefix_sampler,
                 phase_timer=phase_timer,
                 optimizer_diagnostics=optimizer_step_diagnostics if optimizer_diagnostic_due else None,
+                prefix_validated_on_cpu=True,
             )
             loader_wait = batch_prefetcher.stage_next() if not state_boundary_due else 0.0
             actual_positions += valid_prefixes
@@ -5452,6 +5466,11 @@ def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
 
 def config_from_state(values: dict) -> TrainConfig:
     """Restore a checkpoint written by the current experiment definition."""
+    if values.get("checkpoint_format_version") == 1:
+        # Version 1 froze this execution choice in source rather than storing it.
+        if "train_compile_mode" in values:
+            raise ValueError("version 1 checkpoints cannot contain train_compile_mode")
+        values = {**values, "checkpoint_format_version": 2, "train_compile_mode": "reduce-overhead"}
     derived_fields = {"max_steps", "warmup_steps"}
     runtime_fields = {item.name for item in fields(TrainConfig)} - {"arch", "awr"}
     expected = {
@@ -5636,6 +5655,546 @@ def _remote_run_exists(run_name: str) -> bool:
     return bool(response.get("KeyCount", len(response.get("Contents", ()))))
 
 
+@dataclass(frozen=True, slots=True)
+class BenchmarkArgs:
+    output: Path = Path("results/o59-throughput")
+    batch_sizes: tuple[int, ...] = (512, 1024, 2048)
+    bank_examples: int = 2048
+    budget_seconds: int = 6900
+    case: str | None = None
+    batch_size: int = 512
+    bank_sha256: str | None = None
+
+
+def validate_benchmark_args(args: BenchmarkArgs) -> None:
+    if not args.batch_sizes or args.batch_sizes != (512, 1024, 2048)[: len(args.batch_sizes)]:
+        raise ValueError("benchmark batches must be a prefix of (512, 1024, 2048)")
+    if args.batch_size not in (512, 1024, 2048):
+        raise ValueError("benchmark batch_size must be 512, 1024, or 2048")
+    if args.bank_examples < max(args.batch_sizes) or args.bank_examples % 2048:
+        raise ValueError("bank_examples must be a multiple of 2048 covering every batch")
+    if not 1 <= args.budget_seconds <= 6900:
+        raise ValueError("benchmark budget must be in [1, 6900] seconds")
+    if args.case not in (
+        None,
+        "baseline",
+        "cpu-validation",
+        "max-autotune",
+        "compiled-muon",
+        "no-diagnostics",
+        "combined",
+    ):
+        raise ValueError(f"unknown benchmark case {args.case!r}")
+
+
+def _benchmark_slice(bank: AWRBatch, start: int, stop: int) -> AWRBatch:
+    return AWRBatch(
+        TrainBatch(
+            Context(
+                {name: value[start:stop] for name, value in bank.context.features.items()},
+                bank.context.ctx_pad[start:stop],
+            ),
+            bank.target[start:stop],
+            None if bank.batch.replay_ids is None else bank.batch.replay_ids[start:stop],
+        ),
+        bank.returns[start:stop],
+        bank.eligible[start:stop],
+    )
+
+
+def _prepare_benchmark_bank(args: BenchmarkArgs, cfg: TrainConfig) -> None:
+    """Decode only selected shards, using production labels and normalization."""
+    stats = load_stats(cfg)
+    sidecar = load_identity_sidecar(cfg)
+    source = "ranked-anonymized-6-policy-world-v8"
+    selection = PhysicalShardSelection.from_sources((SourceRowSelection(source, args.bank_examples // 8),))
+    projection = FeatureProjection(
+        columns=ITEM_PLAYER_PROJECTION.columns | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column},
+        derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
+    )
+    labels = returns_lib.PolicyReturnLabels(
+        player_lookup=ReplayPlayerLookup(sidecar.by_replay),
+        gamma=cfg.awr.gamma,
+        damage_shaping=cfg.awr.damage_shaping,
+        win_reward=cfg.awr.win_reward,
+        stock_value=cfg.awr.stock_value,
+        suffix=cfg.awr.return_suffix,
+    )
+    replay_ids: list[str] = []
+    windows: list[dict[str, np.ndarray]] = []
+    locators: list[tuple[int, int, int]] = []
+    with contextlib.closing(MDSStorageAdapter(selection)) as adapter:
+        adapter.validate_manifests(
+            expected_sha256={source: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[source]},
+            expected_index_version=cfg.mds_index_version,
+            expected_schema_sha256=cfg.mds_manifest_schema_sha256,
+            expected_rows={source: streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]},
+        )
+        for task in build_shard_plan(selection, adapter.manifests):
+            rows = task.selected_rows
+            for start in range(0, len(rows), 64):
+                generations = adapter.decode_generations(
+                    task,
+                    [(row, 0) for row in rows[start : start + 64]],
+                    seed=cfg.seed,
+                    context_length=cfg.arch.L_ctx,
+                    chunk_length=cfg.arch.sample_chunk_length,
+                    windows_per_generation=8,
+                    schema_version=cfg.mds_schema_version,
+                    labels=labels,
+                    projection=projection,
+                )
+                for (row, _), (replay_id, generation) in generations.items():
+                    for ordinal, window in enumerate(generation):
+                        replay_ids.append(replay_id)
+                        windows.append(window)
+                        locators.append((task.shard, row, ordinal))
+                print(f"[benchmark] decoded {len(windows)}/{args.bank_examples} real windows", flush=True)
+    columns = {name: np.stack([window[name] for window in windows]) for name in windows[0]}
+    bank = _collate_o59_batch(
+        tuple(replay_ids),
+        columns,
+        stats=stats,
+        projection=projection,
+        context_length=cfg.arch.L_ctx,
+        return_column=cfg.awr.ego_return_column,
+        return_valid_column=cfg.awr.ego_return_valid_column,
+    )
+    # Freeze identity dropout in reference-sized batches before comparing transports.
+    masker = IdentityMasker(cfg.seed ^ 0x0501D, cfg.identity_dropout)
+    masked = [masker(_benchmark_slice(bank, start, start + 512)) for start in range(0, args.bank_examples, 512)]
+    bank.context.features["ego_player_id"] = torch.cat([batch.context.features["ego_player_id"] for batch in masked])
+    torch.save(
+        {
+            "format": "o59-benchmark-bank-v1",
+            "batch": _train_batch_state(bank.batch),
+            "returns": bank.returns,
+            "eligible": bank.eligible,
+            "locators": locators,
+            "vocabulary": sidecar.vocabulary,
+            "provenance": run_provenance(cfg),
+            "source": source,
+            "selection_sha256": selection.sha256,
+        },
+        args.output / "bank.pt",
+    )
+    (args.output / "bank.json").write_text(
+        json.dumps(
+            {
+                "format": "o59-benchmark-bank-v1",
+                "sha256": checkpoint_sha256(args.output / "bank.pt"),
+                "source": source,
+                "locators": locators,
+                "replay_ids": replay_ids,
+                "provenance": run_provenance(cfg),
+                "config": asdict(cfg),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _benchmark_optimizer(model: GPT, cfg: TrainConfig, *, compiled_muon: bool) -> torch.optim.Optimizer:
+    # The physical batch must not change LR, betas, epsilon, or schedule units.
+    optimizer = make_optimizer(model, replace(cfg, batch_size=512))
+    if compiled_muon:
+        if not isinstance(optimizer, SingleDeviceMuonWithAuxAdam):
+            raise TypeError("O59 benchmark requires the single-device Muon optimizer")
+        optimizer.orthogonalize = torch.compile(optimizer.orthogonalize, dynamic=False, fullgraph=True, mode="default")
+    return optimizer
+
+
+def _benchmark_state(model: GPT, result: TrainStepResult, sampler: PrefixSampler) -> dict[str, object]:
+    return {
+        "parameters": {name: value.detach().cpu().clone() for name, value in model.named_parameters()},
+        "gradients": {
+            name: value.grad.detach().cpu().clone()
+            for name, value in model.named_parameters()
+            if value.grad is not None
+        },
+        "metrics": _download_scalar_metrics({**result.metrics, "gradient_norm": result.gradient_norm}, 1),
+        "sampler": sampler.generator.get_state().cpu(),
+    }
+
+
+def _benchmark_difference(reference: dict, actual: dict) -> dict[str, float]:
+    if not torch.equal(reference["sampler"], actual["sampler"]):
+        raise AssertionError("execution treatment changed prefix RNG advancement")
+    differences = {}
+    for field in ("parameters", "gradients"):
+        if reference[field].keys() != actual[field].keys():
+            raise AssertionError(f"execution treatment changed {field} membership")
+        absolute = squared = norm = 0.0
+        for name, expected in reference[field].items():
+            observed = actual[field][name]
+            if not bool(torch.isfinite(observed).all()):
+                raise FloatingPointError(f"non-finite {field}: {name}")
+            delta = observed.float() - expected.float()
+            absolute = max(absolute, float(delta.abs().max()))
+            squared += float(delta.square().sum())
+            norm += float(expected.float().square().sum())
+        differences[f"{field}_max_abs"] = absolute
+        differences[f"{field}_relative_l2"] = math.sqrt(squared / max(norm, 1e-30))
+    differences["objective_abs"] = abs(reference["metrics"]["train/objective"] - actual["metrics"]["train/objective"])
+    return differences
+
+
+def _require_validation_parity(differences: Mapping[str, float]) -> None:
+    # CUDA attention backward can vary in FP32 reduction order. Sampling, loss,
+    # and the parameter update must remain exact for this control-flow change.
+    tolerance = 8 * torch.finfo(torch.float32).eps
+    if (
+        differences["parameters_max_abs"] != 0
+        or differences["objective_abs"] != 0
+        or differences["gradients_relative_l2"] > tolerance
+        or differences["gradients_max_abs"] > tolerance
+    ):
+        raise AssertionError(f"CPU validation changed the update: {dict(differences)}")
+
+
+def _run_benchmark_case(args: BenchmarkArgs) -> None:
+    if torch.cuda.device_count() != 1 or "B200" not in torch.cuda.get_device_name():
+        raise RuntimeError("the O59 throughput benchmark requires exactly one B200")
+    bank_path = args.output / "bank.pt"
+    if args.bank_sha256 is None or checkpoint_sha256(bank_path) != args.bank_sha256:
+        raise ValueError("benchmark bank SHA-256 mismatch")
+    saved = torch.load(bank_path, map_location="cpu", weights_only=False)
+    if saved["format"] != "o59-benchmark-bank-v1":
+        raise ValueError("unsupported benchmark bank format")
+    mode = "max-autotune" if args.case in ("max-autotune", "combined") else "reduce-overhead"
+    cfg = replace(TrainConfig(), batch_size=args.batch_size, train_compile_mode=mode)
+    bank = AWRBatch(_train_batch_from_state(saved["batch"]), saved["returns"], saved["eligible"])
+    cpu_batches = [
+        _benchmark_slice(bank, start, start + cfg.batch_size).pin_memory()
+        for start in range(0, bank.target.shape[0], cfg.batch_size)
+    ]
+    for batch in cpu_batches:
+        validate_batch_geometry(batch, cfg, cfg.batch_size)
+        if bool((batch.context.ctx_pad > cfg.arch.direct_loss_start).any()):
+            raise ValueError("benchmark bank does not have a complete suffix")
+    torch.manual_seed(cfg.seed)
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.set_float32_matmul_precision("high")
+    model = GPT(cfg, saved["vocabulary"]).cuda().train()
+    initial = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+    diagnostics = args.case != "no-diagnostics"
+    validated = args.case in ("cpu-validation", "combined")
+    optimizer = _benchmark_optimizer(model, cfg, compiled_muon=args.case == "compiled-muon")
+    scheduler = LambdaLR(optimizer, lr_schedule(replace(cfg, batch_size=512)))
+    initial_scheduler = scheduler.state_dict()
+    sampler = PrefixSampler(cfg.seed ^ 0x059A11, "cuda")
+    trunk_fn, temporal_fn = _training_functions(model, cfg, compile_mode=mode, diagnostics=diagnostics)
+    flops = approximate_training_flops_per_update(cfg, subsystem_parameter_counts(model))
+    report: dict[str, object] = {
+        "format": "o59-benchmark-result-v1",
+        "case": args.case,
+        "batch_size": cfg.batch_size,
+        "bank_sha256": args.bank_sha256,
+        "compile_mode": mode,
+        "config": asdict(cfg),
+        "optimizer_reference_batch": 512,
+        "benchmark_source_sha256": checkpoint_sha256(Path(__file__)),
+        "muon_source_sha256": checkpoint_sha256(Path(__file__).resolve().parents[1] / "hal/training/muon.py"),
+        "provenance": saved["provenance"],
+        "diagnostics": diagnostics,
+        "prefix_validated_on_cpu": validated,
+        "windows": [],
+        "correctness": {},
+    }
+    case_path = args.output / f"{args.case}-{cfg.batch_size}.json"
+
+    def persist() -> None:
+        case_path.write_text(json.dumps(report, indent=2) + "\n")
+
+    def reset() -> None:
+        model.load_state_dict(initial)
+        optimizer.state.clear()
+        scheduler.load_state_dict(initial_scheduler)
+        for group, lr in zip(optimizer.param_groups, scheduler.base_lrs, strict=True):
+            group["lr"] = lr * lr_schedule(replace(cfg, batch_size=512))(0)
+        sampler.generator.manual_seed(cfg.seed ^ 0x059A11)
+        torch.manual_seed(cfg.seed)
+
+    def update(batch: AWRBatch, index: int, active: bool, timer: CudaPhaseTimer | None = None) -> TrainStepResult:
+        return train_step(
+            model,
+            batch,
+            cfg,
+            step=(cfg.awr.start_update - 1 if active else 0) + index,
+            update=index + 1,
+            valid_prefixes=cfg.batch_size * POLICY_PREFIXES_PER_WINDOW,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            prefix_sampler=sampler,
+            phase_timer=timer,
+            prefix_validated_on_cpu=validated,
+            diagnostics=diagnostics,
+        )
+
+    device_batches = [batch.to("cuda") for batch in cpu_batches]
+    torch.cuda.synchronize()
+    started = time.monotonic()
+    with _elapsed_heartbeat("[benchmark] compiling first update"):
+        result = update(device_batches[0], 0, False)
+        torch.cuda.synchronize()
+    report["cold_first_update_seconds"] = time.monotonic() - started
+    started = time.monotonic()
+    for index in range(5):
+        result = update(device_batches[index % len(device_batches)], index, bool(index % 2))
+    torch.cuda.synchronize()
+    report["warmup_seconds"] = time.monotonic() - started
+    report["compilation_peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
+    report["compilation_peak_reserved_bytes"] = torch.cuda.max_memory_reserved()
+    report["approximate_compilation_seconds"] = max(
+        0.0, float(report["cold_first_update_seconds"]) - float(report["warmup_seconds"]) / 5
+    )
+    checked = PrefixSampler(cfg.seed ^ 0x059A11, "cuda")
+    trusted = PrefixSampler(cfg.seed ^ 0x059A11, "cuda")
+    checked_positions = checked.sample(
+        device_batches[0].context.ctx_pad, length=cfg.arch.L_ctx, suffix_start=cfg.arch.direct_loss_start
+    )
+    trusted_positions = trusted.sample(
+        device_batches[0].context.ctx_pad,
+        length=cfg.arch.L_ctx,
+        suffix_start=cfg.arch.direct_loss_start,
+        validated_on_cpu=True,
+    )
+    if not torch.equal(checked_positions, trusted_positions) or not torch.equal(
+        checked.generator.get_state(), trusted.generator.get_state()
+    ):
+        raise AssertionError("CPU validation changed GPU sampling or RNG advancement")
+    report["exact_sampling_parity"] = True
+    persist()
+    reset()
+    with torch.compiler.set_stance("fail_on_recompile"):
+        result = update(device_batches[0], 0, True)
+    actual = _benchmark_state(model, result, sampler)
+    reference_path = args.output / f"reference-{cfg.batch_size}.pt"
+    if args.case == "baseline":
+        torch.save(actual, reference_path)
+    else:
+        reference = torch.load(reference_path, map_location="cpu", weights_only=False)
+        differences = _benchmark_difference(reference, actual)
+        report["correctness"] = differences
+        if args.case == "cpu-validation":
+            _require_validation_parity(differences)
+        del reference
+    del actual
+    persist()
+    windows = cast(list[dict[str, object]], report["windows"])
+    for transport in ("device", "prefetch"):
+        # The baseline times both states; treatments still exercise inactive AWR
+        # during warmup and profiling, without repeating its throughput windows.
+        for active in (False, True) if args.case == "baseline" else (True,):
+            reset()
+            accumulator = _TrainingMetricAccumulator()
+            with ExitStack() as resources:
+                prefetch = None
+                if transport == "prefetch":
+                    prefetch = DeviceBatchPrefetcher(cpu_batches, cfg, "cuda")
+                    resources.callback(prefetch.close)
+                with torch.compiler.set_stance("fail_on_recompile"):
+                    for window in range(3):
+                        torch.cuda.synchronize()
+                        torch.cuda.reset_peak_memory_stats()
+                        started = time.monotonic()
+                        updates = 51_200 // cfg.batch_size
+                        for index in range(updates):
+                            ordinal = window * updates + index
+                            batch = (
+                                device_batches[ordinal % len(device_batches)]
+                                if prefetch is None
+                                else prefetch.next()[0]
+                            )
+                            if prefetch is not None:
+                                prefetch.fill_lookahead(cfg.train_prefetch_factor)
+                            result = update(batch, ordinal, active)
+                            if prefetch is not None:
+                                prefetch.stage_next()
+                            accumulator.add(result, cfg.batch_size * POLICY_PREFIXES_PER_WINDOW)
+                            if (ordinal + 1) % cfg.train_metrics_every == 0:
+                                accumulator.flush(cfg, update=ordinal + 1)
+                        torch.cuda.synchronize()
+                        seconds = time.monotonic() - started
+                        peak = torch.cuda.max_memory_reserved()
+                        row = {
+                            "transport": transport,
+                            "awr_active": active,
+                            "window": window,
+                            "examples": 51_200,
+                            "seconds": seconds,
+                            "samples_per_second": 51_200 / seconds,
+                            "update_seconds": seconds / updates,
+                            "approximate_mfu": flops
+                            / (seconds / updates)
+                            / cast(float, bf16_dense_peak_flops("B200")),
+                            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                            "peak_reserved_bytes": peak,
+                            "free_memory_fraction": 1 - peak / torch.cuda.get_device_properties(0).total_memory,
+                        }
+                        windows.append(row)
+                        print(f"[benchmark] {args.case} batch={cfg.batch_size} {row}", flush=True)
+                        persist()
+            if accumulator.updates:
+                accumulator.flush(cfg, update=3 * updates)
+    reset()
+    timers: list[CudaPhaseTimer] = []
+    with (
+        torch.compiler.set_stance("fail_on_recompile"),
+        torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+        ) as profile,
+    ):
+        for index in range(5):
+            timer = CudaPhaseTimer()
+            timers.append(timer)
+            timer.record("start")
+            timer.record("h2d_end")
+            with torch.profiler.record_function("o59_update"):
+                result = update(device_batches[index % len(device_batches)], index, index >= 2, timer)
+            profile.step()
+    torch.cuda.synchronize()
+    report["phases"] = _mean_phase_metrics(timers)
+    profile.export_chrome_trace(str(args.output / f"{args.case}-{cfg.batch_size}.trace.json"))
+    report["status"] = "complete"
+    persist()
+
+
+def benchmark_score(result: dict) -> float:
+    windows = [row for row in result["windows"] if row["transport"] == "prefetch" and row["awr_active"]]
+    if len(windows) != 3 or result.get("status") != "complete":
+        raise ValueError("benchmark selection requires three completed active-AWR prefetch windows")
+    return float(np.median([row["samples_per_second"] for row in windows]))
+
+
+def benchmark_repeatable_gain(control: dict, treatment: dict) -> bool:
+    """Require all three active-AWR prefetch windows to beat the control."""
+    benchmark_score(control)
+    benchmark_score(treatment)
+    control_speeds = [
+        row["samples_per_second"] for row in control["windows"] if row["transport"] == "prefetch" and row["awr_active"]
+    ]
+    treatment_speeds = [
+        row["samples_per_second"]
+        for row in treatment["windows"]
+        if row["transport"] == "prefetch" and row["awr_active"]
+    ]
+    return min(treatment_speeds) > max(control_speeds)
+
+
+def recommend_benchmark_batch(results: list[dict]) -> int | None:
+    eligible = [result for result in results if min(row["free_memory_fraction"] for row in result["windows"]) >= 0.10]
+    if not eligible:
+        return None
+    best = max(benchmark_score(result) for result in results)
+    candidates = [result["batch_size"] for result in eligible if benchmark_score(result) >= best * 0.95]
+    return min(candidates) if candidates else None
+
+
+def benchmark(args: BenchmarkArgs) -> None:
+    validate_benchmark_args(args)
+    if args.case is not None:
+        _run_benchmark_case(args)
+        return
+    started = time.monotonic()
+    deadline = started + args.budget_seconds
+    args.output.mkdir(parents=True, exist_ok=False)
+    cfg = TrainConfig()
+    validate_config(cfg)
+    _prepare_benchmark_bank(args, cfg)
+    bank_hash = checkpoint_sha256(args.output / "bank.pt")
+    summary: dict[str, object] = {
+        "format": "o59-benchmark-suite-v1",
+        "results": [],
+        "unfinished": [],
+        "budget_seconds": args.budget_seconds,
+    }
+    results = cast(list[dict], summary["results"])
+
+    def persist() -> None:
+        summary["elapsed_seconds"] = time.monotonic() - started
+        (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+    def run(case: str, batch_size: int) -> dict | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 30:
+            cast(list[str], summary["unfinished"]).append(f"{case}-{batch_size}: budget exhausted")
+            persist()
+            return None
+        command = [
+            sys.executable,
+            __file__,
+            "benchmark",
+            "--case",
+            case,
+            "--batch-size",
+            str(batch_size),
+            "--output",
+            str(args.output),
+            "--bank-sha256",
+            bank_hash,
+        ]
+        print(f"[benchmark] starting {case} batch={batch_size}; {remaining:.0f}s budget remains", flush=True)
+        with (args.output / f"{case}-{batch_size}.log").open("w") as log:
+            try:
+                completed = subprocess.run(
+                    command, stdout=log, stderr=subprocess.STDOUT, timeout=remaining - 20, check=False
+                )
+            except subprocess.TimeoutExpired:
+                cast(list[str], summary["unfinished"]).append(f"{case}-{batch_size}: budget exhausted")
+                persist()
+                return None
+        if completed.returncode:
+            detail = (args.output / f"{case}-{batch_size}.log").read_text()
+            status = "out_of_memory" if "OutOfMemoryError" in detail else "failed"
+            results.append({"case": case, "batch_size": batch_size, "status": status, "error_tail": detail[-8000:]})
+            print(detail[-8000:], flush=True)
+            persist()
+            return None
+        result = json.loads((args.output / f"{case}-{batch_size}.json").read_text())
+        results.append(result)
+        persist()
+        return result
+
+    baselines: list[dict] = []
+    for batch_size in args.batch_sizes:
+        result = run("baseline", batch_size)
+        if result is None:
+            break
+        baselines.append(result)
+        if len(baselines) > 1 and benchmark_score(result) < benchmark_score(baselines[-2]) * 1.05:
+            break
+    selected = recommend_benchmark_batch(baselines)
+    summary["recommended_batch"] = selected
+    if selected is not None:
+        baseline = next(result for result in baselines if result["batch_size"] == selected)
+        validation_result = run("cpu-validation", selected)
+        compilation_result = run("max-autotune", selected)
+        phases = baseline["phases"]
+        optimizer_fraction = phases["profile/optimizer_s"] / sum(phases.values())
+        summary["optimizer_fraction"] = optimizer_fraction
+        if optimizer_fraction >= 0.10:
+            run("compiled-muon", selected)
+        if (
+            validation_result is not None
+            and compilation_result is not None
+            and benchmark_repeatable_gain(baseline, validation_result)
+            and benchmark_repeatable_gain(baseline, compilation_result)
+        ):
+            run("combined", selected)
+        run("no-diagnostics", selected)
+    else:
+        cast(list[str], summary["unfinished"]).append(
+            "execution comparisons: no completed batch with required memory margin"
+        )
+    persist()
+
+
 @dataclass
 class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
@@ -5669,7 +6228,9 @@ class EvalArgs:
 
 
 type Command = (
-    Annotated[TrainArgs, tyro.conf.subcommand(name="train")] | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
+    Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
+    | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
+    | Annotated[BenchmarkArgs, tyro.conf.subcommand(name="benchmark")]
 )
 
 
@@ -5684,6 +6245,9 @@ def _parse_character(name: str | None) -> melee.Character | None:
 
 
 def main(args: Command) -> None:
+    if isinstance(args, BenchmarkArgs):
+        benchmark(args)
+        return
     if isinstance(args, EvalArgs):
         checkpoint = _resolve_eval_checkpoint(args.checkpoint, args.run)
         eval_checkpoint(

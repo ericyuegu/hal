@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from collections.abc import Mapping
 
 import torch
@@ -66,6 +67,7 @@ def _orthogonalize_logical_matrices(
     logical_splits: int,
     muon_scale_clamp_min_one: bool,
     ns_steps: int,
+    orthogonalize: Callable[[Tensor, int], Tensor] = zeropower_via_newtonschulz5,
 ) -> Tensor:
     """Orthogonalize equal row-wise logical matrices, then restore fusion."""
     if not isinstance(logical_splits, int) or isinstance(logical_splits, bool) or logical_splits < 1:
@@ -74,7 +76,7 @@ def _orthogonalize_logical_matrices(
     if d_out % logical_splits:
         raise ValueError(f"cannot split {d_out} output rows into {logical_splits} logical matrices")
     if logical_splits == 1:
-        orthogonal = zeropower_via_newtonschulz5(matrices, steps=ns_steps)
+        orthogonal = orthogonalize(matrices, ns_steps)
         orthogonal *= muon_matrix_scale(
             d_out,
             d_in,
@@ -83,7 +85,7 @@ def _orthogonalize_logical_matrices(
         return orthogonal
     logical_d_out = d_out // logical_splits
     logical = matrices.reshape(*matrices.shape[:-2], logical_splits, logical_d_out, d_in)
-    logical = zeropower_via_newtonschulz5(logical, steps=ns_steps)
+    logical = orthogonalize(logical, ns_steps)
     logical *= muon_matrix_scale(
         logical_d_out,
         d_in,
@@ -234,6 +236,7 @@ def _batched_muon_step(
     weight_decay: float,
     muon_scale_clamp_min_one: bool = True,
     logical_splits: int = 1,
+    orthogonalize: Callable[[Tensor, int], Tensor] = zeropower_via_newtonschulz5,
 ) -> None:
     """Apply one Muon update to a bucket of identically shaped matrices."""
     parameter_tensors: list[Tensor] = list(parameters)
@@ -250,6 +253,7 @@ def _batched_muon_step(
         logical_splits=logical_splits,
         muon_scale_clamp_min_one=muon_scale_clamp_min_one,
         ns_steps=5,
+        orthogonalize=orthogonalize,
     )
     updates = [update.reshape(parameter.shape) for update, parameter in zip(matrices, parameters, strict=True)]
 
@@ -510,7 +514,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     Non-distributed variant of MuonWithAuxAdam.
     """
 
-    def __init__(self, param_groups):
+    def __init__(self, param_groups, *, orthogonalize: Callable[[Tensor, int], Tensor] = zeropower_via_newtonschulz5):
         for group in param_groups:
             assert "use_muon" in group
             if group["use_muon"]:
@@ -544,6 +548,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 required = {"params", "lr", "betas", "eps", "weight_decay", "use_muon"}
                 assert required <= group.keys() <= required | {"update_clip_threshold"}
         super().__init__(param_groups, dict())
+        self.orthogonalize = orthogonalize
         self._adam_diagnostic_names: dict[int, str] = {}
         self.last_adam_diagnostics: dict[str, Tensor] = {}
 
@@ -631,6 +636,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                         weight_decay=group["weight_decay"],
                         muon_scale_clamp_min_one=group.get("muon_scale_clamp_min_one", True),
                         logical_splits=group.get("logical_splits", 1),
+                        orthogonalize=self.orthogonalize,
                     )
             else:
                 parameters_by_step: dict[int, list[nn.Parameter]] = {}

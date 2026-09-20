@@ -370,3 +370,27 @@ def test_batched_muon_matches_scalar_cuda_update() -> None:
         strict=True,
     ):
         torch.testing.assert_close(batched_parameter, reference_parameter, rtol=2e-4, atol=2e-4)
+
+
+def test_injected_orthogonalization_preserves_updates_and_state() -> None:
+    calls: list[tuple[tuple[int, ...], int]] = []
+
+    def orthogonalize(matrices: torch.Tensor, steps: int) -> torch.Tensor:
+        calls.append((tuple(matrices.shape), steps))
+        return muon.zeropower_via_newtonschulz5(matrices, steps)
+
+    reference = _optimizer(*_parameters())
+    treatment = _optimizer(*_parameters())
+    treatment.orthogonalize = orthogonalize
+    for index in range(2):
+        for left, right in zip(reference.param_groups, treatment.param_groups, strict=True):
+            for expected, actual in zip(left["params"], right["params"], strict=True):
+                expected.grad = torch.full_like(expected, 0.1 + index)
+                actual.grad = expected.grad.clone()
+        reference.step()
+        treatment.step()
+    assert calls and all(steps == 5 for _, steps in calls)
+    for left, right in zip(reference.param_groups, treatment.param_groups, strict=True):
+        for expected, actual in zip(left["params"], right["params"], strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert reference.state_dict().keys() == treatment.state_dict().keys()
