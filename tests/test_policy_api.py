@@ -6,6 +6,7 @@ from hal.inference.api import PolicyInput
 from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
 from hal.inference.api import RuntimeConfig
+from hal.inference.api import step_policy
 from hal.inference.api import validate_policy_inputs
 from hal.inference.api import validate_policy_outputs
 from hal.inference.transport import ActionTransport
@@ -42,6 +43,28 @@ def test_policy_contract_is_model_independent_and_batched() -> None:
         ],
     )
     assert set(actions) == {4, 9}
+
+
+def test_step_policy_validates_before_using_the_prevalidated_fast_path() -> None:
+    class FastPolicy:
+        spec = PolicySpec("fast", "tests.fast.v1", ("position",), (2,), requires_player_identity=True)
+
+        def prepare(self, _config: RuntimeConfig) -> None:
+            pass
+
+        def step(self, _inputs: list[PolicyInput]) -> list[PolicyOutput]:
+            raise AssertionError("step_policy repeated validation through the public path")
+
+        def step_prevalidated(self, inputs: list[PolicyInput]) -> list[PolicyOutput]:
+            return [PolicyOutput(item.stream_id, NEUTRAL_CONTROLLER_ACTION) for item in inputs]
+
+    policy = FastPolicy()
+    config = RuntimeConfig(1, (2,))
+    assert step_policy(policy, config, [_input(0)]) == [PolicyOutput(0, NEUTRAL_CONTROLLER_ACTION)]
+
+    invalid = _input(0, delay=1)
+    with pytest.raises(ValueError, match="pending actions"):
+        step_policy(policy, config, [invalid])
 
 
 def test_runtime_delays_are_explicit_and_canonical() -> None:

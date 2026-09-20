@@ -11,7 +11,7 @@ from hal.controller import ControllerAction
 from hal.inference.api import Policy
 from hal.inference.api import PolicyInput
 from hal.inference.api import RuntimeConfig
-from hal.inference.api import validate_policy_inputs
+from hal.inference.api import step_policy
 from hal.inference.api import validate_policy_outputs
 from hal.inference.transport import ActionTransport
 from hal.sim.inputs import ControllerInputs
@@ -113,8 +113,7 @@ class PolicyBatchAdapter:
                     reset=reset,
                 )
             )
-        validate_policy_inputs(self.policy.spec, self.runtime, items)
-        outputs = validate_policy_outputs(items, tuple(self.policy.step(items)))
+        outputs = validate_policy_outputs(items, tuple(step_policy(self.policy, self.runtime, items)))
         result = {}
         for slot, item in zip(obs, items, strict=True):
             state = self._states[slot]

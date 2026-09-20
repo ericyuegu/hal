@@ -530,6 +530,18 @@ def test_stream_delay_can_change_only_with_reset(monkeypatch: pytest.MonkeyPatch
     policy.step([_input(1, 3, reset=True)])
 
 
+def test_public_step_rejects_invalid_observation_before_the_fast_path() -> None:
+    policy = _policy()
+    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2,)))
+    item = _input(0, 2, reset=True)
+    invalid = replace(item, observation={**item.observation, "stage": float("inf")})
+
+    with pytest.raises(ValueError, match="observation 'stage'.*infinite"):
+        policy.step([invalid])
+
+    assert not policy._states
+
+
 @pytest.mark.parametrize("delay", [2, 3])
 def test_temporal_decoder_advances_through_every_forced_action(
     delay: int,

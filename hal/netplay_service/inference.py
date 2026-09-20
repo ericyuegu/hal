@@ -26,6 +26,7 @@ from hal.inference.api import PolicyInput
 from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
 from hal.inference.api import RuntimeConfig
+from hal.inference.api import step_policy
 from hal.inference.api import validate_policy_inputs
 from hal.inference.api import validate_policy_outputs
 from hal.sim.ipc import ControlMessage
@@ -376,8 +377,14 @@ class RemotePolicy:
     def step(self, inputs: Sequence[PolicyInput]) -> tuple[PolicyOutput, ...]:
         if len(inputs) != 1:
             raise ValueError(f"a Dolphin slot must submit one policy input, got {len(inputs)}")
-        item = inputs[0]
         validate_policy_inputs(self._spec, self._runtime, inputs)
+        return self.step_prevalidated(inputs)
+
+    def step_prevalidated(self, inputs: Sequence[PolicyInput]) -> tuple[PolicyOutput, ...]:
+        """Submit a request after the caller has validated the public contract."""
+        if len(inputs) != 1:
+            raise ValueError(f"a Dolphin slot must submit one policy input, got {len(inputs)}")
+        item = inputs[0]
         sequence = self._sequence
         self._sequence += 1
         self._arena.write_request(self._slot, sequence, item)
@@ -483,9 +490,8 @@ class ContinuousBatcher:
                 item = self.arena.read_request(slot, message.sequence)
                 requests.append((slot, message.sequence, item, connection))
             inputs = tuple(request[2] for request in requests)
-            validate_policy_inputs(self.policy.spec, self.runtime, inputs)
             policy_started = time.perf_counter()
-            outputs = validate_policy_outputs(inputs, tuple(self.policy.step(inputs)))
+            outputs = validate_policy_outputs(inputs, tuple(step_policy(self.policy, self.runtime, inputs)))
             with self._timing_lock:
                 self._policy_seconds.append(time.perf_counter() - policy_started)
                 self._batch_wait_seconds.append(batch_wait_seconds)

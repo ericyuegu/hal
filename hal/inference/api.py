@@ -117,6 +117,13 @@ class Policy(Protocol):
     def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]: ...
 
 
+@runtime_checkable
+class PrevalidatedPolicy(Protocol):
+    """Policy fast path for a caller that already validated the whole batch."""
+
+    def step_prevalidated(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]: ...
+
+
 def validate_controller_action(action: ControllerAction) -> None:
     """Reject values that cannot represent a logical GameCube controller."""
     analog = {
@@ -184,6 +191,18 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
         validate_controller_action(item.applied_action)
         for action in item.pending_actions:
             validate_controller_action(action)
+
+
+def step_policy(
+    policy: Policy,
+    config: RuntimeConfig,
+    inputs: Sequence[PolicyInput],
+) -> Sequence[PolicyOutput]:
+    """Validate once, then use the policy's trusted fast path when available."""
+    validate_policy_inputs(policy.spec, config, inputs)
+    if isinstance(policy, PrevalidatedPolicy):
+        return policy.step_prevalidated(inputs)
+    return policy.step(inputs)
 
 
 def validate_policy_outputs(

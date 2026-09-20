@@ -577,16 +577,12 @@ def _relative_name(name: str, controlled_port: int) -> str:
 
 
 def _relative_observation(item: PolicyInput) -> dict[str, ObservationScalar]:
+    # The public caller validates numeric types and finiteness before this conversion.
     output: dict[str, ObservationScalar] = {}
     for name in O50_REQUIRED_OBSERVATION_FIELDS:
         value = item.observation[name]
-        if not isinstance(value, (int, float, np.integer, np.floating)) or isinstance(value, (bool, np.bool_)):
-            raise ValueError(f"O50 observation field {name!r} must be numeric")
-        number = float(value)
-        if math.isinf(number):
-            raise ValueError(f"O50 observation field {name!r} must not be infinite")
         output[_relative_name(name, item.controlled_port)] = (
-            int(value) if isinstance(value, (int, np.integer)) else number
+            int(value) if isinstance(value, (int, np.integer)) else float(value)
         )
     action = _action_vector(item.applied_action)
     output.update({f"ego_{name}": float(value) for name, value in zip(ACTION_CHANNELS, action, strict=True)})
@@ -969,6 +965,11 @@ class O50Policy:
     def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
         runtime = self._require_runtime()
         validate_policy_inputs(self._spec, runtime, inputs)
+        return self.step_prevalidated(inputs)
+
+    def step_prevalidated(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
+        """Step after the caller has enforced the model-independent contract."""
+        self._require_runtime()
         states = [(item, self._ingest(item)) for item in inputs]
         due = [(item, state) for item, state in states if not state.queued]
         if due:

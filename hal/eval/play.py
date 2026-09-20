@@ -19,7 +19,7 @@ from hal.controller import ControllerAction
 from hal.inference.api import Policy
 from hal.inference.api import PolicyInput
 from hal.inference.api import RuntimeConfig
-from hal.inference.api import validate_policy_inputs
+from hal.inference.api import step_policy
 from hal.inference.api import validate_policy_outputs
 from hal.inference.transport import ActionTransport
 from hal.sim.inputs import canonical_pre_to_action
@@ -276,8 +276,7 @@ def run_netplay_match(
             player_identity=player_identity,
             reset=countdown_policy_frames == 0,
         )
-        validate_policy_inputs(policy.spec, runtime, (item,))
-        action = validate_policy_outputs((item,), tuple(policy.step((item,))))[stream_id]
+        action = validate_policy_outputs((item,), tuple(step_policy(policy, runtime, (item,))))[stream_id]
         expected_countdown_action = transport.submit(action)
         recent_scheduled.append(expected_countdown_action)
         countdown_policy_frames += 1
@@ -344,9 +343,8 @@ def run_netplay_match(
             player_identity=player_identity,
             reset=first_policy_frame,
         )
-        validate_policy_inputs(policy.spec, runtime, (item,))
         inference_started = time.perf_counter()
-        outputs = tuple(policy.step((item,)))
+        outputs = tuple(step_policy(policy, runtime, (item,)))
         inference_elapsed = time.perf_counter() - inference_started
         inference_seconds.append(inference_elapsed)
         if observer is not None:

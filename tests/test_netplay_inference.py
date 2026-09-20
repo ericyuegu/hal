@@ -100,6 +100,29 @@ def test_continuous_batcher_combines_mixed_delays_and_preserves_types() -> None:
         assert isinstance(first.observation["floating"], float)
 
 
+def test_continuous_batcher_rejects_infinite_shared_memory_observation() -> None:
+    runtime = RuntimeConfig(1, (2,))
+    policy = _Policy()
+    parent, child = Pipe()
+    try:
+        with ServingArena.create(1, 2, policy.spec.required_observation_fields) as arena:
+            arena.write_request(0, 0, _input(0, 2))
+            arena.observation[0, 1] = float("inf")
+            inference.send_control(
+                child,
+                inference.ControlMessage(inference.MessageType.PLAN_REQUEST, worker_id=0, sequence=0),
+            )
+            batcher = ContinuousBatcher(policy, runtime, arena, {0: parent})
+
+            with pytest.raises(ValueError, match="must not be infinite"):
+                batcher._serve_batch((parent,), 0.0)
+
+            assert not policy.batches
+    finally:
+        parent.close()
+        child.close()
+
+
 def test_continuous_batcher_does_not_wait_for_an_idle_slot() -> None:
     runtime = RuntimeConfig(2, (2, 3))
     policy = _Policy()
