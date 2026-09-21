@@ -2899,6 +2899,8 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
     ctx_pad = torch.cat(
         (
             ctx.ctx_pad,
+            # Keep one inert position visible. A fully masked synthetic row is
+            # undefined for the decoder's attention kernels.
             torch.full(
                 (extra,),
                 ctx.features[next(iter(ctx.features))].shape[1] - 1,
@@ -3392,7 +3394,7 @@ class BF16Inference:
         if len({slot for slot in slot_ids if slot >= 0}) != sum(slot >= 0 for slot in slot_ids):
             raise ValueError("rolling inference received duplicate stream ids")
         expected_pad = tuple(
-            self.cfg.arch.L_ctx - min(count, self.cfg.arch.L_ctx) if slot >= 0 else self.cfg.arch.L_ctx
+            self.cfg.arch.L_ctx - min(count, self.cfg.arch.L_ctx) if slot >= 0 else self.cfg.arch.L_ctx - 1
             for slot, count in zip(slot_ids, counts, strict=True)
         )
         actual_pad = tuple(int(value) for value in ctx.ctx_pad.detach().cpu().tolist())

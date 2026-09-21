@@ -581,6 +581,41 @@ def test_rolling_cache_tracks_stream_order_and_reset() -> None:
     assert engine._rolling_state.observation_counts == (1, 3)
 
 
+def test_rolling_cache_accepts_an_inert_bucket_padding_row() -> None:
+    torch.manual_seed(39)
+    cfg = _tiny_cfg(batch_size=2)
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False, cache_mode="rolling")
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    context = replace(
+        context,
+        ctx_pad=torch.full((2,), cfg.arch.L_ctx - 1, dtype=torch.long),
+        observation_counts=torch.ones(2, dtype=torch.long),
+    )
+    engine.decode(context, cfg.prediction_frames, argmax=True)
+
+    one_row = replace(
+        context,
+        features={name: value[:1] for name, value in context.features.items()},
+        ctx_pad=torch.tensor([cfg.arch.L_ctx - 2]),
+        slot_ids=context.slot_ids[:1],
+        reset=torch.zeros(1, dtype=torch.bool),
+        observation_counts=torch.tensor([2]),
+    )
+    padded = exp._pad_context(one_row, 2)
+    if "ego_player_id" not in padded.features:
+        padded = exp._condition_ego_player(padded, exp.MASKED_PLAYER_ID)
+    padded = exp.canonical_context(padded, "base", items=True)
+    observed = model.codec.quantize(exp.stack_actions(padded.features))
+    engine._rolling_hidden(padded, observed)
+
+    assert padded.ctx_pad.tolist() == [cfg.arch.L_ctx - 2, cfg.arch.L_ctx - 1]
+    assert engine._rolling_state is not None
+    assert engine._rolling_state.slot_ids == (int(context.slot_ids[0]), -1)
+    assert engine._rolling_state.observation_counts == (2, 0)
+    assert engine._rolling_state.ctx_pad.tolist() == [cfg.arch.L_ctx - 2, cfg.arch.L_ctx]
+
+
 def test_rolling_cache_comparison_records_numerical_metrics() -> None:
     torch.manual_seed(41)
     cfg = _tiny_cfg(batch_size=1)
