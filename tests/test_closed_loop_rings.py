@@ -354,6 +354,54 @@ def test_context_pad_tracks_the_refilling_context() -> None:
     assert pads[2 * L_CTX : 3 * L_CTX] == [L_CTX - 1 - i for i in range(L_CTX)]
 
 
+@pytest.mark.parametrize("entry", ["frames", "rows"])
+def test_observation_count_continues_after_context_saturates(entry: str) -> None:
+    counts: list[int] = []
+    pads: list[int] = []
+    resets: list[bool] = []
+
+    def predict_chunk(ctx, committed):
+        assert ctx.observation_counts is not None
+        assert ctx.reset is not None
+        counts.append(int(ctx.observation_counts[0]))
+        pads.append(int(ctx.ctx_pad[0]))
+        resets.append(bool(ctx.reset[0]))
+        return np.zeros((ctx.batch, 1, ACTION_DIM), dtype=np.float32)
+
+    policy = RecedingHorizon(
+        predict_chunk=predict_chunk,
+        stats=_stats(False, False),
+        L_ctx=3,
+        L_chunk=1,
+        s=1,
+        d=0,
+        device="cpu",
+    )
+    slot = Slot(0, EGO_PORT)
+    frame_ids = [100, 101, 102, 103, 104, -123, -122]
+    for tick, frame_id in enumerate(frame_ids):
+        frame = _obs(tick, frame_id, v6=False, follower=False)
+        if entry == "frames":
+            policy(tick, {slot: frame})
+        else:
+            policy.plan_rows(
+                {
+                    slot: [
+                        ObservationRow(
+                            frame_id,
+                            flatten_canonical_frame(frame),
+                            NEUTRAL_ACTION,
+                            reset=tick == 5,
+                        )
+                    ]
+                }
+            )
+
+    assert counts == [1, 2, 3, 4, 5, 1, 2]
+    assert pads == [2, 1, 0, 0, 0, 2, 1]
+    assert resets == [True, False, False, False, False, True, False]
+
+
 # --- the global item block ----------------------------------------------------
 #
 # The two observation paths deliver the same projectile frame in DIFFERENT dtypes:

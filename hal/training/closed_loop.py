@@ -87,6 +87,7 @@ class _SlotState:
     last_id: int | None = None  # previous frame's canonical id; a drop = instant-restart boundary
     reset_pending: bool = True
     last_action: np.ndarray | None = None  # the action returned for the PREVIOUS frame
+    observation_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +218,7 @@ class RecedingHorizon:
         st.offset = 0
         st.last_action = None
         st.reset_pending = True
+        st.observation_count = 0
 
     def _ingest_row(self, slot: Slot, row: ObservationRow) -> None:
         st = self._slots.setdefault(slot, _SlotState())
@@ -231,6 +233,7 @@ class RecedingHorizon:
         st.rings.gather(row.flat, action)
         push_context_rows([st.rings])
         st.last_action = action
+        st.observation_count += 1
 
     def _ingest(self, live: list[Slot], obs: Mapping[Slot, dict]) -> None:
         """Flatten + preprocess this frame once per live slot, into that slot's rings.
@@ -256,6 +259,7 @@ class RecedingHorizon:
                     flat, _PORT_TO_PREFIX[slot.port], self.stats, self.L_ctx, self.extra, self.projection
                 )
             st.rings.gather(flat, NEUTRAL_ACTION if st.last_action is None else st.last_action)
+            st.observation_count += 1
             gathered.append(st.rings)
         push_context_rows(gathered)
 
@@ -302,7 +306,9 @@ class RecedingHorizon:
             ctx_pad=ctx_pad,
             slot_ids=torch.tensor([sl.match * 8 + sl.port for sl in live], dtype=torch.long, device=self.device),
             reset=torch.tensor(resets, dtype=torch.bool, device=self.device),
-            observation_counts=torch.tensor([self._count(sl) for sl in live], dtype=torch.long, device=self.device),
+            observation_counts=torch.tensor(
+                [self._slots[sl].observation_count for sl in live], dtype=torch.long, device=self.device
+            ),
         )
         for sl in live:
             self._slots[sl].reset_pending = False
