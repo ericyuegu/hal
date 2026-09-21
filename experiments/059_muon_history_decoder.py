@@ -73,6 +73,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 import tyro
 from beartype import beartype
 from jaxtyping import Bool
@@ -3097,6 +3099,75 @@ class _CacheComparison:
         return metrics
 
 
+@triton.jit
+def _write_kv_slot_kernel(
+    keys: tl.tensor,
+    values: tl.tensor,
+    key: tl.tensor,
+    value: tl.tensor,
+    active: tl.tensor,
+    slots: tl.tensor,
+    layer: tl.constexpr,
+    batch: tl.constexpr,
+    heads: tl.constexpr,
+    length: tl.constexpr,
+    head_dim: tl.constexpr,
+    key_batch_stride: tl.constexpr,
+    key_head_stride: tl.constexpr,
+    value_batch_stride: tl.constexpr,
+    value_head_stride: tl.constexpr,
+    block_size: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offset = tl.program_id(1) * block_size + tl.arange(0, block_size)
+    enabled = tl.load(active + row)
+    slot = tl.load(slots + row)
+    head = offset // head_dim
+    channel = offset % head_dim
+    mask = (offset < heads * head_dim) & enabled
+    destination = ((layer * batch + row) * heads + head) * length * head_dim + slot * head_dim + channel
+    next_key = tl.load(key + row * key_batch_stride + head * key_head_stride + channel, mask, other=0)
+    next_value = tl.load(value + row * value_batch_stride + head * value_head_stride + channel, mask, other=0)
+    tl.store(keys + destination, next_key, mask)
+    tl.store(values + destination, next_value, mask)
+
+
+@torch.library.triton_op("hal_o59::write_kv_slot", mutates_args={"keys", "values"})
+def _write_kv_slot(
+    keys: Tensor,
+    values: Tensor,
+    key: Tensor,
+    value: Tensor,
+    active: Tensor,
+    slots: Tensor,
+    layer: int,
+) -> None:
+    # PyTorch 2.11 turns native indexed assignments into full-cache temporaries.
+    # Keep this operation until native writes pass the compiled storage tests and
+    # generated-code inspection without those copies.
+    if torch.__version__.split("+")[0] != "2.11.0" or triton.__version__ != "3.6.0":
+        raise RuntimeError("O59 CUDA ring writes require validated PyTorch 2.11.0 and Triton 3.6.0")
+    _, batch, heads, length, head_dim = keys.shape
+    torch.library.wrap_triton(_write_kv_slot_kernel)[(batch, triton.cdiv(heads * head_dim, 256))](
+        keys,
+        values,
+        key,
+        value,
+        active,
+        slots,
+        layer,
+        batch,
+        heads,
+        length,
+        head_dim,
+        key.stride(0),
+        key.stride(1),
+        value.stride(0),
+        value.stride(1),
+        256,
+    )
+
+
 def _rolling_trunk_forward(
     model: GPT,
     tokens: Tensor,
@@ -3107,7 +3178,7 @@ def _rolling_trunk_forward(
     active_steps: Tensor,
     token_positions: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Advance a fixed-width trunk cache by the supplied chronological tokens."""
+    """Mutate ring K/V slots; retain chronological final hidden states for the decoder."""
     batch, steps, width = tokens.shape
     layers, cache_batch, heads, length, head_dim = keys.shape
     if (
@@ -3118,14 +3189,16 @@ def _rolling_trunk_forward(
         or active_steps.shape != (steps, batch)
         or token_positions.shape != (steps, batch)
         or layers != len(model.trunk.blocks)
+        or not keys.is_contiguous()
+        or not values.is_contiguous()
     ):
         raise ValueError("rolling trunk inputs have incompatible shapes")
 
     first_attention = cast(Any, model.trunk.blocks[0]).attn
     positions = torch.arange(length, device=tokens.device)
+    rows = torch.arange(batch, device=tokens.device)
     for step in range(steps):
         active = active_steps[step]
-        active_4d = active[:, None, None, None]
         active_token = active[:, None, None]
         next_pad = torch.where(active, (ctx_pad - 1).clamp_min(0), ctx_pad)
         x = tokens[:, step : step + 1]
@@ -3137,8 +3210,7 @@ def _rolling_trunk_forward(
         frequencies = token_positions[step, :, None].float() * inv_freq[None]
         cos = frequencies.cos().to(tokens.dtype)[:, None, None]
         sin = frequencies.sin().to(tokens.dtype)[:, None, None]
-        next_keys: list[Tensor] = []
-        next_values: list[Tensor] = []
+        slots = token_positions[step].remainder(length)
         for layer, module in enumerate(model.trunk.blocks):
             block = cast(Any, module)
             attention = block.attn
@@ -3149,37 +3221,36 @@ def _rolling_trunk_forward(
             value = value.view(batch, 1, heads, head_dim).transpose(1, 2)
             query = apply_rotary_emb(query, cos, sin).transpose(1, 2)
             key = apply_rotary_emb(key, cos, sin).transpose(1, 2)
-            present_key = torch.where(
-                active_4d,
-                torch.cat((keys[layer, :, :, 1:], key), dim=2),
-                keys[layer],
-            )
-            present_value = torch.where(
-                active_4d,
-                torch.cat((values[layer, :, :, 1:], value), dim=2),
-                values[layer],
-            )
-            valid = positions[None, :] >= next_pad[:, None]
+            if keys.dtype != key.dtype or values.dtype != value.dtype:
+                raise ValueError("rolling K/V storage must match the attention dtype")
+            # Only the incoming slot is written. Physical order does not affect
+            # attention: keys already carry their absolute RoPE positions.
+            if keys.is_cuda:
+                _write_kv_slot(keys, values, key, value, active, slots, layer)
+            else:
+                keys[layer, rows, :, slots, :] = torch.where(
+                    active[:, None, None], key[:, :, 0], keys[layer, rows, :, slots, :]
+                )
+                values[layer, rows, :, slots, :] = torch.where(
+                    active[:, None, None], value[:, :, 0], values[layer, rows, :, slots, :]
+                )
+            valid = positions[None, :] < (length - next_pad)[:, None]
             attended = F.scaled_dot_product_attention(
                 query,
-                present_key,
-                present_value,
+                keys[layer],
+                values[layer],
                 attn_mask=valid[:, None, None],
             )
             attended = attended.transpose(1, 2).contiguous().view(batch, 1, width)
             candidate = x + block.attn_scale * attention.c_proj(attended)
             candidate = candidate + block.mlp_scale * block.mlp(rmsnorm(candidate))
             x = torch.where(active_token, candidate, x)
-            next_keys.append(present_key)
-            next_values.append(present_value)
         final = rmsnorm(x)
         hidden = torch.where(
             active_token,
             torch.cat((hidden[:, 1:], final), dim=1),
             hidden,
         )
-        keys = torch.stack(next_keys)
-        values = torch.stack(next_values)
         ctx_pad = next_pad
     return keys, values, hidden, ctx_pad
 
@@ -3316,16 +3387,22 @@ class BF16Inference:
             architecture.L_ctx,
             architecture.d_model // architecture.n_heads,
         )
+        device_type = reference.device.type
+        dtype = (
+            torch.get_autocast_dtype(device_type)
+            if torch.is_autocast_enabled(device_type)
+            else next(self.model.parameters()).dtype
+        )
         return _RollingTrunkState(
             slot_ids=tuple([-1] * bucket),
             observation_counts=tuple([0] * bucket),
-            keys=torch.zeros(shape, dtype=reference.dtype, device=reference.device),
-            values=torch.zeros(shape, dtype=reference.dtype, device=reference.device),
+            keys=torch.zeros(shape, dtype=dtype, device=reference.device),
+            values=torch.zeros(shape, dtype=dtype, device=reference.device),
             hidden=torch.zeros(
                 bucket,
                 architecture.L_ctx,
                 architecture.d_model,
-                dtype=reference.dtype,
+                dtype=dtype,
                 device=reference.device,
             ),
             ctx_pad=torch.full((bucket,), architecture.L_ctx, dtype=torch.long, device=reference.device),
@@ -3348,9 +3425,9 @@ class BF16Inference:
         old_rows = {slot: row for row, slot in enumerate(state.slot_ids) if slot >= 0}
         source_rows: list[int] = []
         new_counts: list[int] = []
-        for slot, reset, count in zip(slot_ids, resets, observation_counts, strict=True):
+        for row, (slot, reset, count) in enumerate(zip(slot_ids, resets, observation_counts, strict=True)):
             if slot < 0:
-                source_rows.append(0)
+                source_rows.append(row)
                 new_counts.append(0)
                 continue
             old_row = old_rows.get(slot)

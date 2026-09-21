@@ -506,7 +506,7 @@ def test_normal_decode_keeps_logits_out_of_the_decoder_path() -> None:
 def test_rolling_trunk_matches_recomputation_then_bounded_history() -> None:
     torch.manual_seed(31)
     cfg = _tiny_cfg(batch_size=1)
-    cfg = replace(cfg, arch=replace(cfg.arch, attn_window=cfg.arch.L_ctx))
+    cfg = replace(cfg, arch=replace(cfg.arch, attn_window=cfg.arch.L_ctx, n_layers=2))
     model = exp.GPT(cfg).eval()
     length = cfg.arch.L_ctx
     sequence = torch.randn(1, length + 5, cfg.arch.d_model)
@@ -1395,3 +1395,367 @@ def test_conditioned_and_unconditioned_evidence_cannot_share_directory(tmp_path:
     (tmp_path / "match_rows.json").write_text(json.dumps({**saved, "schema_version": 6}))
     with pytest.raises(ValueError, match="different protocol"):
         exp._validate_eval_directory(tmp_path, protocol)
+
+
+@pytest.mark.parametrize("device,dtype", [("cpu", torch.float32), ("cuda", torch.bfloat16)])
+@torch.inference_mode()
+def test_circular_cache_matches_shifting_across_three_wraps(device: str, dtype: torch.dtype) -> None:
+    from o59_shifting_reference import shifting_trunk_forward
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.fail("Required GPU circular-cache coverage is unavailable")
+    torch.manual_seed(59)
+    torch.set_num_threads(4)
+    cfg = _tiny_cfg(batch_size=3)
+    cfg = replace(cfg, arch=replace(cfg.arch, L_ctx=256, n_layers=2, n_heads=2))
+    if device == "cuda":
+        cfg = replace(
+            cfg,
+            arch=replace(
+                cfg.arch,
+                d_model=256,
+                n_layers=12,
+                n_heads=4,
+                temporal_d_model=256,
+                temporal_layers=6,
+                temporal_heads=4,
+                temporal_ff_dim=1024,
+                group_head_dim=256,
+            ),
+        )
+    model = exp.GPT(cfg).to(device).eval()
+    length, batch, width = cfg.arch.L_ctx, 3, cfg.arch.d_model
+    shape = (cfg.arch.n_layers, batch, cfg.arch.n_heads, length, width // cfg.arch.n_heads)
+    keys = torch.zeros(shape, device=device, dtype=dtype)
+    values = torch.zeros_like(keys)
+    hidden = torch.zeros(batch, length, width, device=device, dtype=dtype)
+    pad = torch.full((batch,), length, device=device, dtype=torch.long)
+    ref_keys, ref_values, ref_hidden, ref_pad = keys.clone(), values.clone(), hidden.clone(), pad.clone()
+    pointers = (keys.data_ptr(), values.data_ptr())
+    counts = torch.zeros(batch, device=device, dtype=torch.long)
+    worst_relative_rms, worst_cosine = 0.0, 1.0
+    prefix: list[torch.Tensor] = []
+    prefix_count = 0
+    with torch.autocast(device, dtype=torch.bfloat16, enabled=device == "cuda"):
+        for update in range(3 * length + 7):
+            steps = 1 if update % 3 == 0 else 2
+            # Row 0 wraps uninterrupted; row 1 resets after filling; row 2 is inert.
+            if update in (length + 5, 2 * length + 5):
+                counts[1] = 0
+                pad[1] = length
+                ref_pad[1] = length
+            tokens = torch.randn(batch, steps, width, device=device, dtype=dtype)
+            if prefix_count < length:
+                prefix.append(tokens[:1])
+                prefix_count += steps
+            active = torch.ones(steps, batch, dtype=torch.bool, device=device)
+            active[:, 2] = False
+            active[0, 1] = update % 2 == 0
+            positions = counts[None] + active.long().cumsum(0) - 1
+            positions.clamp_min_(0)
+            old_keys, old_values = keys[:, 2].clone(), values[:, 2].clone()
+            keys, values, hidden, pad = exp._rolling_trunk_forward(
+                model,
+                tokens,
+                keys,
+                values,
+                hidden,
+                pad,
+                active,
+                positions,
+            )
+            ref_keys, ref_values, ref_hidden, ref_pad = shifting_trunk_forward(
+                model,
+                tokens,
+                ref_keys,
+                ref_values,
+                ref_hidden,
+                ref_pad,
+                active,
+                positions,
+            )
+            counts += active.sum(0)
+            if update < 4 or prefix_count == length:
+                full = model.trunk.forward_dense(
+                    torch.cat(prefix, dim=1), torch.zeros(1, dtype=torch.long, device=device)
+                )
+                cached = hidden[:1, -prefix_count:].float()
+                full = full.float()
+                if device == "cpu":
+                    torch.testing.assert_close(cached, full, rtol=2e-5, atol=2e-6)
+                else:
+                    assert ((cached - full).square().mean() / full.square().mean()).sqrt() < 0.01
+                    assert torch.nn.functional.cosine_similarity(cached.flatten(), full.flatten(), dim=0) > 0.9999
+                if prefix_count == length:
+                    prefix_count += 1
+            assert pointers == (keys.data_ptr(), values.data_ptr())
+            assert keys.dtype == values.dtype == dtype
+            assert keys.shape == values.shape == shape
+            assert torch.equal(keys[:, 2], old_keys)
+            assert torch.equal(values[:, 2], old_values)
+            assert torch.equal(pad, ref_pad)
+            valid = torch.arange(length, device=device)[None] >= pad[:, None]
+            actual, expected = hidden[valid].float(), ref_hidden[valid].float()
+            if device == "cpu":
+                torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+            relative_rms = ((actual - expected).square().mean() / expected.square().mean()).sqrt().item()
+            cosine = torch.nn.functional.cosine_similarity(actual.flatten(), expected.flatten(), dim=0).item()
+            worst_relative_rms = max(worst_relative_rms, relative_rms)
+            worst_cosine = min(worst_cosine, cosine)
+        assert counts[0] >= 3 * length
+        assert worst_relative_rms < 0.01
+        assert worst_cosine > 0.9999
+        observed = torch.zeros(batch, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long, device=device)
+        uniforms = torch.rand(4, exp.CONTROLLER_GROUP_COUNT, batch, device=device)
+        returns = torch.zeros(batch, device=device)
+        present = torch.zeros(batch, device=device, dtype=torch.bool)
+        actual_indices, actual_logits = model.temporal.sample_indices_with_logits(
+            hidden,
+            observed,
+            model.head_offsets[:4],
+            returns,
+            present,
+            argmax=False,
+            uniforms=uniforms,
+            ctx_pad=pad,
+        )
+        ref_indices, ref_logits = model.temporal.sample_indices_with_logits(
+            ref_hidden,
+            observed,
+            model.head_offsets[:4],
+            returns,
+            present,
+            argmax=False,
+            uniforms=uniforms,
+            ctx_pad=ref_pad,
+        )
+        differences = []
+        for actual, expected in zip(actual_logits, ref_logits, strict=True):
+            finite = torch.isfinite(actual) & torch.isfinite(expected)
+            differences.append((actual[finite].float() - expected[finite].float()).square())
+        logit_rms = torch.cat(differences).mean().sqrt().item()
+        disagreement = (actual_indices != ref_indices).float().mean().item()
+    print(
+        {
+            "device": device,
+            "hidden_relative_rms_max": worst_relative_rms,
+            "hidden_cosine_min": worst_cosine,
+            "logit_rms": logit_rms,
+            "sampled_action_disagreement": disagreement,
+        }
+    )
+
+
+@pytest.mark.parametrize("mode", ["default", "reduce-overhead"])
+@torch.inference_mode()
+def test_circular_cache_compiled_positions_and_resets(mode: str) -> None:
+    from o59_shifting_reference import shifting_trunk_forward
+
+    if not torch.cuda.is_available():
+        pytest.fail("Required compiled GPU circular-cache coverage is unavailable")
+    torch.compiler.reset()
+    torch.manual_seed(61)
+    cfg = _tiny_cfg()
+    cfg = replace(cfg, arch=replace(cfg.arch, n_layers=2, n_heads=2, temporal_heads=2))
+    model = exp.GPT(cfg).cuda().eval()
+    engine = exp.BF16Inference(model, cfg, compiled=True, bucket=2, cache_mode="rolling", compile_mode=mode)
+    context = exp.synthetic_context(cfg, 2, torch.device("cuda"))
+    engine.prewarm(2, 4, committed_frames=2)
+    committed = torch.as_tensor(exp.NEUTRAL_ACTION, device="cuda").expand(2, 2, -1)
+    counts = [3, 3]
+    pointers = None
+    shape = (2, 2, 2, cfg.arch.L_ctx, cfg.arch.d_model // 2)
+    ref_keys = torch.zeros(shape, device="cuda", dtype=torch.bfloat16)
+    ref_values = torch.zeros_like(ref_keys)
+    ref_hidden = torch.zeros(2, cfg.arch.L_ctx, cfg.arch.d_model, device="cuda", dtype=torch.bfloat16)
+    ref_pad = torch.full((2,), cfg.arch.L_ctx, device="cuda", dtype=torch.long)
+    with torch.compiler.set_stance("fail_on_recompile"):
+        for index in range(20):
+            resets = [index in (0, 10), index in (0, 15)]
+            counts = [1 if reset else count + 2 for reset, count in zip(resets, counts, strict=True)]
+            current = replace(
+                context,
+                slot_ids=torch.arange(2, device="cuda"),
+                reset=torch.tensor(resets, device="cuda"),
+                observation_counts=torch.tensor(counts, device="cuda"),
+                ctx_pad=torch.tensor([max(0, cfg.arch.L_ctx - count) for count in counts], device="cuda"),
+            )
+            engine.decode(current, 4, committed=committed)
+            state = engine._rolling_state
+            deltas = [1 if reset else 2 for reset in resets]
+            steps = max(deltas)
+            canonical = exp.canonical_context(
+                exp._condition_ego_player(current, exp.MASKED_PLAYER_ID), "base", items=True
+            )
+            features = {name: value[:, -steps:] for name, value in canonical.features.items()}
+            observed = model.codec.quantize(exp.stack_actions(features))
+            active = torch.tensor(
+                [[offset >= steps - delta for delta in deltas] for offset in range(steps)], device="cuda"
+            )
+            positions = torch.tensor(
+                [[max(0, count - steps + offset) for count in counts] for offset in range(steps)], device="cuda"
+            )
+            ref_pad = torch.where(current.reset, cfg.arch.L_ctx, ref_pad)
+            with exp.amp_context(cfg, "cuda"):
+                ref_keys, ref_values, ref_hidden, ref_pad = shifting_trunk_forward(
+                    model,
+                    model.context_tokens(features, observed),
+                    ref_keys,
+                    ref_values,
+                    ref_hidden,
+                    ref_pad,
+                    active,
+                    positions,
+                )
+            valid = torch.arange(cfg.arch.L_ctx, device="cuda")[None] >= ref_pad[:, None]
+            left, right = state.hidden[valid].float(), ref_hidden[valid].float()
+            assert ((left - right).square().mean() / right.square().mean()).sqrt() < 0.01
+            assert torch.nn.functional.cosine_similarity(left.flatten(), right.flatten(), dim=0) > 0.9999
+            assert state.keys.dtype == state.values.dtype == torch.bfloat16
+            current_pointers = (state.keys.data_ptr(), state.values.data_ptr())
+            if pointers is not None:
+                assert pointers == current_pointers
+            pointers = current_pointers
+    torch.cuda.synchronize()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    ) as profile:
+        engine.decode(
+            replace(
+                current,
+                reset=torch.ones(2, dtype=torch.bool, device="cuda"),
+                observation_counts=torch.ones(2, dtype=torch.long, device="cuda"),
+                ctx_pad=torch.full((2,), cfg.arch.L_ctx - 1, device="cuda"),
+            ),
+            4,
+            committed=committed,
+        )
+        torch.cuda.synchronize()
+    launches = sum(event.count for event in profile.key_averages() if "cudaGraphLaunch" in event.key)
+    print({"mode": mode, "cuda_graph_launches": launches})
+
+
+@pytest.mark.parametrize("device,dtype", [("cpu", torch.float32), ("cuda", torch.bfloat16)])
+@torch.inference_mode()
+def test_circular_cache_stream_membership_and_reset_isolation(device: str, dtype: torch.dtype) -> None:
+    from o59_shifting_reference import shifting_trunk_forward
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.fail("Required GPU stream-membership coverage is unavailable")
+    torch.manual_seed(67)
+    cfg = _tiny_cfg()
+    cfg = replace(cfg, arch=replace(cfg.arch, n_layers=2))
+    model = exp.GPT(cfg).to(device=device).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False, cache_mode="rolling")
+    with exp.amp_context(cfg, device):
+        base = exp.synthetic_context(cfg, 2, torch.device(device))
+        base = exp.canonical_context(exp._condition_ego_player(base, exp.MASKED_PLAYER_ID), "base", items=True)
+        observed = model.codec.quantize(exp.stack_actions(base.features))
+        references: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]] = {}
+        # Fill, reorder, reset a full row, remove a row, continue with padding, add a stream.
+        updates = [
+            ((10, 20), (True, True), (8, 5)),
+            ((20, 10), (False, False), (7, 10)),
+            ((20, 10), (True, False), (1, 12)),
+            ((20, -1), (False, True), (3, 0)),
+            ((20, -1), (False, True), (5, 0)),
+            ((20, 30), (False, True), (7, 1)),
+        ]
+        for slots, resets, counts in updates:
+            old = engine._rolling_state
+            inactive = None if old is None else (old.keys[:, 1].clone(), old.values[:, 1].clone())
+            pointers = None if old is None else (old.keys.data_ptr(), old.values.data_ptr())
+            ctx = replace(
+                base,
+                slot_ids=torch.tensor(slots, device=device),
+                reset=torch.tensor(resets, device=device),
+                observation_counts=torch.tensor(counts, device=device),
+                ctx_pad=torch.tensor(
+                    [
+                        cfg.arch.L_ctx - min(count, cfg.arch.L_ctx) if slot >= 0 else cfg.arch.L_ctx - 1
+                        for slot, count in zip(slots, counts, strict=True)
+                    ],
+                    device=device,
+                ),
+            )
+            actual = engine._rolling_hidden(ctx, observed)
+            state = engine._rolling_state
+            if old is not None and old.slot_ids == slots:
+                assert pointers == (state.keys.data_ptr(), state.values.data_ptr())
+            if slots[1] < 0:
+                assert torch.equal(state.keys[:, 1], inactive[0])
+                assert torch.equal(state.values[:, 1], inactive[1])
+            for row, (slot, reset, count) in enumerate(zip(slots, resets, counts, strict=True)):
+                if slot < 0:
+                    continue
+                if reset:
+                    shape = (
+                        cfg.arch.n_layers,
+                        1,
+                        cfg.arch.n_heads,
+                        cfg.arch.L_ctx,
+                        cfg.arch.d_model // cfg.arch.n_heads,
+                    )
+                    reference = (
+                        torch.zeros(shape, device=device, dtype=dtype),
+                        torch.zeros(shape, device=device, dtype=dtype),
+                        torch.zeros(1, cfg.arch.L_ctx, cfg.arch.d_model, device=device, dtype=dtype),
+                        torch.tensor([cfg.arch.L_ctx], device=device),
+                        0,
+                    )
+                else:
+                    reference = references[slot]
+                keys, values, hidden, pad, previous = reference
+                steps = count - previous
+                features = {name: value[row : row + 1, -steps:] for name, value in base.features.items()}
+                tokens = model.context_tokens(features, observed[row : row + 1, -steps:])
+                keys, values, hidden, pad = shifting_trunk_forward(
+                    model,
+                    tokens,
+                    keys,
+                    values,
+                    hidden,
+                    pad,
+                    torch.ones(steps, 1, dtype=torch.bool, device=device),
+                    torch.arange(previous, count, device=device)[:, None],
+                )
+                references[slot] = (keys, values, hidden, pad, count)
+                valid = min(count, cfg.arch.L_ctx)
+                left, right = actual[row : row + 1, -valid:].float(), hidden[:, -valid:].float()
+                if device == "cpu":
+                    torch.testing.assert_close(left, right, rtol=2e-5, atol=2e-6)
+                else:
+                    assert ((left - right).square().mean() / right.square().mean()).sqrt() < 0.01
+                    assert torch.nn.functional.cosine_similarity(left.flatten(), right.flatten(), dim=0) > 0.9999
+
+
+@torch.inference_mode()
+def test_compiled_slot_write_has_no_full_cache_temporary() -> None:
+    if not torch.cuda.is_available():
+        pytest.fail("Required slot-write GPU coverage is unavailable")
+    keys = torch.zeros(12, 32, 4, 256, 64, device="cuda", dtype=torch.bfloat16)
+    values = torch.zeros_like(keys)
+    key = torch.randn(32, 4, 1, 64, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    active = torch.arange(32, device="cuda") % 2 == 0
+    slots = torch.arange(32, device="cuda") * 7
+    torch.library.opcheck(exp._write_kv_slot, (keys, values, key, value, active, slots, 3))
+    writer = torch.compile(exp._write_kv_slot, fullgraph=True)
+    writer(keys, values, key, value, active, slots, 3)
+    torch.cuda.synchronize()
+    baseline = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    with torch.compiler.set_stance("fail_on_recompile"):
+        for _ in range(5):
+            slots.add_(1)
+            writer(keys, values, key, value, active, slots, 3)
+    torch.cuda.synchronize()
+    temporary_bytes = torch.cuda.max_memory_allocated() - baseline
+    assert temporary_bytes < keys.numel() * keys.element_size() // 4
+    assert torch.count_nonzero(keys[2]) == 0
+    assert torch.count_nonzero(keys[4]) == 0
+    assert torch.count_nonzero(keys[:, 1::2]) == 0
+    for row in range(0, 32, 2):
+        torch.testing.assert_close(keys[3, row, :, slots[row]], key[row, :, 0], rtol=0, atol=0)
+        torch.testing.assert_close(values[3, row, :, slots[row]], value[row, :, 0], rtol=0, atol=0)
+    print({"compiled_slot_write_peak_temporary_bytes": temporary_bytes})
