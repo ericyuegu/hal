@@ -1,0 +1,1918 @@
+(function () {
+    'use strict';
+
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+    var WAND_B = 'https://wandb.ai/ericyuegu/hal/runs/';
+    var COLORS = {
+      ink: 'var(--ink)',
+      soft: 'var(--ink-soft)',
+      faint: 'var(--ink-faint)',
+      ghost: 'var(--ink-ghost)',
+      oxblood: 'var(--oxblood)',
+      rule: 'var(--rule)',
+      dotted: 'var(--rule-dotted)',
+      paper: 'var(--paper)',
+      aside: 'var(--surface-aside)',
+      white: 'var(--white)'
+    };
+
+    function one(selector, root) {
+      return (root || document).querySelector(selector);
+    }
+
+    function many(selector, root) {
+      return Array.prototype.slice.call((root || document).querySelectorAll(selector));
+    }
+
+    function empty(target) {
+      while (target.firstChild) target.removeChild(target.firstChild);
+    }
+
+    function svgElement(name, attributes, content) {
+      var element = document.createElementNS(SVG_NS, name);
+      Object.keys(attributes || {}).forEach(function (key) {
+        element.setAttribute(key, String(attributes[key]));
+      });
+      if (content !== undefined) element.textContent = content;
+      return element;
+    }
+
+    function htmlEscape(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function signed(value, digits) {
+      if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+      var places = digits === undefined ? 3 : digits;
+      return (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(places);
+    }
+
+    function compact(value) {
+      var absolute = Math.abs(value);
+      if (absolute >= 1e9) return (value / 1e9).toFixed(absolute >= 1e10 ? 1 : 2).replace(/\.0+$/, '') + 'B';
+      if (absolute >= 1e6) return (value / 1e6).toFixed(absolute >= 1e8 ? 1 : 2).replace(/\.0+$/, '') + 'M';
+      if (absolute >= 1e3) return (value / 1e3).toFixed(absolute >= 1e5 ? 0 : 1).replace(/\.0+$/, '') + 'k';
+      return String(Math.round(value));
+    }
+
+    function axisNumber(value, span) {
+      if (Math.abs(value) >= 1000) return compact(value);
+      if (span >= 100) return value.toFixed(0);
+      if (span >= 10) return value.toFixed(1);
+      if (span >= 1) return value.toFixed(2).replace(/0$/, '');
+      return value.toFixed(2);
+    }
+
+    function linear(domainMin, domainMax, rangeMin, rangeMax) {
+      var denominator = domainMax - domainMin || 1;
+      return function (value) {
+        return rangeMin + ((value - domainMin) / denominator) * (rangeMax - rangeMin);
+      };
+    }
+
+    function logScale(domainMin, domainMax, rangeMin, rangeMax) {
+      var low = Math.log10(domainMin);
+      var high = Math.log10(domainMax);
+      var scale = linear(low, high, rangeMin, rangeMax);
+      return function (value) {
+        return scale(Math.log10(value));
+      };
+    }
+
+    function ticks(minimum, maximum, count) {
+      var values = [];
+      for (var index = 0; index < count; index += 1) {
+        values.push(minimum + (maximum - minimum) * index / (count - 1));
+      }
+      return values;
+    }
+
+    function setPressed(attribute, value) {
+      many('[' + attribute + ']').forEach(function (button) {
+        button.setAttribute('aria-pressed', button.getAttribute(attribute) === value ? 'true' : 'false');
+      });
+    }
+
+    var tip = one('#tip');  // shared tooltip element in the shell
+
+    function placeTip(event) {
+      var x = event && Number.isFinite(event.clientX) ? event.clientX : window.innerWidth / 2;
+      var y = event && Number.isFinite(event.clientY) ? event.clientY : window.innerHeight / 2;
+      var left = Math.min(window.innerWidth - tip.offsetWidth - 12, x + 14);
+      var top = Math.min(window.innerHeight - tip.offsetHeight - 12, y + 14);
+      tip.style.left = Math.max(8, left) + 'px';
+      tip.style.top = Math.max(8, top) + 'px';
+    }
+
+    function showTip(event, message) {
+      tip.textContent = typeof message === 'function' ? message() : message;
+      tip.classList.add('on');
+      placeTip(event);
+    }
+
+    function hideTip() {
+      tip.classList.remove('on');
+    }
+
+    function bindTip(target, message, url) {
+      target.setAttribute('tabindex', '0');
+      target.addEventListener('mouseenter', function (event) { showTip(event, message); });
+      target.addEventListener('mousemove', placeTip);
+      target.addEventListener('mouseleave', hideTip);
+      target.addEventListener('focus', function () {
+        var box = target.getBoundingClientRect();
+        showTip({clientX: box.left + box.width / 2, clientY: box.top + box.height / 2}, message);
+      });
+      target.addEventListener('blur', hideTip);
+      if (url) {
+        target.setAttribute('data-run-source-url', url);
+        target.addEventListener('click', function () {
+          if (document.body.classList.contains('show-run-sources')) window.open(url, '_blank', 'noopener');
+        });
+        target.addEventListener('keydown', function (event) {
+          if ((event.key === 'Enter' || event.key === ' ') && document.body.classList.contains('show-run-sources')) {
+            event.preventDefault();
+            window.open(url, '_blank', 'noopener');
+          }
+        });
+      }
+    }
+
+    function setRunSourcesVisible(visible) {
+      document.body.classList.toggle('show-run-sources', visible);
+      var button = one('#source-toggle');
+      button.setAttribute('aria-pressed', visible ? 'true' : 'false');
+      button.textContent = visible ? 'hide run sources' : 'show run sources';
+      many('[data-run-source-url]').forEach(function (target) {
+        target.style.cursor = visible ? 'pointer' : '';
+      });
+    }
+
+    function chartFrame(target, options) {
+      empty(target);
+      var viewBox = target.getAttribute('viewBox').split(/\s+/).map(Number);
+      var width = viewBox[2];
+      var height = viewBox[3];
+      var margin = options.margin || {top: 24, right: 24, bottom: 48, left: 62};
+      var left = margin.left;
+      var right = width - margin.right;
+      var top = margin.top;
+      var bottom = height - margin.bottom;
+      var x = options.xLog ?
+        logScale(options.xDomain[0], options.xDomain[1], left, right) :
+        linear(options.xDomain[0], options.xDomain[1], left, right);
+      var y = linear(options.yDomain[0], options.yDomain[1], bottom, top);
+      var xTicks = options.xTicks || ticks(options.xDomain[0], options.xDomain[1], 5);
+      var yTicks = options.yTicks || ticks(options.yDomain[0], options.yDomain[1], 5);
+      var xFormat = options.xFormat || function (value) { return axisNumber(value, options.xDomain[1] - options.xDomain[0]); };
+      var yFormat = options.yFormat || function (value) { return axisNumber(value, options.yDomain[1] - options.yDomain[0]); };
+
+      yTicks.forEach(function (value) {
+        target.appendChild(svgElement('line', {x1: left, x2: right, y1: y(value), y2: y(value), class: 'grid'}));
+        target.appendChild(svgElement('text', {x: left - 9, y: y(value) + 3, 'text-anchor': 'end'}, yFormat(value)));
+      });
+      xTicks.forEach(function (value) {
+        target.appendChild(svgElement('line', {x1: x(value), x2: x(value), y1: bottom, y2: bottom + 5, class: 'axis'}));
+        target.appendChild(svgElement('text', {x: x(value), y: bottom + 19, 'text-anchor': 'middle'}, xFormat(value)));
+      });
+      target.appendChild(svgElement('line', {x1: left, x2: right, y1: bottom, y2: bottom, class: 'axis'}));
+      target.appendChild(svgElement('line', {x1: left, x2: left, y1: top, y2: bottom, class: 'axis'}));
+      if (options.yDomain[0] < 0 && options.yDomain[1] > 0) {
+        target.appendChild(svgElement('line', {x1: left, x2: right, y1: y(0), y2: y(0), class: 'zero'}));
+      }
+      if (options.xLabel) {
+        target.appendChild(svgElement('text', {x: (left + right) / 2, y: height - 7, 'text-anchor': 'middle', class: 'axis-label'}, options.xLabel));
+      }
+      if (options.yLabel) {
+        target.appendChild(svgElement('text', {
+          x: 14,
+          y: (top + bottom) / 2,
+          transform: 'rotate(-90 14 ' + ((top + bottom) / 2) + ')',
+          'text-anchor': 'middle',
+          class: 'axis-label'
+        }, options.yLabel));
+      }
+      return {x: x, y: y, left: left, right: right, top: top, bottom: bottom, width: width, height: height};
+    }
+
+    function sizeAxisChart(target, desktopWidth, desktopHeight, mobileHeight) {
+      var mobile = window.matchMedia('(max-width: 720px)').matches;
+      target.setAttribute('viewBox', '0 0 ' + (mobile ? 520 : desktopWidth) + ' ' +
+        (mobile ? mobileHeight : desktopHeight));
+      target.classList.add('axis-chart');
+      return mobile;
+    }
+
+    function linePath(points, x, y) {
+      return points.map(function (point, index) {
+        return (index ? 'L' : 'M') + x(point.x).toFixed(2) + ',' + y(point.y).toFixed(2);
+      }).join(' ');
+    }
+
+    function drawSeries(target, frame, points, options) {
+      var path = svgElement('path', {
+        d: linePath(points, frame.x, frame.y),
+        fill: 'none',
+        stroke: options.color || COLORS.ink,
+        'stroke-width': options.width || 1.8,
+        'stroke-dasharray': options.dash || '',
+        'stroke-linejoin': 'round',
+        'stroke-linecap': 'round'
+      });
+      target.appendChild(path);
+      points.forEach(function (point) {
+        var circle = svgElement('circle', {
+          cx: frame.x(point.x),
+          cy: frame.y(point.y),
+          r: point.radius || options.radius || 4.2,
+          fill: point.hollow ? COLORS.paper : (point.color || options.color || COLORS.ink),
+          stroke: point.color || options.color || COLORS.ink,
+          'stroke-width': point.hollow ? 2 : 1.4,
+          class: 'point'
+        });
+        target.appendChild(circle);
+        if (options.tip) bindTip(circle, function () { return options.tip(point); }, point.url || options.url);
+      });
+    }
+
+    function addText(target, x, y, textValue, attributes) {
+      var attrs = attributes || {};
+      attrs.x = x;
+      attrs.y = y;
+      var textNode = svgElement('text', attrs, textValue);
+      target.appendChild(textNode);
+      return textNode;
+    }
+
+    function modelMarker(target, suffix, color) {
+      var markerId = target.id + '-' + suffix;
+      var defs = one('defs', target);
+      if (!defs) {
+        defs = svgElement('defs');
+        target.appendChild(defs);
+      }
+      var marker = svgElement('marker', {
+        id: markerId,
+        viewBox: '0 0 10 10',
+        refX: 9,
+        refY: 5,
+        markerWidth: 5,
+        markerHeight: 5,
+        orient: 'auto-start-reverse'
+      });
+      marker.appendChild(svgElement('path', {d: 'M 0 0 L 10 5 L 0 10 z', fill: color}));
+      defs.appendChild(marker);
+      return 'url(#' + markerId + ')';
+    }
+
+    function modelPart(target, moduleId) {
+      var group = svgElement('g', {'data-module': moduleId});
+      target.appendChild(group);
+      return group;
+    }
+
+    function modelBox(target, x, y, width, height, label, options) {
+      var settings = options || {};
+      var group = settings.module ? modelPart(target, settings.module) : svgElement('g');
+      if (!settings.module) target.appendChild(group);
+      group.appendChild(svgElement('rect', {
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        class: 'model-box' + (settings.accent ? ' accent' : '')
+      }));
+      addText(group, x + width / 2, y + height / 2 + (settings.note ? -3 : 3), label, {
+        'text-anchor': 'middle',
+        class: settings.title ? 'diagram-title' : 'diagram-label'
+      });
+      if (settings.note) {
+        addText(group, x + width / 2, y + height / 2 + 12, settings.note, {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      }
+      return group;
+    }
+
+    function modelWire(target, x1, y1, x2, y2, options) {
+      var settings = options || {};
+      var parent = settings.module ? modelPart(target, settings.module) : target;
+      var attributes = {
+        x1: x1,
+        y1: y1,
+        x2: x2,
+        y2: y2,
+        class: 'model-wire' + (settings.accent ? ' accent' : '') + (settings.ghost ? ' ghost' : '')
+      };
+      if (settings.marker) attributes['marker-end'] = settings.marker;
+      if (settings.dash) attributes['stroke-dasharray'] = settings.dash;
+      parent.appendChild(svgElement('line', attributes));
+      return parent.lastChild;
+    }
+
+    function drawGroupChain(target, x, y, moduleId, accent) {
+      var group = modelPart(target, moduleId || 'groups');
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        var left = x + index * 27;
+        group.appendChild(svgElement('rect', {
+          x: left, y: y, width: 20, height: 24,
+          class: 'model-token' + (accent ? ' accent' : '')
+        }));
+        addText(group, left + 10, y + 16, label, {'text-anchor': 'middle', class: 'diagram-label'});
+        if (index) {
+          group.appendChild(svgElement('line', {
+            x1: left - 7, y1: y + 12, x2: left - 1, y2: y + 12,
+            class: 'model-wire' + (accent ? ' accent' : '')
+          }));
+        }
+      });
+      return group;
+    }
+
+    var production = [
+      {update: 8192, stock: -0.218, damage: 9.54},
+      {update: 16384, stock: 0.058, damage: 45.03},
+      {update: 24576, stock: 0.164, damage: 50.31},
+      {update: 40960, stock: -0.154, damage: 39.58},
+      {update: 57344, stock: -0.175, damage: 27.19},
+      {update: 98304, stock: 0.138, damage: 31.63},
+      {update: 114688, stock: 0.260, damage: 37.51},
+      {update: 122880, stock: 0.292, damage: 41.48, stockLcb: 0.196},
+      {update: 131072, stock: 0.345, damage: 37.59, stockLcb: 0.244, damageLcb: 30.61}
+    ];
+    var adamwProduction = {
+      update: 131072, stock: 0.4936706061, damage: 52.71964931,
+      stockLcb: 0.3978857534, damageLcb: 45.13586218
+    };
+
+    function renderProductionChart(targetSelector, metric, hero) {
+      var target = one(targetSelector);
+      var mobile = sizeAxisChart(target, hero ? 900 : 680, hero ? 300 : 390, hero ? 300 : 350);
+      var yDomain = metric === 'stock' ? [-0.25, hero ? 0.57 : 0.42] : [0, 60];
+      var frame = chartFrame(target, {
+        xDomain: [0, 131072],
+        yDomain: yDomain,
+        xTicks: mobile ? [0, 65536, 131072] : [0, 32768, 65536, 98304, 131072],
+        yTicks: metric === 'stock' ? [-0.2, 0, 0.2, 0.4] : [0, 20, 40, 60],
+        xFormat: function (value) { return value === 0 ? '0' : Math.round(value / 1024) + 'k'; },
+        yFormat: function (value) { return metric === 'stock' ? signed(value, 1) : signed(value, 0); },
+        xLabel: 'optimizer updates',
+        yLabel: metric === 'stock' ? 'net stocks / active min' : 'net damage / active min',
+        margin: hero ? {top: 26, right: 34, bottom: 46, left: 66} : {top: 26, right: 28, bottom: 48, left: 67}
+      });
+      var points = production.map(function (row) {
+        return {
+          x: row.update,
+          y: row[metric],
+          stock: row.stock,
+          damage: row.damage,
+          radius: row.update === 131072 ? 4.8 : 4,
+          color: COLORS.ink
+        };
+      });
+      drawSeries(target, frame, points, {
+        color: COLORS.ink,
+        tip: function (point) {
+          return 'U' + point.x.toLocaleString() + ' · stocks ' + signed(point.stock, 3) + ' · damage ' + signed(point.damage, 2);
+        }
+      });
+      var finalRow = production[production.length - 1];
+      var lower = finalRow[metric + 'Lcb'];
+      if (Number.isFinite(lower)) {
+        target.appendChild(svgElement('line', {
+          x1: frame.x(finalRow.update),
+          x2: frame.x(finalRow.update),
+          y1: frame.y(finalRow[metric]),
+          y2: frame.y(lower),
+          stroke: hero ? COLORS.faint : COLORS.oxblood,
+          'stroke-width': 1.4
+        }));
+        target.appendChild(svgElement('line', {
+          x1: frame.x(finalRow.update) - 5,
+          x2: frame.x(finalRow.update) + 5,
+          y1: frame.y(lower),
+          y2: frame.y(lower),
+          stroke: hero ? COLORS.faint : COLORS.oxblood,
+          'stroke-width': 1.4
+        }));
+      }
+      addText(target, frame.x(131072) - 7, frame.y(finalRow[metric]) - 11, (hero ? 'Muon ' : 'final ') + signed(finalRow[metric], metric === 'stock' ? 3 : 2), {
+        'text-anchor': 'end',
+        fill: hero ? COLORS.faint : COLORS.oxblood,
+        'font-family': 'var(--mono)',
+        'font-size': 10,
+        'font-weight': 600
+      });
+      if (hero) {
+        var currentY = frame.y(adamwProduction[metric]);
+        var currentLower = frame.y(adamwProduction[metric + 'Lcb']);
+        target.appendChild(svgElement('line', {
+          x1: frame.x(adamwProduction.update), x2: frame.x(adamwProduction.update),
+          y1: currentY, y2: currentLower, stroke: COLORS.oxblood, 'stroke-width': 1.5
+        }));
+        target.appendChild(svgElement('line', {
+          x1: frame.x(adamwProduction.update) - 5, x2: frame.x(adamwProduction.update) + 5,
+          y1: currentLower, y2: currentLower, stroke: COLORS.oxblood, 'stroke-width': 1.5
+        }));
+        var currentPoint = svgElement('rect', {
+          x: frame.x(adamwProduction.update) - 4.5, y: currentY - 4.5, width: 9, height: 9,
+          fill: COLORS.oxblood, stroke: COLORS.paper, 'stroke-width': 1
+        });
+        target.appendChild(currentPoint);
+        bindTip(currentPoint, 'all-AdamW · U131,072 · stocks ' + signed(adamwProduction.stock, 3) +
+          ' [' + signed(adamwProduction.stockLcb, 3) + '] · damage ' + signed(adamwProduction.damage, 2) +
+          ' [' + signed(adamwProduction.damageLcb, 2) + ']', WAND_B + 'tgpuo1be');
+        addText(target, frame.x(adamwProduction.update) - 7, currentY - 11, 'AdamW ' +
+          signed(adamwProduction[metric], metric === 'stock' ? 3 : 2), {
+          'text-anchor': 'end', fill: COLORS.oxblood, 'font-family': 'var(--mono)', 'font-size': 10, 'font-weight': 600
+        });
+      }
+    }
+
+    var lineage = {
+      next: {
+        title: 'One frame, one head',
+        text: 'The old baseline predicts only the next controller state. It cannot trade inference time for a longer open-loop plan.',
+        source: '<a href="' + WAND_B + 'vlim96s9">O11 · vlim96s9</a>',
+        offsets: [1]
+      },
+      mtp: {
+        title: 'Independent future heads',
+        text: 'The independent model reuses one trunk state to predict offsets 1, 5, 9, and 13. Each future head is conditionally independent of the other predicted frames.',
+        source: '<a href="' + WAND_B + 'shjnxxsu">O12 · shjnxxsu</a>',
+        offsets: [1, 5, 9, 13]
+      },
+      temporal: {
+        title: 'A causal decoder over the plan',
+        text: 'Every selected-offset token receives the same trunk state, its own offset, and the previous selected controller frame. Training feeds targets; play feeds realized actions and advances a KV cache.',
+        source: '<a href="' + WAND_B + 'tgpuo1be">O50 production · tgpuo1be</a> · <a href="' + WAND_B + '5wfk2esf">O37 ablation · 5wfk2esf</a>',
+        offsets: [1, 2, 3, 4, 5, 6, 9, 12, 16, 20]
+      }
+    };
+
+    var factorRows = [
+      {name: 'Independent MTP', note: 'no feedback', across: false, within: false, stock: -0.702, stockLcb: -0.798, damage: 2.77, damageLcb: -4.56, run: '98r9smrj'},
+      {name: 'Within-frame AR', note: 'controller groups only', across: false, within: true, stock: -0.313, stockLcb: -0.408, damage: 13.05, damageLcb: 6.00, run: 'a117chkw'},
+      {name: 'Across-frame AR', note: 'future frames only', across: true, within: false, stock: -0.196, stockLcb: -0.297, damage: 18.06, damageLcb: 11.91, run: '50q39o9j'},
+      {name: 'Autoregressive MTP', note: 'both kinds of feedback', across: true, within: true, stock: -0.096, stockLcb: -0.212, damage: 24.75, damageLcb: 17.10, run: '5wfk2esf'}
+    ];
+
+    function factorBar(value, minimum, maximum, digits) {
+      var zero = (0 - minimum) / (maximum - minimum) * 100;
+      var point = (value - minimum) / (maximum - minimum) * 100;
+      var left = Math.min(zero, point);
+      var width = Math.abs(point - zero);
+      var positive = value >= 0;
+      var inside = positive ? point > 82 : point < 18;
+      var label = inside ? (positive ? point - 1.5 : point + 1.5) : (positive ? point + 1.5 : point - 1.5);
+      var labelEndsAtPoint = (positive && inside) || (!positive && !inside);
+      var transform = labelEndsAtPoint ? 'transform:translate(-100%,-50%);' : 'transform:translateY(-50%);';
+      return '<div class="factor-track" style="--zero:' + zero.toFixed(2) + '%">' +
+        '<i style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%"></i>' +
+        '<output class="' + (inside ? 'inside' : '') + '" style="left:' + label.toFixed(2) + '%;' + transform + '">' +
+        signed(value, digits) + '</output></div>';
+    }
+
+    function renderFactor() {
+      one('#factor-chart').innerHTML =
+        '<div class="factor-bar-head"><span>condition</span><span>net stocks / min</span><span>net damage / min</span></div>' +
+        factorRows.map(function (row, index) {
+          return '<div class="factor-bar-row' + (index === factorRows.length - 1 ? ' flagship' : '') + '">' +
+            '<div class="factor-bar-label"><b>' + row.name + '</b><span>' + row.note + '</span></div>' +
+            factorBar(row.stock, -0.8, 0.1, 3) + factorBar(row.damage, -5, 30, 2) + '</div>';
+        }).join('');
+    }
+
+    var legacyStickPoints = [
+      [0, 0], [.35, 0], [-.35, 0], [0, .35], [0, -.35], [.675, 0], [-.675, 0], [0, .675], [0, -.675],
+      [1, 0], [0, 1], [-1, 0], [0, -1], [.95, -.3], [-.95, -.3], [.95, .3], [-.95, .3],
+      [.85, -.5], [.85, .5], [-.85, -.5], [-.85, .5], [.7, -.7], [-.7, -.7], [.7, .7], [-.7, .7],
+      [.5, .5], [-.5, .5], [.5, -.5], [-.5, -.5], [.5, .85], [-.5, .85], [.5, -.85], [-.5, -.85],
+      [.3, -.95], [.3, .95], [-.3, -.95], [-.3, .95]
+    ];
+
+    function ringPoints(radius, count) {
+      return Array.from({ length: count }, function (_, index) {
+        var angle = index / count * Math.PI * 2;
+        return [radius * Math.cos(angle), radius * Math.sin(angle)];
+      });
+    }
+
+    function cartesianStickPoints() {
+      return [[0, 0], [.35, 0], [-.35, 0], [0, .35], [0, -.35], [.675, 0], [-.675, 0], [0, .675], [0, -.675]]
+        .concat(ringPoints(.5, 8), ringPoints(.85, 8), ringPoints(1, 40));
+    }
+
+    function polarStickPoints() {
+      return [[0, 0]].concat(ringPoints(23 / 80, 4), ringPoints(Math.sqrt(23 * 80) / 80, 16), ringPoints(1, 64));
+    }
+
+    function renderCodecSticks() {
+      var pointSets = {
+        legacy: legacyStickPoints,
+        cartesian: cartesianStickPoints(),
+        polar: polarStickPoints()
+      };
+      many('[data-stick-codec]').forEach(function (svg) {
+        var name = svg.getAttribute('data-stick-codec');
+        var rings = name === 'polar' ? [23 / 80, Math.sqrt(23 * 80) / 80] : name === 'cartesian' ? [.5, .85] : [];
+        var html = '<line class="stick-axis" x1="62" y1="66" x2="178" y2="66"></line>' +
+          '<line class="stick-axis" x1="120" y1="8" x2="120" y2="124"></line>' +
+          '<circle class="stick-rim" cx="120" cy="66" r="56"></circle>';
+        html += rings.map(function (radius) {
+          return '<circle class="stick-ring" cx="120" cy="66" r="' + (radius * 56).toFixed(2) + '"></circle>';
+        }).join('');
+        html += pointSets[name].map(function (point) {
+          var radius = name === 'polar' && pointSets[name].length > 80 ? 1.55 : name === 'cartesian' ? 1.8 : 2.1;
+          return '<circle class="stick-point" cx="' + (120 + point[0] * 56).toFixed(2) + '" cy="' +
+            (66 - point[1] * 56).toFixed(2) + '" r="' + radius + '"></circle>';
+        }).join('');
+        svg.innerHTML = html;
+      });
+    }
+
+    var codecComparisons = [
+      {
+        title: 'Legacy → Cartesian',
+        rows: [
+          { name: 'Legacy', role: 'control', stock: -0.132712, damage: 21.371409 },
+          { name: 'Cartesian', role: 'treatment', stock: 0.159110, damage: 37.529324 }
+        ]
+      },
+      {
+        title: 'Cartesian → Polar',
+        rows: [
+          { name: 'Cartesian', role: 'control', stock: 0.031839, damage: 33.963848 },
+          { name: 'Polar', role: 'treatment', stock: 0.127288, damage: 34.839119 }
+        ]
+      }
+    ];
+
+    function renderCodecResults() {
+      one('#codec-results').innerHTML =
+        '<div class="codec-result-head"><span>matched comparison</span><span>net stocks / min</span><span>net damage / min</span></div>' +
+        codecComparisons.map(function (comparison) {
+          return '<section class="codec-result-pair"><div class="codec-pair-title"><b>' + comparison.title +
+            '</b></div>' +
+            comparison.rows.map(function (row) {
+              return '<div class="codec-result-row ' + row.role + '"><div class="codec-result-label"><b>' + row.name +
+                '</b></div>' + factorBar(row.stock, -.18, .18, 3) +
+                factorBar(row.damage, 0, 42, 2) + '</div>';
+            }).join('') + '</section>';
+        }).join('');
+    }
+
+    var representationBranches = [
+      {
+        id: 'physical', name: 'Past-action input', diagram: 'physical',
+        focus: ['history'], locus: 'past-action input',
+        control: '256-way class one-hot', treatment: 'class + physical embedding',
+        stock: 0.260, damage: 23.68,
+        text: 'The physical embedding won despite fewer examples and fewer parameters.',
+        links: [['one-hot', '1zzstd2d'], ['physical', 'cqbbbg77']]
+      },
+      {
+        id: 'geometry', name: 'Geometric features', diagram: 'geometry',
+        focus: ['history'], locus: 'observation input',
+        control: 'raw measured state', treatment: 'derived relative geometry',
+        stock: null, damage: null,
+        noResult: 'Two spatial-feature attempts stopped without a closed-loop result. There is no intervention score.',
+        text: 'The derived block included relative positions, velocities, and stage geometry.',
+        links: [['baseline', 'fxhtoxu8'], ['attempt 1', '6mmt6o4c'], ['attempt 2', '60esc6s8']]
+      },
+      {
+        id: 'cross', name: 'Head cross-attention', diagram: 'cross',
+        focus: ['trunk', 'temporal'], locus: 'trunk → plan',
+        control: 'final trunk state hₜ', treatment: 'queries cross-attend to trunk history',
+        stock: null, damage: null,
+        noResult: 'The retained run scored −0.398 stocks/min and +21.55 damage/min, but its nearest reference changes the trunk, codec, offsets, and decoder size.',
+        text: 'Twenty action-prefix queries used causal cross-attention over earlier trunk tokens.',
+        links: [['O24', '4hoe86s7'], ['O26 reference', 'cqbbbg77']]
+      },
+      {
+        id: 'flat', name: 'Flattened action tokens', diagram: 'flat',
+        focus: ['history', 'trunk'], locus: 'trunk sequence',
+        control: 'one trunk token per frame', treatment: 'state + four action-part tokens',
+        stock: null, damage: null,
+        noResult: '51-frame: −0.101 stock / +28.82 damage in a later 96-boot eval. 256-frame: +0.262 / +41.34 under the older protocol and about 5× the training work. No clean delta.',
+        text: 'This puts controller groups inside the main sequence instead of a small output decoder.',
+        links: [['frame-token reference', '6g1fud8e'], ['51-frame', '7tlk11io'], ['256-frame', 'lxo3id9l']]
+      },
+      {
+        id: 'bpe', name: 'BPE / RLE spans', diagram: 'bpe',
+        focus: ['temporal', 'runtime'], locus: 'plan + runtime',
+        control: 'one action target per frame', treatment: 'action + duration event spans',
+        stock: -2.635, damage: -172.16,
+        text: 'Output format, execution cadence, parameter count, and crash rate also changed. The complete tested system failed.',
+        links: [['frame-aligned', 'fxhtoxu8'], ['BPE/RLE', 'xgj1dwot']]
+      },
+      {
+        id: 'chording', name: 'Joint action chords', diagram: 'chord',
+        focus: ['groups'], locus: 'controller frame',
+        control: 'four factorized groups', treatment: 'one joint frame token',
+        stock: null, damage: null,
+        noResult: 'The only retained run stopped after three diagnostic steps. It has no closed-loop evaluation.',
+        text: 'A data-derived vocabulary maps the full controller state to one token, then autoregresses over frames.',
+        links: [['three-step diagnostic', 'vgwbv53u']]
+      },
+      {
+        id: 'state', name: 'Game-state expert', diagram: 'state',
+        focus: ['trunk', 'objective'], locus: 'training heads',
+        control: 'policy objective only', treatment: 'training-only future-state expert',
+        stock: -0.048, damage: -12.60,
+        text: 'The treatment had 8% more parameters, twice the examples, and more than twice the estimated training work.',
+        links: [['policy', 'cqbbbg77'], ['future-state expert', 'qxcjjwl8']]
+      },
+      {
+        id: 'delay', name: 'Fixed long delay', diagram: 'delay',
+        focus: ['temporal', 'runtime'], locus: 'plan + runtime',
+        control: 'act near the observation', treatment: 'act twelve frames ahead',
+        stock: -1.105, damage: -85.71,
+        text: 'Plan length, replan interval, and the future-data buffer changed with delay. The tested deployment combination failed.',
+        links: [['delay 1', '1imfy8v3'], ['delay 12', '2qs05au4']]
+      }
+    ];
+
+    function branchLinks(links) {
+      if (!links.length) return '<span>source only; no completed run</span>';
+      return links.map(function (link) {
+        return '<a href="' + WAND_B + link[1] + '">' + link[0] + ' · ' + link[1] + '</a>';
+      }).join(' · ');
+    }
+
+    function contrast(leftLabel, left, rightLabel, right) {
+      return '<div class="contrast"><div class="contrast-side"><span class="contrast-label">' + leftLabel +
+        '</span>' + left + '</div><div class="contrast-arrow">→</div><div class="contrast-side"><span class="contrast-label">' +
+        rightLabel + '</span>' + right + '</div></div>';
+    }
+
+    function branchCanvas(target) {
+      empty(target);
+      target.setAttribute('viewBox', '0 0 390 132');
+      addText(target, 8, 13, 'REFERENCE', {class: 'diagram-note'});
+      addText(target, 216, 13, 'TEST', {class: 'diagram-note', fill: COLORS.oxblood});
+      target.appendChild(svgElement('line', {
+        x1: 195, y1: 4, x2: 195, y2: 128,
+        class: 'model-wire ghost', 'stroke-dasharray': '2 3'
+      }));
+      addText(target, 195, 70, '→', {'text-anchor': 'middle', class: 'diagram-title'});
+    }
+
+    function smallTransformer(target, x, y, accent) {
+      [6, 3].forEach(function (offset) {
+        target.appendChild(svgElement('rect', {
+          x: x - offset, y: y + offset, width: 58, height: 37, class: 'model-layer'
+        }));
+      });
+      target.appendChild(svgElement('rect', {
+        x: x, y: y, width: 58, height: 37,
+        class: 'model-box' + (accent ? ' accent' : '')
+      }));
+      addText(target, x + 29, y + 17, 'Transformer', {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(target, x + 29, y + 29, 'causal', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function segmentedVector(target, x, y, width, labels, accentStart) {
+      var segmentWidth = width / labels.length;
+      labels.forEach(function (label, index) {
+        target.appendChild(svgElement('rect', {
+          x: x + index * segmentWidth,
+          y: y,
+          width: segmentWidth - 1,
+          height: 25,
+          class: 'model-token' + (index >= accentStart ? ' accent' : '')
+        }));
+        addText(target, x + index * segmentWidth + (segmentWidth - 1) / 2, y + 16, label, {
+          'text-anchor': 'middle', class: 'diagram-note'
+        });
+      });
+    }
+
+    function renderPhysicalBranch(target) {
+      branchCanvas(target);
+      var marker = modelMarker(target, 'physical', COLORS.faint);
+      modelBox(target, 20, 37, 54, 30, 'class id', {});
+      modelWire(target, 74, 52, 92, 52, {marker: marker});
+      segmentedVector(target, 96, 40, 75, ['', '', '1', '', '', '', '', ''], 8);
+      addText(target, 133, 82, 'one-hot class vector', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      modelBox(target, 218, 32, 55, 28, 'class id', {});
+      segmentedVector(target, 283, 34, 88, ['B', 'x', 'y', 'C', 'L', 'R'], 0);
+      modelWire(target, 245, 60, 278, 94, {marker: marker});
+      modelWire(target, 327, 59, 315, 94, {marker: marker});
+      modelBox(target, 276, 94, 77, 28, 'embedding', {accent: true});
+      addText(target, 327, 76, 'physical values', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderGeometryBranch(target) {
+      branchCanvas(target);
+      segmentedVector(target, 17, 44, 151, ['x', 'y', 'v', 'state', '%'], 5);
+      modelWire(target, 92, 69, 92, 88, {});
+      smallTransformer(target, 63, 88, false);
+      addText(target, 92, 35, 'measured state', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      segmentedVector(target, 211, 44, 168, ['x', 'y', 'v', 'state', '%', 'Δx', 'Δy', 'range', 'ledge'], 5);
+      modelWire(target, 295, 69, 295, 88, {});
+      smallTransformer(target, 266, 88, true);
+      addText(target, 295, 35, 'wider input vector', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function drawHiddenStates(target, x, y, accent) {
+      ['h₋₃', 'h₋₂', 'h₋₁', 'hₜ'].forEach(function (label, index) {
+        modelBox(target, x + index * 34, y, 28, 25, label, {accent: accent && index < 3});
+      });
+    }
+
+    function renderCrossBranch(target) {
+      branchCanvas(target);
+      var marker = modelMarker(target, 'cross', COLORS.faint);
+      drawHiddenStates(target, 17, 31, false);
+      modelWire(target, 147, 56, 147, 81, {marker: marker});
+      ['q₁', 'q₂', 'q₃'].forEach(function (label, index) {
+        modelBox(target, 85 + index * 35, 86, 28, 25, label, {});
+      });
+      addText(target, 87, 122, 'heads use hₜ', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      drawHiddenStates(target, 218, 31, true);
+      target.appendChild(svgElement('line', {x1: 220, y1: 68, x2: 348, y2: 68, class: 'model-wire accent'}));
+      [232, 266, 300, 334].forEach(function (x) {
+        modelWire(target, x, 56, x, 68, {accent: true});
+      });
+      ['q₁', 'q₂', 'q₃'].forEach(function (label, index) {
+        var x = 264 + index * 35;
+        modelWire(target, x + 14, 68, x + 14, 84, {accent: true, marker: marker});
+        modelBox(target, x, 86, 28, 25, label, {accent: true});
+      });
+      addText(target, 295, 122, 'queries attend to trunk history', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function frameToken(target, x, y, expanded) {
+      if (expanded) {
+        segmentedVector(target, x, y, 87, ['s', 'C', 'M', 'T', 'B'], 1);
+      } else {
+        segmentedVector(target, x, y, 43, ['s', 'a'], 2);
+      }
+    }
+
+    function renderFlatBranch(target) {
+      branchCanvas(target);
+      frameToken(target, 14, 39, false);
+      frameToken(target, 61, 39, false);
+      frameToken(target, 108, 39, false);
+      addText(target, 84, 79, 'one token per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      smallTransformer(target, 111, 87, false);
+
+      frameToken(target, 213, 39, true);
+      frameToken(target, 304, 39, true);
+      addText(target, 296, 79, 'five tokens per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      smallTransformer(target, 267, 87, true);
+    }
+
+    function renderBpeBranch(target) {
+      branchCanvas(target);
+      ['A', 'A', 'A', 'B', 'B', 'C'].forEach(function (label, index) {
+        modelBox(target, 18 + index * 26, 47, 21, 27, label, {});
+      });
+      addText(target, 90, 90, 'one token per frame', {'text-anchor': 'middle', class: 'diagram-note'});
+      addText(target, 90, 105, 'fixed cadence', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      [['A', '×3'], ['B', '×2'], ['C', '×1']].forEach(function (pair, index) {
+        var x = 222 + index * 52;
+        modelBox(target, x, 43, 46, 34, pair[0], {accent: true, note: pair[1]});
+      });
+      addText(target, 295, 94, 'one token per event span', {'text-anchor': 'middle', class: 'diagram-note'});
+      addText(target, 295, 109, 'variable cadence', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderChordBranch(target) {
+      branchCanvas(target);
+      drawGroupChain(target, 39, 51, '', false);
+      addText(target, 91, 91, 'four decisions', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var outer = svgElement('g');
+      target.appendChild(outer);
+      outer.appendChild(svgElement('rect', {x: 235, y: 45, width: 120, height: 37, class: 'model-box accent'}));
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        if (index) outer.appendChild(svgElement('line', {
+          x1: 235 + index * 30, y1: 45, x2: 235 + index * 30, y2: 82, class: 'model-wire ghost'
+        }));
+        addText(outer, 250 + index * 30, 68, label, {'text-anchor': 'middle', class: 'diagram-label'});
+      });
+      addText(target, 295, 99, 'one joint class', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function drawActionPlanMini(target, x, y, accent) {
+      [0, 1, 2, 3].forEach(function (index) {
+        modelBox(target, x + index * 29, y, 23, 27, 'a' + (index + 1), {accent: accent});
+      });
+    }
+
+    function renderStateBranch(target) {
+      branchCanvas(target);
+      modelBox(target, 18, 47, 34, 30, 'hₜ', {});
+      drawActionPlanMini(target, 66, 34, false);
+      modelWire(target, 52, 62, 66, 48, {});
+      modelBox(target, 89, 87, 62, 25, 'action loss', {});
+      modelWire(target, 120, 61, 120, 87, {});
+
+      modelBox(target, 213, 47, 34, 30, 'hₜ', {});
+      drawActionPlanMini(target, 259, 24, true);
+      modelWire(target, 247, 60, 259, 38, {accent: true});
+      modelBox(target, 282, 86, 62, 25, 'action loss', {accent: true});
+      modelWire(target, 313, 51, 313, 86, {accent: true});
+      modelBox(target, 259, 52, 108, 25, 'future state', {});
+      modelWire(target, 247, 63, 259, 64, {});
+      addText(target, 313, 123, 'training-only auxiliary head', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderDelayBranch(target) {
+      branchCanvas(target);
+      var marker = modelMarker(target, 'delay', COLORS.faint);
+      modelBox(target, 16, 45, 52, 29, 'observe t', {});
+      modelWire(target, 68, 59, 91, 59, {marker: marker});
+      modelBox(target, 96, 45, 48, 29, 'act t+1', {accent: true});
+      addText(target, 80, 96, 'near the observation', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      modelBox(target, 211, 45, 52, 29, 'observe t', {});
+      modelWire(target, 263, 59, 280, 59, {});
+      [0, 1, 2].forEach(function (index) {
+        modelBox(target, 283 + index * 20, 48, 15, 23, '·', {});
+      });
+      modelWire(target, 338, 59, 348, 59, {marker: marker});
+      modelBox(target, 351, 45, 35, 29, 'a₁₂', {accent: true});
+      addText(target, 300, 96, 'twelve-frame prediction gap', {'text-anchor': 'middle', class: 'diagram-note'});
+    }
+
+    function renderBranchMechanism(target, kind) {
+      if (kind === 'physical') return renderPhysicalBranch(target);
+      if (kind === 'geometry') return renderGeometryBranch(target);
+      if (kind === 'cross') return renderCrossBranch(target);
+      if (kind === 'flat') return renderFlatBranch(target);
+      if (kind === 'bpe') return renderBpeBranch(target);
+      if (kind === 'chord') return renderChordBranch(target);
+      if (kind === 'state') return renderStateBranch(target);
+      return renderDelayBranch(target);
+    }
+
+    function deltaBar(value, extent) {
+      var fraction = Math.min(50, Math.abs(value) / extent * 50);
+      var left = value < 0 ? 50 - fraction : 50;
+      return '<div class="delta-track"><i class="' + (value < 0 ? 'negative' : '') +
+        '" style="left:' + left + '%;width:' + fraction + '%"></i></div>';
+    }
+
+    function impactBlock(branch) {
+      if (!Number.isFinite(branch.stock) || !Number.isFinite(branch.damage)) {
+        return '<div class="no-result">' + branch.noResult + '</div>';
+      }
+      return '<div class="delta-block"><div class="delta-block-title">treatment − reference</div>' +
+        '<div class="delta-row"><span class="delta-name">stock</span>' + deltaBar(branch.stock, 3) +
+        '<span class="delta-value">' + signed(branch.stock, 3) + '</span></div>' +
+        '<div class="delta-row"><span class="delta-name">damage</span>' + deltaBar(branch.damage, 180) +
+        '<span class="delta-value">' + signed(branch.damage, 2) + '</span></div>' +
+        '<div class="delta-scale"><span>−</span><span>0</span><span>+</span></div></div>';
+    }
+
+    var BRANCH_OUTCOMES = {"geometry": "Stopped without a closed-loop result.", "cross": "No matched control; the nearest reference changes the trunk, codec, offsets and decoder size.", "flat": "No matched control; the two arms use different context lengths and evaluation protocols.", "bpe": "The tested package lost, and it also changed execution cadence, parameter count and crash rate.", "chording": "Stopped after three diagnostic steps.", "state": "Lost with more parameters, twice the examples and more than twice the training work.", "delay": "Lost; plan length, replan interval and the future-data buffer changed with the delay."};
+    function renderRepresentation() {
+      var lists = [
+        [one('#past-action-list'), representationBranches.filter(function (b) { return b.id === 'physical'; })],
+        [one('#representation-list'), representationBranches.filter(function (b) { return b.id !== 'physical'; }).map(function (b) {
+          return Object.assign({}, b, {stock: null, damage: null, noResult: BRANCH_OUTCOMES[b.id] || b.noResult});
+        })]
+      ];
+      lists.forEach(function (pair) {
+      var target = pair[0];
+      if (!target) return;
+      empty(target);
+      pair[1].forEach(function (branch) {
+        var row = document.createElement('section');
+        row.className = 'branch-study';
+        row.innerHTML = '<div><h4>' + branch.name + '</h4><p>' + branch.text + '</p><p class="source-line">' +
+          branchLinks(branch.links) + '</p></div><div class="branch-locus"><span class="branch-locus-label">' +
+          htmlEscape(branch.locus) + '</span><svg class="branch-map" role="img" aria-label="Location of ' +
+          htmlEscape(branch.name) + ' in the policy"></svg></div><svg id="branch-' + branch.id +
+          '" class="model-diagram branch-mechanism" role="img" aria-label="' +
+          htmlEscape(branch.control + ' compared with ' + branch.treatment) + '"></svg><div class="branch-impact">' +
+          impactBlock(branch) + '</div>';
+        target.appendChild(row);
+        renderMasterMap(one('.branch-map', row), branch.focus);
+        renderBranchMechanism(one('.branch-mechanism', row), branch.diagram);
+      });
+      });
+    }
+
+    var delayModels = [
+      {
+        id: 'L5',
+        name: 'L5 · 6.99M',
+        run: 'oixqvhj2',
+        rows: [
+          [1, -3.617, -92.6, 6.25, true], [2, -1.899, -77.8, 8.05, true], [4, -1.071, -44.5, 12.83, true],
+          [6, -1.036, -59.5, 11.62, true], [8, -0.968, -40.1, 12.66, true], [10, -1.042, -51.2, 14.22, true],
+          [12, -1.192, -65.1, 15.11, true], [14, -1.389, -70.9, 16.42, true], [16, -1.523, -80.6, 17.77, true]
+        ]
+      },
+      {
+        id: 'L8',
+        name: 'L8 · 7.08M',
+        run: 'bpsr9sji',
+        rows: [[1, -3.198, -80.7, 5.99, true], [2, -1.719, -44.3, 8.80, true], [4, -1.818, -71.4, 11.06, true]]
+      },
+      {
+        id: 'L7',
+        name: 'L7 · 17.81M',
+        run: 'kwzr1hp4',
+        rows: [
+          [1, -3.648, -75.5, 7.54, true], [2, -1.569, -32.1, 10.31, true], [4, -0.936, -37.3, 12.32, true],
+          [6, -1.418, -94.3, 14.95, true], [8, -1.187, -65.0, 13.62, true], [10, -1.374, -86.6, 15.25, true],
+          [12, -1.318, -76.8, 16.78, true], [14, -1.501, -80.9, 18.43, true], [16, -1.695, -97.6, 20.02, true]
+        ]
+      },
+      {
+        id: 'L10',
+        name: 'L10 · 51.15M',
+        run: '9885eba2',
+        rows: [
+          [1, -2.704, -93.5, 11.66, true], [2, -1.334, -24.2, 14.62, true], [4, -1.044, -26.8, 17.30, true],
+          [6, -0.903, -39.6, 17.30, true], [8, -1.009, -51.6, 19.39, true], [10, -1.000, -55.8, 20.56, true],
+          [12, -1.658, -96.2, 22.26, true], [14, -1.483, -82.7, 24.88, true], [16, -1.332, -80.0, 26.57, true]
+        ]
+      },
+      {
+        id: 'L16',
+        name: 'L16 · 205.25M',
+        run: 'tlgvpsqh',
+        rows: [
+          [1, -2.095, -91.0, 29.66, false], [2, -1.357, -24.4, 32.83, false], [4, -1.611, -78.0, 35.92, true],
+          [6, -1.425, -66.2, 37.43, true], [8, -1.113, -60.9, 39.25, false], [10, -1.484, -90.9, 40.92, true],
+          [12, -1.063, -58.0, 43.02, true], [14, -1.776, -111.7, 44.60, true], [16, -1.618, -88.3, 46.85, true]
+        ]
+      }
+    ];
+    var delayMetric = 'stock';
+    var selectedDelayModel = 'L10';
+
+    function populateDelaySelect() {
+      var select = one('#delay-model');
+      empty(select);
+      delayModels.forEach(function (model) {
+        var option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name;
+        select.appendChild(option);
+      });
+      select.value = selectedDelayModel;
+    }
+
+    function renderDelay() {
+      setPressed('data-delay-metric', delayMetric);
+      var model = delayModels.filter(function (item) { return item.id === selectedDelayModel; })[0];
+      var target = one('#delay-chart');
+      sizeAxisChart(target, 900, 390, 350);
+      var frame = chartFrame(target, {
+        xDomain: [0.5, 16.5],
+        yDomain: delayMetric === 'stock' ? [-4, 0] : [-120, 0],
+        xTicks: [1, 2, 4, 6, 8, 10, 12, 14, 16],
+        yTicks: delayMetric === 'stock' ? [-4, -3, -2, -1, 0] : [-120, -90, -60, -30, 0],
+        xFormat: function (value) { return String(value); },
+        yFormat: function (value) { return signed(value, delayMetric === 'stock' ? 1 : 0); },
+        xLabel: 'imposed delay (frames)',
+        yLabel: delayMetric === 'stock' ? 'net stocks / active min' : 'net damage / active min',
+        margin: {top: 28, right: 28, bottom: 51, left: 70}
+      });
+      var points = model.rows.map(function (row) {
+        return {x: row[0], y: row[delayMetric === 'stock' ? 1 : 2], stock: row[1], damage: row[2], latency: row[3], hollow: !row[4]};
+      });
+      drawSeries(target, frame, points, {
+        color: COLORS.oxblood,
+        radius: 4.8,
+        tip: function (point) {
+          return model.name + ' · delay ' + point.x + ' · p95 ' + point.latency.toFixed(2) + ' ms · stocks ' +
+            signed(point.stock, 3) + ' · damage ' + signed(point.damage, 1) + (point.hollow ? ' · missed fit check' : '');
+        },
+        url: WAND_B + model.run
+      });
+      points.forEach(function (point) {
+        if (point.hollow) {
+          addText(target, frame.x(point.x), frame.y(point.y) - 10, 'not fit', {
+            'text-anchor': 'middle',
+            fill: COLORS.faint,
+            'font-family': 'var(--mono)',
+            'font-size': 8
+          });
+        }
+      });
+      var latencies = model.rows.map(function (row) { return row[3]; });
+      one('#delay-note').innerHTML = model.name + ' · measured p95 inference ' +
+        Math.min.apply(null, latencies).toFixed(2) + '–' + Math.max.apply(null, latencies).toFixed(2) +
+        ' ms. Hollow points missed the recorded real-time fit check. <span class="run-source"><a href="' +
+        WAND_B + model.run + '">Checkpoint run ' + model.run + '</a>.</span>';
+    }
+
+    var frontierRows = [
+      {delay: 1, model: 'L7', params: 17810159, stock: -3.648, damage: -75.5, latency: 7.54},
+      {delay: 2, model: 'L10', params: 51154223, stock: -1.334, damage: -24.2, latency: 14.62},
+      {delay: 4, model: 'L10', params: 51154223, stock: -1.044, damage: -26.8, latency: 17.30},
+      {delay: 6, model: 'L10', params: 51154223, stock: -0.903, damage: -39.6, latency: 17.30},
+      {delay: 8, model: 'L5', params: 6988015, stock: -0.968, damage: -40.1, latency: 12.66},
+      {delay: 10, model: 'L5', params: 6988015, stock: -1.042, damage: -51.2, latency: 14.22},
+      {delay: 12, model: 'L16', params: 205245039, stock: -1.063, damage: -58.0, latency: 43.02},
+      {delay: 14, model: 'L5', params: 6988015, stock: -1.389, damage: -70.9, latency: 16.42},
+      {delay: 16, model: 'L10', params: 51154223, stock: -1.332, damage: -80.0, latency: 26.57}
+    ];
+    var frontierMetric = 'stock';
+
+    function renderFrontier() {
+      setPressed('data-frontier-metric', frontierMetric);
+      var target = one('#frontier-chart');
+      sizeAxisChart(target, 900, 390, 350);
+      var frame = chartFrame(target, {
+        xDomain: [0.5, 16.5],
+        yDomain: frontierMetric === 'stock' ? [-4, 0] : [-100, 0],
+        xTicks: [1, 2, 4, 6, 8, 10, 12, 14, 16],
+        yTicks: frontierMetric === 'stock' ? [-4, -3, -2, -1, 0] : [-100, -75, -50, -25, 0],
+        xFormat: function (value) { return String(value); },
+        yFormat: function (value) { return signed(value, frontierMetric === 'stock' ? 1 : 0); },
+        xLabel: 'imposed delay (frames)',
+        yLabel: frontierMetric === 'stock' ? 'stock score of damage-selected model' : 'best deployable net damage / active min',
+        margin: {top: 34, right: 28, bottom: 51, left: 72}
+      });
+      var points = frontierRows.map(function (row) {
+        return {x: row.delay, y: row[frontierMetric], row: row};
+      });
+      drawSeries(target, frame, points, {
+        color: COLORS.oxblood,
+        width: 2,
+        radius: 5,
+        tip: function (point) {
+          var row = point.row;
+          return 'delay ' + row.delay + ' · ' + row.model + ' (' + compact(row.params) + ') · p95 ' +
+            row.latency.toFixed(2) + ' ms · stocks ' + signed(row.stock, 3) + ' · damage ' + signed(row.damage, 1);
+        }
+      });
+      points.forEach(function (point, index) {
+        addText(target, frame.x(point.x), frame.y(point.y) + (index % 2 ? 19 : -11), point.row.model, {
+          'text-anchor': 'middle',
+          fill: COLORS.ink,
+          'font-family': 'var(--mono)',
+          'font-size': 9,
+          'font-weight': 600
+        });
+      });
+    }
+
+    function scalePoint(model, params, row) {
+      return {model: model, params: params, dPow: row[0], nll: row[1], stock: row[2], damage: row[3], run: row[4]};
+    }
+
+    var scalingPoints = []
+      .concat([
+        [26, 2.0430, -2.108, -44.7, 'dt361n1f'],
+        [27, 1.9696, -1.680, -44.5, 'accppjyl'],
+        [28, 1.9181, -1.320, -34.6, '5tewqgz7'],
+        [29, 1.8786, -1.382, -51.1, 'd7zifq1s'],
+        [30, 1.8489, -1.071, -44.5, 'oixqvhj2']
+      ].map(function (row) { return scalePoint('L5', 6988015, row); }))
+      .concat([
+        [26, 2.0359, -1.959, -43.8, '18266r7m'],
+        [27, 1.9650, -1.638, -46.5, 'fufjdhue'],
+        [28, 1.9136, -1.698, -56.0, 'gpfbsp9a'],
+        [29, 1.8750, -1.387, -63.7, 'z0q5csaf'],
+        [30, 1.8461, -1.818, -71.4, 'bpsr9sji']
+      ].map(function (row) { return scalePoint('L8', 7081967, row); }))
+      .concat([
+        [26, 2.0365, -2.155, -52.9, 'la5p7wpo'],
+        [27, 1.9621, -1.910, -42.8, '54gkmcl9'],
+        [28, 1.9072, -1.350, -33.3, 'zzwng0rb'],
+        [29, 1.8685, -0.755, -7.5, 'jgqts6t4'],
+        [30, 1.8403, -0.936, -37.3, 'kwzr1hp4']
+      ].map(function (row) { return scalePoint('L7', 17810159, row); }))
+      .concat([
+        [26, 1.9844, -1.617, -47.1, '24m9fz5k'],
+        [27, 1.9122, -1.833, -42.9, '9idtvi78'],
+        [28, 1.8588, -1.465, -30.0, '2g1pgvvz'],
+        [29, 1.8218, -1.351, -49.5, '79d8l0af'],
+        [30, 1.7956, -1.044, -26.8, '9885eba2']
+      ].map(function (row) { return scalePoint('L10', 51154223, row); }))
+      .concat([
+        [26, 1.9602, -1.800, -53.9, 'u7t65xfs'],
+        [27, 1.8862, -1.572, -43.7, 'm2cpo3rn'],
+        [28, 1.8336, -1.471, -37.0, 'z2h1ain0'],
+        [29, 1.7975, -1.515, -44.0, '2epkrfmj']
+      ].map(function (row) { return scalePoint('L13', 111720303, row); }))
+      .concat([
+        [26, 1.9581, -2.334, -67.2, 'spwekixh'],
+        [27, 1.8844, -1.675, -48.5, 't2o011wf'],
+        [28, 1.8318, -1.597, -42.1, '0ls85skw'],
+        [29, 1.7966, -0.664, -12.8, 'to0fx9ig'],
+        [30, 1.7711, -1.611, -78.0, 'tlgvpsqh']
+      ].map(function (row) { return scalePoint('L16', 205245039, row); }))
+      .concat([
+        [26, 1.9470, -2.135, -63.8, 'wcdj8arn'],
+        [27, 1.8678, -1.555, -46.5, '84z3js0r'],
+        [28, 1.8159, -1.487, -41.4, 'rz25c5pr'],
+        [29, 1.7810, -1.226, -37.8, '03f39e4a']
+      ].map(function (row) { return scalePoint('L18', 293127087, row); }));
+
+    var rhoByDelay = [
+      [1, -0.353, 33], [2, -0.617, 33], [4, -0.669, 33],
+      [6, -0.625, 32], [8, -0.729, 32], [10, -0.677, 32],
+      [12, -0.686, 32], [14, -0.706, 32], [16, -0.817, 32]
+    ];
+
+    function regression(rows, xKey, yKey) {
+      var xMean = rows.reduce(function (sum, row) { return sum + row[xKey]; }, 0) / rows.length;
+      var yMean = rows.reduce(function (sum, row) { return sum + row[yKey]; }, 0) / rows.length;
+      var numerator = 0;
+      var denominator = 0;
+      rows.forEach(function (row) {
+        numerator += (row[xKey] - xMean) * (row[yKey] - yMean);
+        denominator += Math.pow(row[xKey] - xMean, 2);
+      });
+      var slope = numerator / denominator;
+      return {slope: slope, intercept: yMean - slope * xMean};
+    }
+
+    function renderNll() {
+      var target = one('#nll-chart');
+      sizeAxisChart(target, 680, 430, 380);
+      var frame = chartFrame(target, {
+        xDomain: [1.75, 2.06],
+        yDomain: [-2.5, -0.5],
+        xTicks: [1.76, 1.84, 1.92, 2.00],
+        yTicks: [-2.5, -2.0, -1.5, -1.0, -0.5],
+        xFormat: function (value) { return value.toFixed(2); },
+        yFormat: function (value) { return signed(value, 1); },
+        xLabel: 'validation NLL (lower is better)',
+        yLabel: 'net stocks / active min',
+        margin: {top: 28, right: 25, bottom: 54, left: 66}
+      });
+      var fit = regression(scalingPoints, 'nll', 'stock');
+      var fitRows = [
+        {x: 1.76, y: fit.intercept + fit.slope * 1.76},
+        {x: 2.05, y: fit.intercept + fit.slope * 2.05}
+      ];
+      target.appendChild(svgElement('path', {
+        d: linePath(fitRows, frame.x, frame.y),
+        fill: 'none',
+        stroke: COLORS.oxblood,
+        'stroke-width': 1.5,
+        'stroke-dasharray': '5 4'
+      }));
+      var modelOrder = ['L5', 'L8', 'L7', 'L10', 'L13', 'L16', 'L18'];
+      scalingPoints.forEach(function (row) {
+        var sizeFraction = (Math.log10(row.params) - Math.log10(6988015)) /
+          (Math.log10(293127087) - Math.log10(6988015));
+        var circle = svgElement('circle', {
+          cx: frame.x(row.nll),
+          cy: frame.y(row.stock),
+          r: 3.4 + sizeFraction * 3.0,
+          fill: row.model === 'L16' ? COLORS.oxblood : COLORS.ink,
+          'fill-opacity': row.model === 'L16' ? 0.74 : 0.26 + modelOrder.indexOf(row.model) * 0.085,
+          stroke: COLORS.white,
+          'stroke-width': 1.1,
+          class: 'point'
+        });
+        target.appendChild(circle);
+        bindTip(
+          circle,
+          row.model + ' · ' + compact(row.params) + ' params · D=2^' + row.dPow +
+            ' · NLL ' + row.nll.toFixed(4) + ' · stocks ' + signed(row.stock, 3) +
+            ' · damage ' + signed(row.damage, 1),
+          WAND_B + row.run
+        );
+      });
+      addText(target, frame.left + 6, frame.top + 14, 'dashed line: least-squares guide', {
+        fill: COLORS.oxblood,
+        'font-family': 'var(--mono)',
+        'font-size': 8.5
+      });
+      var legendY = frame.bottom - 8;
+      target.appendChild(svgElement('circle', {cx: frame.right - 105, cy: legendY, r: 3.4, fill: COLORS.ink, opacity: 0.55}));
+      addText(target, frame.right - 96, legendY + 3, '7M', {'font-family': 'var(--mono)', 'font-size': 8.5, fill: COLORS.faint});
+      target.appendChild(svgElement('circle', {cx: frame.right - 45, cy: legendY, r: 6.4, fill: COLORS.ink, opacity: 0.55}));
+      addText(target, frame.right - 35, legendY + 3, '293M', {'font-family': 'var(--mono)', 'font-size': 8.5, fill: COLORS.faint});
+    }
+
+    function renderRho() {
+      one('#rho-list').innerHTML = rhoByDelay.map(function (row) {
+        return '<div class="rho-row"><span>d' + row[0] + '</span><span class="rho-track"><i style="width:' +
+          Math.round(Math.abs(row[1]) * 100) + '%"></i></span><span>' + row[1].toFixed(2) + '</span></div>';
+      }).join('');
+    }
+
+    function renderScalingTable() {
+      one('#scaling-rows').innerHTML = scalingPoints.map(function (row) {
+        return '<tr><td><span class="mono">' + row.model + '</span> · ' + compact(row.params) +
+          '</td><td class="num">2^' + row.dPow + '</td><td class="num">' + row.nll.toFixed(4) +
+          '</td><td class="num">' + signed(row.stock, 3) + '</td><td class="num">' +
+          signed(row.damage, 1) + '</td><td class="num run-source-cell"><a href="' + WAND_B + row.run + '">' +
+          row.run + '</a></td></tr>';
+      }).join('');
+    }
+
+    var FIT = {base: 1.6350, aScale: 89.11, aPower: 0.368, dScale: 2009, dPower: 0.498};
+    var CORPUS_POSITIONS = 2.410e9;
+
+    function fittedLoss(parameters, positions) {
+      return FIT.base + FIT.aScale / Math.pow(parameters, FIT.aPower) +
+        FIT.dScale / Math.pow(positions, FIT.dPower);
+    }
+
+    function computeOptimum(compute) {
+      var numerator = FIT.aPower * FIT.aScale;
+      var denominator = FIT.dPower * FIT.dScale;
+      var parameters = Math.pow(
+        numerator / denominator * Math.pow(compute / 6, FIT.dPower),
+        1 / (FIT.aPower + FIT.dPower)
+      );
+      var positions = compute / (6 * parameters);
+      return {parameters: parameters, positions: positions, loss: fittedLoss(parameters, positions)};
+    }
+
+    function scientific(value) {
+      var power = Math.floor(Math.log10(value));
+      var coefficient = value / Math.pow(10, power);
+      return coefficient.toFixed(1) + 'e' + power;
+    }
+
+    function renderIsoflop() {
+      var slider = one('#compute-slider');
+      var compute = Math.pow(10, Number(slider.value));
+      var target = one('#isoflop-chart');
+      sizeAxisChart(target, 900, 430, 380);
+      var xDomain = [3e6, 2e9];
+      var yDomain = [1.65, 2.70];
+      var frame = chartFrame(target, {
+        xDomain: xDomain,
+        yDomain: yDomain,
+        xLog: true,
+        xTicks: [1e7, 1e8, 1e9],
+        yTicks: [1.7, 1.9, 2.1, 2.3, 2.5, 2.7],
+        xFormat: compact,
+        yFormat: function (value) { return value.toFixed(1); },
+        xLabel: 'compute-equivalent parameters N · log scale',
+        yLabel: 'fitted validation NLL',
+        margin: {top: 34, right: 28, bottom: 53, left: 65}
+      });
+      var measuredBand = svgElement('rect', {
+        x: frame.x(6988015),
+        y: frame.top,
+        width: frame.x(293127087) - frame.x(6988015),
+        height: frame.bottom - frame.top,
+        fill: COLORS.aside,
+        opacity: 0.75
+      });
+      target.insertBefore(measuredBand, target.firstChild);
+      addText(target, frame.x(Math.sqrt(6988015 * 293127087)), frame.top + 12, 'measured model range', {
+        'text-anchor': 'middle',
+        fill: COLORS.faint,
+        'font-family': 'var(--mono)',
+        'font-size': 8.5
+      });
+      var corpusBoundary = compute / (6 * CORPUS_POSITIONS);
+      if (corpusBoundary > xDomain[0] && corpusBoundary < xDomain[1]) {
+        target.appendChild(svgElement('line', {
+          x1: frame.x(corpusBoundary),
+          x2: frame.x(corpusBoundary),
+          y1: frame.top,
+          y2: frame.bottom,
+          stroke: COLORS.faint,
+          'stroke-width': 1,
+          'stroke-dasharray': '3 3'
+        }));
+        addText(target, frame.x(corpusBoundary) + 5, frame.bottom - 8, 'D = one corpus epoch', {
+          fill: COLORS.faint,
+          'font-family': 'var(--mono)',
+          'font-size': 8.5
+        });
+      } else if (corpusBoundary >= xDomain[1]) {
+        addText(target, frame.right - 4, frame.bottom - 8, 'all shown points exceed one corpus epoch', {
+          'text-anchor': 'end',
+          fill: COLORS.faint,
+          'font-family': 'var(--mono)',
+          'font-size': 8.5
+        });
+      }
+      var curve = [];
+      for (var index = 0; index <= 90; index += 1) {
+        var logN = Math.log10(xDomain[0]) +
+          (Math.log10(xDomain[1]) - Math.log10(xDomain[0])) * index / 90;
+        var parameters = Math.pow(10, logN);
+        var positions = compute / (6 * parameters);
+        curve.push({x: parameters, y: fittedLoss(parameters, positions)});
+      }
+      target.appendChild(svgElement('path', {
+        d: linePath(curve, frame.x, frame.y),
+        fill: 'none',
+        stroke: COLORS.ink,
+        'stroke-width': 2,
+        'stroke-linejoin': 'round'
+      }));
+      var optimum = computeOptimum(compute);
+      var optimumPoint = svgElement('circle', {
+        cx: frame.x(optimum.parameters),
+        cy: frame.y(optimum.loss),
+        r: 6,
+        fill: COLORS.oxblood,
+        stroke: COLORS.white,
+        'stroke-width': 1.5,
+        class: 'point'
+      });
+      target.appendChild(optimumPoint);
+      bindTip(
+        optimumPoint,
+        'fit optimum · N ' + compact(optimum.parameters) + ' · D ' + compact(optimum.positions) +
+          ' · NLL ' + optimum.loss.toFixed(4)
+      );
+      addText(target, frame.x(optimum.parameters), frame.y(optimum.loss) - 13, 'fit optimum', {
+        'text-anchor': 'middle',
+        fill: COLORS.oxblood,
+        'font-family': 'var(--mono)',
+        'font-size': 9.5,
+        'font-weight': 600
+      });
+      one('#compute-output').textContent = scientific(compute);
+      one('#fit-n').textContent = compact(optimum.parameters);
+      one('#fit-d').textContent = compact(optimum.positions);
+      one('#fit-loss').textContent = optimum.loss.toFixed(4);
+    }
+
+    var architectureModules = [
+      {
+        id: 'data',
+        label: 'Replay stream',
+        sublabel: '44 sources · v8',
+        x: 18, y: 35, w: 145, h: 62,
+        title: 'Data and sampling',
+        text: '1,295,370 replays and 13.27B frames, served through a deterministic physical-shard ring.',
+        specs: [['replay ring', '131,072'], ['sampling', 'one window / replay'], ['batch', '512']]
+      },
+      {
+        id: 'history',
+        label: 'Observation + action history',
+        labelLines: ['Observation + action', 'history'],
+        mobileLabelLines: ['Observation', '+ action history'],
+        sublabel: '256 frames',
+        x: 18, y: 148, w: 145, h: 70,
+        title: 'Input representation',
+        text: 'Current controller codec, learned class + physical past-action embeddings, four pooled projectile slots, and ego identity with 10% dropout.',
+        specs: [['button classes', '256'], ['main / C', '65 / 9'], ['trigger pairs', '25']]
+      },
+      {
+        id: 'trunk',
+        label: 'Causal trunk',
+        sublabel: 'd1024 · L16 · h16',
+        x: 245, y: 92, w: 150, h: 76,
+        title: 'Observation trunk',
+        text: 'A 16-layer causal observation model consumes the most recent 256 frames and emits the state used by every action target.',
+        specs: [['total parameters', '216.5M'], ['context frames', '256'], ['logit path', 'direct trunk skip']]
+      },
+      {
+        id: 'temporal',
+        label: 'Temporal decoder',
+        sublabel: 'across-frame feedback',
+        mobileSublabel: 'across-frame AR',
+        x: 480, y: 35, w: 150, h: 68,
+        title: 'Across-frame action model',
+        text: 'Every token receives the trunk state, its offset, and the preceding selected controller frame. Causal self-attention also exposes all earlier temporal tokens.',
+        specs: [['training offsets', '1–6, 9, 12, 16, 20'], ['decoder', 'd512 × 4'], ['live offsets', '1–4']]
+      },
+      {
+        id: 'groups',
+        label: 'Controller groups',
+        sublabel: 'within-frame FiLM',
+        mobileSublabel: 'within-frame AR',
+        x: 480, y: 148, w: 150, h: 70,
+        title: 'Within-frame controller model',
+        text: 'Controller groups are generated as C-stick → main stick → triggers → buttons. Earlier groups provide bounded FiLM; every group also has a direct trunk-to-logit path.',
+        specs: [['conditioning', 'bounded FiLM'], ['heads', 'nonlinear'], ['buttons', 'trigger-masked']]
+      },
+      {
+        id: 'objective',
+        label: 'BC + detached AWR',
+        sublabel: 'starts at U4,097',
+        x: 245, y: 264, w: 150, h: 70,
+        title: 'Training objective',
+        text: 'Near action targets use detached-value AWR. Far targets retain their own loss term.',
+        specs: [['β', '199.5'], ['γ', '0.99618'], ['maximum weight', '3.5']]
+      },
+      {
+        id: 'optimizer',
+        label: 'AdamW',
+        sublabel: 'all parameters',
+        x: 18, y: 356, w: 145, h: 66,
+        title: 'Optimization',
+        text: 'The final long run uses AdamW for every parameter. Muon remains a small-scale branch, not an ingredient of this checkpoint.',
+        specs: [['updates', '131,072'], ['positions', '8 × 2³⁰'], ['batch', '512']]
+      },
+      {
+        id: 'runtime',
+        label: 'Receding-horizon runtime',
+        labelLines: ['Receding-horizon', 'runtime'],
+        sublabel: 'prediction 4 · delay 2 · replan 2',
+        x: 480, y: 356, w: 150, h: 66,
+        title: 'Deployment',
+        text: 'The standard evaluation requests four predictions, observes with delay two, and replans every two frames.',
+        specs: [['evaluation boots', '96'], ['characters', 'all'], ['identity', 'masked']]
+      }
+    ];
+
+    var architectureEdges = [
+      ['data', 'history'], ['history', 'trunk'], ['trunk', 'temporal'], ['temporal', 'groups'],
+      ['groups', 'objective'], ['objective', 'optimizer'], ['groups', 'runtime']
+    ];
+    var activeModule = '';
+    var highlightedModules = [];
+    var selectedLedger = '';
+
+    function renderMasterMap(target, focus) {
+      empty(target);
+      target.classList.add('model-diagram');
+      target.setAttribute('viewBox', '0 0 160 120');
+
+      var data = modelPart(target, 'data');
+      data.appendChild(svgElement('rect', {x: 2, y: 4, width: 23, height: 15, class: 'model-token'}));
+      addText(data, 13.5, 14, 'data', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var history = modelPart(target, 'history');
+      [0, 1, 2].forEach(function (index) {
+        history.appendChild(svgElement('rect', {
+          x: 3 + index * 8, y: 35, width: 10, height: 29, class: 'model-token'
+        }));
+      });
+      addText(history, 16, 75, 'input', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var trunk = modelPart(target, 'trunk');
+      [6, 3].forEach(function (offset) {
+        trunk.appendChild(svgElement('rect', {
+          x: 35 - offset, y: 21 + offset, width: 40, height: 58, class: 'model-layer'
+        }));
+      });
+      trunk.appendChild(svgElement('rect', {x: 35, y: 21, width: 40, height: 58, class: 'model-box'}));
+      addText(trunk, 55, 47, 'TFM', {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(trunk, 55, 61, '×16', {'text-anchor': 'middle', class: 'diagram-note'});
+      trunk.appendChild(svgElement('rect', {x: 82, y: 41, width: 19, height: 20, class: 'model-token'}));
+      addText(trunk, 91.5, 55, 'hₜ', {'text-anchor': 'middle', class: 'diagram-label'});
+
+      var temporal = modelPart(target, 'temporal');
+      [5, 2.5].forEach(function (offset) {
+        temporal.appendChild(svgElement('rect', {
+          x: 110 - offset, y: 24 + offset, width: 39, height: 52, class: 'model-layer'
+        }));
+      });
+      temporal.appendChild(svgElement('rect', {x: 110, y: 24, width: 39, height: 52, class: 'model-box'}));
+      addText(temporal, 129.5, 47, 'TFM', {'text-anchor': 'middle', class: 'diagram-label'});
+      addText(temporal, 129.5, 61, '×4', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var groups = modelPart(target, 'groups');
+      ['C', 'M', 'T', 'B'].forEach(function (label, index) {
+        var x = 102 + index * 14;
+        groups.appendChild(svgElement('rect', {x: x, y: 85, width: 11, height: 16, class: 'model-token'}));
+        addText(groups, x + 5.5, 97, label, {'text-anchor': 'middle', class: 'diagram-note'});
+      });
+
+      var objective = modelPart(target, 'objective');
+      objective.appendChild(svgElement('rect', {x: 66, y: 94, width: 28, height: 15, class: 'model-token'}));
+      addText(objective, 80, 105, 'loss', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var runtime = modelPart(target, 'runtime');
+      runtime.appendChild(svgElement('rect', {x: 119, y: 106, width: 38, height: 12, class: 'model-token'}));
+      addText(runtime, 138, 115, 'runtime', {'text-anchor': 'middle', class: 'diagram-note'});
+
+      var optimizer = modelPart(target, 'optimizer');
+      optimizer.appendChild(svgElement('path', {
+        d: 'M29,88 L29,117 L101,117 L101,88', class: 'model-wire ghost'
+      }));
+      addText(optimizer, 32, 113, 'update', {class: 'diagram-note'});
+
+      modelWire(target, 13.5, 19, 13.5, 35, {});
+      modelWire(target, 27, 50, 32, 50, {});
+      modelWire(target, 75, 50, 82, 50, {});
+      modelWire(target, 101, 50, 107, 50, {});
+      modelWire(target, 129.5, 76, 129.5, 85, {});
+      modelWire(target, 91, 61, 80, 94, {});
+      modelWire(target, 143, 101, 138, 106, {});
+
+      many('[data-module]', target).forEach(function (part) {
+        if (!focus.length) return;
+        part.classList.add(focus.indexOf(part.getAttribute('data-module')) !== -1 ? 'module-focus' : 'module-dim');
+      });
+    }
+
+    function renderArchitecture() {
+      renderContextMaps();
+    }
+
+    function renderContextMaps() {
+      many('.architecture-context').forEach(function (container) {
+        var focus = container.getAttribute('data-dynamic') === 'true' ?
+          highlightedModules : (container.getAttribute('data-focus') || '').split(/\s+/).filter(Boolean);
+        renderMasterMap(one('svg', container), focus);
+      });
+    }
+
+    function runLinks(links) {
+      return links.map(function (link) {
+        return '<a href="' + WAND_B + link[1] + '">' + link[0] + ' · ' + link[1] + '</a>';
+      }).join(' · ');
+    }
+
+    var experiments = [
+      {
+        id: 'windows', order: 12, code: 'O12', category: 'data', title: 'One window per replay',
+        stock: 0.728, damage: -6.23, evidence: 'controlled', modules: ['data'],
+        control: '4 windows / replay', treatment: '1 window / replay',
+        summary: 'Replay diversity inside the batch produced the largest clean positive stock result. Damage did not improve.',
+        links: [['four windows', 'uw05bvm2'], ['one window', 'shjnxxsu']]
+      },
+      {
+        id: 'across', order: 37.1, code: 'O37', category: 'architecture', title: 'Across-frame action feedback',
+        stock: 0.361, damage: 13.49, evidence: 'controlled', modules: ['temporal'],
+        control: 'future frames independent', treatment: 'earlier actions feed later frames',
+        summary: 'Average main effect across both within-frame backgrounds. This is the clean support for a causal temporal decoder.',
+        links: [['D0', '98r9smrj'], ['D2', '50q39o9j'], ['D1', 'a117chkw'], ['D3', '5wfk2esf']]
+      },
+      {
+        id: 'batch', order: 26.2, code: 'O26', category: 'optimization', title: 'Smaller batch at fixed data',
+        stock: 0.469, damage: 27.92, evidence: 'controlled', modules: ['optimizer'],
+        control: 'B2,048 · U1,024', treatment: 'B128 · U16,384',
+        summary: 'All runs saw 2.097M examples. The result is about the batch/update trade, not batch size in isolation.',
+        links: [['B2,048', 'rri7scjc'], ['B128', 'nt4gh4mk']]
+      },
+      {
+        id: 'codec', order: 43.1, code: 'O43', category: 'representation', title: 'Current controller codec',
+        stock: 0.292, damage: 16.16, evidence: 'controlled', modules: ['history', 'groups'],
+        control: 'legacy codec', treatment: 'current physical codec',
+        summary: 'The legacy controller code did not explain the old model. It reduced performance in the exact bridge.',
+        links: [['legacy', 'acbbeb76'], ['current', 'cqbbbg77']]
+      },
+      {
+        id: 'polar_codec', order: 53, code: 'O53', category: 'representation', title: 'Polar stick codec',
+        stock: 0.095, damage: 0.88, evidence: 'controlled', modules: ['history', 'groups'],
+        control: 'fixed Cartesian stick classes', treatment: 'fixed polar stick classes',
+        summary: 'Polar was slightly better at U16,384. The stock LCB moved from −0.074 to +0.016 while decode p95 increased by 0.54 ms.',
+        links: [['Cartesian', 'yxy8brhx'], ['polar', 'yi7yyyu0']]
+      },
+      {
+        id: 'physical_history', order: 28, code: 'O28', category: 'representation', title: 'Physical past-action embeddings',
+        stock: 0.260, damage: 23.68, evidence: 'controlled', modules: ['history'],
+        control: '256-way one-hot history', treatment: 'class + physical embeddings',
+        summary: 'The one-hot model received more parameters and twice the examples and still lost.',
+        links: [['one-hot', '1zzstd2d'], ['physical', 'cqbbbg77']]
+      },
+      {
+        id: 'within', order: 37.2, code: 'O37', category: 'architecture', title: 'Within-frame controller feedback',
+        stock: 0.245, damage: 8.48, evidence: 'controlled', modules: ['groups'],
+        control: 'controller parts independent', treatment: 'earlier parts condition later parts',
+        summary: 'Average main effect across both across-frame backgrounds. This tests conditioning against none; it does not compare FiLM with concatenation.',
+        links: [['D0', '98r9smrj'], ['D1', 'a117chkw'], ['D2', '50q39o9j'], ['D3', '5wfk2esf']]
+      },
+      {
+        id: 'learning_rate', order: 26.3, code: 'O26', category: 'optimization', title: 'Learning-rate selection',
+        stock: 0.218, damage: null, evidence: 'controlled', modules: ['optimizer'],
+        control: 'edge of sweep · 0.014 Muon', treatment: 'interior best · 0.040 Muon',
+        summary: 'The best stock point was inside the six-point sweep, not at an endpoint. Muon and Adam rates moved together.',
+        links: [['0.014', '9luwu85n'], ['0.040', '7hy8xjjh']]
+      },
+      {
+        id: 'next_loss', order: 43.2, code: 'O43', category: 'objective', title: '50% loss on the next frame',
+        stock: 0.138, damage: 3.55, evidence: 'controlled', modules: ['objective'],
+        control: 'previous loss · legacy codec', treatment: 'half action loss at offset 1',
+        summary: 'Helpful under the legacy-code model. It has not been transferred to the current production recipe.',
+        links: [['old loss', 'acbbeb76'], ['next-frame', '1imfy8v3']]
+      },
+      {
+        id: 'projectiles', order: 41, code: 'O41', category: 'representation', title: 'Projectile inputs',
+        stock: 0.092, damage: 10.48, evidence: 'controlled', modules: ['history'],
+        control: 'no projectile state', treatment: '4 pooled projectile slots',
+        summary: 'A small positive result. The final model retains the four pooled slots.',
+        links: [['none', 'v9xku05q'], ['projectiles', '9wh7qhr1']]
+      },
+      {
+        id: 'identity', order: 49, code: 'O49', category: 'conditioning', title: 'Cody player identity',
+        stock: 0.081, damage: 31.16, evidence: 'controlled', modules: ['history', 'runtime'],
+        control: 'identity always masked', treatment: 'Cody identity at runtime',
+        summary: 'Identity changes behavior. Cody adds much more damage than stock in this Fox evaluation; other identities do not all help.',
+        links: [['masked', 'u1gvby0r'], ['conditioned', 'dg0u00w5']]
+      },
+      {
+        id: 'awr', order: 36, code: 'O36', category: 'objective', title: 'Detached-value AWR',
+        stock: 0.076, damage: 10.80, evidence: 'near-control', modules: ['objective'],
+        control: 'uniform behavior cloning', treatment: 'advantage-weighted cloning',
+        summary: 'A modest gain in the modern comparison. The evaluations used 96 and 128 boots and were not paired.',
+        links: [['BC', '5wfk2esf'], ['AWR', 'hwzv0k9a']]
+      },
+      {
+        id: 'iql', order: 30, code: 'O30', category: 'objective', title: 'Attached offline IQL',
+        stock: -2.009, damage: -95.85, evidence: 'package', modules: ['objective'],
+        control: 'behavior cloning', treatment: 'critics + attached IQL loss',
+        summary: 'The tested IQL system failed despite more data, parameters, and work. It does not reject every offline Q-learning method.',
+        links: [['BC', 'cqbbbg77'], ['IQL', '06fi5jms']]
+      },
+      {
+        id: 'flow', order: 38, code: 'O38', category: 'architecture', title: 'Endpoint-flow decoder',
+        stock: -0.186, damage: -32.93, evidence: 'controlled', modules: ['temporal', 'groups'],
+        control: 'categorical temporal decoder', treatment: 'continuous endpoint flow',
+        summary: 'The flow decoder was worse despite 25% more parameters and training work and 7% more inference work.',
+        links: [['categorical', '5wfk2esf'], ['flow', 't4s3gohe']]
+      },
+      {
+        id: 'lean', order: 21, code: 'O21', category: 'representation', title: 'Lean observation feature set',
+        stock: -0.268, damage: -13.37, evidence: 'controlled', modules: ['history'],
+        control: 'full observation features', treatment: 'lean feature bundle',
+        summary: 'The lean bundle hurt. This tests the complete bundle, not one input column.',
+        links: [['full', 'fxhtoxu8'], ['lean', 'pu8jpmbf']]
+      },
+      {
+        id: 'future_state', order: 29, code: 'O29', category: 'objective', title: 'Future-state auxiliary model',
+        stock: -0.048, damage: -12.60, evidence: 'package', modules: ['trunk', 'objective'],
+        control: 'policy loss only', treatment: 'future-state auxiliary task',
+        summary: 'The treatment had more parameters, twice the examples, and over twice the estimated training work, but did not improve play.',
+        links: [['control', 'cqbbbg77'], ['auxiliary', 'qxcjjwl8']]
+      },
+      {
+        id: 'rank_weight', order: 34, code: 'O34', category: 'objective', title: 'Rank-weighted behavior cloning',
+        stock: -0.122, damage: null, evidence: 'controlled', modules: ['objective'],
+        control: 'uniform BC', treatment: 'rank weights 1 / 2 / 4',
+        summary: 'Rank weighting did not help. The damage mean was not preserved; its saved lower bound was effectively unchanged.',
+        links: [['uniform', 'cqbbbg77'], ['rank-weighted', 'c5cxoyk8']]
+      },
+      {
+        id: 'data_mix', order: 42.1, code: 'O42', category: 'data', title: 'All 44 data sources',
+        stock: -0.058, damage: 6.31, evidence: 'controlled', modules: ['data'],
+        control: 'ranked-anon-1 only', treatment: 'all 44 sources',
+        summary: 'The full mix improved damage but not stock. The earlier positive stock claim compared unequal update counts.',
+        links: [['ranked only', 'k8nb00xv'], ['full mix', 'bevhq159']]
+      },
+      {
+        id: 'prune', order: 28.2, code: 'O28', category: 'representation', title: 'Prune rare one-hot button classes',
+        stock: 0.037, damage: -7.63, evidence: 'controlled', modules: ['history'],
+        control: '256 one-hot classes', treatment: '52 retained classes',
+        summary: 'Stock improved slightly while damage worsened. There is no clear overall benefit.',
+        links: [['256', '1zzstd2d'], ['52', '4wyxy1g2']]
+      },
+      {
+        id: 'muon', order: 11, code: 'O11', category: 'optimization', title: 'Muon for matrix parameters',
+        stock: 0.030, damage: -30.11, evidence: 'package', modules: ['optimizer'],
+        control: 'AdamW', treatment: 'Muon matrices + AdamW others',
+        summary: 'There is no evidence for a large stock benefit. The optimizer and learning rates changed together.',
+        links: [['AdamW', 'o3nihah5'], ['Muon + AdamW', 'vlim96s9']]
+      },
+      {
+        id: 'delay', order: 44, code: 'O44', category: 'deployment', title: 'Delay 1 → 12',
+        stock: -1.105, damage: -85.71, evidence: 'package', modules: ['runtime'],
+        control: 'delay 1', treatment: 'delay 12',
+        summary: 'The long-delay configuration failed. Plan length, replan interval, and future-data buffer also changed.',
+        links: [['delay 1', '1imfy8v3'], ['delay 12', '2qs05au4']]
+      },
+      {
+        id: 'replan', order: 37.3, code: 'O37', category: 'deployment', title: 'Execute / replan 1 → 6',
+        stock: -0.431, damage: -30.20, evidence: 'package', modules: ['runtime', 'temporal'],
+        control: 'execute and replan 1', treatment: 'execute and replan 6',
+        summary: 'Average across the four factorization checkpoints. Execution length and replan interval moved together.',
+        links: [['D0', '98r9smrj'], ['D3', '5wfk2esf']]
+      },
+      {
+        id: 'fast', order: 50.1, code: 'O50', category: 'deployment', title: 'Cody / Fox fast deployment',
+        stock: 0.757, damage: 59.91, evidence: 'package', modules: ['history', 'runtime'],
+        control: 'delay 2 · replan 2 · identity masked', treatment: 'Cody · Fox · delay 0 · replan 1',
+        summary: 'The combination is strong. Identity, character, delay, and replan all changed, so the gain cannot be assigned to one factor.',
+        links: [['O50 proxy', 'a9ud18bc']]
+      },
+      {
+        id: 'bpe', order: 18, code: 'O18', category: 'representation', title: 'BPE / RLE action spans',
+        stock: -2.635, damage: -172.16, evidence: 'package', modules: ['history', 'groups', 'runtime'],
+        control: 'frame-aligned action targets', treatment: 'compressed action spans',
+        summary: 'Output format, execution cadence, parameters, and crash rate changed. The tested system failed.',
+        links: [['BPE/RLE', 'xgj1dwot']]
+      },
+      {
+        id: 'xm1', order: 33.1, code: 'O33', category: 'architecture', title: 'Exploration modeling · K=1',
+        stock: -1.667, damage: -89.37, evidence: 'package', modules: ['temporal', 'objective'],
+        control: 'behavior cloning', treatment: 'one latent trajectory',
+        summary: 'The K=1 system was worse than behavior cloning. The comparison also changes the decoder and objective, doubles the samples, and nearly doubles estimated training work.',
+        links: [['O26 BC', 'cqbbbg77'], ['K=1', 'mz8dk2gh']]
+      },
+      {
+        id: 'xm8', order: 33.2, code: 'O33', category: 'architecture', title: 'Exploration modeling · K=8',
+        stock: -0.807, damage: -44.33, evidence: 'package', modules: ['temporal', 'objective'],
+        control: 'behavior cloning', treatment: 'best of eight latent trajectories',
+        summary: 'K=8 was better than K=1 but still worse than behavior cloning. It stopped earlier and differs in microbatching and training work, so the K effect is not isolated.',
+        links: [['O26 BC', 'cqbbbg77'], ['K=8', 'feic18gt']]
+      },
+      {
+        id: 'o42', order: 42.2, code: 'O42', category: 'architecture', title: 'Architecture + sampler bundle',
+        stock: -0.217, damage: -10.81, evidence: 'package', modules: ['data', 'trunk', 'groups'],
+        control: 'earlier architecture + sampler', treatment: 'revised architecture + sampler',
+        summary: 'Projection, heads, trunk skip, FiLM, normalization, residual scaling, and sampler all changed. No component can be isolated.',
+        links: [['O26', 'cqbbbg77'], ['O42', 'k8nb00xv']]
+      },
+      {
+        id: 'capacity', order: 39, code: 'O39', category: 'scaling', title: 'More model capacity',
+        stock: null, damage: null, evidence: 'descriptive', modules: ['trunk', 'runtime'],
+        control: '7M family', treatment: 'up to 293M',
+        summary: 'Validation loss usually improves with size. Closed-loop play has no stable monotonic ordering and depends on deployment.',
+        links: [['17.8M point', 'jgqts6t4'], ['205M point', 'to0fx9ig']]
+      },
+      {
+        id: 'training', order: 50.9, code: 'O50', category: 'training', title: 'More training',
+        stock: null, damage: null, evidence: 'descriptive', modules: ['objective', 'optimizer'],
+        control: 'earlier checkpoint', treatment: 'later checkpoint',
+        summary: 'Offline likelihood improves steadily. Play regresses through the middle of training, then recovers at the final checkpoint.',
+        links: [['Muon checkpoint series', 'p1fyyp1z'], ['all-AdamW production', 'tgpuo1be']]
+      }
+    ];
+    var ledgerMetric = 'stock';
+    var ledgerCategory = 'all';
+    var ledgerSort = 'magnitude';
+
+    function experimentById(id) {
+      return experiments.filter(function (experiment) { return experiment.id === id; })[0];
+    }
+
+    function deltaClass(value) {
+      if (!Number.isFinite(value)) return '';
+      return value < 0 ? 'neg' : 'pos';
+    }
+
+    function renderLedgerFilters() {
+      var select = one('#ledger-category');
+      var previous = ledgerCategory;
+      var categories = ['all'].concat(experiments.map(function (experiment) {
+        return experiment.category;
+      }).filter(function (category, index, rows) {
+        return rows.indexOf(category) === index;
+      }).sort());
+      empty(select);
+      categories.forEach(function (category) {
+        var option = document.createElement('option');
+        option.value = category;
+        option.textContent = category;
+        select.appendChild(option);
+      });
+      select.value = previous;
+      one('#ledger-sort').value = ledgerSort;
+    }
+
+    function sortedExperiments() {
+      var rows = experiments.filter(function (experiment) {
+        return ledgerCategory === 'all' || experiment.category === ledgerCategory;
+      }).slice();
+      var value = function (experiment) {
+        return Number.isFinite(experiment[ledgerMetric]) ? experiment[ledgerMetric] : null;
+      };
+      if (ledgerSort === 'magnitude') {
+        rows.sort(function (a, b) {
+          var av = value(a);
+          var bv = value(b);
+          return (bv === null ? -1 : Math.abs(bv)) - (av === null ? -1 : Math.abs(av));
+        });
+      } else if (ledgerSort === 'gain_desc') {
+        rows.sort(function (a, b) { return (value(b) === null ? -Infinity : value(b)) - (value(a) === null ? -Infinity : value(a)); });
+      } else if (ledgerSort === 'gain_asc') {
+        rows.sort(function (a, b) { return (value(a) === null ? Infinity : value(a)) - (value(b) === null ? Infinity : value(b)); });
+      } else if (ledgerSort === 'chronology') {
+        rows.sort(function (a, b) { return a.order - b.order; });
+      } else if (ledgerSort === 'category') {
+        rows.sort(function (a, b) { return a.category.localeCompare(b.category) || a.order - b.order; });
+      }
+      return rows;
+    }
+
+    function selectExperiment(id) {
+      selectedLedger = selectedLedger === id ? '' : id;
+      var selected = selectedLedger ? experimentById(selectedLedger) : null;
+      highlightedModules = selected ? selected.modules.slice() : [];
+      activeModule = selected ? selected.modules[0] : '';
+      renderLedger();
+      renderArchitecture();
+    }
+
+    function renderLedger() {
+      setPressed('data-ledger-metric', ledgerMetric);
+      one('#ledger-delta-head').textContent = ledgerMetric === 'stock' ? 'Stock Δ' : 'Damage Δ';
+      var body = one('#ledger-body');
+      empty(body);
+      sortedExperiments().forEach(function (experiment) {
+        var value = experiment[ledgerMetric];
+        var row = document.createElement('tr');
+        row.className = 'ledger-row' + (selectedLedger === experiment.id ? ' selected' : '');
+        row.setAttribute('tabindex', '0');
+        row.setAttribute('aria-expanded', selectedLedger === experiment.id ? 'true' : 'false');
+        row.innerHTML =
+          '<td><span class="experiment-title">' + experiment.title + '</span><span class="experiment-sub">' +
+          '<span class="run-source">' + experiment.code + ' · </span>' + experiment.category + '</span></td>' +
+          '<td>' + experiment.control + ' → ' + experiment.treatment + '</td>' +
+          '<td class="num"><span class="delta ' + deltaClass(value) + '">' +
+          (Number.isFinite(value) ? signed(value, ledgerMetric === 'stock' ? 3 : 2) : 'no stable order') +
+          '</span></td>';
+        row.addEventListener('click', function () { selectExperiment(experiment.id); });
+        row.addEventListener('keydown', function (event) {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            selectExperiment(experiment.id);
+          }
+        });
+        body.appendChild(row);
+        if (selectedLedger === experiment.id) {
+          var expanded = document.createElement('tr');
+          expanded.className = 'expanded-row';
+          expanded.innerHTML =
+            '<td colspan="3"><div class="expanded-grid"><div><p>' + experiment.summary + '</p>' +
+            '<p class="source-line">' + runLinks(experiment.links) + '</p></div>' +
+            '<div class="compare-toy"><div class="compare-box"><b>control</b><span>' +
+            experiment.control + '</span></div><div class="compare-arrow">→</div>' +
+            '<div class="compare-box"><b>treatment</b><span>' + experiment.treatment +
+            '</span></div></div></div></td>';
+          body.appendChild(expanded);
+        }
+      });
+    }
+
+    many('[data-production-metric]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var metric = button.getAttribute('data-production-metric');
+        setPressed('data-production-metric', metric);
+        renderProductionChart('#production-chart', metric, false);
+      });
+    });
+
+    one('#delay-model').addEventListener('change', function (event) {
+      selectedDelayModel = event.target.value;
+      renderDelay();
+    });
+
+    many('[data-delay-metric]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        delayMetric = button.getAttribute('data-delay-metric');
+        renderDelay();
+      });
+    });
+
+    many('[data-frontier-metric]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        frontierMetric = button.getAttribute('data-frontier-metric');
+        renderFrontier();
+      });
+    });
+
+    one('#compute-slider').addEventListener('input', renderIsoflop);
+
+    many('[data-ledger-metric]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        ledgerMetric = button.getAttribute('data-ledger-metric');
+        renderLedger();
+      });
+    });
+
+    one('#ledger-category').addEventListener('change', function (event) {
+      ledgerCategory = event.target.value;
+      if (selectedLedger) {
+        var selected = experimentById(selectedLedger);
+        if (ledgerCategory !== 'all' && selected.category !== ledgerCategory) {
+          selectedLedger = '';
+          highlightedModules = [];
+          activeModule = '';
+          renderArchitecture();
+        }
+      }
+      renderLedger();
+    });
+
+    one('#ledger-sort').addEventListener('change', function (event) {
+      ledgerSort = event.target.value;
+      renderLedger();
+    });
+
+    one('#source-toggle').addEventListener('click', function () {
+      setRunSourcesVisible(!document.body.classList.contains('show-run-sources'));
+    });
+
+    var architectureMedia = window.matchMedia('(max-width: 720px)');
+    if (architectureMedia.addEventListener) architectureMedia.addEventListener('change', renderArchitecture);
+
+    renderProductionChart('#production-chart', 'stock', false);
+    renderFactor();
+    renderCodecSticks();
+    renderCodecResults();
+    renderRepresentation();
+    populateDelaySelect();
+    renderDelay();
+    renderFrontier();
+    renderNll();
+    renderRho();
+    renderScalingTable();
+    renderIsoflop();
+    renderLedgerFilters();
+    renderLedger();
+    renderArchitecture();
+    setRunSourcesVisible(false);
+  
+    window.HALFIG_ANATOMY = {data: {FIT: function () { return FIT; }, adamwProduction: function () { return adamwProduction; }, architectureEdges: function () { return architectureEdges; }, architectureModules: function () { return architectureModules; }, delayModels: function () { return delayModels; }, experiments: function () { return experiments; }, factorRows: function () { return factorRows; }, frontierRows: function () { return frontierRows; }, lineage: function () { return lineage; }, production: function () { return production; }, representationBranches: function () { return representationBranches; }, rhoByDelay: function () { return rhoByDelay; }, scalingPoints: function () { return scalingPoints; }}, rerender: function () { renderArchitecture(); }};
+}());

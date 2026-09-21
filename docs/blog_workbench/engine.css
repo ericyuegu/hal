@@ -108,6 +108,10 @@ body.wb-showdata .wb-drawer{display:block}
 
 /* ---------- edit mode ---------- */
 .wb-handle,.wb-menu-btn,.wb-insert,.wb-note{display:none}
+body.wb-static #source-toggle,body.wb-static .fig-key{display:none}
+/* a single-figure page (build.py --figures): the figure, its caption and the data/ink tools, nothing else */
+.wb-figure-page .wb-top-left,.wb-figure-page .wb-toc,.wb-figure-page .wb-foot{display:none}
+.wb-figure-page .wb-top{justify-content:flex-end;padding-top:18px}
 body.wb-edit .wb-block{padding-left:0;border-left:2px solid transparent;transition:border-color var(--dur-fast) var(--ease),background var(--dur-fast) var(--ease)}
 body.wb-edit .wb-block:hover{border-left-color:var(--rule-dotted)}
 body.wb-edit .wb-block.dragging{opacity:.46}

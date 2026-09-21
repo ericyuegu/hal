@@ -20,12 +20,12 @@
       <span class="wb-kicker">HAL · working draft</span>
     </div>
     <div class="wb-tools" role="toolbar" aria-label="Workbench tools">
-      <span class="wb-status" id="wb-status" aria-live="polite">loading document…</span>
-      <button type="button" class="wb-tool" id="wb-edit" aria-pressed="false">edit</button>
+      <!--wb-only--><span class="wb-status" id="wb-status" aria-live="polite">loading document…</span>
+      <button type="button" class="wb-tool" id="wb-edit" aria-pressed="false">edit</button><!--/wb-only-->
       <button type="button" class="wb-tool" id="wb-data" aria-pressed="false">data</button>
-      <button type="button" class="wb-tool" id="wb-notes" aria-pressed="false">notes</button>
+      <!--wb-only--><button type="button" class="wb-tool" id="wb-notes" aria-pressed="false">notes</button><!--/wb-only-->
       <button type="button" class="wb-tool source-toggle" id="source-toggle" aria-pressed="false">show run sources</button>
-      <button type="button" class="wb-tool" id="wb-export">copy markdown</button>
+      <!--wb-only--><button type="button" class="wb-tool" id="wb-export">copy markdown</button><!--/wb-only-->
       <button type="button" class="wb-tool" id="wb-theme" aria-label="Switch theme">ink</button>
     </div>
   </header>
@@ -40,16 +40,16 @@
       <div class="wb-doc" id="wb-doc"></div>
     </article>
 
-    <section class="wb-parked" id="wb-parked" hidden>
+    <!--wb-only--><section class="wb-parked" id="wb-parked" hidden>
       <h2 class="wb-parked-head">Parked blocks <span class="section-number" id="wb-parked-count"></span></h2>
       <p class="wb-parked-note">Hidden from the draft and the export. Restore a block to put it back where it was.</p>
       <div id="wb-parked-list"></div>
-    </section>
+    </section><!--/wb-only-->
   </main>
 
   <footer class="wb-foot">
-    <span>Content lives in this artifact's document store; figures and data ship with the page.</span>
-    <span id="wb-foot-meta"></span>
+    <!--wb-only--><span>Content lives in this artifact's document store; figures and data ship with the page.</span>
+    <span id="wb-foot-meta"></span><!--/wb-only-->
   </footer>
 </div>
 
@@ -60,7 +60,7 @@
 <!--__FIGURE_POOL__-->
 </div>
 
-<template id="wb-block-menu">
+<!--wb-only--><template id="wb-block-menu">
   <div class="wb-menu" role="menu">
     <button type="button" data-act="edit" role="menuitem">edit</button>
     <button type="button" data-act="below-text" role="menuitem">+ text below</button>
@@ -74,7 +74,7 @@
     <button type="button" data-act="duplicate" role="menuitem">duplicate</button>
     <button type="button" data-act="delete" role="menuitem" class="danger">delete</button>
   </div>
-</template>
+</template><!--/wb-only-->
 
 <script id="wb-registry" type="application/json">
 /*__REGISTRY__*/
@@ -90,6 +90,7 @@
 <script src="figures/anatomy.js"></script>
 <script src="figures/explorer.js"></script>
 <script src="figures/custom.js"></script>
+<!--__SEED__-->
 <script>
 /*__ENGINE_JS__*/
 </script>

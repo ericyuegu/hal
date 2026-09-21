@@ -10,6 +10,9 @@
     try { return node ? JSON.parse(node.textContent) : null; } catch (err) { return null; }
   }());
   var WB_RUN = 'https://wandb.ai/ericyuegu/hal/runs/';
+  /* A static export (build.py --static) ships the visible blocks as WB_SEED and renders them
+     read-only: no store, no toolbar editing, no insert bars, handles, menus or parked section. */
+  var STATIC = Boolean(window.WB_STATIC);
 
   var pool = document.getElementById('wb-fig-pool');
   var docEl = document.getElementById('wb-doc');
@@ -64,6 +67,7 @@
     toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 1800);
   }
   function status(msg, warn) {
+    if (!statusEl) return;
     statusEl.textContent = msg;
     statusEl.classList.toggle('warn', Boolean(warn));
   }
@@ -71,7 +75,8 @@
   /* ------------------------------------------------------------------ document model */
   function order() { return (state.outline && state.outline.order) || []; }
   function visibleIds() { return order().filter(function (id) { var b = state.blocks[id]; return b && !b.hidden; }); }
-  /* Figures number in order; a figure with `sub: true` shares the previous figure's number as 2a, 2b, … */
+  /* Figures number in order; a figure with `sub: true` shares the previous figure's number as 2a, 2b, …
+     A seeded `num` (build.py --figures) carries the page number onto a block exported on its own. */
   function figureNumbers() {
     var n = 0, map = {}, group = [], owner = {};
     function label(k) { return group.length > 1 ? n + String.fromCharCode(96 + k) : String(n); }
@@ -79,6 +84,7 @@
     visibleIds().forEach(function (id) {
       var b = state.blocks[id];
       if (b.type !== 'figure') return;
+      if (b.num) { map[id] = String(b.num); group = []; if (b.fig && !(b.fig in owner)) owner[b.fig] = id; return; }
       if (b.sub && group.length) group.push(id); else { n += 1; group = [id]; }
       if (b.fig && !(b.fig in owner)) owner[b.fig] = id;
       relabel();
@@ -370,6 +376,12 @@
     var node = state.els[id];
     if (node) return node;
     node = el('div', {class: 'wb-block', 'data-id': id});
+    if (STATIC) {
+      node.appendChild(el('div', {class: 'wb-body'}));
+      node.appendChild(el('div', {class: 'wb-note', 'data-empty': ''}));
+      state.els[id] = node;
+      return node;
+    }
     var handle = el('span', {class: 'wb-handle', title: 'drag to reorder', 'aria-hidden': 'true', text: '⋮⋮'});
     handle.addEventListener('mousedown', function () { node.setAttribute('draggable', 'true'); });
     handle.addEventListener('mouseup', function () { node.removeAttribute('draggable'); });
@@ -492,7 +504,7 @@
       if (node === cursor) cursor = cursor.nextSibling;
       else docEl.insertBefore(node, cursor);
     }
-    place(insertBar(0));
+    if (!STATIC) place(insertBar(0));
     ids.forEach(function (id, index) {
       var b = state.blocks[id];
       if (!b) { missing += 1; return; }
@@ -501,7 +513,7 @@
         return;
       }
       place(paintBlock(id, b, figNums, secNums));
-      place(insertBar(index + 1));
+      if (!STATIC) place(insertBar(index + 1));
     });
     // everything after the cursor is stale: old insert bars and blocks that no longer belong
     while (cursor) { var stale = cursor; cursor = cursor.nextSibling; docEl.removeChild(stale); }
@@ -517,7 +529,7 @@
     renderParked();
     renderToc();
     var figCount = Object.keys(figNums).filter(function (k) { return k.slice(0, 2) === 'b_' || state.blocks[k]; }).length;
-    footMeta.textContent = ids.length + ' blocks · ' + visibleIds().filter(function (id) { return state.blocks[id].type === 'figure'; }).length + ' figures placed · ' + REGISTRY.length + ' in the registry' + (missing ? ' · ' + missing + ' outline ids without a block' : '');
+    if (footMeta) footMeta.textContent = ids.length + ' blocks · ' + visibleIds().filter(function (id) { return state.blocks[id].type === 'figure'; }).length + ' figures placed · ' + REGISTRY.length + ' in the registry' + (missing ? ' · ' + missing + ' outline ids without a block' : '');
     void figCount;
     if (window.HALFIG_ANATOMY && window.HALFIG_ANATOMY.rerender && !render.warmed) {
       render.warmed = true;
@@ -573,6 +585,7 @@
   }
 
   function renderParked() {
+    if (!parkedEl) return;
     var hidden = order().filter(function (id) { return state.blocks[id] && state.blocks[id].hidden; });
     parkedEl.hidden = !hidden.length || !state.edit;
     parkedCount.textContent = hidden.length ? String(hidden.length) : '';
@@ -794,12 +807,14 @@
     notesBtn.setAttribute('aria-pressed', String(on));
     try { localStorage.setItem('wb-notes', on ? '1' : '0'); } catch (err) { /* per-viewer convenience only */ }
   }
-  notesBtn.addEventListener('click', function () { setNotes(!state.showNotes); });
-  editBtn.addEventListener('click', function () { setEdit(!state.edit); });
   dataBtn.addEventListener('click', function () { setData(!state.showData); });
-  document.getElementById('wb-export').addEventListener('click', function () {
-    copyText(exportMarkdown()).then(function () { toast('markdown copied · ' + visibleIds().length + ' blocks'); }, function () { toast('copy failed — select the text manually'); });
-  });
+  if (!STATIC) {
+    notesBtn.addEventListener('click', function () { setNotes(!state.showNotes); });
+    editBtn.addEventListener('click', function () { setEdit(!state.edit); });
+    document.getElementById('wb-export').addEventListener('click', function () {
+      copyText(exportMarkdown()).then(function () { toast('markdown copied · ' + visibleIds().length + ' blocks'); }, function () { toast('copy failed — select the text manually'); });
+    });
+  }
 
   function effectiveTheme() {
     var stamped = document.documentElement.getAttribute('data-theme');
@@ -819,19 +834,28 @@
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paintTheme);
 
   // figure-key datalist for the editor
-  var dl = el('datalist', {id: 'wb-fig-keys'});
-  REGISTRY.forEach(function (r) { dl.appendChild(el('option', {value: r.key, text: r.name})); });
-  document.body.appendChild(dl);
+  if (!STATIC) {
+    var dl = el('datalist', {id: 'wb-fig-keys'});
+    REGISTRY.forEach(function (r) { dl.appendChild(el('option', {value: r.key, text: r.name})); });
+    document.body.appendChild(dl);
+  }
 
   /* ------------------------------------------------------------------ boot */
   try {
     var savedTheme = localStorage.getItem('wb-theme');
     if (savedTheme === 'dark' || savedTheme === 'light') document.documentElement.setAttribute('data-theme', savedTheme);
-    if (localStorage.getItem('wb-edit') === '1') setEdit(true);
+    if (!STATIC && localStorage.getItem('wb-edit') === '1') setEdit(true);
     if (localStorage.getItem('wb-data') === '1') setData(true);
-    if (localStorage.getItem('wb-notes') === '1') setNotes(true);
+    if (!STATIC && localStorage.getItem('wb-notes') === '1') setNotes(true);
   } catch (err) { /* private windows still render */ }
   paintTheme();
-  render();
-  connect();
+  if (STATIC) {
+    document.body.classList.add('wb-static');
+    state.outline = window.WB_SEED.outline;
+    state.blocks = window.WB_SEED.blocks;
+    render();
+  } else {
+    render();
+    connect();
+  }
 }());
