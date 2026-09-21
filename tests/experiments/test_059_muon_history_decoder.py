@@ -32,6 +32,54 @@ def _load():
 exp = _load()
 
 
+def _step_snapshot(model, result, sampler) -> dict[str, object]:
+    return {
+        "parameters": {name: parameter.detach().cpu().clone() for name, parameter in model.named_parameters()},
+        "gradients": {
+            name: parameter.grad.detach().cpu().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        },
+        "metrics": {name: value.detach().cpu().clone() for name, value in result.metrics.items()},
+        "gradient_norm": result.gradient_norm.detach().cpu().clone(),
+        "sampler": sampler.generator.get_state().cpu(),
+        "conditioning": model.return_calibration.state_dict(),
+    }
+
+
+def _assert_nested_equal(expected: object, actual: object) -> None:
+    if isinstance(expected, torch.Tensor):
+        assert isinstance(actual, torch.Tensor)
+        assert torch.equal(expected, actual)
+    elif isinstance(expected, Mapping):
+        assert isinstance(actual, Mapping)
+        assert expected.keys() == actual.keys()
+        for key in expected:
+            _assert_nested_equal(expected[key], actual[key])
+    elif isinstance(expected, (list, tuple)):
+        assert isinstance(actual, type(expected)) and len(expected) == len(actual)
+        for left, right in zip(expected, actual, strict=True):
+            _assert_nested_equal(left, right)
+    else:
+        assert expected == actual
+
+
+def _assert_step_close(expected: dict[str, object], actual: dict[str, object]) -> None:
+    _assert_nested_equal(expected["sampler"], actual["sampler"])
+    _assert_nested_equal(expected["conditioning"], actual["conditioning"])
+    for field, (rtol, atol) in {"parameters": (2e-5, 2e-6), "gradients": (0.01, 2e-4)}.items():
+        left = cast(Mapping[str, torch.Tensor], expected[field])
+        right = cast(Mapping[str, torch.Tensor], actual[field])
+        assert left.keys() == right.keys()
+        for name in left:
+            torch.testing.assert_close(left[name], right[name], rtol=rtol, atol=atol, msg=f"{field}/{name}")
+    left_metrics = cast(Mapping[str, torch.Tensor], expected["metrics"])
+    right_metrics = cast(Mapping[str, torch.Tensor], actual["metrics"])
+    assert left_metrics.keys() == right_metrics.keys()
+    for name in left_metrics:
+        torch.testing.assert_close(left_metrics[name], right_metrics[name], rtol=0.01, atol=2e-4, msg=name)
+
+
 def _tiny_cfg(*, batch_size=2, **changes):
     arch = {
         **asdict(exp.Architecture()),
@@ -200,6 +248,67 @@ def test_action_head_forward_and_diagnostics_have_gradient_parity(norm_eps: floa
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_action_group_conditioning_uses_adaptive_rmsnorm_and_cumulative_prefix() -> None:
+    torch.manual_seed(17)
+    cfg = _tiny_cfg(batch_size=2)
+    decoder = exp.GPT(cfg).temporal.eval()
+    assert exp.CONTROLLER_DECODE_ORDER == ("c_stick", "main_stick", "triggers", "buttons")
+    states = torch.randn(2, 3, cfg.arch.temporal_d_model, requires_grad=True)
+    embedded = {
+        name: torch.randn(2, 3, cfg.arch.action_embed_dim, requires_grad=True) for name in exp.CONTROLLER_DECODE_ORDER
+    }
+    for position, name in enumerate(exp.CONTROLLER_DECODE_ORDER):
+        head = decoder.outputs[name]
+        normalized = head.normalize(states)
+        actual = decoder.group_features(states, name, embedded)
+        if position == 0:
+            torch.testing.assert_close(actual, normalized)
+            continue
+        condition = decoder.group_condition[name]
+        assert condition.in_features == position * cfg.arch.action_embed_dim
+        prefix = torch.cat([embedded[earlier] for earlier in exp.CONTROLLER_DECODE_ORDER[:position]], dim=-1)
+        raw_scale, shift = condition(prefix).chunk(2, dim=-1)
+        expected = normalized * (1 + torch.tanh(raw_scale)) + shift
+        torch.testing.assert_close(actual, expected)
+
+    with torch.no_grad():
+        decoder.group_condition["buttons"].weight.fill_(0.01)
+    decoder.group_features(states, "buttons", embedded).square().sum().backward()
+    assert states.grad is not None and torch.count_nonzero(states.grad) > 0
+    for name in exp.CONTROLLER_DECODE_ORDER[:-1]:
+        assert embedded[name].grad is not None and torch.count_nonzero(embedded[name].grad) > 0
+    assert embedded["buttons"].grad is None
+
+
+def test_teacher_forced_action_head_does_not_renormalize_after_film() -> None:
+    torch.manual_seed(29)
+    cfg = _tiny_cfg(batch_size=1)
+    decoder = exp.GPT(cfg).temporal.eval()
+    condition = decoder.group_condition["buttons"]
+    with torch.no_grad():
+        condition.weight.zero_()
+        condition.bias[: cfg.arch.temporal_d_model].fill_(torch.atanh(torch.tensor(0.25)).item())
+        condition.bias[cfg.arch.temporal_d_model :].fill_(0.5)
+    hidden = torch.randn(1, 8, cfg.arch.d_model)
+    ctx_pad = torch.tensor([1])
+    prefixes = torch.tensor([[7]])
+    observed = torch.zeros(1, 1, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    targets = torch.zeros(1, 1, len(cfg.arch.head_offsets), exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    return_value = torch.zeros(1, 1)
+    present = torch.ones(1, 1, dtype=torch.bool)
+    states = decoder.teacher_forced_states(hidden, ctx_pad, prefixes, observed, targets, return_value, present)
+    expected = decoder.outputs["buttons"].normalize(states) * 1.25 + 0.5
+    _logits, button_values, projections = decoder._teacher_forced_outputs(
+        hidden, ctx_pad, prefixes, observed, targets, return_value, present
+    )
+    head_input, _combined_logits, _mask = button_values
+    projected_input, _up, _down, head_output, *_trunk = projections["buttons"]
+    torch.testing.assert_close(head_input, expected)
+    torch.testing.assert_close(projected_input, expected)
+    torch.testing.assert_close(head_output, decoder.outputs["buttons"].project(expected))
+    assert not torch.allclose(head_input, decoder.outputs["buttons"].normalize(expected))
+
+
 @pytest.mark.parametrize("button_input_scale", [1.0, 1e-3])
 def test_teacher_forced_and_stepwise_decoding_match(button_input_scale: float) -> None:
     torch.manual_seed(5)
@@ -272,6 +381,11 @@ def test_optimizer_membership_and_logical_splits_are_complete() -> None:
     assert roles["temporal.trunk_outputs.buttons.up.weight"].lr_kind == "hidden"
     assert roles["temporal.trunk_outputs.buttons.down.weight"].optimizer == "adamw"
     assert roles["temporal.trunk_outputs.buttons.down.weight"].lr_kind == "output"
+    for name in exp.CONTROLLER_DECODE_ORDER[1:]:
+        weight = roles[f"temporal.group_condition.{name}.weight"]
+        bias = roles[f"temporal.group_condition.{name}.bias"]
+        assert (weight.optimizer, weight.lr_kind, weight.decay) == ("adamw", "input", True)
+        assert (bias.optimizer, bias.lr_kind, bias.decay) == ("adamw", "vector", False)
 
 
 def test_trunk_skip_uses_matching_nonlinear_heads_and_parameter_contract() -> None:
@@ -407,6 +521,8 @@ def test_resolved_delay_prewarm_avoids_live_recompilation() -> None:
         for projection in model.temporal.return_conditioner.projections:
             projection.weight.normal_(std=0.01)
             projection.bias.normal_(std=0.01)
+        for condition in model.temporal.group_condition.values():
+            condition.bias.normal_(std=0.1)
     engine = exp.BF16Inference(model, cfg, compiled=True, bucket=4, desired_return=120.0)
     context = exp.synthetic_context(cfg, 3, torch.device("cuda"))
     for delay in (0, 1, 2, 3):
@@ -479,38 +595,6 @@ def test_awr_normalization_uses_dense_eligible_prefixes_before_sampling() -> Non
     sampled = weights.gather(1, positions)
     torch.testing.assert_close(sampled, expected.gather(1, positions))
     assert not torch.isclose(sampled.mean(), torch.tensor(1.0))
-
-
-def test_scalar_download_preserves_order_and_cpu_values() -> None:
-    metrics = {
-        "z": torch.tensor(3, dtype=torch.int64),
-        "a": torch.tensor(0.125, requires_grad=True),
-        "b": torch.tensor(True),
-    }
-    actual = exp._download_scalar_metrics(metrics, 7)
-    assert list(actual) == list(metrics)
-    assert actual == {"z": 3.0, "a": 0.125, "b": 1.0}
-    assert exp._download_scalar_metrics({}, 7) == {}
-
-
-@pytest.mark.parametrize(
-    "value", [torch.zeros(1), torch.zeros(2), torch.tensor(float("nan")), torch.tensor(float("inf"))]
-)
-def test_scalar_download_rejects_invalid_metrics(value: torch.Tensor) -> None:
-    with pytest.raises(FloatingPointError, match="update 13"):
-        exp._download_scalar_metrics({"good": torch.tensor(1.0), "bad": value}, 13)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for mixed-device scalar transfers")
-def test_scalar_download_handles_mixed_devices() -> None:
-    metrics = {
-        "cpu": torch.tensor(1.0),
-        "gpu": torch.tensor(2.0, device="cuda"),
-        "cpu2": torch.tensor(3.0),
-        "gpu2": torch.tensor(4.0, device="cuda"),
-    }
-    assert exp._download_scalar_metrics(metrics, 1) == {"cpu": 1.0, "gpu": 2.0, "cpu2": 3.0, "gpu2": 4.0}
-    assert metrics["cpu"].device.type == "cpu"
 
 
 def test_checkpoint_config_keeps_auxiliary_field_at_one() -> None:
@@ -617,48 +701,6 @@ def test_direct_prefix_sampling_rejects_short_suffix_before_drawing() -> None:
     assert torch.equal(before, sampler.generator.get_state())
 
 
-@pytest.mark.parametrize("batch_size", [512, 1024, 2048])
-def test_benchmark_optimizer_uses_reference_batch_hyperparameters(batch_size: int) -> None:
-    cfg = _tiny_cfg(batch_size=batch_size)
-    model = exp.GPT(cfg)
-    actual = exp._benchmark_optimizer(model, cfg, compiled_muon=False)
-    expected = exp.make_optimizer(model, replace(cfg, batch_size=512))
-    assert [{key: value for key, value in group.items() if key != "params"} for group in actual.param_groups] == [
-        {key: value for key, value in group.items() if key != "params"} for group in expected.param_groups
-    ]
-    if batch_size != 512:
-        with pytest.raises(ValueError, match="batch_size=512"):
-            exp.validate_config(replace(exp.TrainConfig(), batch_size=batch_size))
-
-
-def _benchmark_result(batch: int, speed: float, free: float = 0.2) -> dict:
-    return {
-        "status": "complete",
-        "batch_size": batch,
-        "windows": [
-            {
-                "transport": "prefetch",
-                "awr_active": True,
-                "samples_per_second": speed * factor,
-                "free_memory_fraction": free,
-            }
-            for factor in (0.99, 1.0, 1.01)
-        ],
-    }
-
-
-def test_benchmark_selection_rejects_incomplete_results() -> None:
-    with pytest.raises(ValueError, match="three completed"):
-        exp.benchmark_score({"status": "failed", "windows": []})
-
-
-def test_benchmark_validation_keeps_production_contract_separate() -> None:
-    exp.validate_benchmark_args(exp.BenchmarkArgs())
-    for changes in ({"batch_size": 1024}, {"bank_examples": 512}, {"case": "fp8"}):
-        with pytest.raises(ValueError):
-            exp.validate_benchmark_args(replace(exp.BenchmarkArgs(), **changes))
-
-
 @pytest.mark.parametrize("active", [False, True])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_training_validation_change_and_next_update_resume_are_exact(
@@ -682,7 +724,7 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     trusted_model = copy.deepcopy(checked_model)
 
     def setup(model):
-        optimizer = exp._benchmark_optimizer(model, cfg, compiled_muon=False)
+        optimizer = exp.make_optimizer(model, cfg)
         scheduler = exp.LambdaLR(optimizer, exp.lr_schedule(cfg))
         sampler = exp.PrefixSampler(7, device)
         return optimizer, scheduler, sampler
@@ -709,16 +751,15 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     for index in range(2):
         left = update(checked_model, checked, index, False, batch)
         right = update(trusted_model, trusted, index, True, batch)
-        differences = exp._benchmark_difference(
-            exp._benchmark_state(checked_model, left, checked[2]),
-            exp._benchmark_state(trusted_model, right, trusted[2]),
+        _assert_step_close(
+            _step_snapshot(checked_model, left, checked[2]),
+            _step_snapshot(trusted_model, right, trusted[2]),
         )
-        assert not any(differences.values())
     identity_masker = exp.IdentityMasker(11, 0.5)
     return_masker = exp.ReturnMasker(13, 0.2)
     first_masked = return_masker(identity_masker(batch.to("cpu")))
     trusted_model.return_calibration.observe(first_masked)
-    checkpoint = tmp_path / "benchmark-resume.pt"
+    checkpoint = tmp_path / "training-resume.pt"
     next_batch = copy.deepcopy(batch)
     next_batch.context.features["ego_position_x"].fill_(0.5)
     next_batch = replace(next_batch, returns=next_batch.returns + 1)
@@ -740,7 +781,7 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     expected_batch = return_masker(identity_masker(next_batch.to("cpu")))
     trusted_model.return_calibration.observe(expected_batch)
     expected = update(trusted_model, trusted, 2, True, expected_batch.to(device))
-    expected_state = exp._benchmark_state(trusted_model, expected, trusted[2])
+    expected_state = _step_snapshot(trusted_model, expected, trusted[2])
     saved = torch.load(checkpoint, weights_only=False)
     restored_model = exp.GPT(cfg).to(device)
     restored = setup(restored_model)
@@ -764,41 +805,25 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     assert torch.equal(restored_return.generator.get_state(), return_masker.generator.get_state())
     assert torch.equal(restored_identity.generator.get_state(), identity_masker.generator.get_state())
     actual = update(restored_model, restored, 2, True, restored_batch.to(device))
-    assert not any(
-        exp._benchmark_difference(expected_state, exp._benchmark_state(restored_model, actual, restored[2])).values()
-    )
-
-
-def test_validation_parity_allows_only_fp32_gradient_roundoff() -> None:
-    differences = {
-        "parameters_max_abs": 0.0,
-        "objective_abs": 0.0,
-        "gradients_relative_l2": 1.5e-7,
-        "gradients_max_abs": 6e-8,
-    }
-    exp._require_validation_parity(differences)
-    for name in differences:
-        with pytest.raises(AssertionError, match="changed the update"):
-            exp._require_validation_parity({**differences, name: 0.001})
-
-
-def test_execution_gain_must_exceed_control_variation() -> None:
-    control = _benchmark_result(512, 100)
-    assert not exp.benchmark_repeatable_gain(control, _benchmark_result(512, 101))
-    assert exp.benchmark_repeatable_gain(control, _benchmark_result(512, 105))
+    _assert_nested_equal(expected_state, _step_snapshot(restored_model, actual, restored[2]))
 
 
 def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
     cfg = replace(exp.TrainConfig(), train_compile_mode="max-autotune")
     exp.validate_config(cfg)
     payload = exp._checkpoint_config(cfg)
-    assert payload["experiment_id"] == "059_muon_history_decoder_v4"
-    assert payload["checkpoint_format_version"] == 3
+    assert payload["experiment_id"] == "059_muon_history_decoder_v5"
+    assert payload["checkpoint_format_version"] == 4
     assert exp.config_from_state(payload).train_compile_mode == "max-autotune"
-    for version in (1, 2):
+    for version in (1, 2, 3):
         with pytest.raises(ValueError, match="checkpoint format version"):
             exp.config_from_state({**payload, "checkpoint_format_version": version})
-    for previous in ("059_muon_history_decoder_v1", "059_muon_history_decoder_v2", "059_muon_history_decoder_v3"):
+    for previous in (
+        "059_muon_history_decoder_v1",
+        "059_muon_history_decoder_v2",
+        "059_muon_history_decoder_v3",
+        "059_muon_history_decoder_v4",
+    ):
         with pytest.raises(ValueError, match="checkpoint experiment_id"):
             exp.config_from_state({**payload, "experiment_id": previous})
     with pytest.raises(ValueError, match="unsupported training compile mode"):
@@ -1026,154 +1051,12 @@ def test_prefetch_calibrates_only_consumed_batches() -> None:
         prefetch.close()
 
 
-def test_numerical_acceptance_rejects_small_parameter_and_rng_drift() -> None:
-    import copy
-
-    reference = {
-        "sampler": torch.tensor([1]),
-        "rng": exp.rng_state(),
-        "batch_sha256": "bank",
-        "conditioning": {},
-        "parameters": {"large": torch.ones(10000), "small": torch.tensor([1.0])},
-        "gradients": {"small": torch.tensor([1.0])},
-        "updates": {"small": torch.tensor([0.001])},
-        "metrics": {"train/objective": 3.0},
-    }
-    for field in ("parameters", "gradients", "updates"):
-        actual = copy.deepcopy(reference)
-        actual[field]["small"] += 1
-        with pytest.raises(AssertionError, match="numerical acceptance"):
-            exp._benchmark_difference(reference, actual)
-    actual = copy.deepcopy(reference)
-    actual["gradients"]["small"] += 1e-7
-    exp._benchmark_difference(reference, actual)
-    actual["sampler"] += 1
-    with pytest.raises(AssertionError, match="sampler"):
-        exp._benchmark_difference(reference, actual)
-
-
-@pytest.mark.parametrize("patch", ["reuse_quantized_history", "reuse_action_embeddings", "groupwise_training_loss"])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_execution_candidate_forward_backward_and_update_parity(patch: str, device: str) -> None:
-    import copy
-
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA is required for compiled candidate parity")
-    cfg = _tiny_cfg(batch_size=1)
-    cfg = replace(
-        cfg,
-        arch=replace(cfg.arch, L_ctx=128, n_heads=2, temporal_heads=2),
-        amp_dtype="bfloat16" if device == "cuda" else "float32",
-    )
-    torch.manual_seed(133)
-    model = exp.GPT(cfg).to(device)
-    with torch.no_grad():
-        for projection in model.temporal.return_conditioner.projections:
-            projection.weight.normal_(std=0.01)
-            projection.bias.normal_(std=0.01)
-    initial = copy.deepcopy(model.state_dict())
-    batch = _return_batch(cfg).to(device)
-    # Distinct context states exercise full-rank gradients rather than repeating
-    # one synthetic token through every selected prefix.
-    for name in ("ego_position_x", "ego_position_y", "opp_position_x", "opp_position_y"):
-        batch.context.features[name].normal_(std=0.5)
-    batch.target.uniform_(0, 1)
-    prefixes = torch.arange(64, 96, device=device)[None]
-    results = []
-    gradients = []
-    deltas = []
-    for candidate in (False, True):
-        selected_cfg = replace(cfg, **{patch: candidate})
-        current = exp.GPT(selected_cfg).to(device)
-        current.load_state_dict(initial)
-        temporal = current.temporal.teacher_forced_nll_with_diagnostics
-        if device == "cuda":
-            temporal = torch.compile(temporal, dynamic=False, fullgraph=True)
-        loss, _, diagnostics = exp.microbatch_loss(
-            current,
-            batch,
-            selected_cfg,
-            step=4096,
-            valid_prefixes=32,
-            trunk_fn=current.forward_dense,
-            temporal_fn=temporal,
-            prefix_positions=prefixes,
-        )
-        loss.backward()
-        results.append((loss.detach(), diagnostics))
-        gradients.append({name: parameter.grad.detach().clone() for name, parameter in current.named_parameters()})
-        optimizer = exp.make_optimizer(current, selected_cfg)
-        exp.LambdaLR(optimizer, exp.lr_schedule(selected_cfg))
-        torch.nn.utils.clip_grad_norm_(current.parameters(), cfg.grad_clip)
-        optimizer.step()
-        deltas.append({name: parameter.detach() - initial[name] for name, parameter in current.named_parameters()})
-    torch.testing.assert_close(results[0][0], results[1][0], rtol=2e-5, atol=2e-4)
-    assert results[0][1].keys() == results[1][1].keys()
-    for name in results[0][1]:
-        torch.testing.assert_close(
-            results[0][1][name],
-            results[1][1][name],
-            rtol=0.01 if device == "cuda" else 2e-5,
-            atol=2e-4 if device == "cuda" else 2e-5,
-        )
-    if device == "cuda":
-        invariant = {
-            "sampler": torch.zeros(0, dtype=torch.uint8),
-            "rng": exp.rng_state(),
-            "batch_sha256": "fixed",
-            "conditioning": {},
-        }
-        snapshots = [
-            {
-                **invariant,
-                "parameters": {name: initial[name] + delta for name, delta in deltas[index].items()},
-                "updates": deltas[index],
-                "gradients": gradients[index],
-                "metrics": {"train/objective": float(results[index][0])},
-            }
-            for index in range(2)
-        ]
-        exp._benchmark_difference(snapshots[0], snapshots[1])
-    else:
-        for name in gradients[0]:
-            torch.testing.assert_close(gradients[0][name], gradients[1][name], rtol=3e-5, atol=3e-6)
-            torch.testing.assert_close(deltas[0][name], deltas[1][name], rtol=0.02, atol=2e-6)
-
-
 def test_production_run_name_fits_filesystem_component_limit() -> None:
     name = exp.make_run_name(
-        "059_muon_history_decoder", exp.model_tag(exp.TrainConfig()), "policy-world-v8", "v4-b512"
+        "059_muon_history_decoder", exp.model_tag(exp.TrainConfig()), "policy-world-v8", "v5-b512"
     )
     assert len(name.encode()) <= 255
-    assert "o59v4" in name and "wmax10" in name
-
-
-@pytest.mark.parametrize("version", ["o59-benchmark-bank-v1", "o58-benchmark-bank-v2"])
-def test_benchmark_rejects_old_bank_format(version: str, tmp_path: Path) -> None:
-    path = tmp_path / "bank.pt"
-    torch.save({"format": version}, path)
-    with pytest.raises(ValueError, match="unsupported benchmark bank format"):
-        exp._load_benchmark_bank(path, exp.checkpoint_sha256(path))
-
-
-def test_benchmark_reference_rejects_recipe_and_mask_changes() -> None:
-    import copy
-
-    cfg = exp.TrainConfig()
-    saved = {"identity_masker": {"generator": torch.tensor([1])}, "return_masker": {"generator": torch.tensor([2])}}
-    reference = {
-        "format": "o59-benchmark-reference-v2",
-        "bank_sha256": "bank",
-        "config": exp.asdict(cfg),
-        "conditioning_protocol": exp.conditioning_protocol(),
-        **copy.deepcopy(saved),
-    }
-    exp._validate_benchmark_reference(reference, saved, "bank", replace(cfg, reuse_action_embeddings=True))
-    with pytest.raises(AssertionError, match="scientific configuration"):
-        exp._validate_benchmark_reference(reference, saved, "bank", replace(cfg, return_dropout=0.3))
-    saved["return_masker"]["generator"] += 1
-    with pytest.raises(AssertionError, match="return_masker"):
-        exp._validate_benchmark_reference(reference, saved, "bank", cfg)
+    assert "o59v5" in name and "wmax10" in name
 
 
 class _ResumeReplayAdapter:
@@ -1311,7 +1194,7 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
             prefix_sampler=sampler,
             prefix_validated_on_cpu=True,
         )
-        return exp._benchmark_state(model, result, sampler)
+        return _step_snapshot(model, result, sampler)
 
     with ExitStack() as resources:
         original = setup(resources)
@@ -1346,7 +1229,7 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
         actual_batch, _ = restored[-1].next()
         assert exp._return_batch_sha256(actual_batch) == exp._return_batch_sha256(expected_batch)
         actual = update(restored, actual_batch, 5)
-        assert not any(exp._benchmark_difference(expected, actual).values())
+        _assert_nested_equal(expected, actual)
         assert restored[-1].drained
 
 

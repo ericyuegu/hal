@@ -1,0 +1,71 @@
+{
+  "format": "o59-throughput-results-v3",
+  "experiment_id": "059_muon_history_decoder_v5",
+  "base_git_sha": "ec5069bf3a18ae6c0fd8306684e3655226985071",
+  "batch_size": 512,
+  "compile_mode": "reduce-overhead",
+  "selection_rule": "all three active-AWR prefetch treatment windows exceed all three control windows",
+  "bank_sha256": "625ded22595305fdb15df5836f29eb10602e2776d639c1cb553a4c3d0ad4979c",
+  "reference_sha256": "d13edf0295b7563482dca07fd9f68cfad0653674eb2a6de34afa750098218505",
+  "modal": {
+    "app_id": "ap-vxworW0PW7QS6LVbKwkIwm",
+    "function_call_id": "fc-01M30P63N6TQ6ZHG26R39Y4Z2A",
+    "launch_id": "0f5290d426da49f88192ddbf983b5aa9",
+    "dashboard": "https://modal.com/apps/ap-vxworW0PW7QS6LVbKwkIwm",
+    "elapsed_seconds": 2206.854509546,
+    "compiler_cache_sha256": "ad92c8bb1229c3eb78e6287d033df9dfe6c5dad0383f54b932787747b04dee60"
+  },
+  "cases": [
+    {
+      "case": "baseline",
+      "job_id": "9efdfac6aefa467d84c6cbd207e954d3",
+      "source_sha256": "11fb6be7cbc5913b78e07637bdca2f8b015e43fd466b1b9f580190ddb836cf4b",
+      "active_device_samples_per_second": [1288.4745648290484, 1289.5094714460736, 1286.3433144933763],
+      "active_prefetch_samples_per_second": [1286.6489189590043, 1287.8147872338895, 1283.4047664189686]
+    },
+    {
+      "case": "reuse-history",
+      "job_id": "5632f4370eef452c8d0ca7ce1c7ecf5d",
+      "source_sha256": "063667698d6db7e34343f932076a238169dd5cb3424332caea5c6b5e37fb9171",
+      "active_device_samples_per_second": [1298.2112129699608, 1292.1951383308515, 1289.0079844878092],
+      "active_prefetch_samples_per_second": [1286.438105699553, 1288.5597642514604, 1283.6717224593854],
+      "promoted": false
+    },
+    {
+      "case": "reuse-embeddings",
+      "job_id": "a71ce8bb48ac4ef3bf47f968a8f6b11e",
+      "source_sha256": "d657b566fc66efe649d305d5a9372c3530a0d032adcf615b938a63fa30b29017",
+      "active_device_samples_per_second": [1296.9197060147785, 1294.3236732154617, 1287.6411904969],
+      "active_prefetch_samples_per_second": [1289.3894683338503, 1289.9070378731033, 1285.3108930422486],
+      "promoted": false
+    },
+    {
+      "case": "groupwise-loss",
+      "job_id": "2ef359683a0646e1a59cd1c0304df782",
+      "source_sha256": "83ac78a9855160997d37b1535f8e1730b051671c344d65c39ec10e03a3be07d1",
+      "active_device_samples_per_second": [1296.7678486267093, 1288.831105630887, 1287.9752981829713],
+      "active_prefetch_samples_per_second": [1288.159614533249, 1285.404488215918, 1285.4260835492444],
+      "promoted": false
+    },
+    {
+      "case": "repeated-control",
+      "job_id": "ff0299d927304f89997ea95aa1ea798a",
+      "source_sha256": "07101de48b9f1140cc9fe7d79bc79e5722709306ee790c1723dc5f12e38b75b4",
+      "active_device_samples_per_second": [1288.7787292527723, 1285.8300388072166, 1287.3327876848234],
+      "active_prefetch_samples_per_second": [1285.3114189152961, 1287.2864377541005, 1285.4545792821245]
+    }
+  ],
+  "maximum_numerical_differences": {
+    "objective_abs": 0.0000247955322265625,
+    "parameter_max_abs": 0.000000548236130271107,
+    "gradient_max_abs": 0.000123683363199234,
+    "update_max_abs": 0.000000548236130271107
+  },
+  "profile_share": {
+    "rmsnorm_percent_of_gpu_kernel_time": 7.6833,
+    "short_attention_upper_bound_less_than_percent_of_gpu_kernel_time": 2.0,
+    "optimizer_percent_of_update_time": 3.9,
+    "custom_kernel_threshold_percent": 10.0
+  },
+  "selected_execution": "plain"
+}

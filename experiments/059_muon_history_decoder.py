@@ -170,18 +170,16 @@ from hal.training.player_identity import vocabulary_buffer
 from hal.training.runs import make_run_name
 from hal.training.runs import setup_run_dir
 from hal.training.system_metrics import HostMetricsSampler
-from hal.training.trunk import Block as TrunkBlock
 from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 from hal.training.trunk import apply_rotary_emb
-from hal.training.trunk import dense_mask
 from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v4"
-_CHECKPOINT_FORMAT_VERSION: Final[int] = 3
+_EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v5"
+_CHECKPOINT_FORMAT_VERSION: Final[int] = 4
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (
@@ -603,14 +601,9 @@ class TrainConfig:
     system_metrics_interval_s: float = 5.0
     process_metrics_interval_s: float = 30.0
     cache_metrics_interval_s: float = 30.0
-    phase_timing_every: int = 256
     identity_dropout: float = 0.10
     return_conditioning: bool = True
     return_dropout: float = 0.2
-    reuse_quantized_history: bool = False
-    reuse_action_embeddings: bool = True
-    groupwise_training_loss: bool = False
-    continuation_diagnostics: Annotated[bool, tyro.conf.Suppress] = False
     parent_run_name: Annotated[str | None, tyro.conf.Suppress] = None
     parent_checkpoint_name: Annotated[str | None, tyro.conf.Suppress] = None
     parent_checkpoint_sha256: Annotated[str | None, tyro.conf.Suppress] = None
@@ -759,10 +752,7 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("auxiliary_loss_weight must remain 1.0 for checkpoint compatibility")
     if cfg.awr != AWRCalibration():
         raise ValueError("O59 freezes its value and AWR calibration")
-    for name, value in (
-        ("system_metrics_every", cfg.system_metrics_every),
-        ("phase_timing_every", cfg.phase_timing_every),
-    ):
+    for name, value in (("system_metrics_every", cfg.system_metrics_every),):
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
     for name, value in (
@@ -837,7 +827,7 @@ def validate_config(cfg: TrainConfig) -> None:
         or cfg.grad_clip != 1.0
     ):
         raise ValueError("O59 optimizer hyperparameters are frozen")
-    if cfg.muon_lr_multiplier != 1.0 or cfg.continuation_diagnostics:
+    if cfg.muon_lr_multiplier != 1.0:
         raise ValueError("O59 freezes optimizer hyperparameters across continuations")
     if cfg.arch == Architecture() and (
         cfg.max_steps != 131_072 or cfg.warmup_steps != 4096 or cfg.stable_updates != 98_304
@@ -954,38 +944,6 @@ def amp_context(cfg: TrainConfig, device: torch.device | str):
     return contextlib.nullcontext()
 
 
-_CUDA_PHASES: tuple[tuple[str, str, str], ...] = (
-    ("h2d", "start", "h2d_end"),
-    ("target_prep", "h2d_end", "target_prep_end"),
-    ("trunk", "target_prep_end", "trunk_end"),
-    ("temporal", "trunk_end", "temporal_end"),
-    ("objective", "temporal_end", "objective_end"),
-    ("backward", "objective_end", "backward_end"),
-    ("grad_norm", "backward_end", "grad_norm_end"),
-    ("optimizer", "grad_norm_end", "optimizer_end"),
-)
-
-
-class CudaPhaseTimer:
-    """Measure named phases on the current CUDA stream with one final sync."""
-
-    def __init__(self) -> None:
-        self._events: dict[str, torch.cuda.Event] = {}
-
-    def record(self, name: str) -> None:
-        event = torch.cuda.Event(enable_timing=True)
-        event.record()
-        self._events[name] = event
-
-    def metrics(self) -> dict[str, float]:
-        """Return seconds for every phase whose boundary events were recorded."""
-        metrics: dict[str, float] = {}
-        for metric, start, end in _CUDA_PHASES:
-            if start in self._events and end in self._events:
-                metrics[f"profile/{metric}_s"] = self._events[start].elapsed_time(self._events[end]) / 1000
-        return metrics
-
-
 def decoder_rmsnorm(x: Tensor) -> Tensor:
     return F.rms_norm(x, (x.shape[-1],), eps=1e-6)
 
@@ -1018,9 +976,15 @@ class NonlinearActionHead(nn.Module):
         self.up = nn.Linear(d_model, d_hidden, bias=False)
         self.down = nn.Linear(d_hidden, vocab)
 
+    def normalize(self, x: Tensor) -> Tensor:
+        return F.rms_norm(x, (x.shape[-1],), eps=self.norm_eps)
+
+    def project(self, x: Tensor) -> Tensor:
+        """Apply the head MLP to an input prepared by its caller."""
+        return self.down(F.silu(self.up(x)))
+
     def forward(self, x: Tensor) -> Tensor:
-        normalized = F.rms_norm(x, (x.shape[-1],), eps=self.norm_eps)
-        return self.down(F.silu(self.up(normalized)))
+        return self.project(self.normalize(x))
 
     def forward_with_input(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """Return logits and the normalized tensor read by the hidden layer."""
@@ -1029,10 +993,15 @@ class NonlinearActionHead(nn.Module):
 
     def projection_activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Return the output and the tensors at both projection boundaries."""
-        normalized = F.rms_norm(x, (x.shape[-1],), eps=self.norm_eps)
-        up_output = self.up(normalized)
+        normalized = self.normalize(x)
+        output, up_output, down_input = self.project_activations(normalized)
+        return output, normalized, up_output, down_input
+
+    def project_activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Return the output and activations for an input prepared by its caller."""
+        up_output = self.up(x)
         down_input = F.silu(up_output)
-        return self.down(down_input), normalized, up_output, down_input
+        return self.down(down_input), up_output, down_input
 
 
 def _sampled_quantile(tensor: Tensor, percentile: float, *, absolute: bool = False) -> Tensor:
@@ -1314,8 +1283,6 @@ class CausalTemporalDecoder(nn.Module):
         self.live_horizons = (cfg.prediction_frames,)
         self.d_model = cfg.arch.temporal_d_model
         self.training_diagnostics = cfg.optimizer == "adamw"
-        self.reuse_action_embeddings = cfg.reuse_action_embeddings
-        self.groupwise_training_loss = cfg.groupwise_training_loss
         controller_width = CONTROLLER_GROUP_COUNT * cfg.arch.action_embed_dim
         self.offset_embedding = nn.Embedding(cfg.arch.sample_chunk_length + 1, cfg.arch.offset_embed_dim)
         self.token_projection = nn.Linear(
@@ -1420,7 +1387,6 @@ class CausalTemporalDecoder(nn.Module):
         targets: Tensor,
         return_value: Tensor,
         condition_present: Tensor,
-        target_embeddings: dict[str, Tensor] | None = None,
     ) -> Tensor:
         prefix_shape = tuple(prefix_positions.shape)
         expected = (*prefix_shape, len(self.head_offsets), CONTROLLER_GROUP_COUNT)
@@ -1432,15 +1398,9 @@ class CausalTemporalDecoder(nn.Module):
         batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
         selected_hidden = hidden[batch_indices, prefix_positions]
         previous = torch.cat((observed[:, :, None], targets[..., :-1, :]), dim=2)
-        previous_embedded = None
-        if self.reuse_action_embeddings:
-            embedded = self.codec.embed_groups(targets) if target_embeddings is None else target_embeddings
-            target_frame = self.codec.embed_frame(targets, embedded)
-            observed_frame = self.codec.embed_frame(observed)
-            previous_embedded = torch.cat((observed_frame[:, :, None], target_frame[..., :-1, :]), dim=2)
         trunk = decoder_rmsnorm(selected_hidden)
         offsets = torch.tensor(self.head_offsets, device=hidden.device)
-        x = self._state_bias(trunk)[:, :, None] + self._step_features(previous, offsets, previous_embedded)
+        x = self._state_bias(trunk)[:, :, None] + self._step_features(previous, offsets)
         x = decoder_rmsnorm(x)
         x = x.reshape(hidden.shape[0] * prefix_positions.shape[1], len(self.head_offsets), self.d_model)
         conditioning = self.return_conditioner(return_value, condition_present)
@@ -1461,14 +1421,16 @@ class CausalTemporalDecoder(nn.Module):
         return decoder_rmsnorm(x.view(*prefix_shape, len(self.head_offsets), self.d_model))
 
     def group_features(self, states: Tensor, name: str, embedded: dict[str, Tensor]) -> Tensor:
+        head = cast(NonlinearActionHead, self.outputs[name])
+        normalized = head.normalize(states)
         position = CONTROLLER_DECODE_ORDER.index(name)
         if position == 0:
-            return states
+            return normalized
         prefix = torch.cat([embedded[group] for group in CONTROLLER_DECODE_ORDER[:position]], dim=-1)
         raw_scale, raw_shift = self.group_condition[name](prefix).chunk(2, dim=-1)
         scale = torch.tanh(raw_scale)
         shift = raw_shift
-        return states * (1.0 + scale) + shift
+        return normalized * (1.0 + scale) + shift
 
     def _teacher_forced_outputs(
         self,
@@ -1481,28 +1443,27 @@ class CausalTemporalDecoder(nn.Module):
         condition_present: Tensor,
     ) -> tuple[
         dict[str, Tensor],
-        tuple[Tensor, Tensor, Tensor, Tensor],
+        tuple[Tensor, Tensor, Tensor],
         dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
     ]:
         """Return group logits and tensors at the action projection boundaries."""
-        embedded = self.codec.embed_groups(targets) if self.reuse_action_embeddings else None
         states = self.teacher_forced_states(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present, embedded
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
         batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
         selected_hidden = hidden[batch_indices, prefix_positions]
-        if embedded is None:
-            embedded = self.codec.embed_groups(targets)
+        embedded = self.codec.embed_groups(targets)
         logits: dict[str, Tensor] = {}
         projection_values: dict[
             str,
             tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
         ] = {}
-        button_values: tuple[Tensor, Tensor, Tensor] | None = None
+        button_values: tuple[Tensor, Tensor] | None = None
         for name in CONTROLLER_GROUP_NAMES:
             features = self.group_features(states, name, embedded)
             head = cast(NonlinearActionHead, self.outputs[name])
-            head_output, head_input, up_output, down_input = head.projection_activations(features)
+            head_output, up_output, down_input = head.project_activations(features)
+            head_input = features
             trunk_head = cast(NonlinearActionHead, self.trunk_outputs[name])
             trunk_output, trunk_input, trunk_up_output, trunk_down_input = trunk_head.projection_activations(
                 selected_hidden
@@ -1519,7 +1480,7 @@ class CausalTemporalDecoder(nn.Module):
                 trunk_output,
             )
             if name == "buttons":
-                button_values = (features, head_input, combined_logits)
+                button_values = (head_input, combined_logits)
             logits[name] = self._center(combined_logits)
         if button_values is None:
             raise RuntimeError("button head was not evaluated")
@@ -1564,17 +1525,6 @@ class CausalTemporalDecoder(nn.Module):
         return_value: Tensor,
         condition_present: Tensor,
     ) -> Tensor:
-        if self.groupwise_training_loss:
-            return self.teacher_forced_groupwise_nll(
-                hidden,
-                ctx_pad,
-                prefix_positions,
-                observed,
-                targets,
-                return_value,
-                condition_present,
-                diagnostics=False,
-            )[0]
         logits = self.teacher_forced_logits_by_group(
             hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
@@ -1591,10 +1541,6 @@ class CausalTemporalDecoder(nn.Module):
         condition_present: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Return NLL plus a compact button-boundary stability signal."""
-        if self.groupwise_training_loss:
-            return self.teacher_forced_groupwise_nll(
-                hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present, diagnostics=True
-            )
         logits, button_values, projection_values = self._teacher_forced_outputs(
             hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
@@ -1606,9 +1552,8 @@ class CausalTemporalDecoder(nn.Module):
 
     @staticmethod
     def _button_metrics(
-        features: Tensor, head_input: Tensor, raw_logits: Tensor, button_mask: Tensor, targets: Tensor
+        head_input: Tensor, raw_logits: Tensor, button_mask: Tensor, targets: Tensor
     ) -> dict[str, Tensor]:
-        feature_rms = features.detach().float().square().mean(dim=-1).sqrt()
         input_values = head_input.detach()
         raw_logits_values = raw_logits.detach()
         button_targets = targets[..., BUTTONS_GROUP, None]
@@ -1617,7 +1562,6 @@ class CausalTemporalDecoder(nn.Module):
         competing_logits = legal_logits.scatter(-1, button_targets, float("-inf")).amax(dim=-1).float()
         margin = target_logits - competing_logits
         return {
-            "stability/button_pre_norm_rms_min": feature_rms.amin(),
             "stability/button_input_abs_p999": _sampled_quantile(input_values, 99.9, absolute=True),
             "stability/button_logit_abs_p999": _sampled_quantile(raw_logits_values, 99.9, absolute=True),
             "stability/button_margin_mean": margin.mean(),
@@ -1649,62 +1593,6 @@ class CausalTemporalDecoder(nn.Module):
         metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/down", trunk_output))
         metrics.update(_activation_output_metrics(f"{prefix}/combined_centered_logits", logits))
         return metrics
-
-    def teacher_forced_groupwise_nll(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-        *,
-        diagnostics: bool,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        embedded = self.codec.embed_groups(targets)
-        states = self.teacher_forced_states(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present, embedded
-        )
-        rows = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
-        selected_hidden = hidden[rows, prefix_positions]
-        losses: list[Tensor] = []
-        metrics: dict[str, Tensor] = {}
-        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
-            features = self.group_features(states, name, embedded)
-            head = cast(NonlinearActionHead, self.outputs[name])
-            head_output, head_input, up_output, down_input = head.projection_activations(features)
-            trunk_head = cast(NonlinearActionHead, self.trunk_outputs[name])
-            trunk_output, trunk_input, trunk_up_output, trunk_down_input = trunk_head.projection_activations(
-                selected_hidden
-            )
-            raw_logits = head_output + trunk_output[..., None, :]
-            logits = self._center(raw_logits)
-            if name == "buttons":
-                mask = self.codec.button_mask(targets[..., TRIGGERS_GROUP])
-                logits = logits.masked_fill(mask, float("-inf"))
-                if diagnostics:
-                    metrics.update(self._button_metrics(features, head_input, raw_logits, mask, targets))
-            losses.append(
-                F.cross_entropy(
-                    logits.float().reshape(-1, CONTROLLER_GROUP_VOCABS[group]),
-                    targets[..., group].reshape(-1),
-                    reduction="none",
-                ).view(*targets.shape[:-1])
-            )
-            if diagnostics and self.training_diagnostics:
-                values = (
-                    head_input,
-                    up_output,
-                    down_input,
-                    head_output,
-                    trunk_input,
-                    trunk_up_output,
-                    trunk_down_input,
-                    trunk_output,
-                )
-                metrics.update(self._group_metrics(name, values, logits))
-        return torch.stack(losses, dim=-1), metrics
 
     def teacher_forced_logits(
         self,
@@ -1757,7 +1645,10 @@ class CausalTemporalDecoder(nn.Module):
             target = targets[:, depth]
             embedded = self.codec.embed_groups(target)
             group_logits = {
-                name: self._center(self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name])
+                name: self._center(
+                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    + trunk_logits[name]
+                )
                 for name in CONTROLLER_GROUP_NAMES
             }
             group_logits["buttons"] = group_logits["buttons"].masked_fill(
@@ -1874,7 +1765,8 @@ class CausalTemporalDecoder(nn.Module):
             picks: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
                 logits = self._center(
-                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
+                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    + trunk_logits[name]
                 )
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
@@ -1934,7 +1826,8 @@ class CausalTemporalDecoder(nn.Module):
             frame_logits: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
                 logits = self._center(
-                    self.outputs[name](self.group_features(state, name, embedded)) + trunk_logits[name]
+                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    + trunk_logits[name]
                 )
                 if name == "buttons":
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
@@ -2217,7 +2110,6 @@ def prepared_targets(
     Int[Tensor, "B L_ctx n_groups"],
     Int[Tensor, "B L_ctx n_offsets n_groups"],
     Bool[Tensor, "B L_ctx"],
-    Int[Tensor, "B full_context n_groups"],
 ]:
     """Quantize history+future exactly once, then align every selected offset."""
     history = stack_actions(batch.context.features)
@@ -2226,7 +2118,7 @@ def prepared_targets(
     targets = torch.stack([full[:, offset : offset + length] for offset in model.head_offsets], dim=2)
     valid = torch.arange(length, device=full.device)[None, :] >= batch.context.ctx_pad[:, None]
     suffix = slice(length // 2, None)
-    return full[:, :length][:, suffix], targets[:, suffix], valid[:, suffix], full[:, :length]
+    return full[:, :length][:, suffix], targets[:, suffix], valid[:, suffix]
 
 
 class DeviceBatchPrefetcher:
@@ -2591,7 +2483,6 @@ def microbatch_loss(
     trunk_fn: Callable,
     temporal_fn: Callable,
     prefix_positions: Tensor,
-    phase_timer: CudaPhaseTimer | None = None,
 ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
     """Compute the learned-value AWR policy and critic losses.
 
@@ -2600,15 +2491,9 @@ def microbatch_loss(
     """
     if not isinstance(batch, ReturnBatch):
         raise TypeError(f"advantage training needs an ReturnBatch, got {type(batch).__name__}")
-    dense_history, dense_targets, dense_valid, context_actions = prepared_targets(model, batch)
-    if phase_timer is not None:
-        phase_timer.record("target_prep_end")
+    dense_history, dense_targets, dense_valid = prepared_targets(model, batch)
     with amp_context(cfg, DEVICE):
-        hidden = trunk_fn(
-            batch.context.features, batch.context.ctx_pad, context_actions if cfg.reuse_quantized_history else None
-        )
-        if phase_timer is not None:
-            phase_timer.record("trunk_end")
+        hidden = trunk_fn(batch.context.features, batch.context.ctx_pad, None)
         suffix_start = cfg.arch.direct_loss_start
         local_positions = prefix_positions - suffix_start
         batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
@@ -2629,8 +2514,6 @@ def microbatch_loss(
             button_diagnostics: dict[str, Tensor] = {}
         else:
             dense_nll, button_diagnostics = temporal_output
-        if phase_timer is not None:
-            phase_timer.record("temporal_end")
     value_hidden = hidden[:, suffix_start:]
     value_features = decoder_rmsnorm(value_hidden).detach()
     if cfg.optimizer == "adamw":
@@ -2699,8 +2582,6 @@ def microbatch_loss(
         **value_diagnostics,
         **projection_attribution,
     }
-    if phase_timer is not None:
-        phase_timer.record("objective_end")
     return loss, nll_sum.detach(), extra
 
 
@@ -2773,13 +2654,9 @@ def val_metrics(model: GPT, batches: list[ReturnBatch], cfg: TrainConfig) -> dic
     try:
         for cpu_batch in batches:
             batch = cpu_batch.to(device)
-            history, targets, valid, context_actions = prepared_targets(model, batch)
+            history, targets, valid = prepared_targets(model, batch)
             with amp_context(cfg, device):
-                hidden = model.forward_dense(
-                    batch.context.features,
-                    batch.context.ctx_pad,
-                    context_actions if cfg.reuse_quantized_history else None,
-                )
+                hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, None)
                 prefix_positions = torch.arange(cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=device).expand(
                     hidden.shape[0], -1
                 )
@@ -3004,272 +2881,6 @@ def _return_batch_sha256(batch: ReturnBatch) -> str:
         digest.update(json.dumps(tuple(tensor.shape)).encode())
         digest.update(tensor.numpy().tobytes())
     return digest.hexdigest()
-
-
-@contextlib.contextmanager
-def _capture_linear_outputs(modules: Iterable[nn.Linear]) -> Iterator[list[Tensor]]:
-    outputs: list[Tensor] = []
-    handles = []
-
-    def capture(_module: nn.Module, _inputs: tuple[Tensor, ...], output: Tensor) -> None:
-        outputs.append(output.detach())
-
-    try:
-        for module in modules:
-            handles.append(module.register_forward_hook(capture))
-        yield outputs
-    finally:
-        for handle in handles:
-            handle.remove()
-
-
-def _normalized_attention_entropy(qkv: Tensor, n_heads: int, mask: Tensor, rotary: Rotary) -> tuple[Tensor, Tensor]:
-    batch, length, fused_width = qkv.shape
-    d_model = fused_width // 3
-    head_dim = d_model // n_heads
-    q, k, _v = qkv.split(d_model, dim=-1)
-    q = q.view(batch, length, n_heads, head_dim)
-    k = k.view(batch, length, n_heads, head_dim)
-    cos, sin = rotary(q)
-    q = apply_rotary_emb(q, cos, sin).transpose(1, 2).float()
-    k = apply_rotary_emb(k, cos, sin).transpose(1, 2).float()
-    scores = (q @ k.transpose(-2, -1)) * (head_dim**-0.5)
-    keep = mask.expand(batch, 1, length, length)
-    log_probabilities = F.log_softmax(scores.masked_fill(~keep, -torch.inf), dim=-1)
-    probabilities = log_probabilities.exp()
-    entropy = -(probabilities * log_probabilities.masked_fill(~keep, 0)).sum(dim=-1)
-    legal_counts = keep.sum(dim=-1).expand(batch, n_heads, length)
-    valid = legal_counts > 1
-    normalized = entropy / legal_counts.clamp_min(2).log()
-    head_denominator = valid.sum(dim=(0, 2)).clamp_min(1)
-    head_means = normalized.masked_fill(~valid, 0).sum(dim=(0, 2)) / head_denominator
-    return normalized[valid].mean(), head_means.min()
-
-
-@torch.no_grad()
-def fixed_policy_diagnostics(
-    model: GPT,
-    batch: ReturnBatch,
-    cfg: TrainConfig,
-) -> tuple[dict[str, Tensor], dict[str, Tensor], Tensor]:
-    """Return fixed-batch log probabilities and stability diagnostics."""
-    was_training = model.training
-    cpu_rng_state = torch.get_rng_state()
-    cuda_rng_states = torch.cuda.get_rng_state_all() if next(model.parameters()).device.type == "cuda" else None
-    device_batch = batch.to(next(model.parameters()).device)
-    trunk_blocks = [cast(TrunkBlock, block) for block in model.trunk.blocks]
-    trunk_modules = [block.attn.c_attn for block in trunk_blocks]
-    temporal_modules = [cast(TemporalBlock, block).qkv for block in model.temporal.blocks]
-    try:
-        model.eval()
-        with (
-            _capture_linear_outputs(trunk_modules) as trunk_qkv,
-            _capture_linear_outputs(temporal_modules) as temporal_qkv,
-        ):
-            history, targets, valid, context_actions = prepared_targets(model, device_batch)
-            with amp_context(cfg, device_batch.target.device):
-                hidden = model.forward_dense(
-                    device_batch.context.features,
-                    device_batch.context.ctx_pad,
-                    context_actions if cfg.reuse_quantized_history else None,
-                )
-                prefix_positions = torch.arange(
-                    cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=hidden.device
-                ).expand(hidden.shape[0], -1)
-                logits = model.temporal.teacher_forced_logits_by_group(
-                    hidden,
-                    device_batch.context.ctx_pad,
-                    prefix_positions,
-                    history,
-                    targets,
-                    device_batch.future_return[:, cfg.arch.direct_loss_start :],
-                    device_batch.available[:, cfg.arch.direct_loss_start :],
-                )
-    finally:
-        model.train(was_training)
-        torch.set_rng_state(cpu_rng_state)
-        if cuda_rng_states is not None:
-            torch.cuda.set_rng_state_all(cuda_rng_states)
-    if len(trunk_qkv) != cfg.arch.n_layers or len(temporal_qkv) != cfg.arch.temporal_layers:
-        raise RuntimeError("fixed diagnostics did not capture every attention layer")
-
-    metrics: dict[str, Tensor] = {}
-    centered_values: list[Tensor] = []
-    log_probabilities: dict[str, Tensor] = {}
-    for name, group_logits in logits.items():
-        float_logits = group_logits.detach().float()
-        legal = torch.isfinite(float_logits)
-        legal_count = legal.sum(dim=-1, keepdim=True)
-        if not bool((legal_count > 0).all()):
-            raise RuntimeError(f"fixed diagnostic batch has no legal {name} class")
-        legal_sum = float_logits.masked_fill(~legal, 0).sum(dim=-1, keepdim=True)
-        centered = (float_logits - legal_sum / legal_count).masked_fill(~legal, 0)
-        selected = centered[legal]
-        centered_values.append(selected)
-        prefix = f"diagnostics/fixed_logits/{name}"
-        metrics[f"{prefix}/rms"] = selected.square().mean().sqrt()
-        metrics[f"{prefix}/abs_p999"] = _sampled_quantile(selected, 99.9, absolute=True)
-        log_probabilities[name] = F.log_softmax(float_logits, dim=-1).cpu()
-    all_centered = torch.cat(centered_values)
-    metrics["diagnostics/fixed_logits/all/rms"] = all_centered.square().mean().sqrt()
-    metrics["diagnostics/fixed_logits/all/abs_p999"] = _sampled_quantile(all_centered, 99.9, absolute=True)
-
-    trunk_mask = dense_mask(device_batch.context.ctx_pad, cfg.arch.L_ctx, cfg.arch.attn_window)
-    trunk_means: list[Tensor] = []
-    for index, (qkv, block) in enumerate(zip(trunk_qkv, trunk_blocks, strict=True)):
-        mean, minimum = _normalized_attention_entropy(qkv, cfg.arch.n_heads, trunk_mask, block.attn.rotary)
-        metrics[f"diagnostics/attention/trunk/layer_{index:02d}/mean"] = mean
-        metrics[f"diagnostics/attention/trunk/layer_{index:02d}/min_head_mean"] = minimum
-        trunk_means.append(mean)
-    temporal_mask = torch.ones(
-        (1, 1, len(cfg.arch.head_offsets), len(cfg.arch.head_offsets)),
-        dtype=torch.bool,
-        device=device_batch.target.device,
-    ).tril()
-    temporal_means: list[Tensor] = []
-    for index, (qkv, block) in enumerate(zip(temporal_qkv, model.temporal.blocks, strict=True)):
-        temporal_block = cast(TemporalBlock, block)
-        mean, minimum = _normalized_attention_entropy(
-            qkv,
-            cfg.arch.temporal_heads,
-            temporal_mask,
-            temporal_block.rotary,
-        )
-        metrics[f"diagnostics/attention/temporal/layer_{index:02d}/mean"] = mean
-        metrics[f"diagnostics/attention/temporal/layer_{index:02d}/min_head_mean"] = minimum
-        temporal_means.append(mean)
-    metrics["diagnostics/attention/trunk/mean"] = torch.stack(trunk_means).mean()
-    metrics["diagnostics/attention/temporal/mean"] = torch.stack(temporal_means).mean()
-    return log_probabilities, metrics, valid.detach().cpu()
-
-
-def _fixed_policy_kl(
-    reference: dict[str, Tensor],
-    current: dict[str, Tensor],
-    valid: Tensor,
-    namespace: str,
-) -> dict[str, Tensor]:
-    metrics: dict[str, Tensor] = {}
-    total = torch.zeros(())
-    for name in CONTROLLER_GROUP_NAMES:
-        reference_log = reference[name].float()
-        current_log = current[name].float()
-        if reference_log.shape != current_log.shape or not torch.equal(
-            torch.isfinite(reference_log), torch.isfinite(current_log)
-        ):
-            raise ValueError(f"fixed policy support changed for {name}")
-        legal = torch.isfinite(reference_log)
-        terms = torch.where(legal, reference_log.exp() * (reference_log - current_log), 0)
-        row_kl = terms.sum(dim=-1)
-        selected = row_kl[valid[..., None].expand_as(row_kl)]
-        value = selected.mean()
-        metrics[f"diagnostics/fixed_policy_kl/{namespace}/{name}_nats"] = value
-        total += value
-    metrics[f"diagnostics/fixed_policy_kl/{namespace}/total_nats"] = total
-    return metrics
-
-
-@dataclass(slots=True)
-class FixedDiagnosticTracker:
-    batch: ReturnBatch
-    batch_sha256: str
-    baseline_log_probabilities: dict[str, Tensor]
-    previous_log_probabilities: dict[str, Tensor]
-    previous_update: int
-
-    @classmethod
-    def create(
-        cls,
-        model: GPT,
-        validation: list[ReturnBatch],
-        cfg: TrainConfig,
-        update: int,
-    ) -> tuple[FixedDiagnosticTracker, dict[str, Tensor]]:
-        if not validation or validation[0].context.batch < 8:
-            raise RuntimeError("validation does not contain the eight-row fixed diagnostic batch")
-        batch = validation[0].slice(8).to("cpu")
-        if bool((batch.context.ctx_pad != 0).any()):
-            raise RuntimeError("the fixed diagnostic batch must have complete contexts")
-        log_probabilities, metrics, valid = fixed_policy_diagnostics(model, batch, cfg)
-        metrics.update(_fixed_policy_kl(log_probabilities, log_probabilities, valid, "from_parent"))
-        metrics.update(_fixed_policy_kl(log_probabilities, log_probabilities, valid, "from_previous"))
-        return (
-            cls(batch, _return_batch_sha256(batch), log_probabilities, log_probabilities, update),
-            metrics,
-        )
-
-    @classmethod
-    def from_state(cls, state: dict[str, object]) -> FixedDiagnosticTracker:
-        expected = {
-            "batch",
-            "batch_sha256",
-            "baseline_log_probabilities",
-            "previous_log_probabilities",
-            "previous_update",
-        }
-        if set(state) != expected:
-            raise ValueError("fixed diagnostic state has the wrong fields")
-        batch_state = state["batch"]
-        if not isinstance(batch_state, dict):
-            raise TypeError("fixed diagnostic batch state must be a mapping")
-        batch = _return_batch_from_state(cast(dict[str, object], batch_state))
-        batch_sha256 = state["batch_sha256"]
-        if not isinstance(batch_sha256, str) or batch_sha256 != _return_batch_sha256(batch):
-            raise ValueError("fixed diagnostic batch hash does not match its tensors")
-        baseline = state["baseline_log_probabilities"]
-        previous = state["previous_log_probabilities"]
-        previous_update = state["previous_update"]
-        if not isinstance(baseline, dict) or not isinstance(previous, dict):
-            raise TypeError("fixed diagnostic policy references must be mappings")
-        if set(baseline) != set(CONTROLLER_GROUP_NAMES) or set(previous) != set(CONTROLLER_GROUP_NAMES):
-            raise ValueError("fixed diagnostic policy references have the wrong controller groups")
-        if not all(isinstance(value, Tensor) for value in (*baseline.values(), *previous.values())):
-            raise TypeError("fixed diagnostic policy references must be tensors")
-        if not isinstance(previous_update, int) or isinstance(previous_update, bool):
-            raise TypeError("fixed diagnostic previous update must be an integer")
-        return cls(
-            batch,
-            batch_sha256,
-            {name: value.detach().cpu() for name, value in cast(dict[str, Tensor], baseline).items()},
-            {name: value.detach().cpu() for name, value in cast(dict[str, Tensor], previous).items()},
-            previous_update,
-        )
-
-    def state_dict(self) -> dict[str, object]:
-        return {
-            "batch": _return_batch_state(self.batch),
-            "batch_sha256": self.batch_sha256,
-            "baseline_log_probabilities": self.baseline_log_probabilities,
-            "previous_log_probabilities": self.previous_log_probabilities,
-            "previous_update": self.previous_update,
-        }
-
-    def measure(self, model: GPT, cfg: TrainConfig, update: int) -> dict[str, Tensor]:
-        if update <= self.previous_update:
-            raise ValueError(f"fixed diagnostic update {update} is not after {self.previous_update}")
-        current, metrics, valid = fixed_policy_diagnostics(model, self.batch, cfg)
-        metrics.update(_fixed_policy_kl(self.baseline_log_probabilities, current, valid, "from_parent"))
-        metrics.update(_fixed_policy_kl(self.previous_log_probabilities, current, valid, "from_previous"))
-        self.previous_log_probabilities = current
-        self.previous_update = update
-        return metrics
-
-
-def _download_scalar_metrics(metrics: dict[str, Tensor], update: int) -> dict[str, float]:
-    if not metrics:
-        return {}
-    groups: dict[torch.device, list[str]] = {}
-    for name, value in metrics.items():
-        if value.ndim != 0:
-            raise FloatingPointError(f"update {update}: diagnostic {name!r} is non-scalar")
-        groups.setdefault(value.device, []).append(name)
-    downloaded: dict[str, float] = {}
-    for names in groups.values():
-        values = torch.stack([metrics[name].detach().float() for name in names]).cpu()
-        if not torch.isfinite(values).all():
-            raise FloatingPointError(f"update {update}: diagnostics contain a non-finite value")
-        downloaded.update(zip(names, values.tolist(), strict=True))
-    return {name: downloaded[name] for name in metrics}
 
 
 def _pad_context(ctx: Context, bucket: int) -> Context:
@@ -4356,343 +3967,6 @@ def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
     return counts
 
 
-@dataclass(slots=True)
-class OptimizerStepDiagnostics:
-    """Measure sampled gradients and exact parameter deltas by subsystem."""
-
-    buckets: dict[tuple[str, str], tuple[nn.Parameter, ...]]
-    snapshots: dict[int, Tensor]
-    _gradient_squares: dict[tuple[str, str], Tensor] = dataclass_field(default_factory=dict)
-    _parameter_squares: dict[tuple[str, str], Tensor] = dataclass_field(default_factory=dict)
-
-    @classmethod
-    def create(cls, model: GPT, cfg: TrainConfig) -> OptimizerStepDiagnostics:
-        subsystem_by_parameter = {
-            id(parameter): subsystem
-            for subsystem, parameters in parameter_subsystems(model).items()
-            for parameter in parameters
-        }
-        buckets: dict[tuple[str, str], list[nn.Parameter]] = defaultdict(list)
-        named_parameters = dict(model.named_parameters())
-        for name, role in optimizer_roles(model, cfg).items():
-            parameter = named_parameters[name]
-            buckets[(subsystem_by_parameter[id(parameter)], role.optimizer)].append(parameter)
-        frozen_buckets = {key: tuple(parameters) for key, parameters in buckets.items()}
-        snapshots = {id(parameter): torch.empty_like(parameter) for parameter in model.parameters()}
-        return cls(frozen_buckets, snapshots)
-
-    @staticmethod
-    def _sum_squares(tensors: Iterable[Tensor]) -> Tensor:
-        values = [tensor.detach().float().square().sum() for tensor in tensors]
-        if not values:
-            raise ValueError("cannot measure an empty tensor collection")
-        return torch.stack(values).sum()
-
-    @torch.no_grad()
-    def begin(self) -> None:
-        if self._gradient_squares or self._parameter_squares:
-            raise RuntimeError("optimizer diagnostics already have an active sample")
-        for key, parameters in self.buckets.items():
-            for parameter in parameters:
-                self.snapshots[id(parameter)].copy_(parameter)
-            gradients = [
-                parameter.grad if parameter.grad is not None else torch.zeros_like(parameter)
-                for parameter in parameters
-            ]
-            self._gradient_squares[key] = self._sum_squares(gradients)
-            self._parameter_squares[key] = self._sum_squares(parameters)
-
-    @staticmethod
-    def _combine_by_subsystem(values: dict[tuple[str, str], Tensor]) -> dict[str, Tensor]:
-        combined: dict[str, Tensor] = {}
-        for (subsystem, _optimizer), value in values.items():
-            combined[subsystem] = combined.get(subsystem, torch.zeros_like(value)) + value
-        return combined
-
-    @torch.no_grad()
-    def finish(
-        self,
-        _optimizer: torch.optim.Optimizer,
-        gradient_norm: Tensor,
-        clip_threshold: float,
-    ) -> dict[str, Tensor]:
-        if not self._gradient_squares or not self._parameter_squares:
-            raise RuntimeError("optimizer diagnostics have no active sample")
-        update_squares = {
-            key: self._sum_squares(self.snapshots[id(parameter)].sub_(parameter) for parameter in parameters)
-            for key, parameters in self.buckets.items()
-        }
-        clip_scale = (gradient_norm.detach().float() + 1e-6).reciprocal().mul(clip_threshold).clamp(max=1.0)
-        metrics: dict[str, Tensor] = {}
-
-        def add_metrics(
-            prefix: str,
-            gradient_square: Tensor,
-            parameter_square: Tensor,
-            update_square: Tensor,
-            element_count: int,
-        ) -> None:
-            gradient_l2 = gradient_square.sqrt()
-            update_l2 = update_square.sqrt()
-            parameter_l2 = parameter_square.sqrt()
-            root_count = math.sqrt(element_count)
-            metrics[f"{prefix}/grad_l2_pre_clip"] = gradient_l2
-            metrics[f"{prefix}/grad_l2_post_clip"] = gradient_l2 * clip_scale
-            metrics[f"{prefix}/grad_rms_pre_clip"] = gradient_l2 / root_count
-            metrics[f"{prefix}/grad_rms_post_clip"] = gradient_l2 * clip_scale / root_count
-            metrics[f"{prefix}/update_l2"] = update_l2
-            metrics[f"{prefix}/update_rms"] = update_l2 / root_count
-            metrics[f"{prefix}/update_parameter_rms_ratio"] = update_l2 / parameter_l2.clamp_min(
-                torch.finfo(torch.float32).tiny
-            )
-
-        for key in sorted(self.buckets):
-            subsystem, optimizer_name = key
-            add_metrics(
-                f"diagnostics/optimizer/{subsystem}/{optimizer_name}",
-                self._gradient_squares[key],
-                self._parameter_squares[key],
-                update_squares[key],
-                sum(parameter.numel() for parameter in self.buckets[key]),
-            )
-        subsystem_gradients = self._combine_by_subsystem(self._gradient_squares)
-        subsystem_parameters = self._combine_by_subsystem(self._parameter_squares)
-        subsystem_updates = self._combine_by_subsystem(update_squares)
-        for subsystem in sorted(subsystem_gradients):
-            parameters = tuple(
-                parameter
-                for (name, _optimizer), bucket in self.buckets.items()
-                if name == subsystem
-                for parameter in bucket
-            )
-            add_metrics(
-                f"diagnostics/optimizer/{subsystem}/all",
-                subsystem_gradients[subsystem],
-                subsystem_parameters[subsystem],
-                subsystem_updates[subsystem],
-                sum(parameter.numel() for parameter in parameters),
-            )
-        self._gradient_squares.clear()
-        self._parameter_squares.clear()
-        return metrics
-
-
-@dataclass(frozen=True, slots=True)
-class LogicalMatrixSample:
-    """A bounded deterministic sample from one logical parameter matrix."""
-
-    parameter: nn.Parameter
-    rows: Tensor
-    columns: Tensor
-    element_count: int
-
-    def from_tensor(self, tensor: Tensor) -> Tensor:
-        return tensor[self.rows, self.columns].detach().float()
-
-
-def logical_parameter_samples(model: GPT) -> dict[str, LogicalMatrixSample]:
-    """Split every learned matrix at its semantic boundaries."""
-    samples: dict[str, LogicalMatrixSample] = {}
-    covered: dict[int, int] = defaultdict(int)
-    limit = 4096
-
-    def add(
-        name: str,
-        parameter_tensor: Tensor,
-        row_start: int = 0,
-        row_stop: int | None = None,
-        column_start: int = 0,
-        column_stop: int | None = None,
-    ) -> None:
-        parameter = cast(nn.Parameter, parameter_tensor)
-        if name in samples:
-            raise RuntimeError(f"duplicate logical matrix name {name!r}")
-        row_stop = parameter.shape[0] if row_stop is None else row_stop
-        column_stop = parameter.shape[1] if column_stop is None else column_stop
-        height = row_stop - row_start
-        width = column_stop - column_start
-        element_count = height * width
-        stride = max((element_count + limit - 1) // limit, 1)
-        linear = torch.arange(0, element_count, stride, device=parameter.device)[:limit]
-        samples[name] = LogicalMatrixSample(
-            parameter,
-            row_start + linear.div(width, rounding_mode="floor"),
-            column_start + linear.remainder(width),
-            element_count,
-        )
-        covered[id(parameter)] += element_count
-
-    for index, module in enumerate(model.trunk.blocks):
-        block = cast(TrunkBlock, module)
-        width = block.attn.c_attn.weight.shape[1]
-        for part, name in enumerate(("q", "k", "v")):
-            add(
-                f"trunk/layer_{index:02d}/{name}",
-                block.attn.c_attn.weight,
-                part * width,
-                (part + 1) * width,
-            )
-        add(f"trunk/layer_{index:02d}/o", block.attn.c_proj.weight)
-        add(f"trunk/layer_{index:02d}/mlp_up", block.mlp.c_fc.weight)
-        add(f"trunk/layer_{index:02d}/mlp_down", block.mlp.c_proj.weight)
-
-    for index, module in enumerate(model.temporal.blocks):
-        block = cast(TemporalBlock, module)
-        width = block.qkv.weight.shape[1]
-        for part, name in enumerate(("q", "k", "v")):
-            add(
-                f"temporal/layer_{index:02d}/{name}",
-                block.qkv.weight,
-                part * width,
-                (part + 1) * width,
-            )
-        add(f"temporal/layer_{index:02d}/o", block.proj.weight)
-        add(f"temporal/layer_{index:02d}/mlp_up", block.up.weight)
-        add(f"temporal/layer_{index:02d}/mlp_down", block.down.weight)
-
-    token_weight = model.temporal.token_projection.weight
-    trunk_stop = model.temporal.trunk_width
-    action_stop = trunk_stop + model.temporal.controller_width
-    add("temporal/token_projection/trunk_columns", token_weight, column_stop=trunk_stop)
-    add("temporal/token_projection/action_columns", token_weight, column_start=trunk_stop, column_stop=action_stop)
-    add("temporal/token_projection/offset_columns", token_weight, column_start=action_stop)
-
-    for name in CONTROLLER_GROUP_NAMES:
-        if name in model.temporal.group_condition:
-            condition = cast(nn.Linear, model.temporal.group_condition[name])
-            weight = condition.weight
-            midpoint = weight.shape[0] // 2
-            add(f"action/{name}/film_scale", weight, row_stop=midpoint)
-            add(f"action/{name}/film_shift", weight, row_start=midpoint)
-        head = cast(NonlinearActionHead, model.temporal.outputs[name])
-        add(f"action/{name}/up", head.up.weight)
-        add(f"action/{name}/down", head.down.weight)
-        trunk_output = cast(NonlinearActionHead, model.temporal.trunk_outputs[name])
-        add(f"action/{name}/trunk_skip/up", trunk_output.up.weight)
-        add(f"action/{name}/trunk_skip/down", trunk_output.down.weight)
-
-    value_midpoint = model.value_head.up.weight.shape[0] // 2
-    add("value/gate", model.value_head.up.weight, row_stop=value_midpoint)
-    add("value/value", model.value_head.up.weight, row_start=value_midpoint)
-    add("value/down", model.value_head.down.weight)
-
-    item_midpoint = model.item_encoder.up.weight.shape[0] // 2
-    add("remaining/item_encoder/gate", model.item_encoder.up.weight, row_stop=item_midpoint)
-    add("remaining/item_encoder/value", model.item_encoder.up.weight, row_start=item_midpoint)
-    add("remaining/item_encoder/down", model.item_encoder.down.weight)
-
-    for name, parameter in model.named_parameters():
-        if parameter.ndim == 2 and id(parameter) not in covered:
-            add(f"remaining/{name.replace('.', '/')}", parameter)
-
-    matrices = {id(parameter): parameter for parameter in model.parameters() if parameter.ndim == 2}
-    wrong = {
-        name: (covered.get(parameter_id, 0), parameter.numel())
-        for parameter_id, parameter in matrices.items()
-        if covered.get(parameter_id, 0) != parameter.numel()
-        for name in [next(name for name, candidate in model.named_parameters() if candidate is parameter)]
-    }
-    if wrong:
-        raise RuntimeError(f"logical matrix partition is incomplete: {wrong}")
-    return samples
-
-
-def action_group_parameters(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
-    """Return the disjoint parameters owned by each action group."""
-    groups: dict[str, tuple[nn.Parameter, ...]] = {}
-    for name in CONTROLLER_GROUP_NAMES:
-        modules: list[nn.Module] = [
-            model.codec.class_embeddings[name],
-            model.codec.semantic_projections[name],
-            model.temporal.outputs[name],
-            model.temporal.trunk_outputs[name],
-        ]
-        if name in model.temporal.group_condition:
-            modules.append(model.temporal.group_condition[name])
-        groups[name] = tuple(parameter for module in modules for parameter in module.parameters())
-    identifiers = [id(parameter) for parameters in groups.values() for parameter in parameters]
-    if len(identifiers) != len(set(identifiers)):
-        raise RuntimeError("action-group parameter ownership overlaps")
-    return groups
-
-
-@dataclass(slots=True)
-class AdamWStepDiagnostics:
-    """Measure Adam moments and realized updates from bounded matrix samples."""
-
-    matrices: dict[str, LogicalMatrixSample]
-    action_groups: dict[str, tuple[nn.Parameter, ...]]
-    snapshots: dict[str, Tensor] = dataclass_field(default_factory=dict)
-    weight_rms: dict[str, Tensor] = dataclass_field(default_factory=dict)
-    gradient_rms: dict[str, Tensor] = dataclass_field(default_factory=dict)
-    action_gradient_rms: dict[str, Tensor] = dataclass_field(default_factory=dict)
-
-    @classmethod
-    def create(cls, model: GPT) -> AdamWStepDiagnostics:
-        return cls(logical_parameter_samples(model), action_group_parameters(model))
-
-    @staticmethod
-    def _rms(values: Tensor) -> Tensor:
-        return values.square().mean().sqrt()
-
-    @torch.no_grad()
-    def begin(self) -> None:
-        if self.snapshots:
-            raise RuntimeError("AdamW diagnostics already have an active sample")
-        for name, matrix in self.matrices.items():
-            gradient = matrix.parameter.grad
-            if gradient is None:
-                raise RuntimeError(f"logical matrix {name!r} has no gradient")
-            weights = matrix.from_tensor(matrix.parameter)
-            self.snapshots[name] = weights.clone()
-            self.weight_rms[name] = self._rms(weights)
-            self.gradient_rms[name] = self._rms(matrix.from_tensor(gradient))
-        for name, parameters in self.action_groups.items():
-            gradients = []
-            element_count = 0
-            for parameter in parameters:
-                if parameter.grad is None:
-                    raise RuntimeError(f"action group {name!r} has a parameter without a gradient")
-                gradients.append(parameter.grad.detach().float().square().sum())
-                element_count += parameter.numel()
-            self.action_gradient_rms[name] = (torch.stack(gradients).sum() / element_count).sqrt()
-
-    @torch.no_grad()
-    def finish(
-        self,
-        optimizer: torch.optim.Optimizer,
-        _gradient_norm: Tensor,
-        _clip_threshold: float,
-    ) -> dict[str, Tensor]:
-        if not self.snapshots:
-            raise RuntimeError("AdamW diagnostics have no active sample")
-        metrics: dict[str, Tensor] = {}
-        tiny = torch.finfo(torch.float32).tiny
-        for name, matrix in self.matrices.items():
-            state = optimizer.state.get(matrix.parameter)
-            if not isinstance(state, dict) or not {"exp_avg", "exp_avg_sq"} <= state.keys():
-                raise RuntimeError(f"AdamW state is missing moments for logical matrix {name!r}")
-            moment = state["exp_avg"]
-            second_moment = state["exp_avg_sq"]
-            if not isinstance(moment, Tensor) or not isinstance(second_moment, Tensor):
-                raise TypeError(f"AdamW moments for logical matrix {name!r} must be tensors")
-            update_rms = self._rms(self.snapshots[name] - matrix.from_tensor(matrix.parameter))
-            prefix = f"diagnostics/optimizer/matrix/{name}"
-            metrics[f"{prefix}/pre_step_weight_rms"] = self.weight_rms[name]
-            metrics[f"{prefix}/grad_rms_pre_clip"] = self.gradient_rms[name]
-            metrics[f"{prefix}/adam_m_rms"] = self._rms(matrix.from_tensor(moment))
-            metrics[f"{prefix}/adam_v_rms"] = self._rms(matrix.from_tensor(second_moment))
-            metrics[f"{prefix}/update_rms"] = update_rms
-            metrics[f"{prefix}/update_weight_rms_ratio"] = update_rms / self.weight_rms[name].clamp_min(tiny)
-        for name, gradient_rms in self.action_gradient_rms.items():
-            metrics[f"diagnostics/optimizer/action_group/{name}/grad_rms_pre_clip"] = gradient_rms
-        self.snapshots.clear()
-        self.weight_rms.clear()
-        self.gradient_rms.clear()
-        self.action_gradient_rms.clear()
-        return metrics
-
-
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
     """Estimate forward-backward FLOPs from each subsystem's parameter uses."""
     full = cfg.arch.L_ctx
@@ -4711,7 +3985,7 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 
 def model_tag(cfg: TrainConfig) -> str:
     return (
-        f"o59v4-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
+        f"o59v5-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
         f"dual-nonlinear-head-rc{int(cfg.return_conditioning)}e{cfg.arch.return_embed_dim}-drop{cfg.return_dropout:g}-"
         f"{cfg.optimizer}-wsd-b{cfg.awr.beta:g}-wmax{cfg.awr.weight_max:g}-g{cfg.awr.gamma:g}"
@@ -4831,7 +4105,6 @@ def save_boundary_checkpoint(
     return_masker_state: dict[str, object],
     identity_masker_state: dict[str, object] | None = None,
     prefix_sampler_state: dict[str, object] | None = None,
-    fixed_diagnostic_state: dict[str, object] | None = None,
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
@@ -4869,7 +4142,6 @@ def save_boundary_checkpoint(
                 loader_state.get("identity_masker") if identity_masker_state is None else identity_masker_state
             ),
             "prefix_sampler": prefix_sampler_state,
-            "fixed_diagnostics": fixed_diagnostic_state,
         },
     )
     os.replace(temporary, snapshot)
@@ -5259,8 +4531,6 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.run.summary["optimizer/lr_schedule"] = "warmup-stable-decay"
     wandb.run.summary["optimizer/update_clip_semantics"] = "global pre-step gradient norm clipping only"
     wandb.run.summary["diagnostics/activation_sample_limit"] = Architecture.activation_percentile_sample_size
-    wandb.run.summary["diagnostics/parameter_sample_limit"] = 4096
-    wandb.run.summary["diagnostics/realized_update_semantics"] = "post-step delta including weight decay"
     wandb.run.summary["diagnostics/target_logit_gradient_semantics"] = (
         "exact projection-local L1 from NLL and objective coefficient; not a shared-trunk decomposition"
     )
@@ -5353,14 +4623,10 @@ def _log_training_summary(
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
-def _training_functions(
-    model: GPT, cfg: TrainConfig, *, compile_mode: str | None = None, diagnostics: bool = True
-) -> tuple[Callable, Callable]:
+def _training_functions(model: GPT, cfg: TrainConfig, *, compile_mode: str | None = None) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
-    temporal_fn: Callable = (
-        model.temporal.teacher_forced_nll_with_diagnostics if diagnostics else model.temporal.teacher_forced_nll
-    )
+    temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
     mode = cfg.train_compile_mode if compile_mode is None else compile_mode
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
@@ -5395,7 +4661,6 @@ class TrainStepResult:
     metrics: dict[str, Tensor]
     muon_lr: float
     adam_lr: float
-    optimizer_diagnostics: dict[str, Tensor]
 
 
 @dataclass(slots=True)
@@ -5430,19 +4695,11 @@ class _TrainingMetricAccumulator:
         cfg: TrainConfig,
         *,
         update: int,
-        diagnostics: dict[str, Tensor] | None = None,
-    ) -> tuple[dict[str, float], int, int]:
+    ) -> tuple[dict[str, float], int]:
         """Synchronize once, return window means, and reset the accumulator."""
         if self._sum is None or self.updates == 0 or self.valid_prefixes == 0:
             raise RuntimeError("cannot flush an empty training metric accumulator")
-        diagnostic_names = () if diagnostics is None else tuple(diagnostics)
-        diagnostic_values = (
-            self._sum.new_empty(0)
-            if diagnostics is None
-            else torch.stack([diagnostics[name].detach().float() for name in diagnostic_names])
-        )
-        training_value_count = self._sum.numel()
-        payload = torch.cat((self._sum, diagnostic_values)).cpu()
+        payload = self._sum.cpu()
         if not torch.isfinite(payload).all():
             raise FloatingPointError(f"update {update}: accumulated training metrics contain a non-finite value")
 
@@ -5450,7 +4707,7 @@ class _TrainingMetricAccumulator:
         mean_nll = (
             payload[:nll_values].reshape(len(cfg.arch.head_offsets), CONTROLLER_GROUP_COUNT) / self.valid_prefixes
         )
-        scalar_values = payload[nll_values:training_value_count] / self.updates
+        scalar_values = payload[nll_values:] / self.updates
         nll_metrics = nll_mean_metrics(
             mean_nll,
             cfg.arch.head_offsets,
@@ -5460,17 +4717,13 @@ class _TrainingMetricAccumulator:
             "optimizer/grad_norm": float(scalar_values[0]),
         }
         values.update({name: float(value) for name, value in zip(self._metric_names, scalar_values[1:], strict=True)})
-        values.update(
-            {name: float(value) for name, value in zip(diagnostic_names, payload[training_value_count:], strict=True)}
-        )
 
         updates = self.updates
-        valid_prefixes = self.valid_prefixes
         self._sum = None
         self._metric_names = ()
         self.updates = 0
         self.valid_prefixes = 0
-        return values, updates, valid_prefixes
+        return values, updates
 
 
 def train_step(
@@ -5486,10 +4739,7 @@ def train_step(
     optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
     prefix_sampler: PrefixSampler,
-    phase_timer: CudaPhaseTimer | None = None,
-    optimizer_diagnostics: OptimizerStepDiagnostics | AdamWStepDiagnostics | None = None,
     prefix_validated_on_cpu: bool = False,
-    diagnostics: bool = True,
 ) -> TrainStepResult:
     """Run one complete optimization step on a device-resident batch."""
     if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
@@ -5510,19 +4760,11 @@ def train_step(
         trunk_fn=trunk_fn,
         temporal_fn=temporal_fn,
         prefix_positions=prefix_positions,
-        phase_timer=phase_timer,
     )
     loss.backward()
-    if phase_timer is not None:
-        phase_timer.record("backward_end")
-    if diagnostics:
-        metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
-    if optimizer_diagnostics is not None:
-        optimizer_diagnostics.begin()
+    metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
     gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
     metrics["optimizer/clip_fraction"] = (gradient_norm > cfg.grad_clip).float()
-    if phase_timer is not None:
-        phase_timer.record("grad_norm_end")
     if cfg.optimizer == "muon":
         muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
         adam_lr = float(next(group["lr"] for group in optimizer.param_groups if not group["use_muon"]))
@@ -5530,13 +4772,8 @@ def train_step(
         muon_lr = 0.0
         adam_lr = float(max(group["lr"] for group in optimizer.param_groups))
     optimizer.step()
-    diagnostic_metrics = (
-        {} if optimizer_diagnostics is None else optimizer_diagnostics.finish(optimizer, gradient_norm, cfg.grad_clip)
-    )
     scheduler.step()
-    if phase_timer is not None:
-        phase_timer.record("optimizer_end")
-    return TrainStepResult(nll_sum, gradient_norm, metrics, muon_lr, adam_lr, diagnostic_metrics)
+    return TrainStepResult(nll_sum, gradient_norm, metrics, muon_lr, adam_lr)
 
 
 def _cadence_in_window(first_update: int, last_update: int, every: int) -> bool:
@@ -5544,14 +4781,6 @@ def _cadence_in_window(first_update: int, last_update: int, every: int) -> bool:
     if every <= 0:
         return False
     return first_update == 1 or last_update // every > (first_update - 1) // every
-
-
-def _mean_phase_metrics(timers: list[CudaPhaseTimer]) -> dict[str, float]:
-    totals: dict[str, float] = {}
-    for timer in timers:
-        for name, value in timer.metrics().items():
-            totals[name] = totals.get(name, 0.0) + value
-    return {name: value / len(timers) for name, value in totals.items()} if timers else {}
 
 
 def _minimal_system_metrics(metrics: dict[str, float]) -> dict[str, float]:
@@ -5636,7 +4865,6 @@ def _finalize_training(
     update: int,
     actual_loss_positions: int,
     smoke: bool,
-    fixed_diagnostics: FixedDiagnosticTracker | None,
 ) -> None:
     """Save the final model and queue evaluation for a separate L40S worker."""
     snapshot = save_boundary_checkpoint(
@@ -5654,7 +4882,6 @@ def _finalize_training(
         identity_masker_state=identity_masker_state,
         return_masker_state=return_masker_state,
         prefix_sampler_state=prefix_sampler_state,
-        fixed_diagnostic_state=None if fixed_diagnostics is None else fixed_diagnostics.state_dict(),
     )
     final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
     advance_checkpoint_link(snapshot, final_path)
@@ -5780,8 +5007,6 @@ def train(
     run_name = resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), "policy-world-v8", comment)
     uploader = BackgroundUploader(run_name) if cfg.push_to_r2 else None
     _init_wandb(cfg, run_name, resume_state)
-    if cfg.continuation_diagnostics and (wandb.run is None or not isinstance(wandb.run.id, str)):
-        raise RuntimeError("the continuation requires a child W&B run id")
     if cfg.parent_wandb_id is not None and wandb.run is not None and wandb.run.id == cfg.parent_wandb_id:
         raise RuntimeError("the continuation must use a new W&B run id")
     run_dir, replay_dir = setup_run_dir(run_name)
@@ -5847,20 +5072,6 @@ def train(
                 f"checkpoint actual_loss_positions={actual_positions} is invalid after {start_step} updates"
             )
 
-    optimizer_step_diagnostics: OptimizerStepDiagnostics | AdamWStepDiagnostics | None
-    if cfg.optimizer == "adamw":
-        optimizer_step_diagnostics = AdamWStepDiagnostics.create(model)
-    elif cfg.continuation_diagnostics:
-        optimizer_step_diagnostics = OptimizerStepDiagnostics.create(model, cfg)
-    else:
-        optimizer_step_diagnostics = None
-    fixed_diagnostics: FixedDiagnosticTracker | None = None
-    if cfg.continuation_diagnostics:
-        fixed_state = None if resume_state is None else resume_state.get("fixed_diagnostics")
-        if not isinstance(fixed_state, dict):
-            raise ValueError("the diagnostic continuation checkpoint has no fixed diagnostic state")
-        fixed_diagnostics = FixedDiagnosticTracker.from_state(cast(dict[str, object], fixed_state))
-
     trunk_fn, temporal_fn = _training_functions(model, cfg)
     train_loader, val_cache = prepared_data.loader, prepared_data.validation
     _compile_synthetic_forward_backward(
@@ -5908,7 +5119,6 @@ def train(
     window_loader_wait_seconds: list[float] = []
     window_loader_submitted_batches: list[int] = []
     window_loader_ready_batches: list[int] = []
-    window_phase_timers: list[CudaPhaseTimer] = []
     window_peak_allocated_gb = 0.0
     update_timer = _UpdateTimer()
     # CUDA compilation must remain on the training thread. Background compilation
@@ -5930,26 +5140,12 @@ def train(
             state_boundary_due = boundary_due or update == run_stop
             next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary >= update)
 
-            phase_due = (
-                DEVICE == "cuda"
-                and cfg.phase_timing_every > 0
-                and (update == 1 or update % cfg.phase_timing_every == 0)
-            )
-            phase_timer = CudaPhaseTimer() if phase_due else None
-            if phase_timer is not None:
-                phase_timer.record("start")
             batch, valid_prefixes = batch_prefetcher.next()
-            if phase_timer is not None:
-                phase_timer.record("h2d_end")
             lookahead_limit = 0 if state_boundary_due else next_state_boundary - update
             batch_prefetcher.fill_lookahead(lookahead_limit)
             window_loader_submitted_batches.append(batch_prefetcher.submitted_batches)
             window_loader_ready_batches.append(batch_prefetcher.ready_batches)
             metrics_due = update % cfg.train_metrics_every == 0 or update == run_stop
-            optimizer_diagnostic_due = (cfg.optimizer == "adamw" and metrics_due) or (
-                cfg.continuation_diagnostics
-                and (update % cfg.train_metrics_every == 0 or update in evaluation_updates)
-            )
             result = train_step(
                 model,
                 batch,
@@ -5962,16 +5158,12 @@ def train(
                 optimizer=optimizer,
                 scheduler=scheduler,
                 prefix_sampler=prefix_sampler,
-                phase_timer=phase_timer,
-                optimizer_diagnostics=optimizer_step_diagnostics if optimizer_diagnostic_due else None,
                 prefix_validated_on_cpu=True,
             )
             loader_wait = batch_prefetcher.stage_next() if not state_boundary_due else 0.0
             actual_positions += valid_prefixes
             metric_accumulator.add(result, valid_prefixes)
             window_loader_wait_seconds.append(loader_wait)
-            if phase_timer is not None:
-                window_phase_timers.append(phase_timer)
             if DEVICE == "cuda":
                 window_peak_allocated_gb = max(
                     window_peak_allocated_gb,
@@ -5979,22 +5171,11 @@ def train(
                 )
 
             if metrics_due:
-                window_metric_values, window_updates, window_valid_prefixes = metric_accumulator.flush(
+                window_metric_values, window_updates = metric_accumulator.flush(
                     cfg,
                     update=update,
-                    diagnostics=result.optimizer_diagnostics,
                 )
             update_timer.finish()
-            diagnostic_values = {} if metrics_due else _download_scalar_metrics(result.optimizer_diagnostics, update)
-            fixed_diagnostic_due = cfg.continuation_diagnostics and (
-                (cfg.val_every > 0 and update % cfg.val_every == 0) or update == run_stop
-            )
-            if fixed_diagnostic_due:
-                if fixed_diagnostics is None:
-                    raise RuntimeError("fixed diagnostics are enabled but not initialized")
-                diagnostic_values.update(
-                    _download_scalar_metrics(fixed_diagnostics.measure(model, cfg, update), update)
-                )
             if metrics_due:
                 if len(window_loader_wait_seconds) != window_updates:
                     raise RuntimeError("training telemetry window lost an update")
@@ -6027,8 +5208,6 @@ def train(
                     "schedule/adam_lr": result.adam_lr,
                     **window_metric_values,
                     **identity_masker.metrics(),
-                    **_mean_phase_metrics(window_phase_timers),
-                    **diagnostic_values,
                 }
                 loader_metrics = getattr(train_loader, "metrics", None)
                 if isinstance(loader_metrics, dict):
@@ -6067,10 +5246,7 @@ def train(
                 window_loader_wait_seconds.clear()
                 window_loader_submitted_batches.clear()
                 window_loader_ready_batches.clear()
-                window_phase_timers.clear()
                 window_peak_allocated_gb = 0.0
-            elif diagnostic_values:
-                wandb.log({"global_step": update, **diagnostic_values})
             checkpoint_path: Path | None = None
             if boundary_due:
                 if not batch_prefetcher.drained:
@@ -6090,7 +5266,6 @@ def train(
                     identity_masker_state=identity_masker.state_dict(),
                     return_masker_state=return_masker.state_dict(),
                     prefix_sampler_state=prefix_sampler.state_dict(),
-                    fixed_diagnostic_state=(None if fixed_diagnostics is None else fixed_diagnostics.state_dict()),
                 )
             boundary_metrics: dict[str, float] = {}
             if val_due:
@@ -6133,7 +5308,6 @@ def train(
             update=run_stop,
             actual_loss_positions=actual_positions,
             smoke=smoke,
-            fixed_diagnostics=fixed_diagnostics,
         )
     finally:
         batch_prefetcher.close()
@@ -6370,624 +5544,6 @@ def _remote_run_exists(run_name: str) -> bool:
     return bool(response.get("KeyCount", len(response.get("Contents", ()))))
 
 
-@dataclass(frozen=True, slots=True)
-class BenchmarkArgs:
-    output: Path = Path("results/o59-throughput")
-    bank_examples: int = 2048
-    case: str = "baseline"
-    batch_size: int = 512
-    bank_sha256: str | None = None
-    existing_bank: Path | None = None
-    reference_state: Path | None = None
-    reference_sha256: str | None = None
-
-
-def validate_benchmark_args(args: BenchmarkArgs) -> None:
-    if args.batch_size != 512:
-        raise ValueError("O59 execution comparisons require batch 512")
-    if args.bank_examples < 2048 or args.bank_examples % 2048:
-        raise ValueError("bank_examples must be a positive multiple of 2048")
-    if (args.reference_state is None) != (args.reference_sha256 is None):
-        raise ValueError("reference state requires its SHA-256")
-    if args.existing_bank is not None and args.bank_sha256 is None:
-        raise ValueError("existing bank requires its SHA-256")
-    if args.case not in (
-        "baseline",
-        "cpu-validation",
-        "max-autotune",
-        "compiled-muon",
-        "no-diagnostics",
-        "reuse-history",
-        "reuse-embeddings",
-        "groupwise-loss",
-        "combined",
-    ):
-        raise ValueError(f"unknown benchmark case {args.case!r}")
-
-
-def _benchmark_slice(bank: ReturnBatch, start: int, stop: int) -> ReturnBatch:
-    return ReturnBatch(
-        TrainBatch(
-            Context(
-                {name: value[start:stop] for name, value in bank.context.features.items()},
-                bank.context.ctx_pad[start:stop],
-            ),
-            bank.target[start:stop],
-            None if bank.batch.replay_ids is None else bank.batch.replay_ids[start:stop],
-        ),
-        bank.returns[start:stop],
-        bank.eligible[start:stop],
-        bank.future_return[start:stop],
-        bank.available[start:stop],
-        bank.condition_present[start:stop],
-    )
-
-
-def _prepare_benchmark_bank(args: BenchmarkArgs, cfg: TrainConfig) -> None:
-    """Decode only selected shards, using production labels and normalization."""
-    stats = load_stats(cfg)
-    sidecar = load_identity_sidecar(cfg)
-    source = "ranked-anonymized-6-policy-world-v8"
-    selection = PhysicalShardSelection.from_sources((SourceRowSelection(source, args.bank_examples // 8),))
-    projection = FeatureProjection(
-        columns=ITEM_PLAYER_PROJECTION.columns
-        | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
-        derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
-    )
-    labels = ReturnLabels(
-        returns_lib.PolicyReturnLabels(
-            player_lookup=ReplayPlayerLookup(sidecar.by_replay),
-            gamma=cfg.awr.gamma,
-            damage_shaping=cfg.awr.damage_shaping,
-            win_reward=cfg.awr.win_reward,
-            stock_value=cfg.awr.stock_value,
-            suffix=cfg.awr.return_suffix,
-        )
-    )
-    replay_ids: list[str] = []
-    windows: list[dict[str, np.ndarray]] = []
-    locators: list[tuple[int, int, int]] = []
-    with contextlib.closing(MDSStorageAdapter(selection)) as adapter:
-        adapter.validate_manifests(
-            expected_sha256={source: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[source]},
-            expected_index_version=cfg.mds_index_version,
-            expected_schema_sha256=cfg.mds_manifest_schema_sha256,
-            expected_rows={source: streams.POLICY_WORLD_V8_TRAIN_REPLAYS[source]},
-        )
-        for task in build_shard_plan(selection, adapter.manifests):
-            rows = task.selected_rows
-            for start in range(0, len(rows), 64):
-                generations = adapter.decode_generations(
-                    task,
-                    [(row, 0) for row in rows[start : start + 64]],
-                    seed=cfg.seed,
-                    context_length=cfg.arch.L_ctx,
-                    chunk_length=cfg.arch.sample_chunk_length,
-                    windows_per_generation=8,
-                    schema_version=cfg.mds_schema_version,
-                    labels=labels,
-                    projection=projection,
-                )
-                for (row, _), (replay_id, generation) in generations.items():
-                    for ordinal, window in enumerate(generation):
-                        replay_ids.append(replay_id)
-                        windows.append(window)
-                        locators.append((task.shard, row, ordinal))
-                print(f"[benchmark] decoded {len(windows)}/{args.bank_examples} real windows", flush=True)
-    columns = {name: np.stack([window[name] for window in windows]) for name in windows[0]}
-    bank = _collate_o59_batch(
-        tuple(replay_ids),
-        columns,
-        stats=stats,
-        projection=projection,
-        context_length=cfg.arch.L_ctx,
-        return_column=cfg.awr.ego_return_column,
-        return_valid_column=cfg.awr.ego_return_valid_column,
-    )
-    # Freeze identity dropout in reference-sized batches before comparing transports.
-    masker = IdentityMasker(cfg.seed ^ 0x0501D, cfg.identity_dropout)
-    return_masker = ReturnMasker(cfg.seed ^ 0x059C0D, cfg.return_dropout, enabled=cfg.return_conditioning)
-    masked = [
-        return_masker(masker(_benchmark_slice(bank, start, start + 512)))
-        for start in range(0, args.bank_examples, 512)
-    ]
-    bank = replace(bank, condition_present=torch.cat([batch.condition_present for batch in masked]))
-    bank.context.features["ego_player_id"] = torch.cat([batch.context.features["ego_player_id"] for batch in masked])
-    torch.save(
-        {
-            "format": "o59-benchmark-bank-v2",
-            "batch": _return_batch_state(bank),
-            "batch_sha256": _return_batch_sha256(bank),
-            "conditioning_protocol": conditioning_protocol(),
-            "identity_masker": masker.state_dict(),
-            "return_masker": return_masker.state_dict(),
-            "locators": locators,
-            "vocabulary": sidecar.vocabulary,
-            "provenance": run_provenance(cfg),
-            "source": source,
-            "selection_sha256": selection.sha256,
-        },
-        args.output / "bank.pt",
-    )
-    (args.output / "bank.json").write_text(
-        json.dumps(
-            {
-                "format": "o59-benchmark-bank-v2",
-                "sha256": checkpoint_sha256(args.output / "bank.pt"),
-                "source": source,
-                "locators": locators,
-                "replay_ids": replay_ids,
-                "provenance": run_provenance(cfg),
-                "config": asdict(cfg),
-            },
-            indent=2,
-        )
-        + "\n"
-    )
-
-
-def _benchmark_optimizer(model: GPT, cfg: TrainConfig, *, compiled_muon: bool) -> torch.optim.Optimizer:
-    # The physical batch must not change LR, betas, epsilon, or schedule units.
-    optimizer = make_optimizer(model, replace(cfg, batch_size=512))
-    if compiled_muon:
-        if not isinstance(optimizer, SingleDeviceMuonWithAuxAdam):
-            raise TypeError("O59 benchmark requires the single-device Muon optimizer")
-        optimizer.orthogonalize = torch.compile(optimizer.orthogonalize, dynamic=False, fullgraph=True, mode="default")
-    return optimizer
-
-
-def _benchmark_state(
-    model: GPT,
-    result: TrainStepResult,
-    sampler: PrefixSampler,
-    *,
-    initial: Mapping[str, Tensor] | None = None,
-    batch_sha256: str | None = None,
-) -> dict[str, object]:
-    parameters = {name: value.detach().cpu().clone() for name, value in model.named_parameters()}
-    return {
-        "parameters": parameters,
-        "updates": {name: value - initial[name].cpu() for name, value in parameters.items()}
-        if initial is not None
-        else {},
-        "gradients": {
-            name: value.grad.detach().cpu().clone()
-            for name, value in model.named_parameters()
-            if value.grad is not None
-        },
-        "metrics": _download_scalar_metrics({**result.metrics, "gradient_norm": result.gradient_norm}, 1),
-        "sampler": sampler.generator.get_state().cpu(),
-        "rng": rng_state(),
-        "batch_sha256": batch_sha256,
-        "conditioning": model.return_calibration.state_dict(),
-    }
-
-
-def _require_exact_state(expected: object, actual: object, path: str) -> None:
-    if isinstance(expected, Tensor):
-        equal = isinstance(actual, Tensor) and torch.equal(expected.cpu(), actual.cpu())
-    elif isinstance(expected, np.ndarray):
-        equal = isinstance(actual, np.ndarray) and np.array_equal(expected, actual)
-    elif isinstance(expected, Mapping) and isinstance(actual, Mapping):
-        if expected.keys() != actual.keys():
-            raise AssertionError(f"execution treatment changed {path} fields")
-        for key in expected:
-            _require_exact_state(
-                cast(Mapping[object, object], expected)[key],
-                cast(Mapping[object, object], actual)[key],
-                f"{path}/{key}",
-            )
-        return
-    elif isinstance(expected, (tuple, list)) and isinstance(actual, type(expected)):
-        if len(expected) != len(actual):
-            raise AssertionError(f"execution treatment changed {path} length")
-        for index, (left, right) in enumerate(zip(expected, actual, strict=True)):
-            _require_exact_state(left, right, f"{path}/{index}")
-        return
-    else:
-        equal = expected == actual
-    if not equal:
-        raise AssertionError(f"execution treatment changed {path}")
-
-
-# Fixed before throughput measurements. BF16 execution changes may alter rounding,
-# but must preserve each gradient and update within these error bounds.
-BENCHMARK_TOLERANCES = {
-    "parameters": (2e-6, 2e-5),
-    "gradients": (2e-4, 0.01),
-    "updates": (2e-6, 0.02),
-}
-
-
-def _benchmark_difference(reference: dict, actual: dict) -> dict[str, float]:
-    for field in ("sampler", "rng", "batch_sha256", "conditioning"):
-        _require_exact_state(reference[field], actual[field], field)
-    differences: dict[str, float] = {}
-    for field, (atol, rtol) in BENCHMARK_TOLERANCES.items():
-        if reference[field].keys() != actual[field].keys():
-            raise AssertionError(f"execution treatment changed {field} membership")
-        absolute = squared = norm = 0.0
-        for name, expected in reference[field].items():
-            observed = actual[field][name]
-            if not bool(torch.isfinite(observed).all()) or not bool(torch.isfinite(expected).all()):
-                raise FloatingPointError(f"non-finite {field}: {name}")
-            delta = observed.float() - expected.float()
-            maximum = float(delta.abs().max())
-            error_l2 = float(delta.square().sum()) ** 0.5
-            expected_l2 = float(expected.float().square().sum()) ** 0.5
-            # Absolute tolerance applies elementwise; relative tolerance applies
-            # to each parameter's L2 norm, including zero-initialized projections.
-            if maximum > atol and error_l2 > rtol * expected_l2:
-                raise AssertionError(
-                    f"numerical acceptance failed for {field}/{name}: max_abs={maximum}, relative_l2={error_l2 / max(expected_l2, 1e-30)}"
-                )
-            differences[f"{field}/{name}/max_abs"] = maximum
-            differences[f"{field}/{name}/relative_l2"] = error_l2 / max(expected_l2, 1e-30)
-            absolute = max(absolute, maximum)
-            squared += error_l2**2
-            norm += expected_l2**2
-        differences[f"{field}_max_abs"] = absolute
-        differences[f"{field}_relative_l2"] = math.sqrt(squared / max(norm, 1e-30))
-    objective = abs(reference["metrics"]["train/objective"] - actual["metrics"]["train/objective"])
-    if not math.isfinite(objective) or objective > 2e-4:
-        raise AssertionError(f"numerical acceptance failed for objective: {objective}")
-    differences["objective_abs"] = objective
-    return differences
-
-
-def _require_validation_parity(differences: Mapping[str, float]) -> None:
-    # CUDA attention backward can vary in FP32 reduction order. Sampling, loss,
-    # and the parameter update must remain exact for this control-flow change.
-    tolerance = 8 * torch.finfo(torch.float32).eps
-    if (
-        differences["parameters_max_abs"] != 0
-        or differences["objective_abs"] != 0
-        or differences["gradients_relative_l2"] > tolerance
-        or differences["gradients_max_abs"] > tolerance
-    ):
-        raise AssertionError(f"CPU validation changed the update: {dict(differences)}")
-
-
-def _load_benchmark_bank(path: Path, expected_sha256: str) -> dict:
-    if checkpoint_sha256(path) != expected_sha256:
-        raise ValueError("benchmark bank SHA-256 mismatch")
-    saved = torch.load(path, map_location="cpu", weights_only=False)
-    if saved.get("format") != "o59-benchmark-bank-v2":
-        raise ValueError("unsupported benchmark bank format")
-    if saved.get("conditioning_protocol") != conditioning_protocol():
-        raise ValueError("benchmark conditioning protocol mismatch")
-    batch = _return_batch_from_state(saved["batch"])
-    if _return_batch_sha256(batch) != saved["batch_sha256"]:
-        raise ValueError("benchmark return batch identity mismatch")
-    return saved
-
-
-def _validate_benchmark_reference(reference: dict, saved: dict, bank_sha256: str, cfg: TrainConfig) -> None:
-    if reference.get("format") != "o59-benchmark-reference-v2" or reference["bank_sha256"] != bank_sha256:
-        raise ValueError("incompatible benchmark reference")
-    if reference.get("conditioning_protocol") != conditioning_protocol():
-        raise ValueError("benchmark reference conditioning protocol mismatch")
-    execution_fields = {
-        "train_compile_mode",
-        "reuse_quantized_history",
-        "reuse_action_embeddings",
-        "groupwise_training_loss",
-    }
-    expected = {name: value for name, value in reference["config"].items() if name not in execution_fields}
-    actual = {name: value for name, value in asdict(cfg).items() if name not in execution_fields}
-    _require_exact_state(expected, actual, "scientific configuration")
-    for name in ("identity_masker", "return_masker"):
-        _require_exact_state(reference[name], saved[name], name)
-
-
-def _run_benchmark_case(args: BenchmarkArgs) -> None:
-    if torch.cuda.device_count() != 1 or "B200" not in torch.cuda.get_device_name():
-        raise RuntimeError("the O59 throughput benchmark requires exactly one B200")
-    args.output.mkdir(parents=True, exist_ok=True)
-    if args.existing_bank is None:
-        if args.case != "baseline":
-            raise ValueError("candidates require an existing bank and reference state")
-        _prepare_benchmark_bank(args, TrainConfig())
-        args = replace(
-            args, existing_bank=args.output / "bank.pt", bank_sha256=checkpoint_sha256(args.output / "bank.pt")
-        )
-    bank_path = args.existing_bank
-    if bank_path is None:
-        raise RuntimeError("benchmark bank was not prepared")
-    if args.bank_sha256 is None:
-        raise ValueError("benchmark bank requires its SHA-256")
-    saved = _load_benchmark_bank(bank_path, args.bank_sha256)
-    reference = None
-    if args.reference_state is not None:
-        if checkpoint_sha256(args.reference_state) != args.reference_sha256:
-            raise ValueError("benchmark reference SHA-256 mismatch")
-        reference = torch.load(args.reference_state, map_location="cpu", weights_only=False)
-    elif args.case != "baseline":
-        raise ValueError("candidate requires the saved reference state")
-    mode = "max-autotune" if args.case == "max-autotune" else "reduce-overhead"
-    cfg = replace(
-        TrainConfig(),
-        batch_size=args.batch_size,
-        train_compile_mode=mode,
-        reuse_quantized_history=args.case in ("reuse-history", "combined"),
-        reuse_action_embeddings=args.case in ("reuse-embeddings", "combined"),
-        groupwise_training_loss=args.case in ("groupwise-loss", "combined"),
-    )
-    if reference is not None:
-        _validate_benchmark_reference(reference, saved, args.bank_sha256, cfg)
-    bank = _return_batch_from_state(saved["batch"])
-    cpu_batches = [
-        _benchmark_slice(bank, start, start + cfg.batch_size).pin_memory()
-        for start in range(0, bank.target.shape[0], cfg.batch_size)
-    ]
-    for batch in cpu_batches:
-        validate_batch_geometry(batch, cfg, cfg.batch_size)
-        if bool((batch.context.ctx_pad > cfg.arch.direct_loss_start).any()):
-            raise ValueError("benchmark bank does not have a complete suffix")
-    torch.manual_seed(cfg.seed)
-    random.seed(cfg.seed)
-    np.random.seed(cfg.seed)
-    torch.set_float32_matmul_precision("high")
-    model = GPT(cfg, saved["vocabulary"]).cuda().train()
-    initial = (
-        {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
-        if reference is None
-        else reference["initial"]
-    )
-    model.load_state_dict(initial)
-    initial_rng = rng_state() if reference is None else reference["rng"]
-    initial_calibration = model.return_calibration.state_dict() if reference is None else reference["conditioning"]
-    diagnostics = args.case != "no-diagnostics"
-    # Match production: the CPU preparation path has checked the full suffix.
-    validated = True
-    optimizer = _benchmark_optimizer(model, cfg, compiled_muon=args.case == "compiled-muon")
-    scheduler = LambdaLR(optimizer, lr_schedule(replace(cfg, batch_size=512)))
-    initial_scheduler = scheduler.state_dict()
-    sampler = PrefixSampler(cfg.seed ^ 0x059A11, "cuda")
-    trunk_fn, temporal_fn = _training_functions(model, cfg, compile_mode=mode, diagnostics=diagnostics)
-    flops = approximate_training_flops_per_update(cfg, subsystem_parameter_counts(model))
-    report: dict[str, object] = {
-        "format": "o59-benchmark-result-v2",
-        "case": args.case,
-        "batch_size": cfg.batch_size,
-        "bank_sha256": args.bank_sha256,
-        "reference_sha256": args.reference_sha256,
-        "batch_sha256": saved["batch_sha256"],
-        "numerical_tolerances": BENCHMARK_TOLERANCES,
-        "compile_mode": mode,
-        "config": asdict(cfg),
-        "optimizer_reference_batch": 512,
-        "benchmark_source_sha256": checkpoint_sha256(Path(__file__)),
-        "muon_source_sha256": checkpoint_sha256(Path(__file__).resolve().parents[1] / "hal/training/muon.py"),
-        "provenance": saved["provenance"],
-        "diagnostics": diagnostics,
-        "prefix_validated_on_cpu": validated,
-        "windows": [],
-        "correctness": {},
-    }
-    case_path = args.output / f"{args.case}-{cfg.batch_size}.json"
-
-    def persist() -> None:
-        case_path.write_text(json.dumps(report, indent=2) + "\n")
-
-    def reset() -> None:
-        model.load_state_dict(initial)
-        optimizer.state.clear()
-        scheduler.load_state_dict(initial_scheduler)
-        for group, lr in zip(optimizer.param_groups, scheduler.base_lrs, strict=True):
-            group["lr"] = lr * lr_schedule(replace(cfg, batch_size=512))(0)
-        sampler.generator.manual_seed(cfg.seed ^ 0x059A11)
-        restore_rng(initial_rng)
-        model.return_calibration.load_state_dict(initial_calibration)
-
-    def update(batch: ReturnBatch, index: int, active: bool, timer: CudaPhaseTimer | None = None) -> TrainStepResult:
-        return train_step(
-            model,
-            batch,
-            cfg,
-            step=(cfg.awr.start_update - 1 if active else 0) + index,
-            update=index + 1,
-            valid_prefixes=cfg.batch_size * POLICY_PREFIXES_PER_WINDOW,
-            trunk_fn=trunk_fn,
-            temporal_fn=temporal_fn,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            prefix_sampler=sampler,
-            phase_timer=timer,
-            prefix_validated_on_cpu=validated,
-            diagnostics=diagnostics,
-        )
-
-    device_batches = [batch.to("cuda") for batch in cpu_batches]
-    torch.cuda.synchronize()
-    started = time.monotonic()
-    with _elapsed_heartbeat("[benchmark] compiling first update"):
-        result = update(device_batches[0], 0, False)
-        torch.cuda.synchronize()
-    report["cold_first_update_seconds"] = time.monotonic() - started
-    started = time.monotonic()
-    for index in range(5):
-        result = update(device_batches[index % len(device_batches)], index, bool(index % 2))
-    torch.cuda.synchronize()
-    report["warmup_seconds"] = time.monotonic() - started
-    report["compilation_peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
-    report["compilation_peak_reserved_bytes"] = torch.cuda.max_memory_reserved()
-    report["approximate_compilation_seconds"] = max(
-        0.0, float(report["cold_first_update_seconds"]) - float(report["warmup_seconds"]) / 5
-    )
-    checked = PrefixSampler(cfg.seed ^ 0x059A11, "cuda")
-    trusted = PrefixSampler(cfg.seed ^ 0x059A11, "cuda")
-    checked_positions = checked.sample(
-        device_batches[0].context.ctx_pad, length=cfg.arch.L_ctx, suffix_start=cfg.arch.direct_loss_start
-    )
-    trusted_positions = trusted.sample(
-        device_batches[0].context.ctx_pad,
-        length=cfg.arch.L_ctx,
-        suffix_start=cfg.arch.direct_loss_start,
-        validated_on_cpu=True,
-    )
-    if not torch.equal(checked_positions, trusted_positions) or not torch.equal(
-        checked.generator.get_state(), trusted.generator.get_state()
-    ):
-        raise AssertionError("CPU validation changed GPU sampling or RNG advancement")
-    report["exact_sampling_parity"] = True
-    persist()
-    expected_states: dict[str, object] = {}
-    for active in (False, True):
-        reset()
-        with torch.compiler.set_stance("fail_on_recompile"):
-            for index in range(2):
-                result = update(device_batches[index % len(device_batches)], index, active)
-        actual = _benchmark_state(model, result, sampler, initial=initial, batch_sha256=saved["batch_sha256"])
-        if reference is None:
-            expected_states[str(active)] = actual
-        else:
-            differences = _benchmark_difference(reference["expected"][str(active)], actual)
-            cast(dict, report["correctness"])[str(active)] = differences
-        del actual
-    if reference is None:
-        reference_path = args.output / "reference-state.pt"
-        torch.save(
-            {
-                "format": "o59-benchmark-reference-v2",
-                "initial": initial,
-                "rng": initial_rng,
-                "conditioning": initial_calibration,
-                "bank_sha256": args.bank_sha256,
-                "expected": expected_states,
-                "conditioning_protocol": conditioning_protocol(),
-                "config": asdict(cfg),
-                "identity_masker": saved["identity_masker"],
-                "return_masker": saved["return_masker"],
-            },
-            reference_path,
-        )
-        report["reference_sha256"] = checkpoint_sha256(reference_path)
-    del expected_states, reference
-    persist()
-    windows = cast(list[dict[str, object]], report["windows"])
-    for transport in ("device", "prefetch"):
-        # The baseline times both states; treatments still exercise inactive AWR
-        # during warmup and profiling, without repeating its throughput windows.
-        for active in (False, True) if args.case == "baseline" else (True,):
-            reset()
-            accumulator = _TrainingMetricAccumulator()
-            with ExitStack() as resources:
-                prefetch = None
-                if transport == "prefetch":
-                    prefetch = DeviceBatchPrefetcher(cpu_batches, cfg, "cuda")
-                    resources.callback(prefetch.close)
-                with torch.compiler.set_stance("fail_on_recompile"):
-                    for window in range(3):
-                        torch.cuda.synchronize()
-                        torch.cuda.reset_peak_memory_stats()
-                        started = time.monotonic()
-                        updates = 51_200 // cfg.batch_size
-                        for index in range(updates):
-                            ordinal = window * updates + index
-                            batch = (
-                                device_batches[ordinal % len(device_batches)]
-                                if prefetch is None
-                                else prefetch.next()[0]
-                            )
-                            if prefetch is not None:
-                                prefetch.fill_lookahead(cfg.train_prefetch_factor)
-                            result = update(batch, ordinal, active)
-                            if prefetch is not None:
-                                prefetch.stage_next()
-                            accumulator.add(result, cfg.batch_size * POLICY_PREFIXES_PER_WINDOW)
-                            if (ordinal + 1) % cfg.train_metrics_every == 0:
-                                accumulator.flush(cfg, update=ordinal + 1)
-                        torch.cuda.synchronize()
-                        seconds = time.monotonic() - started
-                        peak = torch.cuda.max_memory_reserved()
-                        row = {
-                            "transport": transport,
-                            "awr_active": active,
-                            "window": window,
-                            "examples": 51_200,
-                            "seconds": seconds,
-                            "samples_per_second": 51_200 / seconds,
-                            "update_seconds": seconds / updates,
-                            "approximate_mfu": flops
-                            / (seconds / updates)
-                            / cast(float, bf16_dense_peak_flops("B200")),
-                            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
-                            "peak_reserved_bytes": peak,
-                            "free_memory_fraction": 1 - peak / torch.cuda.get_device_properties(0).total_memory,
-                        }
-                        windows.append(row)
-                        print(f"[benchmark] {args.case} batch={cfg.batch_size} {row}", flush=True)
-                        persist()
-            if accumulator.updates:
-                accumulator.flush(cfg, update=3 * updates)
-    reset()
-    timers: list[CudaPhaseTimer] = []
-    with (
-        torch.compiler.set_stance("fail_on_recompile"),
-        torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            record_shapes=True,
-        ) as profile,
-    ):
-        for index in range(5):
-            timer = CudaPhaseTimer()
-            timers.append(timer)
-            timer.record("start")
-            timer.record("h2d_end")
-            with torch.profiler.record_function("o59_update"):
-                result = update(device_batches[index % len(device_batches)], index, index >= 2, timer)
-            profile.step()
-    torch.cuda.synchronize()
-    report["phases"] = _mean_phase_metrics(timers)
-    (args.output / f"{args.case}-{cfg.batch_size}.operators.json").write_text(
-        json.dumps(
-            [
-                {
-                    "name": event.key,
-                    "self_cuda_us": event.self_device_time_total,
-                    "self_cpu_us": event.self_cpu_time_total,
-                    "calls": event.count,
-                }
-                for event in profile.key_averages()
-            ],
-            indent=2,
-        )
-        + "\n"
-    )
-    profile.export_chrome_trace(str(args.output / f"{args.case}-{cfg.batch_size}.trace.json"))
-    report["status"] = "complete"
-    persist()
-
-
-def benchmark_score(result: dict) -> float:
-    windows = [row for row in result["windows"] if row["transport"] == "prefetch" and row["awr_active"]]
-    if len(windows) != 3 or result.get("status") != "complete":
-        raise ValueError("benchmark selection requires three completed active-AWR prefetch windows")
-    return float(np.median([row["samples_per_second"] for row in windows]))
-
-
-def benchmark_repeatable_gain(control: dict, treatment: dict) -> bool:
-    """Require all three active-AWR prefetch windows to beat the control."""
-    benchmark_score(control)
-    benchmark_score(treatment)
-    control_speeds = [
-        row["samples_per_second"] for row in control["windows"] if row["transport"] == "prefetch" and row["awr_active"]
-    ]
-    treatment_speeds = [
-        row["samples_per_second"]
-        for row in treatment["windows"]
-        if row["transport"] == "prefetch" and row["awr_active"]
-    ]
-    return min(treatment_speeds) > max(control_speeds)
-
-
-def benchmark(args: BenchmarkArgs) -> None:
-    """Run one immutable job; the Modal queue owns sequencing and deadlines."""
-    validate_benchmark_args(args)
-    _run_benchmark_case(args)
-
-
 @dataclass
 class TrainArgs:
     cfg: TrainConfig = dataclass_field(default_factory=TrainConfig)
@@ -7022,9 +5578,7 @@ class EvalArgs:
 
 
 type Command = (
-    Annotated[TrainArgs, tyro.conf.subcommand(name="train")]
-    | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
-    | Annotated[BenchmarkArgs, tyro.conf.subcommand(name="benchmark")]
+    Annotated[TrainArgs, tyro.conf.subcommand(name="train")] | Annotated[EvalArgs, tyro.conf.subcommand(name="eval")]
 )
 
 
@@ -7039,9 +5593,6 @@ def _parse_character(name: str | None) -> melee.Character | None:
 
 
 def main(args: Command) -> None:
-    if isinstance(args, BenchmarkArgs):
-        benchmark(args)
-        return
     if isinstance(args, EvalArgs):
         checkpoint = _resolve_eval_checkpoint(args.checkpoint, args.run)
         eval_checkpoint(
