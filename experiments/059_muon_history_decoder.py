@@ -62,6 +62,7 @@ from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import ClassVar
 from typing import Final
 from typing import Literal
@@ -174,6 +175,7 @@ from hal.training.trunk import Rotary
 from hal.training.trunk import Trunk
 from hal.training.trunk import TrunkConfig
 from hal.training.trunk import apply_rotary_emb
+from hal.training.trunk import rmsnorm
 from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
@@ -2907,13 +2909,27 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
     )
     slot_ids = None
     reset = None
+    observation_counts = None
     if ctx.slot_ids is not None:
         slot_ids = torch.cat(
             (ctx.slot_ids, torch.full((extra,), -1, dtype=ctx.slot_ids.dtype, device=ctx.slot_ids.device))
         )
     if ctx.reset is not None:
         reset = torch.cat((ctx.reset, torch.ones(extra, dtype=ctx.reset.dtype, device=ctx.reset.device)))
-    return Context(features=features, ctx_pad=ctx_pad, slot_ids=slot_ids, reset=reset)
+    if ctx.observation_counts is not None:
+        observation_counts = torch.cat(
+            (
+                ctx.observation_counts,
+                torch.zeros(extra, dtype=ctx.observation_counts.dtype, device=ctx.observation_counts.device),
+            )
+        )
+    return Context(
+        features=features,
+        ctx_pad=ctx_pad,
+        slot_ids=slot_ids,
+        reset=reset,
+        observation_counts=observation_counts,
+    )
 
 
 def _condition_ego_player(ctx: Context, player_id: int) -> Context:
@@ -2952,6 +2968,218 @@ class _PreparedDecode:
     forced_prefix: Tensor
     return_value: Tensor
     condition_present: Tensor
+    observation_counts: Tensor | None
+    reference_hidden: Tensor | None = None
+
+
+@dataclass(slots=True)
+class _RollingTrunkState:
+    slot_ids: tuple[int, ...]
+    observation_counts: tuple[int, ...]
+    keys: Tensor
+    values: Tensor
+    hidden: Tensor
+    ctx_pad: Tensor
+
+
+class _CacheComparison:
+    """Device-side aggregates for rolling-cache comparisons against recomputation."""
+
+    def __init__(self) -> None:
+        self._totals: dict[str, Tensor] = {}
+        self._maxima: dict[str, Tensor] = {}
+
+    def _add(self, name: str, value: Tensor) -> None:
+        value = value.detach()
+        self._totals[name] = self._totals.get(name, torch.zeros_like(value)) + value
+
+    def _maximum(self, name: str, value: Tensor) -> None:
+        value = value.detach()
+        self._maxima[name] = torch.maximum(self._maxima.get(name, torch.zeros_like(value)), value)
+
+    def record(
+        self,
+        hidden: Tensor,
+        reference_hidden: Tensor,
+        logits: tuple[Tensor, ...],
+        reference_logits: tuple[Tensor, ...],
+        indices: Tensor,
+        reference_indices: Tensor,
+        ctx_pad: Tensor,
+        observation_counts: Tensor,
+        rows: int,
+    ) -> None:
+        batch, length, width = hidden.shape
+        real_rows = torch.arange(batch, device=hidden.device) < rows
+        positions = torch.arange(length, device=hidden.device)
+        real_positions = positions[None, :] >= ctx_pad[:, None]
+        error = (hidden.float() - reference_hidden.float()).abs()
+        hidden_float = hidden.float()
+        reference_float = reference_hidden.float()
+        for phase, selected_rows in (
+            ("pre_eviction", real_rows & (observation_counts <= length)),
+            ("post_eviction", real_rows & (observation_counts > length)),
+            ("all", real_rows),
+        ):
+            mask = selected_rows[:, None] & real_positions
+            weight = mask[:, :, None]
+            prefix = f"cache_compare/{phase}"
+            self._add(f"{prefix}/hidden_error_sq", (error.square() * weight).sum())
+            self._add(f"{prefix}/hidden_reference_sq", (reference_float.square() * weight).sum())
+            self._add(f"{prefix}/hidden_dot", (hidden_float * reference_float * weight).sum())
+            self._add(f"{prefix}/hidden_norm_sq", (hidden_float.square() * weight).sum())
+            self._add(f"{prefix}/hidden_values", mask.sum() * width)
+            self._maximum(f"{prefix}/hidden_abs_max", torch.where(weight, error, 0.0).max())
+
+            row_weight = selected_rows[:, None]
+            sampled_mismatch = (indices != reference_indices).float()
+            self._add(f"{prefix}/sampled_disagreements", (sampled_mismatch * row_weight[:, :, None]).sum())
+            self._add(
+                f"{prefix}/sampled_values",
+                row_weight.sum() * indices.shape[1] * indices.shape[2],
+            )
+            for name, values, reference_values in zip(CONTROLLER_GROUP_NAMES, logits, reference_logits, strict=True):
+                values = values.float()
+                reference_values = reference_values.float()
+                finite = torch.isfinite(values) & torch.isfinite(reference_values)
+                logit_error = torch.where(finite, values - reference_values, 0.0)
+                selected = row_weight[:, :, None] & finite
+                group_prefix = f"{prefix}/{name}"
+                self._add(f"{group_prefix}/logit_error_sq", (logit_error.square() * selected).sum())
+                self._add(f"{group_prefix}/logit_values", selected.sum())
+                probabilities = values.softmax(dim=-1)
+                reference_probabilities = reference_values.softmax(dim=-1)
+                tv = 0.5 * (probabilities - reference_probabilities).abs().sum(dim=-1)
+                kl = (
+                    reference_probabilities
+                    * (reference_probabilities.clamp_min(1e-12).log() - probabilities.clamp_min(1e-12).log())
+                ).sum(dim=-1)
+                self._add(f"{group_prefix}/tv_sum", (tv * row_weight).sum())
+                self._add(f"{group_prefix}/kl_sum", (kl * row_weight).sum())
+                self._add(f"{group_prefix}/distributions", row_weight.sum())
+                disagreement = (values.argmax(-1) != reference_values.argmax(-1)).float()
+                self._add(f"{group_prefix}/argmax_disagreements", (disagreement * row_weight).sum())
+
+    def metrics(self) -> dict[str, float]:
+        totals = {name: float(value.item()) for name, value in self._totals.items()}
+        metrics = {name: float(value.item()) for name, value in self._maxima.items()}
+        for phase in ("pre_eviction", "post_eviction", "all"):
+            prefix = f"cache_compare/{phase}"
+            hidden_values = totals.get(f"{prefix}/hidden_values", 0.0)
+            if hidden_values:
+                error_sq = totals[f"{prefix}/hidden_error_sq"]
+                reference_sq = totals[f"{prefix}/hidden_reference_sq"]
+                hidden_sq = totals[f"{prefix}/hidden_norm_sq"]
+                metrics[f"{prefix}/hidden_rms"] = math.sqrt(error_sq / hidden_values)
+                metrics[f"{prefix}/hidden_relative_rms"] = math.sqrt(error_sq / max(reference_sq, 1e-30))
+                metrics[f"{prefix}/hidden_cosine"] = totals[f"{prefix}/hidden_dot"] / math.sqrt(
+                    max(reference_sq * hidden_sq, 1e-30)
+                )
+            sampled_values = totals.get(f"{prefix}/sampled_values", 0.0)
+            if sampled_values:
+                metrics[f"{prefix}/sampled_disagreement"] = totals[f"{prefix}/sampled_disagreements"] / sampled_values
+            for name in CONTROLLER_GROUP_NAMES:
+                group_prefix = f"{prefix}/{name}"
+                logit_values = totals.get(f"{group_prefix}/logit_values", 0.0)
+                distributions = totals.get(f"{group_prefix}/distributions", 0.0)
+                if logit_values:
+                    metrics[f"{group_prefix}/logit_rms"] = math.sqrt(
+                        totals[f"{group_prefix}/logit_error_sq"] / logit_values
+                    )
+                if distributions:
+                    metrics[f"{group_prefix}/tv"] = totals[f"{group_prefix}/tv_sum"] / distributions
+                    metrics[f"{group_prefix}/kl"] = totals[f"{group_prefix}/kl_sum"] / distributions
+                    metrics[f"{group_prefix}/argmax_disagreement"] = (
+                        totals[f"{group_prefix}/argmax_disagreements"] / distributions
+                    )
+        return metrics
+
+
+def _rolling_trunk_forward(
+    model: GPT,
+    tokens: Tensor,
+    keys: Tensor,
+    values: Tensor,
+    hidden: Tensor,
+    ctx_pad: Tensor,
+    active_steps: Tensor,
+    token_positions: Tensor,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Advance a fixed-width trunk cache by the supplied chronological tokens."""
+    batch, steps, width = tokens.shape
+    layers, cache_batch, heads, length, head_dim = keys.shape
+    if (
+        cache_batch != batch
+        or values.shape != keys.shape
+        or hidden.shape != (batch, length, width)
+        or ctx_pad.shape != (batch,)
+        or active_steps.shape != (steps, batch)
+        or token_positions.shape != (steps, batch)
+        or layers != len(model.trunk.blocks)
+    ):
+        raise ValueError("rolling trunk inputs have incompatible shapes")
+
+    first_attention = cast(Any, model.trunk.blocks[0]).attn
+    positions = torch.arange(length, device=tokens.device)
+    for step in range(steps):
+        active = active_steps[step]
+        active_4d = active[:, None, None, None]
+        active_token = active[:, None, None]
+        next_pad = torch.where(active, (ctx_pad - 1).clamp_min(0), ctx_pad)
+        x = tokens[:, step : step + 1]
+        inv_freq = first_attention.rotary.inv_freq
+        if inv_freq.dtype != torch.float32:
+            inv_freq = 1.0 / (
+                first_attention.rotary.base ** (torch.arange(0, head_dim, 2, device=tokens.device).float() / head_dim)
+            )
+        frequencies = token_positions[step, :, None].float() * inv_freq[None]
+        cos = frequencies.cos().to(tokens.dtype)[:, None, None]
+        sin = frequencies.sin().to(tokens.dtype)[:, None, None]
+        next_keys: list[Tensor] = []
+        next_values: list[Tensor] = []
+        for layer, module in enumerate(model.trunk.blocks):
+            block = cast(Any, module)
+            attention = block.attn
+            normalized = rmsnorm(x)
+            query, key, value = attention.c_attn(normalized).split(attention.d_model, dim=-1)
+            query = query.view(batch, 1, heads, head_dim)
+            key = key.view(batch, 1, heads, head_dim)
+            value = value.view(batch, 1, heads, head_dim).transpose(1, 2)
+            query = apply_rotary_emb(query, cos, sin).transpose(1, 2)
+            key = apply_rotary_emb(key, cos, sin).transpose(1, 2)
+            present_key = torch.where(
+                active_4d,
+                torch.cat((keys[layer, :, :, 1:], key), dim=2),
+                keys[layer],
+            )
+            present_value = torch.where(
+                active_4d,
+                torch.cat((values[layer, :, :, 1:], value), dim=2),
+                values[layer],
+            )
+            valid = positions[None, :] >= next_pad[:, None]
+            attended = F.scaled_dot_product_attention(
+                query,
+                present_key,
+                present_value,
+                attn_mask=valid[:, None, None],
+            )
+            attended = attended.transpose(1, 2).contiguous().view(batch, 1, width)
+            candidate = x + block.attn_scale * attention.c_proj(attended)
+            candidate = candidate + block.mlp_scale * block.mlp(rmsnorm(candidate))
+            x = torch.where(active_token, candidate, x)
+            next_keys.append(present_key)
+            next_values.append(present_value)
+        final = rmsnorm(x)
+        hidden = torch.where(
+            active_token,
+            torch.cat((hidden[:, 1:], final), dim=1),
+            hidden,
+        )
+        keys = torch.stack(next_keys)
+        values = torch.stack(next_values)
+        ctx_pad = next_pad
+    return keys, values, hidden, ctx_pad
 
 
 class BF16Inference:
@@ -2973,12 +3201,21 @@ class BF16Inference:
         compiled_buckets: tuple[int, ...] | None = None,
         temperature: float = 1.0,
         desired_return: float | None = None,
+        cache_mode: Literal["recompute", "rolling"] = "recompute",
+        compare_recompute: bool = False,
     ) -> None:
         if desired_return is not None and (not math.isfinite(desired_return) or not cfg.return_conditioning):
             raise ValueError("desired return requires finite input and enabled conditioning")
         self.desired_return = desired_return
         self.model = model
         self.cfg = cfg
+        if cache_mode not in ("recompute", "rolling"):
+            raise ValueError(f"unknown cache mode {cache_mode!r}")
+        if compare_recompute and cache_mode != "rolling":
+            raise ValueError("recomputation comparison requires rolling cache mode")
+        self.cache_mode = cache_mode
+        self.compare_recompute = compare_recompute
+        self.cache_comparison = _CacheComparison() if compare_recompute else None
         if bucket is not None and compiled_buckets is not None:
             raise ValueError("pass bucket or compiled_buckets, not both")
         chosen = (bucket,) if bucket is not None else compiled_buckets
@@ -2992,16 +3229,25 @@ class BF16Inference:
         self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
         self.compile_mode = compile_mode
         self.temperature = validate_sampling_temperature(temperature)
-        self.attention_backend = "dense_sdpa"
+        self.attention_backend = "dense_sdpa" if cache_mode == "recompute" else "rolling_kv"
         self.compile_seconds = 0.0
         self._warmed: set[tuple[int, int, int]] = set()
         self._trunks: dict[int, Callable] = {}
+        self._rolling_trunks: dict[tuple[int, int], Callable] = {}
         self._decoders: dict[tuple[int, int, int], Callable] = {}
         self._trace_decoders: dict[tuple[int, int, int], Callable] = {}
+        self._rolling_state: _RollingTrunkState | None = None
 
     @property
     def uses_cuda_graphs(self) -> bool:
         return self.compiled and self.compile_mode == "reduce-overhead"
+
+    @property
+    def rolling_cache_bytes(self) -> int:
+        if self._rolling_state is None:
+            return 0
+        state = self._rolling_state
+        return sum(tensor.numel() * tensor.element_size() for tensor in (state.keys, state.values, state.hidden))
 
     def _bucket(self, rows: int) -> int:
         if self.compiled:
@@ -3025,6 +3271,167 @@ class BF16Inference:
                 else forward
             )
         return self._trunks[bucket]
+
+    def _rolling_trunk(self, bucket: int, steps: int) -> Callable:
+        key = (bucket, steps)
+        if key not in self._rolling_trunks:
+
+            def forward(
+                features: dict[str, Tensor],
+                action_indices: Tensor,
+                keys: Tensor,
+                values: Tensor,
+                hidden: Tensor,
+                ctx_pad: Tensor,
+                active_steps: Tensor,
+                token_positions: Tensor,
+            ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                tokens = self.model.context_tokens(features, action_indices)
+                return _rolling_trunk_forward(
+                    self.model,
+                    tokens,
+                    keys,
+                    values,
+                    hidden,
+                    ctx_pad,
+                    active_steps,
+                    token_positions,
+                )
+
+            self._rolling_trunks[key] = (
+                torch.compile(forward, dynamic=False, fullgraph=True, mode=self.compile_mode)
+                if self.compiled
+                else forward
+            )
+        return self._rolling_trunks[key]
+
+    def _initial_rolling_state(self, bucket: int, reference: Tensor) -> _RollingTrunkState:
+        architecture = self.cfg.arch
+        shape = (
+            architecture.n_layers,
+            bucket,
+            architecture.n_heads,
+            architecture.L_ctx,
+            architecture.d_model // architecture.n_heads,
+        )
+        return _RollingTrunkState(
+            slot_ids=tuple([-1] * bucket),
+            observation_counts=tuple([0] * bucket),
+            keys=torch.zeros(shape, dtype=reference.dtype, device=reference.device),
+            values=torch.zeros(shape, dtype=reference.dtype, device=reference.device),
+            hidden=torch.zeros(
+                bucket,
+                architecture.L_ctx,
+                architecture.d_model,
+                dtype=reference.dtype,
+                device=reference.device,
+            ),
+            ctx_pad=torch.full((bucket,), architecture.L_ctx, dtype=torch.long, device=reference.device),
+        )
+
+    def _align_rolling_state(
+        self,
+        slot_ids: tuple[int, ...],
+        resets: tuple[bool, ...],
+        observation_counts: tuple[int, ...],
+        reference: Tensor,
+    ) -> tuple[_RollingTrunkState, tuple[int, ...]]:
+        bucket = len(slot_ids)
+        state = self._rolling_state
+        if state is None:
+            state = self._initial_rolling_state(bucket, reference)
+        elif state.keys.shape[1] != bucket:
+            raise ValueError("rolling cache bucket changed after initialization")
+
+        old_rows = {slot: row for row, slot in enumerate(state.slot_ids) if slot >= 0}
+        source_rows: list[int] = []
+        new_counts: list[int] = []
+        for slot, reset, count in zip(slot_ids, resets, observation_counts, strict=True):
+            if slot < 0:
+                source_rows.append(0)
+                new_counts.append(0)
+                continue
+            old_row = old_rows.get(slot)
+            if old_row is None and not reset:
+                raise ValueError(f"rolling cache has no state for continuing stream {slot}")
+            source_rows.append(0 if old_row is None else old_row)
+            previous = 0 if reset or old_row is None else state.observation_counts[old_row]
+            delta = count - previous
+            if delta <= 0 or delta > self.cfg.arch.L_ctx:
+                raise ValueError(f"stream {slot} advanced by {delta} observations; expected 1..{self.cfg.arch.L_ctx}")
+            new_counts.append(delta)
+
+        if tuple(source_rows) != tuple(range(bucket)):
+            index = torch.tensor(source_rows, dtype=torch.long, device=reference.device)
+            keys = state.keys.index_select(1, index)
+            values = state.values.index_select(1, index)
+            hidden = state.hidden.index_select(0, index)
+            ctx_pad = state.ctx_pad.index_select(0, index)
+        else:
+            keys, values, hidden, ctx_pad = state.keys, state.values, state.hidden, state.ctx_pad
+        reset_tensor = torch.tensor(resets, dtype=torch.bool, device=reference.device)
+        ctx_pad = torch.where(reset_tensor, self.cfg.arch.L_ctx, ctx_pad)
+        return (
+            _RollingTrunkState(
+                slot_ids=slot_ids,
+                observation_counts=observation_counts,
+                keys=keys,
+                values=values,
+                hidden=hidden,
+                ctx_pad=ctx_pad,
+            ),
+            tuple(new_counts),
+        )
+
+    def _rolling_hidden(self, ctx: Context, action_indices: Tensor) -> Tensor:
+        if ctx.slot_ids is None or ctx.reset is None or ctx.observation_counts is None:
+            raise ValueError("rolling inference requires slot ids, reset flags, and observation counts")
+        slot_ids = tuple(int(value) for value in ctx.slot_ids.detach().cpu().tolist())
+        resets = tuple(bool(value) for value in ctx.reset.detach().cpu().tolist())
+        counts = tuple(int(value) for value in ctx.observation_counts.detach().cpu().tolist())
+        if len({slot for slot in slot_ids if slot >= 0}) != sum(slot >= 0 for slot in slot_ids):
+            raise ValueError("rolling inference received duplicate stream ids")
+        expected_pad = tuple(
+            self.cfg.arch.L_ctx - min(count, self.cfg.arch.L_ctx) if slot >= 0 else self.cfg.arch.L_ctx
+            for slot, count in zip(slot_ids, counts, strict=True)
+        )
+        actual_pad = tuple(int(value) for value in ctx.ctx_pad.detach().cpu().tolist())
+        if actual_pad != expected_pad:
+            raise ValueError(f"context padding does not match observation counts: {actual_pad} != {expected_pad}")
+
+        state, new_counts = self._align_rolling_state(slot_ids, resets, counts, action_indices)
+        steps = max(new_counts)
+        suffix_features = {name: value[:, -steps:] for name, value in ctx.features.items()}
+        suffix_actions = action_indices[:, -steps:]
+        active_steps = torch.tensor(
+            [[offset >= steps - count for count in new_counts] for offset in range(steps)],
+            dtype=torch.bool,
+            device=action_indices.device,
+        )
+        token_positions = torch.tensor(
+            [[max(0, count - steps + offset) for count in counts] for offset in range(steps)],
+            dtype=torch.long,
+            device=action_indices.device,
+        )
+        keys, values, hidden, ctx_pad = self._rolling_trunk(len(slot_ids), steps)(
+            suffix_features,
+            suffix_actions,
+            state.keys,
+            state.values,
+            state.hidden,
+            state.ctx_pad,
+            active_steps,
+            token_positions,
+        )
+        self._rolling_state = _RollingTrunkState(
+            slot_ids=slot_ids,
+            observation_counts=counts,
+            keys=keys,
+            values=values,
+            hidden=hidden,
+            ctx_pad=ctx_pad,
+        )
+        return hidden
 
     def _decoder(self, bucket: int, horizon: int, committed_frames: int) -> Callable:
         key = (bucket, horizon, committed_frames)
@@ -3134,7 +3541,13 @@ class BF16Inference:
             # can reuse its output storage only after the decoder consumes it.
             torch.compiler.cudagraph_mark_step_begin()
         with amp_context(self.cfg, ctx.ctx_pad.device):
-            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
+            reference_hidden = None
+            if self.cache_mode == "rolling":
+                hidden = self._rolling_hidden(padded, observed)
+                if self.compare_recompute:
+                    reference_hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
+            else:
+                hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
             if committed is None:
                 forced_prefix = torch.empty(bucket, 0, CONTROLLER_GROUP_COUNT, dtype=torch.long, device=hidden.device)
             else:
@@ -3154,6 +3567,8 @@ class BF16Inference:
             forced_prefix,
             return_value,
             condition_present,
+            padded.observation_counts,
+            reference_hidden,
         )
 
     @torch.no_grad()
@@ -3170,8 +3585,27 @@ class BF16Inference:
         started = time.perf_counter()
         context = synthetic_context(self.cfg, rows, device)
         neutral = torch.as_tensor(NEUTRAL_ACTION, device=device).expand(rows, committed_frames, -1)
-        self.decode(context, horizon, committed=neutral)
-        self.decode(context, horizon, committed=neutral)
+        if self.cache_mode == "rolling":
+            count = torch.ones(rows, dtype=torch.long, device=device)
+            reset_context = replace(
+                context,
+                ctx_pad=torch.full_like(context.ctx_pad, self.cfg.arch.L_ctx - 1),
+                observation_counts=count,
+            )
+            continuing_context = replace(
+                reset_context,
+                ctx_pad=torch.full_like(context.ctx_pad, self.cfg.arch.L_ctx - 3),
+                reset=torch.zeros(rows, dtype=torch.bool, device=device),
+                observation_counts=count + 2,
+            )
+            self.decode(reset_context, horizon, committed=neutral)
+            self.decode(reset_context, horizon, committed=neutral)
+            self.decode(continuing_context, horizon, committed=neutral)
+            self.decode(reset_context, horizon, committed=neutral)
+            self.decode(continuing_context, horizon, committed=neutral)
+        else:
+            self.decode(context, horizon, committed=neutral)
+            self.decode(context, horizon, committed=neutral)
         torch.cuda.synchronize(device)
         elapsed = time.perf_counter() - started
         self.compile_seconds += elapsed
@@ -3196,6 +3630,8 @@ class BF16Inference:
         prepared = self._prepare_decode(ctx, horizon, streams=streams, gen=gen, committed=committed)
         with amp_context(self.cfg, ctx.ctx_pad.device):
             if argmax:
+                if self.cache_comparison is not None:
+                    raise ValueError("cache comparison requires sampled decoding")
                 indices = self.model.temporal.sample_indices(
                     prepared.hidden,
                     prepared.observed,
@@ -3207,7 +3643,7 @@ class BF16Inference:
                     ctx_pad=prepared.ctx_pad,
                     forced_prefix=prepared.forced_prefix,
                 )
-            else:
+            elif self.cache_comparison is None:
                 indices = self._decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
                     prepared.hidden,
                     prepared.ctx_pad,
@@ -3216,6 +3652,41 @@ class BF16Inference:
                     prepared.forced_prefix,
                     prepared.return_value,
                     prepared.condition_present,
+                )
+            else:
+                if prepared.reference_hidden is None or prepared.observation_counts is None:
+                    raise RuntimeError("cache comparison is missing its recomputed reference")
+                decoder = self._trace_decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])
+                indices, logits = decoder(
+                    prepared.hidden,
+                    prepared.ctx_pad,
+                    prepared.observed,
+                    prepared.uniforms,
+                    prepared.forced_prefix,
+                    prepared.return_value,
+                    prepared.condition_present,
+                )
+                indices = indices.clone()
+                logits = tuple(values.clone() for values in logits)
+                reference_indices, reference_logits = decoder(
+                    prepared.reference_hidden,
+                    prepared.ctx_pad,
+                    prepared.observed,
+                    prepared.uniforms,
+                    prepared.forced_prefix,
+                    prepared.return_value,
+                    prepared.condition_present,
+                )
+                self.cache_comparison.record(
+                    prepared.hidden,
+                    prepared.reference_hidden,
+                    logits,
+                    reference_logits,
+                    indices,
+                    reference_indices,
+                    prepared.ctx_pad,
+                    prepared.observation_counts,
+                    prepared.rows,
                 )
         return self.model.codec.dequantize(indices[: prepared.rows])
 
@@ -3373,12 +3844,14 @@ class EvalProtocol:
     replan_interval_frames: int
     transport_semantics: Literal["conditioned_pending_actions_v1"]
     pending_prefix_conditioned: Literal[True]
-    evaluation_protocol_version: Literal[3]
+    evaluation_protocol_version: Literal[4]
     forced_prefix_consumes_sampling_draws: Literal[False]
     dtype: str
     inference_mode: str
     inference_compile_mode: str
     inference_attention_backend: str
+    cache_mode: Literal["recompute", "rolling"]
+    compare_recompute: bool
     compiled_inference_bucket: int
     checkpoint_sha256: str
     return_target: Literal["p90", "unconditioned"]
@@ -3421,6 +3894,8 @@ def _eval_protocol(
     inference_mode: str | None = None,
     inference_compile_mode: str = "reduce-overhead",
     inference_attention_backend: str = "dense_sdpa",
+    cache_mode: Literal["recompute", "rolling"] = "recompute",
+    compare_recompute: bool = False,
     fixed_ego_character: melee.Character | None = None,
     ego_player_id: int = MASKED_PLAYER_ID,
     ego_player_code: str | None = None,
@@ -3459,12 +3934,14 @@ def _eval_protocol(
         replan_interval_frames=replan,
         transport_semantics="conditioned_pending_actions_v1",
         pending_prefix_conditioned=True,
-        evaluation_protocol_version=3,
+        evaluation_protocol_version=4,
         forced_prefix_consumes_sampling_draws=False,
         dtype=str(next(model.parameters()).dtype),
         inference_mode=cfg.inference_mode if inference_mode is None else inference_mode,
         inference_compile_mode=inference_compile_mode,
         inference_attention_backend=inference_attention_backend,
+        cache_mode=cache_mode,
+        compare_recompute=compare_recompute,
         compiled_inference_bucket=_eval_inference_bucket(cfg, n_matchups, max_parallel),
         checkpoint_sha256=checkpoint_sha256,
         return_target="unconditioned" if desired_return is None else "p90",
@@ -3480,7 +3957,7 @@ def _validate_eval_directory(replay_dir: Path, protocol: EvalProtocol) -> None:
     previous = json.loads(path.read_text())
     if (
         not isinstance(previous, dict)
-        or previous.get("schema_version") != 7
+        or previous.get("schema_version") != 8
         or previous.get("protocol") != asdict(protocol)
     ):
         raise ValueError("evaluation directory contains evidence from a different protocol")
@@ -3491,7 +3968,7 @@ def _write_eval_evidence(
 ) -> None:
     replay_dir.mkdir(parents=True, exist_ok=True)
     rows_payload = {
-        "schema_version": 7,
+        "schema_version": 8,
         "protocol": asdict(protocol),
         "rows": [row.as_dict() for row in rows],
     }
@@ -3522,6 +3999,8 @@ def eval_vs_cpu(
     replan_interval_frames: int | None = None,
     desired_return: float | None = None,
     return_calibration_sha256: str | None = None,
+    cache_mode: Literal["recompute", "rolling"] = "recompute",
+    compare_recompute: bool = False,
 ) -> dict[str, float]:
     horizon = cfg.prediction_frames
     inference_mode = "eager" if eager else cfg.inference_mode
@@ -3532,6 +4011,8 @@ def eval_vs_cpu(
             bucket=_eval_inference_bucket(cfg, n_matchups, max_parallel),
             compiled=inference_mode == "compiled",
             desired_return=desired_return,
+            cache_mode=cache_mode,
+            compare_recompute=compare_recompute,
         )
         if inference is None
         else inference
@@ -3540,6 +4021,10 @@ def eval_vs_cpu(
         raise ValueError("inference desired return differs from evaluation protocol")
     if inference.model is not model:
         raise ValueError("the supplied inference engine must own the evaluation model")
+    if inference.cache_mode != cache_mode:
+        raise ValueError("inference cache mode differs from evaluation protocol")
+    if inference.compare_recompute != compare_recompute:
+        raise ValueError("inference comparison mode differs from evaluation protocol")
     protocol = _eval_protocol(
         cfg,
         model,
@@ -3549,6 +4034,8 @@ def eval_vs_cpu(
         inference_mode=inference_mode,
         inference_compile_mode=inference.compile_mode,
         inference_attention_backend=inference.attention_backend,
+        cache_mode=cache_mode,
+        compare_recompute=compare_recompute,
         fixed_ego_character=fixed_ego_character,
         ego_player_id=ego_player_id,
         ego_player_code=ego_player_code,
@@ -3584,6 +4071,8 @@ def eval_vs_cpu(
     total_started = time.perf_counter()
     try:
         compile_seconds = inference.prewarm(protocol.max_parallel, horizon, committed_frames=protocol.delay_frames)
+        if next(model.parameters()).device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(next(model.parameters()).device)
         started = time.perf_counter()
         with torch.compiler.set_stance("fail_on_recompile"):
             results, rows = sweep_vs_cpu_prior_with_rows(
@@ -3616,8 +4105,23 @@ def eval_vs_cpu(
         metrics["fixed_ego_character"] = float(protocol.fixed_ego_character)
     decode_metrics = telemetry.metrics()
     decode_metrics["decode_predicted_actions_per_s"] = decode_metrics.pop("decode_executed_frames_per_s")
+    mean_decode_seconds = decode_metrics["decode_seconds"] / max(decode_metrics["decode_calls"], 1.0)
+    decode_metrics["decode_stream_fps_capacity"] = protocol.replan_interval_frames / max(mean_decode_seconds, 1e-12)
+    decode_metrics["decode_aggregate_emulator_fps_capacity"] = (
+        decode_metrics["decode_rows"] * protocol.replan_interval_frames / max(decode_metrics["decode_seconds"], 1e-12)
+    )
+    decode_metrics["decode_p95_60fps_margin_ms"] = (
+        1000.0 * protocol.replan_interval_frames / 60.0 - decode_metrics["decode_p95_ms"]
+    )
     metrics.update(decode_metrics)
     metrics.update(process_telemetry.metrics())
+    metrics["rolling_cache_bytes"] = float(inference.rolling_cache_bytes)
+    if next(model.parameters()).device.type == "cuda":
+        device = next(model.parameters()).device
+        metrics["peak_cuda_allocated_bytes"] = float(torch.cuda.max_memory_allocated(device))
+        metrics["peak_cuda_reserved_bytes"] = float(torch.cuda.max_memory_reserved(device))
+    if inference.cache_comparison is not None:
+        metrics.update(inference.cache_comparison.metrics())
     _write_eval_evidence(replay_dir, rows, metrics, protocol)
     return metrics
 
@@ -3641,6 +4145,11 @@ def _eval_wandb_metrics(values: dict[str, float]) -> dict[str, float]:
         "captured_emulator_frames": "captured_emulator_frames",
         "emulator_fps": "emulator_fps",
         "decode_predicted_actions_per_s": "decode_predicted_actions_per_s",
+        "decode_stream_fps_capacity": "decode_stream_fps_capacity",
+        "decode_aggregate_emulator_fps_capacity": "decode_aggregate_emulator_fps_capacity",
+        "decode_p95_60fps_margin_ms": "decode_p95_60fps_margin_ms",
+        "rolling_cache_bytes": "rolling_cache_bytes",
+        "peak_cuda_allocated_bytes": "peak_cuda_allocated_bytes",
         "broker_inference_latency_p50_ms": "broker_inference_latency_p50_ms",
         "broker_inference_latency_p95_ms": "broker_inference_latency_p95_ms",
         "prediction_frames": "prediction_frames",
@@ -5453,6 +5962,8 @@ def eval_checkpoint(
     replan_interval_frames: int | None = None,
     wandb_namespace: str = "eval",
     return_target: Literal["p90", "unconditioned"] = "p90",
+    cache_mode: Literal["recompute", "rolling"] = "recompute",
+    compare_recompute: bool = False,
 ) -> dict[str, float]:
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
@@ -5481,8 +5992,10 @@ def eval_checkpoint(
     delay = cfg.delay_frames if delay_frames is None else delay_frames
     replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
     _validate_deployment_timing(horizon, delay, replan)
-    is_variant = any(
-        value is not None for value in (player_code, fixed_ego_character, delay_frames, replan_interval_frames)
+    is_variant = (
+        cache_mode != "recompute"
+        or compare_recompute
+        or any(value is not None for value in (player_code, fixed_ego_character, delay_frames, replan_interval_frames))
     )
     if is_variant and upload_run is not None and output_name is None:
         raise ValueError("evaluation overrides uploaded to a run require an explicit output_name")
@@ -5512,6 +6025,8 @@ def eval_checkpoint(
         replan_interval_frames=replan,
         desired_return=desired_return,
         return_calibration_sha256=calibration_hash,
+        cache_mode=cache_mode,
+        compare_recompute=compare_recompute,
     )
     require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
     if upload_run is not None:
@@ -5575,6 +6090,8 @@ class EvalArgs:
     replan_interval_frames: int | None = None
     wandb_namespace: str = "eval"
     return_target: Literal["p90", "unconditioned"] = "p90"
+    cache_mode: Literal["recompute", "rolling"] = "recompute"
+    compare_recompute: bool = False
 
 
 type Command = (
@@ -5610,6 +6127,8 @@ def main(args: Command) -> None:
             replan_interval_frames=args.replan_interval_frames,
             wandb_namespace=args.wandb_namespace,
             return_target=args.return_target,
+            cache_mode=args.cache_mode,
+            compare_recompute=args.compare_recompute,
         )
         return
     resume_run = resume_state = None

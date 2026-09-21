@@ -456,6 +456,7 @@ class Context:
     # slot-keyed sampling and for a fresh random stream after a match reset.
     slot_ids: Tensor | None = None  # [B] int64
     reset: Tensor | None = None  # [B] bool
+    observation_counts: Tensor | None = None  # [B] int64, total frames observed since reset
 
     @property
     def batch(self) -> int:
@@ -467,6 +468,9 @@ class Context:
             ctx_pad=self.ctx_pad.to(device, non_blocking=True),
             slot_ids=None if self.slot_ids is None else self.slot_ids.to(device, non_blocking=True),
             reset=None if self.reset is None else self.reset.to(device, non_blocking=True),
+            observation_counts=(
+                None if self.observation_counts is None else self.observation_counts.to(device, non_blocking=True)
+            ),
         )
 
     def pin_memory(self) -> Context:
@@ -478,6 +482,7 @@ class Context:
             ctx_pad=self.ctx_pad.pin_memory(),
             slot_ids=None if self.slot_ids is None else self.slot_ids.pin_memory(),
             reset=None if self.reset is None else self.reset.pin_memory(),
+            observation_counts=(None if self.observation_counts is None else self.observation_counts.pin_memory()),
         )
 
 
@@ -508,6 +513,8 @@ class TrainBatch:
             tensors.append(self.context.slot_ids)
         if self.context.reset is not None:
             tensors.append(self.context.reset)
+        if self.context.observation_counts is not None:
+            tensors.append(self.context.observation_counts)
         for tensor in tensors:
             tensor.record_stream(stream)
 

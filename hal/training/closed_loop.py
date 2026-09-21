@@ -302,6 +302,7 @@ class RecedingHorizon:
             ctx_pad=ctx_pad,
             slot_ids=torch.tensor([sl.match * 8 + sl.port for sl in live], dtype=torch.long, device=self.device),
             reset=torch.tensor(resets, dtype=torch.bool, device=self.device),
+            observation_counts=torch.tensor([self._count(sl) for sl in live], dtype=torch.long, device=self.device),
         )
         for sl in live:
             self._slots[sl].reset_pending = False

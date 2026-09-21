@@ -503,6 +503,109 @@ def test_normal_decode_keeps_logits_out_of_the_decoder_path() -> None:
     assert engine._trace_decoders == {}
 
 
+def test_rolling_trunk_matches_recomputation_then_bounded_history() -> None:
+    torch.manual_seed(31)
+    cfg = _tiny_cfg(batch_size=1)
+    cfg = replace(cfg, arch=replace(cfg.arch, attn_window=cfg.arch.L_ctx))
+    model = exp.GPT(cfg).eval()
+    length = cfg.arch.L_ctx
+    sequence = torch.randn(1, length + 5, cfg.arch.d_model)
+    shape = (
+        cfg.arch.n_layers,
+        1,
+        cfg.arch.n_heads,
+        length,
+        cfg.arch.d_model // cfg.arch.n_heads,
+    )
+    keys = torch.zeros(shape)
+    values = torch.zeros(shape)
+    hidden = torch.zeros(1, length, cfg.arch.d_model)
+    pad = torch.full((1,), length, dtype=torch.long)
+    active = torch.ones(1, 1, dtype=torch.bool)
+
+    for index in range(sequence.shape[1]):
+        keys, values, hidden, pad = exp._rolling_trunk_forward(
+            model,
+            sequence[:, index : index + 1],
+            keys,
+            values,
+            hidden,
+            pad,
+            active,
+            torch.tensor([[index]]),
+        )
+        if index < length:
+            padded = torch.zeros(1, length, cfg.arch.d_model)
+            padded[:, -(index + 1) :] = sequence[:, : index + 1]
+            reference = model.trunk.forward_dense(padded, torch.tensor([length - index - 1]))
+            torch.testing.assert_close(hidden[:, -(index + 1) :], reference[:, -(index + 1) :])
+        else:
+            reference = model.trunk.forward_dense(sequence[:, : index + 1], torch.zeros(1, dtype=torch.long))
+            torch.testing.assert_close(hidden, reference[:, -length:])
+    truncated = model.trunk.forward_dense(sequence[:, -length:], torch.zeros(1, dtype=torch.long))
+    assert (hidden - truncated).abs().max() > 1e-5
+
+
+def test_rolling_cache_tracks_stream_order_and_reset() -> None:
+    torch.manual_seed(37)
+    cfg = _tiny_cfg(batch_size=2)
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(model, cfg, compiled=False, cache_mode="rolling")
+    context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
+    context = replace(
+        context,
+        ctx_pad=torch.full((2,), cfg.arch.L_ctx - 1, dtype=torch.long),
+        observation_counts=torch.ones(2, dtype=torch.long),
+    )
+    engine.decode(context, cfg.prediction_frames, argmax=True)
+
+    reordered = replace(
+        context,
+        slot_ids=context.slot_ids.flip(0),
+        reset=torch.zeros(2, dtype=torch.bool),
+        observation_counts=torch.full((2,), 2, dtype=torch.long),
+        ctx_pad=torch.full((2,), cfg.arch.L_ctx - 2, dtype=torch.long),
+    )
+    engine.decode(reordered, cfg.prediction_frames, argmax=True)
+    assert engine._rolling_state is not None
+    assert engine._rolling_state.slot_ids == tuple(int(value) for value in reordered.slot_ids.tolist())
+
+    reset = replace(
+        reordered,
+        reset=torch.tensor([True, False]),
+        observation_counts=torch.tensor([1, 3]),
+        ctx_pad=torch.tensor([cfg.arch.L_ctx - 1, cfg.arch.L_ctx - 3]),
+    )
+    engine.decode(reset, cfg.prediction_frames, argmax=True)
+    assert engine._rolling_state is not None
+    assert engine._rolling_state.observation_counts == (1, 3)
+
+
+def test_rolling_cache_comparison_records_numerical_metrics() -> None:
+    torch.manual_seed(41)
+    cfg = _tiny_cfg(batch_size=1)
+    model = exp.GPT(cfg).eval()
+    engine = exp.BF16Inference(
+        model,
+        cfg,
+        compiled=False,
+        cache_mode="rolling",
+        compare_recompute=True,
+    )
+    context = exp.synthetic_context(cfg, 1, torch.device("cpu"))
+    context = replace(
+        context,
+        ctx_pad=torch.tensor([cfg.arch.L_ctx - 1]),
+        observation_counts=torch.ones(1, dtype=torch.long),
+    )
+    engine.decode(context, cfg.prediction_frames, gen=torch.Generator().manual_seed(5))
+    assert engine.cache_comparison is not None
+    metrics = engine.cache_comparison.metrics()
+    assert metrics["cache_compare/pre_eviction/hidden_rms"] < 1e-5
+    assert metrics["cache_compare/pre_eviction/hidden_cosine"] > 0.99999
+    assert "cache_compare/pre_eviction/buttons/tv" in metrics
+
+
 def test_prewarm_cache_includes_resolved_delay() -> None:
     cfg = _tiny_cfg()
     engine = exp.BF16Inference(exp.GPT(cfg).eval(), cfg, compiled=False)
