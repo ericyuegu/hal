@@ -1180,6 +1180,9 @@ div.wb-math{margin:0 0 var(--space-para);overflow-x:auto;max-width:var(--measure
 .iso-tip.on{opacity:1;transform:none}
 .iso-tip-title{font-weight:600;margin-bottom:2px}
 
+/* ---------- chunk decoder ---------- */
+.chunk-figure .model-diagram{display:block;width:100%;height:auto}
+
 </style>
 
 <div class="wb-shell wb-figure-page">
@@ -1601,6 +1604,20 @@ div.wb-math{margin:0 0 var(--space-para);overflow-x:auto;max-width:var(--measure
       </div>
     </div>
     <svg class="model-diagram" id="deps-diagram" role="img" aria-label="Four rows, one per O37 cell. Each row shows what the decoder is handed when it writes a frame two steps ahead — nothing, or the frames before it — and whether the four controller groups inside the frame are chained. At the right, each conditioned cell's change in net stocks and net damage per minute from the unconditioned cell, with 95% intervals: the cell with both kinds of conditioning gains the most."></svg>
+  </div>
+</figure>
+
+</div>
+<div class="fig-src custom" data-fig="chunk-decoder">
+<figure class="breakout architecture-figure chunk-figure" id="chunk-decoder">
+  <div class="artifact interactive">
+    <div class="figure-head">
+      <div>
+        <h4>Decoding one action chunk</h4>
+        <p>One decoder token per future frame, written in order; each written frame embeds into the next token.</p>
+      </div>
+    </div>
+    <svg class="model-diagram" id="chunk-decoder-diagram" role="img" aria-label="The trunk states over the context end in the current state. One decoder token per future frame concatenates the embedded previous frame, the current trunk state and the frame offset, then passes through a linear layer and a norm, a causal self-attention block over the earlier chunk tokens, a cross-attention to keys and values projected once from all trunk states, further causal blocks and a norm into the frame state, whose four heads write that frame. Each written frame is embedded into the next token."></svg>
   </div>
 </figure>
 
@@ -2311,6 +2328,14 @@ div.wb-math{margin:0 0 var(--space-para);overflow-x:auto;max-width:var(--measure
   ]
  },
  {
+  "key": "chunk-decoder",
+  "name": "Decoding one action chunk",
+  "source": "custom",
+  "caption": "Each decoder token is the embedded previous frame, the trunk state hₜ and the frame offset k. The tokens pass through a causal self-attention block over the earlier chunk tokens, a cross-attention to keys and values projected once from every trunk state in the context, further causal blocks and a norm into the frame state; the four heads of {{fig:action-logit-paths}} then write that frame, and the written frame embeds into the next token. Training runs every step at once with the true prefix; play runs the steps in order with cached keys and values.",
+  "data": [],
+  "studies": []
+ },
+ {
   "key": "action-logit-paths",
   "name": "Inside one written frame",
   "source": "custom",
@@ -2641,7 +2666,7 @@ div.wb-math{margin:0 0 var(--space-para);overflow-x:auto;max-width:var(--measure
 <script src="figures/anatomy.js"></script>
 <script src="figures/explorer.js"></script>
 <script src="figures/custom.js"></script>
-<script>window.WB_STATIC = true; window.WB_SEED = {"outline": {"order": ["fig"]}, "blocks": {"fig": {"type": "figure", "caption": "O39: 33 completed runs, seven model sizes × five data budgets. The fit uses all measured points; none were held out. Top left: measured loss and the fitted data curves. Top right: fitted iso-FLOP parabolas at four budgets with the runs measured at each and the predicted minimum of each. Bottom: compute-optimal size N_opt ∝ C^0.58; the star is the fit's optimum at the O50 production budget (C = 6·D·N with D = 2³³ and N = trunk + 20 × decoder for that architecture), the ring where O50 actually sat. Solid segments stay inside the observed N and D ranges; dashed segments extrapolate. Hover or tab through the points; move along the bottom panel for any budget. Expand the residual panel to inspect measured minus fitted loss. The dedicated O48 study was canceled.", "fig": "iso-flop", "num": "11"}}};</script>
+<script>window.WB_STATIC = true; window.WB_SEED = {"outline": {"order": ["fig"]}, "blocks": {"fig": {"type": "figure", "caption": "O39: 33 completed runs, seven model sizes × five data budgets. The fit uses all measured points; none were held out. Top left: measured loss and the fitted data curves. Top right: fitted iso-FLOP parabolas at four budgets with the runs measured at each and the predicted minimum of each. Bottom: compute-optimal size N_opt ∝ C^0.58; the star is the fit's optimum at the O50 production budget (C = 6·D·N with D = 2³³ and N = trunk + 20 × decoder for that architecture), the ring where O50 actually sat. Solid segments stay inside the observed N and D ranges; dashed segments extrapolate. Hover or tab through the points; move along the bottom panel for any budget. Expand the residual panel to inspect measured minus fitted loss. The dedicated O48 study was canceled.", "fig": "iso-flop", "num": "12"}}};</script>
 <script>
 (function () {
   'use strict';

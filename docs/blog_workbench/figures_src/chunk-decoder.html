@@ -1,0 +1,11 @@
+<figure class="breakout architecture-figure chunk-figure" id="chunk-decoder">
+  <div class="artifact interactive">
+    <div class="figure-head">
+      <div>
+        <h4>Decoding one action chunk</h4>
+        <p>One decoder token per future frame, written in order; each written frame embeds into the next token.</p>
+      </div>
+    </div>
+    <svg class="model-diagram" id="chunk-decoder-diagram" role="img" aria-label="The trunk states over the context end in the current state. One decoder token per future frame concatenates the embedded previous frame, the current trunk state and the frame offset, then passes through a linear layer and a norm, a causal self-attention block over the earlier chunk tokens, a cross-attention to keys and values projected once from all trunk states, further causal blocks and a norm into the frame state, whose four heads write that frame. Each written frame is embedded into the next token."></svg>
+  </div>
+</figure>

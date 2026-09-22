@@ -180,3 +180,6 @@
 .iso-tip{position:fixed;z-index:30;max-width:340px;padding:8px 10px;background:var(--white);border:1px solid var(--ink);box-shadow:2px 2px 0 var(--shadow-ink-12);font:400 .7rem/1.5 var(--mono);color:var(--ink);font-variant-numeric:tabular-nums;pointer-events:none;opacity:0;transform:translateY(3px);transition:opacity .12s ease,transform .12s ease}
 .iso-tip.on{opacity:1;transform:none}
 .iso-tip-title{font-weight:600;margin-bottom:2px}
+
+/* ---------- chunk decoder ---------- */
+.chunk-figure .model-diagram{display:block;width:100%;height:auto}

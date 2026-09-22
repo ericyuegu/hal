@@ -269,6 +269,14 @@
   ]
  },
  {
+  "key": "chunk-decoder",
+  "name": "Decoding one action chunk",
+  "source": "custom",
+  "caption": "Each decoder token is the embedded previous frame, the trunk state hₜ and the frame offset k. The tokens pass through a causal self-attention block over the earlier chunk tokens, a cross-attention to keys and values projected once from every trunk state in the context, further causal blocks and a norm into the frame state; the four heads of {{fig:action-logit-paths}} then write that frame, and the written frame embeds into the next token. Training runs every step at once with the true prefix; play runs the steps in order with cached keys and values.",
+  "data": [],
+  "studies": []
+ },
+ {
   "key": "action-logit-paths",
   "name": "Inside one written frame",
   "source": "custom",

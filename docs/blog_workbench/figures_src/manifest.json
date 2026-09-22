@@ -50,6 +50,13 @@
   ]
  },
  {
+  "key": "chunk-decoder",
+  "name": "Decoding one action chunk",
+  "caption": "Each decoder token is the embedded previous frame, the trunk state hₜ and the frame offset k. The tokens pass through a causal self-attention block over the earlier chunk tokens, a cross-attention to keys and values projected once from every trunk state in the context, further causal blocks and a norm into the frame state; the four heads of {{fig:action-logit-paths}} then write that frame, and the written frame embeds into the next token. Training runs every step at once with the true prefix; play runs the steps in order with cached keys and values.",
+  "studies": [],
+  "data": []
+ },
+ {
   "key": "action-logit-paths",
   "name": "Inside one written frame",
   "caption": "One decoder token per future frame, (hₜ, previous written frame, offset), through two causal attention blocks; each frame’s four heads then fire in order, C-stick first. Later heads see the picks made so far through FiLM on the frame state; every head is a norm → linear → SiLU → linear stack whose logits also receive a linear skip from the trunk state hₜ. O43 tested each part against the model without it: zero-init FiLM → ordinary init +1.09 [+0.75, +1.43] stocks/min, no trunk skip → trunk skip +0.89 [+0.49, +1.29], linear head → SiLU MLP head +2.03 [+1.75, +2.31] on the character suite; the Fox suite agrees. Hover a row to light the part.",
