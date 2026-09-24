@@ -30,6 +30,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from hal.inference.bundle import read_policy_manifest
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
@@ -54,6 +55,8 @@ class ApiConfig:
     allowed_origins: tuple[str, ...] = ("http://localhost:3000",)
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
     runner_status: Path | None = None
+    supported_delays: tuple[int, ...] = (2, 3)
+    masked_identity: bool = False
 
     def __post_init__(self) -> None:
         if self.capacity < 1:
@@ -69,12 +72,16 @@ class ApiConfig:
             filter(None, os.environ.get("HAL_NETPLAY_ALLOWED_ORIGINS", "http://localhost:3000").split(","))
         )
         hosts = tuple(filter(None, os.environ.get("HAL_NETPLAY_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")))
+        policy_path = os.environ.get("HAL_NETPLAY_POLICY")
+        manifest = read_policy_manifest(policy_path) if policy_path else None
         return cls(
             database=Path(database or os.environ.get("HAL_NETPLAY_DATABASE", "runs/netplay/queue.sqlite3")),
             capacity=int(os.environ.get("HAL_NETPLAY_CAPACITY", "2")),
             allowed_origins=origins,
             allowed_hosts=hosts,
             runner_status=(Path(value).resolve() if (value := os.environ.get("HAL_NETPLAY_RUNNER_STATUS")) else None),
+            supported_delays=(2,) if manifest is not None and manifest.backend == "o59-history-decoder" else (2, 3),
+            masked_identity=manifest is not None and manifest.backend == "o59-history-decoder",
         )
 
 
@@ -90,6 +97,10 @@ class OptionsResponse(BaseModel):
     imitations: tuple[ChoiceResponse, ...]
     stages: tuple[ChoiceResponse, ...]
     online_delays: tuple[int, ...] = (2, 3)
+    desired_return_range: tuple[float, float] = (0.0, 40.0)
+    default_desired_return: float = 20.0
+    temperature_range: tuple[float, float] = (0.8, 1.1)
+    default_temperature: float = 1.0
     max_games: int = 5
     no_show_seconds: int = 60
     rematch_seconds: int = 60
@@ -101,6 +112,14 @@ class CreateJobRequest(BaseModel):
     character: str
     imitation: str
     online_delay: int
+    desired_return: float | None = Field(default=20.0, ge=0, le=40)
+    temperature: float = Field(default=1.0, ge=0.8, le=1.1)
+
+
+class UpdatePolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    desired_return: float | None = Field(default=None, ge=0, le=40)
+    temperature: float | None = Field(default=None, ge=0.8, le=1.1)
 
 
 class RematchRequest(BaseModel):
@@ -117,6 +136,9 @@ class JobResponse(BaseModel):
     character: str
     imitation: str
     online_delay: int
+    desired_return: float | None
+    temperature: float
+    policy_revision: int
     requested_stage: str | None
     status: str
     queue_position: int | None
@@ -167,6 +189,9 @@ def _job(job: Job) -> JobResponse:
         character=job.choices.character,
         imitation=job.choices.imitation,
         online_delay=job.choices.online_delay,
+        desired_return=job.choices.desired_return,
+        temperature=job.choices.temperature,
+        policy_revision=job.policy_revision,
         requested_stage=job.choices.requested_stage,
         status=job.status.value,
         queue_position=job.queue_position,
@@ -313,7 +338,7 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(config.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
         max_age=600,
     )
@@ -376,7 +401,10 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
     @app.get("/v1/options", response_model=OptionsResponse)
     def options() -> OptionsResponse:
         return OptionsResponse(
-            characters=_choices(CHARACTERS), imitations=_choices(IMITATIONS), stages=_choices(STAGES)
+            characters=_choices(CHARACTERS),
+            imitations=_choices(IMITATIONS if config.masked_identity else IMITATIONS[1:]),
+            stages=_choices(STAGES),
+            online_delays=config.supported_delays,
         )
 
     @app.get("/v1/capacity", response_model=CapacityResponse)
@@ -385,6 +413,10 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
 
     @app.post("/v1/jobs", response_model=CreatedJobResponse, status_code=201)
     def create_job(body: CreateJobRequest) -> CreatedJobResponse:
+        if body.online_delay not in config.supported_delays:
+            raise HTTPException(status_code=422, detail="online delay is unsupported by this policy")
+        if body.imitation == "MASKED" and not config.masked_identity:
+            raise HTTPException(status_code=422, detail="masked identity is unsupported by this policy")
         try:
             status = _runner_health(config)
         except _RunnerUnavailableError as error:
@@ -394,7 +426,13 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
         try:
             credentials = queue.create_job(
                 body.player_code,
-                MatchChoices(body.character, body.imitation, body.online_delay),
+                MatchChoices(
+                    body.character,
+                    body.imitation,
+                    body.online_delay,
+                    desired_return=body.desired_return,
+                    temperature=body.temperature,
+                ),
             )
         except ActiveJobError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -417,6 +455,28 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
             return _job(queue.get_job(job_id, job_token))
         except AuthenticationError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
+
+    @app.patch("/v1/jobs/{job_id}/policy", response_model=JobResponse)
+    def update_policy(
+        job_id: str, body: UpdatePolicyRequest, job_token: Annotated[str, Depends(token)]
+    ) -> JobResponse:
+        if not body.model_fields_set:
+            raise HTTPException(status_code=422, detail="provide desired_return or temperature")
+        try:
+            current = queue.get_job(job_id, job_token)
+            target = (
+                body.desired_return if "desired_return" in body.model_fields_set else current.choices.desired_return
+            )
+            sampling = body.temperature if "temperature" in body.model_fields_set else current.choices.temperature
+            if sampling is None:
+                raise ValueError("temperature cannot be null")
+            return _job(queue.update_policy(job_id, job_token, desired_return=target, temperature=sampling))
+        except AuthenticationError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+        except InvalidTransitionError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.delete("/v1/jobs/{job_id}", response_model=JobResponse)
     def cancel_job(job_id: str, job_token: Annotated[str, Depends(token)]) -> JobResponse:

@@ -16,11 +16,13 @@ from hal.netplay_service.domain import JobCredentials
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.domain import validate_character
+from hal.netplay_service.domain import validate_desired_return
 from hal.netplay_service.domain import validate_imitation
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.domain import validate_stage
+from hal.netplay_service.domain import validate_temperature
 
-_SCHEMA_VERSION: Final[int] = 2
+_SCHEMA_VERSION: Final[int] = 3
 _ACTIVE_SQL: Final[str] = "'queued','leased','connecting','playing','rematch_wait','rematch_ready'"
 _IN_SERVICE_SQL: Final[str] = "'leased','connecting','playing','rematch_wait','rematch_ready'"
 
@@ -77,7 +79,7 @@ class QueueStore:
     def _initialize(self) -> None:
         with closing(self._connect()) as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, _SCHEMA_VERSION):
+            if version not in (0, 1, 2, _SCHEMA_VERSION):
                 raise QueueError(f"unsupported netplay queue schema {version}")
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
@@ -89,6 +91,9 @@ class QueueStore:
                     character TEXT NOT NULL,
                     imitation TEXT NOT NULL,
                     online_delay INTEGER NOT NULL CHECK (online_delay IN (2, 3)),
+                    desired_return REAL DEFAULT 20.0,
+                    temperature REAL NOT NULL DEFAULT 1.0,
+                    policy_revision INTEGER NOT NULL DEFAULT 0,
                     requested_stage TEXT,
                     status TEXT NOT NULL,
                     queue_seq INTEGER NOT NULL,
@@ -129,6 +134,15 @@ class QueueStore:
             )
             if version == 1:
                 connection.execute("DROP TABLE invites")
+            if version in (1, 2):
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+                for name, definition in (
+                    ("desired_return", "REAL DEFAULT 20.0"),
+                    ("temperature", "REAL NOT NULL DEFAULT 1.0"),
+                    ("policy_revision", "INTEGER NOT NULL DEFAULT 0"),
+                ):
+                    if name not in columns:
+                        connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             connection.execute("PRAGMA optimize")
 
@@ -144,8 +158,9 @@ class QueueStore:
                     """
                     INSERT INTO jobs(
                         id, token_digest, player_code, character, imitation, online_delay,
+                        desired_return, temperature,
                         requested_stage, status, queue_seq, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'queued', ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', ?, ?, ?)
                     """,
                     (
                         job_id,
@@ -154,6 +169,8 @@ class QueueStore:
                         choices.character,
                         choices.imitation,
                         choices.online_delay,
+                        choices.desired_return,
+                        choices.temperature,
                         queue_seq,
                         timestamp,
                         timestamp,
@@ -202,6 +219,8 @@ class QueueStore:
                 imitation=row["imitation"],
                 online_delay=row["online_delay"],
                 requested_stage=row["requested_stage"],
+                desired_return=row["desired_return"],
+                temperature=row["temperature"],
             ),
             status=status,
             queue_position=position,
@@ -218,7 +237,32 @@ class QueueStore:
             lease_expires_at=row["lease_expires_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            policy_revision=row["policy_revision"],
         )
+
+    def update_policy(
+        self,
+        job_id: str,
+        token: str,
+        *,
+        desired_return: float | None,
+        temperature: float,
+    ) -> Job:
+        target = validate_desired_return(desired_return)
+        sampling = validate_temperature(temperature)
+        timestamp = self._now()
+        with self._transaction() as connection:
+            row = self._authenticated_job(connection, job_id, token)
+            if JobStatus(row["status"]) in TERMINAL_STATUSES:
+                raise InvalidTransitionError("cannot update a finished reservation")
+            connection.execute(
+                """UPDATE jobs SET desired_return = ?, temperature = ?,
+                    policy_revision = policy_revision + 1, updated_at = ? WHERE id = ?""",
+                (target, sampling, timestamp, job_id),
+            )
+            updated = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            assert updated is not None
+            return self._job(connection, updated)
 
     def queue_depth(self) -> int:
         with closing(self._connect()) as connection:

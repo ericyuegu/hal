@@ -43,8 +43,41 @@ def test_schema_one_database_drops_obsolete_invites(tmp_path: Path) -> None:
         invite_table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'invites'"
         ).fetchone()
-    assert version == 2
+    assert version == 3
     assert invite_table is None
+
+
+def test_policy_settings_persist_and_revision_advances(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    store = QueueStore(path)
+    credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2, desired_return=24.0))
+    assert credentials.job.choices.desired_return == 24.0
+    assert credentials.job.policy_revision == 0
+
+    updated = store.update_policy(credentials.job.id, credentials.token, desired_return=None, temperature=0.9)
+    assert updated.choices.desired_return is None
+    assert updated.choices.temperature == 0.9
+    assert updated.policy_revision == 1
+    reopened = QueueStore(path).get_job(credentials.job.id, credentials.token)
+    assert reopened.choices == updated.choices
+    assert reopened.policy_revision == 1
+
+
+def test_schema_two_database_adds_policy_settings(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    QueueStore(path)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA user_version = 2")
+        connection.execute("ALTER TABLE jobs DROP COLUMN desired_return")
+        connection.execute("ALTER TABLE jobs DROP COLUMN temperature")
+        connection.execute("ALTER TABLE jobs DROP COLUMN policy_revision")
+        connection.commit()
+    QueueStore(path)
+    with closing(sqlite3.connect(path)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+    assert {"desired_return", "temperature", "policy_revision"} <= columns
+    assert version == 3
 
 
 def test_queue_operations_close_every_sqlite_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

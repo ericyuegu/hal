@@ -5,6 +5,10 @@ export type Options = {
   imitations: Choice[];
   stages: Choice[];
   online_delays: number[];
+  desired_return_range: [number, number];
+  default_desired_return: number;
+  temperature_range: [number, number];
+  default_temperature: number;
   max_games: number;
   no_show_seconds: number;
   rematch_seconds: number;
@@ -33,6 +37,9 @@ export type Job = {
   character: string;
   imitation: string;
   online_delay: number;
+  desired_return: number | null;
+  temperature: number;
+  policy_revision: number;
   requested_stage: string | null;
   status: string;
   queue_position: number | null;
@@ -54,6 +61,13 @@ export type CreateJob = {
   character: string;
   imitation: string;
   online_delay: number;
+  desired_return?: number | null;
+  temperature?: number;
+};
+
+export type PolicySettings = {
+  desired_return?: number | null;
+  temperature?: number;
 };
 
 export type Rematch = {
@@ -109,6 +123,17 @@ export function cancelJob(id: string, token: string): Promise<Job> {
   return request(`/v1/jobs/${id}`, authorized(token, { method: 'DELETE' }));
 }
 
+export function updatePolicy(
+  id: string,
+  token: string,
+  values: PolicySettings,
+): Promise<Job> {
+  return request(
+    `/v1/jobs/${id}/policy`,
+    authorized(token, { method: 'PATCH', body: JSON.stringify(values) }),
+  );
+}
+
 export function requestRematch(
   id: string,
   token: string,
@@ -160,6 +185,7 @@ export const fallbackOptions: Options = {
     ['PLATINUM', 'Platinum rank'],
     ['DIAMOND', 'Diamond rank'],
     ['MASTER', 'Master rank'],
+    ['MASKED', 'No player identity'],
   ].map(([value, label]) => ({ value, label })),
   stages: [
     ['BATTLEFIELD', 'Battlefield'],
@@ -169,7 +195,11 @@ export const fallbackOptions: Options = {
     ['YOSHIS_STORY', "Yoshi's Story"],
     ['FOUNTAIN_OF_DREAMS', 'Fountain of Dreams'],
   ].map(([value, label]) => ({ value, label })),
-  online_delays: [2, 3],
+  online_delays: [2],
+  desired_return_range: [0, 40],
+  default_desired_return: 20,
+  temperature_range: [0.8, 1.1],
+  default_temperature: 1,
   max_games: 5,
   no_show_seconds: 60,
   rematch_seconds: 60,

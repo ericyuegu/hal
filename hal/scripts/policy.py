@@ -59,6 +59,9 @@ def _policy_parser() -> argparse.ArgumentParser:
     export.add_argument("checkpoint")
     export.add_argument("output", type=Path)
     export.add_argument("--cache-root", type=Path, default=Path("runs"))
+    export_o59 = commands.add_parser("export-o59", help="convert the trusted O59 checkpoint to a bundle")
+    export_o59.add_argument("checkpoint")
+    export_o59.add_argument("output", type=Path)
 
     evaluate = commands.add_parser("eval", help="run a portable policy against local CPUs")
     evaluate.add_argument("policy")
@@ -111,6 +114,13 @@ def _export(args: argparse.Namespace) -> None:
     from hal.inference.o50 import export_o50_policy
 
     export_o50_policy(args.checkpoint, args.output, cache_root=args.cache_root)
+    print(args.output.resolve())
+
+
+def _export_o59(args: argparse.Namespace) -> None:
+    from hal.inference.o59 import export_o59_policy
+
+    export_o59_policy(args.checkpoint, args.output)
     print(args.output.resolve())
 
 
@@ -195,6 +205,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _policy_parser().parse_args(argv)
     if args.command == "export":
         _export(args)
+    elif args.command == "export-o59":
+        _export_o59(args)
     elif args.command == "eval":
         _eval(args)
     else:

@@ -94,6 +94,8 @@ class PolicyInput:
     applied_action: ControllerAction
     pending_actions: tuple[ControllerAction, ...]
     player_identity: str | None = None
+    desired_return: float | None = 20.0
+    temperature: float = 1.0
     reset: bool = False
 
 
@@ -188,6 +190,20 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
             raise ValueError(f"stream {item.stream_id} player identity must be a non-empty string")
         if spec.requires_player_identity and item.player_identity is None:
             raise ValueError(f"stream {item.stream_id} requires a player identity")
+        if item.desired_return is not None and (
+            not isinstance(item.desired_return, Real)
+            or isinstance(item.desired_return, bool)
+            or not math.isfinite(float(item.desired_return))
+            or not 0.0 <= item.desired_return <= 40.0
+        ):
+            raise ValueError(f"stream {item.stream_id} desired return must be in [0, 40] or null")
+        if (
+            not isinstance(item.temperature, Real)
+            or isinstance(item.temperature, bool)
+            or not math.isfinite(float(item.temperature))
+            or not 0.8 <= item.temperature <= 1.1
+        ):
+            raise ValueError(f"stream {item.stream_id} temperature must be in [0.8, 1.1]")
         validate_controller_action(item.applied_action)
         for action in item.pending_actions:
             validate_controller_action(action)

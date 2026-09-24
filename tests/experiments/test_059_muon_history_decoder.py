@@ -16,6 +16,9 @@ import pytest
 import torch
 
 import hal.training.physical_shard_loader as replay_loader
+from hal.inference.o59_model import GPT as ServingGPT
+from hal.training.features import NEUTRAL_ACTION
+from hal.training.features import stack_actions
 
 
 def _load():
@@ -1257,3 +1260,44 @@ def test_conditioned_and_unconditioned_evidence_cannot_share_directory(tmp_path:
     (tmp_path / "match_rows.json").write_text(json.dumps({**saved, "schema_version": 6}))
     with pytest.raises(ValueError, match="different protocol"):
         exp._validate_eval_directory(tmp_path, protocol)
+
+
+def test_serving_decoder_matches_frozen_experiment() -> None:
+    cfg = _tiny_cfg(batch_size=1)
+    reference = exp.GPT(cfg).eval()
+    serving = ServingGPT(cfg).eval()
+    serving.load_state_dict(reference.state_dict(), strict=True)
+    context = exp.synthetic_context(cfg, 1, torch.device("cpu"))
+    observed = reference.codec.quantize(stack_actions(context.features))
+    forced = reference.codec.quantize(torch.as_tensor(NEUTRAL_ACTION).reshape(1, 1, -1).expand(1, 2, -1))
+    hidden = torch.randn(1, cfg.arch.L_ctx, cfg.arch.d_model)
+    uniforms = torch.rand(4, len(exp.CONTROLLER_GROUP_NAMES), 1)
+    target = torch.tensor([20.0])
+    present = torch.tensor([True])
+
+    with torch.inference_mode():
+        torch.testing.assert_close(
+            reference.context_tokens(context.features, observed),
+            serving.context_tokens(context.features, observed),
+            rtol=0,
+            atol=0,
+        )
+        for temperature in (0.8, 1.0, 1.1):
+            args = (hidden, observed[:, -1], reference.head_offsets[:4], target, present)
+            expected = reference.temporal.sample_indices(
+                *args,
+                argmax=False,
+                uniforms=uniforms,
+                temperature=temperature,
+                ctx_pad=context.ctx_pad,
+                forced_prefix=forced,
+            )
+            actual = serving.temporal.sample_indices(
+                *args,
+                argmax=False,
+                uniforms=uniforms,
+                temperature=torch.tensor(temperature),
+                ctx_pad=context.ctx_pad,
+                forced_prefix=forced,
+            )
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)

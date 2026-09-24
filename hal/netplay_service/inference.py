@@ -181,6 +181,9 @@ class ServingArena:
             ((slots,), np.dtype("u1")),
             ((slots,), np.dtype("u1")),
             ((slots,), np.dtype("u1")),
+            ((slots,), np.dtype("<f8")),
+            ((slots,), np.dtype("u1")),
+            ((slots,), np.dtype("<f8")),
             ((slots,), np.dtype("<u2")),
             ((slots, identity_bytes), np.dtype("u1")),
             ((slots, fields), np.dtype("<f8")),
@@ -211,6 +214,9 @@ class ServingArena:
         self.controlled_port, offset = self._view(offset, (descriptor.slots,), np.dtype("u1"))
         self.delay, offset = self._view(offset, (descriptor.slots,), np.dtype("u1"))
         self.reset, offset = self._view(offset, (descriptor.slots,), np.dtype("u1"))
+        self.desired_return, offset = self._view(offset, (descriptor.slots,), np.dtype("<f8"))
+        self.return_present, offset = self._view(offset, (descriptor.slots,), np.dtype("u1"))
+        self.temperature, offset = self._view(offset, (descriptor.slots,), np.dtype("<f8"))
         self.identity_length, offset = self._view(offset, (descriptor.slots,), np.dtype("<u2"))
         self.identity, offset = self._view(
             offset,
@@ -257,6 +263,9 @@ class ServingArena:
         self.controlled_port[slot] = item.controlled_port
         self.delay[slot] = delay
         self.reset[slot] = item.reset
+        self.desired_return[slot] = 0.0 if item.desired_return is None else item.desired_return
+        self.return_present[slot] = item.desired_return is not None
+        self.temperature[slot] = item.temperature
         self.actions[slot, 0] = _action_values(item.applied_action)
         for index, action in enumerate(item.pending_actions, start=1):
             self.actions[slot, index] = _action_values(action)
@@ -287,6 +296,8 @@ class ServingArena:
             applied_action=_controller_action(self.actions[slot, 0]),
             pending_actions=tuple(_controller_action(self.actions[slot, index]) for index in range(1, delay + 1)),
             player_identity=identity or None,
+            desired_return=float(self.desired_return[slot]) if self.return_present[slot] else None,
+            temperature=float(self.temperature[slot]),
             reset=bool(self.reset[slot]),
         )
 
@@ -315,6 +326,9 @@ class ServingArena:
             "controlled_port",
             "delay",
             "reset",
+            "desired_return",
+            "return_present",
+            "temperature",
             "identity_length",
             "identity",
             "observation",

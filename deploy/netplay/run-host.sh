@@ -19,9 +19,13 @@ if [[ ! -f $env_file ]]; then
   exit 2
 fi
 
+policy_override=${HAL_NETPLAY_POLICY_OVERRIDE:-}
 set -a
 source "$env_file"
 set +a
+if [[ -n $policy_override ]]; then
+  export HAL_NETPLAY_POLICY=$policy_override
+fi
 
 required_variables=(
   HAL_GIT_SHA
@@ -45,7 +49,7 @@ export HAL_NETPLAY_ALLOWED_ORIGINS=${HAL_NETPLAY_ALLOWED_ORIGINS:-http://127.0.0
 export HAL_NETPLAY_ALLOWED_HOSTS=${HAL_NETPLAY_ALLOWED_HOSTS:-127.0.0.1,localhost}
 
 required_commands=(uv xvfb-run)
-if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} ]]; then
+if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} && ${HAL_NETPLAY_NO_TUNNEL:-0} != 1 ]]; then
   required_commands+=(cloudflared)
 fi
 for command in "${required_commands[@]}"; do
@@ -56,7 +60,8 @@ for command in "${required_commands[@]}"; do
 done
 
 state_dir=${HAL_NETPLAY_STATE_DIR:-"$repo_dir/runs/netplay"}
-mkdir -p "$state_dir/replays"
+export TMPDIR=${HAL_NETPLAY_TMPDIR:-"$state_dir/tmp"}
+mkdir -p "$state_dir/replays" "$TMPDIR"
 cd "$repo_dir"
 uv sync --extra netplay-server --locked
 
@@ -108,7 +113,7 @@ xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --git-sha "$HAL_GIT_SHA" </dev/null &
 process_groups+=("$!")
 
-if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} ]]; then
+if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} && ${HAL_NETPLAY_NO_TUNNEL:-0} != 1 ]]; then
   cloudflared tunnel --no-autoupdate run \
     --token "$CLOUDFLARE_TUNNEL_TOKEN" </dev/null &
   process_groups+=("$!")

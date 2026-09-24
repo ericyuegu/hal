@@ -17,6 +17,21 @@ Set the local paths and R2 values in `.env`, then open
 `http://127.0.0.1:3000`. The command starts the API, one-slot runner, and
 frontend. Press Ctrl-C to stop all three. Cloudflare values can stay empty.
 
+To serve O59 from the local 3060 with its evaluated delay-2 schedule, export
+the checkpoint and override the policy path for one launch:
+
+```text
+uv run hal-policy export-o59 /path/to/final.pt runs/netplay/o59-vywk3cih.hal
+HAL_NETPLAY_POLICY_OVERRIDE="$PWD/runs/netplay/o59-vywk3cih.hal" \
+HAL_NETPLAY_NO_TUNNEL=1 deploy/netplay/run-local.sh
+```
+
+The API accepts `desired_return` in `[0, 40]` or `null` and `temperature` in
+`[0.8, 1.1]` when creating a job. The defaults are 20 and 1. During a game,
+`PATCH /v1/jobs/{id}/policy` with the job bearer token changes either setting
+at the next replan after the runner receives it. The local page offers the same
+controls before joining and during a reservation.
+
 ## Publish with Cloudflare
 
 Set the public origins, API URL, and tunnel token in `.env`. Install
@@ -84,6 +99,7 @@ connect:
 
 ```text
 HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1 \
+TMPDIR="$PWD/runs/netplay/tmp" \
 HAL_NETPLAY_POLICY=/absolute/path/to/policy.halpolicy \
 uv run pytest -q tests/test_netplay_hardware.py -m integration
 ```

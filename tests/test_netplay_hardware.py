@@ -12,6 +12,7 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.inference.api import Policy
 from hal.inference.api import PolicyInput
 from hal.inference.api import RuntimeConfig
+from hal.inference.bundle import read_policy_manifest
 from hal.inference.loader import load_policy
 
 
@@ -49,8 +50,17 @@ def test_compiled_policy_latency_has_no_post_prepare_recompile(delay: int, limit
     value = os.environ.get("HAL_NETPLAY_POLICY")
     if not value or not Path(value).is_file():
         pytest.fail("HAL_NETPLAY_POLICY must name the production policy bundle")
+    manifest = read_policy_manifest(value)
+    if delay not in manifest.supported_transport_delays or (manifest.backend == "o59-history-decoder" and rows != 1):
+        pytest.skip("this policy does not serve this delay or batch size")
     policy = load_policy(value, device="cuda", seed=0, compiled=True)
-    policy.prepare(RuntimeConfig(max_batch_size=rows, transport_delays=(2, 3)))
+    policy.prepare(
+        RuntimeConfig(
+            max_batch_size=rows,
+            transport_delays=(2,) if manifest.backend == "o59-history-decoder" else (2, 3),
+            replan_interval_frames=2 if manifest.backend == "o59-history-decoder" else None,
+        )
+    )
 
     with torch.compiler.set_stance("fail_on_recompile"):
         p95_ms = _measure(policy, rows, delay)

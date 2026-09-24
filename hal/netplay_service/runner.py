@@ -485,6 +485,40 @@ def _heartbeat(store: QueueStore, job_id: str, worker_id: str, stop: threading.E
             return
 
 
+class _LivePolicySettings:
+    """Poll SQLite off the frame thread; publish one immutable settings tuple."""
+
+    def __init__(self, store: QueueStore, job: Job, worker_id: str) -> None:
+        self._store = store
+        self._job_id = job.id
+        self._worker_id = worker_id
+        self._revision = job.policy_revision
+        self._values = (job.choices.desired_return, job.choices.temperature)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+
+    def _poll(self) -> None:
+        while not self._stop.wait(0.1):
+            try:
+                job = self._store.get_worker_job(self._job_id, self._worker_id)
+            except InvalidTransitionError:
+                return
+            if job.policy_revision != self._revision:
+                self._values = (job.choices.desired_return, job.choices.temperature)
+                self._revision = job.policy_revision
+
+    def current(self) -> tuple[float | None, float]:
+        return self._values
+
+    def __enter__(self) -> _LivePolicySettings:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join()
+
+
 def _run_reservation(
     config: SlotConfig,
     store: QueueStore,
@@ -533,16 +567,19 @@ def _run_reservation(
     store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=60.0)
     health.connecting(job.choices.online_delay)
     try:
-        with NetplaySession(
-            config.iso_path,
-            dolphin_path=config.dolphin_path,
-            user_json_path=config.user_json,
-            online_delay=job.choices.online_delay,
-            replay_dir=replay_dir,
-            slippi_port=config.slippi_port,
-            step_timeout_seconds=FRAME_STALL_SECONDS,
-            connect_timeout_seconds=60.0,
-        ) as session:
+        with (
+            _LivePolicySettings(store, job, config.worker_id) as settings,
+            NetplaySession(
+                config.iso_path,
+                dolphin_path=config.dolphin_path,
+                user_json_path=config.user_json,
+                online_delay=job.choices.online_delay,
+                replay_dir=replay_dir,
+                slippi_port=config.slippi_port,
+                step_timeout_seconds=FRAME_STALL_SECONDS,
+                connect_timeout_seconds=60.0,
+            ) as session,
+        ):
             rematch = False
             while not stop.is_set():
                 previous = frozenset(replay_dir.rglob("*.slp"))
@@ -552,7 +589,8 @@ def _run_reservation(
                     _setup(job, rematch=rematch),
                     policy,
                     runtime,
-                    player_identity=job.choices.imitation,
+                    player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
+                    policy_settings=settings.current,
                     max_frames=config.max_frames,
                     rematch=rematch,
                     on_live=mark_live,
@@ -730,8 +768,18 @@ def _start_slot_process(process: BaseProcess, child_connection: Connection) -> N
 def run(config: RunnerConfig) -> None:
     """Load and prepare one policy, then supervise fixed Dolphin slots."""
     bot_connect_codes = _bot_connect_codes(config.user_jsons)
-    runtime = RuntimeConfig(max_batch_size=len(config.user_jsons), transport_delays=(2, 3))
     started = time.perf_counter()
+    policy = load_policy(
+        config.policy,
+        device=config.device,
+        seed=config.seed,
+        compiled=config.compiled,
+    )
+    runtime = RuntimeConfig(
+        max_batch_size=len(config.user_jsons),
+        transport_delays=(2,) if policy.spec.backend == "o59-history-decoder" else (2, 3),
+        replan_interval_frames=2 if policy.spec.backend == "o59-history-decoder" else None,
+    )
     logger.info(
         "loading netplay policy {} on {} mode={} slots={} delays={} display={}",
         config.policy,
@@ -740,12 +788,6 @@ def run(config: RunnerConfig) -> None:
         len(config.user_jsons),
         runtime.transport_delays,
         os.environ.get("DISPLAY", "unset"),
-    )
-    policy = load_policy(
-        config.policy,
-        device=config.device,
-        seed=config.seed,
-        compiled=config.compiled,
     )
     policy.prepare(runtime)
     logger.info("netplay policy ready after {:.2f}s", time.perf_counter() - started)

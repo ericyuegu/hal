@@ -1,5 +1,6 @@
 """Validated values shared by the netplay API and runner."""
 
+import math
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -42,6 +43,7 @@ CHARACTERS: Final[tuple[Choice, ...]] = (
 )
 
 IMITATIONS: Final[tuple[Choice, ...]] = (
+    Choice("MASKED", "No player identity"),
     Choice("IBDW#0", "iBDW"),
     Choice("ZAIN#0", "Zain"),
     Choice("MANG#0", "Mang0"),
@@ -117,12 +119,38 @@ def validate_delay(value: int) -> int:
     return value
 
 
+def validate_desired_return(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (float, int))
+        or not math.isfinite(value)
+        or not 0 <= value <= 40
+    ):
+        raise ValueError("desired_return must be in [0, 40] or null")
+    return float(value)
+
+
+def validate_temperature(value: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (float, int))
+        or not math.isfinite(value)
+        or not 0.8 <= value <= 1.1
+    ):
+        raise ValueError("temperature must be in [0.8, 1.1]")
+    return float(value)
+
+
 @dataclass(frozen=True, slots=True)
 class MatchChoices:
     character: str
     imitation: str
     online_delay: int
     requested_stage: str | None = None
+    desired_return: float | None = 20.0
+    temperature: float = 1.0
 
     def __post_init__(self) -> None:
         validate_character(self.character)
@@ -130,6 +158,8 @@ class MatchChoices:
         validate_delay(self.online_delay)
         if self.requested_stage is not None:
             validate_stage(self.requested_stage)
+        validate_desired_return(self.desired_return)
+        validate_temperature(self.temperature)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +182,7 @@ class Job:
     lease_expires_at: float | None
     created_at: float
     updated_at: float
+    policy_revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)

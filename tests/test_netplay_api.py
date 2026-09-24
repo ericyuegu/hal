@@ -188,6 +188,22 @@ def test_create_poll_and_cancel_job(tmp_path: Path) -> None:
     assert "token" not in status.json()
 
 
+def test_policy_settings_can_change_during_a_job(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    with client:
+        created = client.post("/v1/jobs", json=_request()).json()
+        headers = {"Authorization": f"Bearer {created['token']}"}
+        path = f"/v1/jobs/{created['id']}/policy"
+        changed = client.patch(path, json={"desired_return": None, "temperature": 0.9}, headers=headers)
+        assert changed.status_code == 200
+        assert changed.json()["desired_return"] is None
+        assert changed.json()["temperature"] == 0.9
+        assert changed.json()["policy_revision"] == 1
+        assert store.get_job(created["id"], created["token"]).choices.temperature == 0.9
+        assert client.patch(path, json={"temperature": 1.2}, headers=headers).status_code == 422
+        assert client.patch(path, json={"temperature": None}, headers=headers).status_code == 422
+
+
 def test_job_credentials_do_not_reveal_existence(tmp_path: Path) -> None:
     client, _store = _client(tmp_path)
     with client:

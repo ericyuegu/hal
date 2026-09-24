@@ -35,6 +35,7 @@ import {
   Job,
   Options,
   requestRematch,
+  updatePolicy,
 } from '@/lib/netplay-api';
 
 type SavedJob = { id: string; token: string };
@@ -187,7 +188,13 @@ export default function Home() {
               type: 'string',
               enum: options.imitations.map((choice) => choice.value),
             },
-            online_delay: { type: 'integer', enum: [2, 3] },
+            online_delay: { type: 'integer', enum: options.online_delays },
+            desired_return: {
+              type: ['number', 'null'],
+              minimum: 0,
+              maximum: 40,
+            },
+            temperature: { type: 'number', minimum: 0.8, maximum: 1.1 },
           },
           required: ['player_code', 'character', 'imitation', 'online_delay'],
           additionalProperties: false,
@@ -300,6 +307,8 @@ function JoinForm({
   const [character, setCharacter] = useState('FOX');
   const [imitation, setImitation] = useState('IBDW#0');
   const [delay, setDelay] = useState('2');
+  const [returnTarget, setReturnTarget] = useState<string | null>('20');
+  const [temperature, setTemperature] = useState('1');
 
   function submit(event: SyntheticEvent<HTMLFormElement, SubmitEvent>) {
     event.preventDefault();
@@ -311,6 +320,8 @@ function JoinForm({
       character,
       imitation,
       online_delay: Number(delay),
+      desired_return: returnTarget === null ? null : Number(returnTarget),
+      temperature: Number(temperature),
     }).catch(() => undefined);
   }
 
@@ -367,18 +378,27 @@ function JoinForm({
             onValueChange={(value) => setDelay(value ?? '2')}
             className="mt-3 grid gap-3 sm:grid-cols-2"
           >
-            <DelayChoice
-              value="2"
-              title="2 frames"
-              description="Lower latency · recommended"
-            />
-            <DelayChoice
-              value="3"
-              title="3 frames"
-              description="More network tolerance"
-            />
+            {options.online_delays.map((frames) => (
+              <DelayChoice
+                key={frames}
+                value={String(frames)}
+                title={`${frames} frames`}
+                description={
+                  frames === 2
+                    ? 'Lower latency · recommended'
+                    : 'More network tolerance'
+                }
+              />
+            ))}
           </RadioGroup>
         </fieldset>
+        <PolicyFields
+          options={options}
+          returnTarget={returnTarget}
+          setReturnTarget={setReturnTarget}
+          temperature={temperature}
+          setTemperature={setTemperature}
+        />
         <div className="mt-7 flex flex-col gap-4 border-t border-white/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <CircleDot className="size-4 text-cyan-300" /> Game 1 starts on a
@@ -407,6 +427,143 @@ function JoinForm({
         <ErrorMessage value={error} />
       </form>
     </>
+  );
+}
+
+function PolicyFields({
+  options,
+  returnTarget,
+  setReturnTarget,
+  temperature,
+  setTemperature,
+}: {
+  options: Options;
+  returnTarget: string | null;
+  setReturnTarget: (value: string | null) => void;
+  temperature: string;
+  setTemperature: (value: string) => void;
+}) {
+  return (
+    <fieldset className="mt-7 border-t border-white/10 pt-6">
+      <legend className="text-sm font-medium">Policy settings</legend>
+      <div className="mt-3 grid gap-6 sm:grid-cols-2">
+        <Field
+          label="Return target"
+          htmlFor="return-target"
+          hint="0–40; sets the model's return target."
+        >
+          <Input
+            id="return-target"
+            type="number"
+            min={options.desired_return_range[0]}
+            max={options.desired_return_range[1]}
+            step="1"
+            required={returnTarget !== null}
+            disabled={returnTarget === null}
+            value={returnTarget ?? ''}
+            onChange={(event) => setReturnTarget(event.target.value)}
+          />
+          <label className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={returnTarget === null}
+              onChange={(event) =>
+                setReturnTarget(
+                  event.target.checked
+                    ? null
+                    : String(options.default_desired_return),
+                )
+              }
+            />
+            Unconditioned
+          </label>
+        </Field>
+        <Field
+          label="Decoding temperature"
+          htmlFor="temperature"
+          hint="Higher values add variety."
+        >
+          <Input
+            id="temperature"
+            type="number"
+            min={options.temperature_range[0]}
+            max={options.temperature_range[1]}
+            step="0.01"
+            required
+            value={temperature}
+            onChange={(event) => setTemperature(event.target.value)}
+          />
+        </Field>
+      </div>
+    </fieldset>
+  );
+}
+
+function PolicyForm({
+  job,
+  saved,
+  options,
+  busy,
+  update,
+  setBusy,
+  setError,
+}: {
+  job: Job;
+  saved: SavedJob;
+  options: Options;
+  busy: boolean;
+  update: (job: Job) => void;
+  setBusy: (value: boolean) => void;
+  setError: (value: string) => void;
+}) {
+  const [returnTarget, setReturnTarget] = useState<string | null>(
+    job.desired_return === null ? null : String(job.desired_return),
+  );
+  const [temperature, setTemperature] = useState(String(job.temperature));
+
+  async function submit(event: SyntheticEvent<HTMLFormElement, SubmitEvent>) {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      update(
+        await updatePolicy(saved.id, saved.token, {
+          desired_return: returnTarget === null ? null : Number(returnTarget),
+          temperature: Number(temperature),
+        }),
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Could not update policy settings.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={(event) => void submit(event)}
+      className="border-t border-white/10 px-6 pb-6 sm:px-8"
+    >
+      <PolicyFields
+        options={options}
+        returnTarget={returnTarget}
+        setReturnTarget={setReturnTarget}
+        temperature={temperature}
+        setTemperature={setTemperature}
+      />
+      <Button
+        type="submit"
+        variant="secondary"
+        className="mt-5"
+        disabled={busy}
+      >
+        Apply during match
+      </Button>
+    </form>
   );
 }
 
@@ -455,6 +612,17 @@ function Reservation({
         </div>
         {job.status === 'rematch_wait' && (
           <RematchForm
+            job={job}
+            saved={saved}
+            options={options}
+            busy={busy}
+            update={update}
+            setBusy={setBusy}
+            setError={setError}
+          />
+        )}
+        {!ended && (
+          <PolicyForm
             job={job}
             saved={saved}
             options={options}
@@ -886,7 +1054,24 @@ function validateToolInput(input: unknown, options: Options): CreateJob {
     throw new Error('character is not available.');
   if (!options.imitations.some((choice) => choice.value === values.imitation))
     throw new Error('imitation is not available.');
-  if (values.online_delay !== 2 && values.online_delay !== 3)
-    throw new Error('online_delay must be 2 or 3.');
+  if (!options.online_delays.includes(values.online_delay as number))
+    throw new Error('online_delay is not available.');
+  if (
+    values.desired_return !== undefined &&
+    values.desired_return !== null &&
+    (typeof values.desired_return !== 'number' ||
+      !Number.isFinite(values.desired_return) ||
+      values.desired_return < options.desired_return_range[0] ||
+      values.desired_return > options.desired_return_range[1])
+  )
+    throw new Error('desired_return is out of range.');
+  if (
+    values.temperature !== undefined &&
+    (typeof values.temperature !== 'number' ||
+      !Number.isFinite(values.temperature) ||
+      values.temperature < options.temperature_range[0] ||
+      values.temperature > options.temperature_range[1])
+  )
+    throw new Error('temperature is out of range.');
   return values as CreateJob;
 }

@@ -20,6 +20,7 @@ from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import write_slot_status
+from hal.netplay_service.queue import QueueStore
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import UploadedReplay
 
@@ -64,6 +65,20 @@ def _slot_config(tmp_path: Path) -> runner.SlotConfig:
         git_sha="b" * 40,
         recovery_cooldown_seconds=0.0,
     )
+
+
+def test_live_policy_settings_follow_job_revision(tmp_path: Path) -> None:
+    store = QueueStore(tmp_path / "queue.sqlite3")
+    credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
+    claimed = store.claim_next("slot-0")
+    assert claimed is not None
+    with runner._LivePolicySettings(store, claimed, "slot-0") as settings:
+        assert settings.current() == (20.0, 1.0)
+        store.update_policy(credentials.job.id, credentials.token, desired_return=None, temperature=0.9)
+        deadline = time.monotonic() + 2.0
+        while settings.current() != (None, 0.9) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert settings.current() == (None, 0.9)
 
 
 def test_bot_account_code_is_read_without_fallback(tmp_path: Path) -> None:

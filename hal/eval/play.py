@@ -227,6 +227,7 @@ def run_netplay_match(
     runtime: RuntimeConfig,
     *,
     player_identity: str | None = None,
+    policy_settings: Callable[[], tuple[float | None, float]] | None = None,
     max_frames: int = 28_800,
     rematch: bool = False,
     on_live: Callable[[], None] | None = None,
@@ -251,6 +252,9 @@ def run_netplay_match(
     expected_countdown_action: ControllerAction | None = None
     transport_correction_frames = 0
 
+    def current_settings() -> tuple[float | None, float]:
+        return (20.0, 1.0) if policy_settings is None else policy_settings()
+
     def countdown_action(frame: dict) -> ControllerAction:
         nonlocal countdown_policy_frames
         nonlocal expected_countdown_action
@@ -266,6 +270,7 @@ def run_netplay_match(
                 tuple(recent_scheduled),
             )
         characters = {port: int(frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
+        desired_return, temperature = current_settings()
         item = PolicyInput(
             stream_id=stream_id,
             frame_id=int(frame["id"]),
@@ -274,6 +279,8 @@ def run_netplay_match(
             applied_action=_policy_applied_action(frame, ego_port),
             pending_actions=transport.pending,
             player_identity=player_identity,
+            desired_return=desired_return,
+            temperature=temperature,
             reset=countdown_policy_frames == 0,
         )
         action = validate_policy_outputs((item,), tuple(step_policy(policy, runtime, (item,))))[stream_id]
@@ -333,6 +340,7 @@ def run_netplay_match(
     dolphin_step_seconds: list[float] = []
     last_frame_at = time.perf_counter()
     while len(captured) < max_frames:
+        desired_return, temperature = current_settings()
         item = PolicyInput(
             stream_id=stream_id,
             frame_id=int(current["id"]),
@@ -341,6 +349,8 @@ def run_netplay_match(
             applied_action=_policy_applied_action(current, ego_port),
             pending_actions=transport.pending,
             player_identity=player_identity,
+            desired_return=desired_return,
+            temperature=temperature,
             reset=first_policy_frame,
         )
         inference_started = time.perf_counter()
