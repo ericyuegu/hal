@@ -17,6 +17,8 @@ Set the local paths and R2 values in `.env`, then open
 `http://127.0.0.1:3000`. The command starts the API, one-slot runner, and
 frontend. Press Ctrl-C to stop all three. Cloudflare values can stay empty.
 
+The direct-connect menu flow has completed a match against a human opponent.
+
 To serve O59 from the local 3060 with its evaluated delay-2 schedule, export
 the checkpoint and override the policy path for one launch:
 
