@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import pickle
 import threading
 import time
 from collections import deque
@@ -1168,11 +1167,3 @@ def test_private_worker_shutdown_isolated_in_one_function() -> None:
     _shutdown_data_loader_workers(None)
 
     assert calls == 1
-
-
-def test_legacy_pickle_resolves_physical_row_through_shim() -> None:
-    payload = b"chal.training.o51_replay_loader\nPhysicalRow\n(Vsource\nI2\nI3\ntR."
-
-    row = pickle.loads(payload)
-
-    assert row == PhysicalRow("source", 2, 3)

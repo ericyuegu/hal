@@ -12,7 +12,7 @@ import torch
 from hal.eval.play import require_completed_replay
 from hal.eval.play import run_netplay_match
 from hal.inference.api import RuntimeConfig
-from hal.inference.o59 import load_o59_policy
+from hal.inference.backends.history_decoder.policy import load_o59_policy
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession

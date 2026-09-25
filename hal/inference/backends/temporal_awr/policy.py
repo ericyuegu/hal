@@ -41,6 +41,13 @@ from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
 from hal.inference.api import RuntimeConfig
 from hal.inference.api import validate_policy_inputs
+from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_COUNT
+from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_NAMES
+from hal.inference.backends.temporal_awr.model import O50_BACKEND
+from hal.inference.backends.temporal_awr.model import O50_BACKEND_VERSION
+from hal.inference.backends.temporal_awr.model import O50Config
+from hal.inference.backends.temporal_awr.model import O50Model
+from hal.inference.backends.temporal_awr.model import amp_context
 from hal.inference.bundle import BundleDescription
 from hal.inference.bundle import PolicyBundleManifest
 from hal.inference.bundle import extract_policy_bundle
@@ -51,13 +58,6 @@ from hal.inference.chunks import ChunkResponse
 from hal.inference.chunks import chunk_response
 from hal.inference.chunks import contiguous_horizons
 from hal.inference.chunks import validate_chunk_request
-from hal.inference.o50_model import CONTROLLER_GROUP_COUNT
-from hal.inference.o50_model import CONTROLLER_GROUP_NAMES
-from hal.inference.o50_model import O50_BACKEND
-from hal.inference.o50_model import O50_BACKEND_VERSION
-from hal.inference.o50_model import O50Config
-from hal.inference.o50_model import O50Model
-from hal.inference.o50_model import amp_context
 from hal.training.checkpoints import checkpoint_sha256
 from hal.training.context_history import ContextHistory
 from hal.training.context_history import stack_context_windows

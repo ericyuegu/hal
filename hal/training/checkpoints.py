@@ -2,10 +2,12 @@
 
 import hashlib
 import os
+import pickle
 import queue
 import threading
 from pathlib import Path
 from typing import Any
+from typing import BinaryIO
 from typing import Final
 
 import torch
@@ -19,6 +21,37 @@ from hal import r2
 _NOT_FOUND: Final[frozenset[str]] = frozenset({"404", "NoSuchKey"})
 _FileVersion = tuple[str, int, int, int, int, int]
 _UploadItem = tuple[str, str | None]
+
+
+class _PhysicalShardCheckpointUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str) -> Any:
+        if module == "hal.training.o51_replay_loader":
+            from hal.training.physical_shard_loader import GenerationDescriptor
+            from hal.training.physical_shard_loader import PhysicalRow
+
+            legacy = {"GenerationDescriptor": GenerationDescriptor, "PhysicalRow": PhysicalRow}
+            if name not in legacy:
+                raise pickle.UnpicklingError(f"unsupported legacy physical-shard class {name!r}")
+            return legacy[name]
+        return super().find_class(module, name)
+
+
+class _PhysicalShardCheckpointPickle:
+    Unpickler = _PhysicalShardCheckpointUnpickler
+
+    @staticmethod
+    def load(source: BinaryIO, *, encoding: str = "utf-8") -> object:
+        return _PhysicalShardCheckpointUnpickler(source, encoding=encoding).load()
+
+
+def load_legacy_physical_shard_checkpoint(path: str | Path, *, device: str) -> dict[str, Any]:
+    """Read v5/v6 checkpoints that name the retired physical-shard module.
+
+    PyTorch 2.11.0 cannot load those globals through its default unpickler.
+    Keep this mapping until v5/v6 checkpoint support ends; test_checkpoints.py
+    covers the known globals and rejects unknown ones.
+    """
+    return torch.load(path, map_location=device, weights_only=False, pickle_module=_PhysicalShardCheckpointPickle)
 
 
 class _Stop:
@@ -146,7 +179,14 @@ def save_checkpoint(
         uploader.upload(path)
 
 
-def load_for_resume(run_name: str, ckpt_dir: Path, *, device: str, name: str = "latest.pt") -> dict[str, Any] | None:
+def load_for_resume(
+    run_name: str,
+    ckpt_dir: Path,
+    *,
+    device: str,
+    name: str = "latest.pt",
+    legacy_physical_rows: bool = False,
+) -> dict[str, Any] | None:
     """Load the resume checkpoint for ``run_name``: prefer the local copy, else
     pull it from R2. Returns the deserialized state dict, or ``None`` if no
     checkpoint exists in either place (fresh run)."""
@@ -154,6 +194,8 @@ def load_for_resume(run_name: str, ckpt_dir: Path, *, device: str, name: str = "
     path = local if local.is_file() else download_latest(run_name, ckpt_dir, name=name)
     if path is None:
         return None
+    if legacy_physical_rows:
+        return load_legacy_physical_shard_checkpoint(path, device=device)
     return torch.load(path, map_location=device, weights_only=False)
 
 

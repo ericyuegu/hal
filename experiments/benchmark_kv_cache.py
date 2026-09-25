@@ -17,7 +17,7 @@ from hal.controller import ControllerAction
 from hal.data.extract import extract_replay
 from hal.inference.api import PolicyInput
 from hal.inference.api import RuntimeConfig
-from hal.inference.o59 import load_o59_policy
+from hal.inference.backends.history_decoder.policy import load_o59_policy
 from hal.wire import ACTION_CHANNELS
 from hal.wire import BUTTON_BITS
 

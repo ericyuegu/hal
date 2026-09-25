@@ -8,13 +8,13 @@ import torch
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.data.feature_stats import FeatureStats
 from hal.inference.api import RuntimeConfig
-from hal.inference.kv_cache import KVCache
-from hal.inference.kv_cache import forward_with_kv_cache
-from hal.inference.o59 import _MODEL_FIELDS
-from hal.inference.o59 import O59Policy
-from hal.inference.o59_model import GPT
-from hal.inference.o59_model import Architecture
-from hal.inference.o59_model import TrainConfig
+from hal.inference.backends.history_decoder.kv_cache import KVCache
+from hal.inference.backends.history_decoder.kv_cache import forward_with_kv_cache
+from hal.inference.backends.history_decoder.model import GPT
+from hal.inference.backends.history_decoder.model import Architecture
+from hal.inference.backends.history_decoder.model import TrainConfig
+from hal.inference.backends.history_decoder.policy import _MODEL_FIELDS
+from hal.inference.backends.history_decoder.policy import O59Policy
 from hal.training.ego_stats import consolidate_key
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import ITEM_COLUMNS
@@ -67,7 +67,7 @@ def test_kv_cache_matches_independent_banded_attention_across_wraps(update: int)
     torch.manual_seed(19)
     p = policy()
     # Multiple layers are essential: retained states carry older context.
-    from hal.inference.o59_model import GPT
+    from hal.inference.backends.history_decoder.model import GPT
 
     p.cfg = replace(p.cfg, arch=replace(p.cfg.arch, n_layers=3))
     p.model = GPT(p.cfg).eval()
@@ -164,7 +164,7 @@ def test_kv_cache_policy_reset_discontinuity_settings_and_chunks(update: int) ->
 
 @torch.inference_mode()
 def test_token_staging_matches_window_features_and_actions() -> None:
-    from hal.inference.gpu_history import GpuTokenHistory
+    from hal.inference.backends.history_decoder.gpu_history import GpuTokenHistory
 
     p = policy()
     first = p.warmup_context(0, 7, 2)[0]
@@ -244,7 +244,7 @@ def test_cuda_graph_kv_cache_matches_eager_across_wrap_reset_and_settings() -> N
 
 
 def test_kv_cache_rejects_updates_larger_than_the_ring_reserve() -> None:
-    from hal.inference.kv_cache import forward_tokens_with_kv_cache
+    from hal.inference.backends.history_decoder.kv_cache import forward_tokens_with_kv_cache
 
     p = policy()
     cache = KVCache(p.model, 2, torch.device("cpu"))

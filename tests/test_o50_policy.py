@@ -13,22 +13,22 @@ import pytest
 import torch
 from torch import Tensor
 
-import hal.inference.o50 as o50
+import hal.inference.backends.temporal_awr.policy as o50
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import Rank
 from hal.inference.api import PolicyInput
 from hal.inference.api import RuntimeConfig
-from hal.inference.o50 import O50_REQUIRED_OBSERVATION_FIELDS
-from hal.inference.o50 import O50Policy
-from hal.inference.o50 import export_o50_policy
-from hal.inference.o50 import load_o50_checkpoint
-from hal.inference.o50 import load_o50_policy
-from hal.inference.o50_model import CONTROLLER_GROUP_COUNT
-from hal.inference.o50_model import O50Architecture
-from hal.inference.o50_model import O50Config
-from hal.inference.o50_model import O50Model
+from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_COUNT
+from hal.inference.backends.temporal_awr.model import O50Architecture
+from hal.inference.backends.temporal_awr.model import O50Config
+from hal.inference.backends.temporal_awr.model import O50Model
+from hal.inference.backends.temporal_awr.policy import O50_REQUIRED_OBSERVATION_FIELDS
+from hal.inference.backends.temporal_awr.policy import O50Policy
+from hal.inference.backends.temporal_awr.policy import export_o50_policy
+from hal.inference.backends.temporal_awr.policy import load_o50_checkpoint
+from hal.inference.backends.temporal_awr.policy import load_o50_policy
 from hal.netplay_service.inference import ContinuousBatcher
 from hal.netplay_service.inference import RemotePolicy
 from hal.netplay_service.inference import ServingArena
@@ -897,10 +897,10 @@ def test_incremental_context_rejects_numeric_type_changes() -> None:
 def test_model_import_does_not_load_melee_or_experiments() -> None:
     code = """
 import sys
-import hal.inference.o50_model
+import hal.inference.backends.temporal_awr.model
 assert 'melee' not in sys.modules
 assert not any(name == 'experiments' or name.startswith('experiments.') for name in sys.modules)
-import hal.inference.o50
+import hal.inference.backends.temporal_awr.policy
 assert not any(name == 'experiments' or name.startswith('experiments.') for name in sys.modules)
 """
     subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).parents[1])

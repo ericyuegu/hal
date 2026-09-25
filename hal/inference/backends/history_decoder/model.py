@@ -29,8 +29,8 @@ from hal import streams
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.eval.policy_sampling import sample_categorical
 from hal.eval.policy_sampling import validate_sampling_temperature
-from hal.inference.kv_cache import KVMemory
-from hal.inference.kv_cache import rotate_positions
+from hal.inference.backends.history_decoder.kv_cache import KVMemory
+from hal.inference.backends.history_decoder.kv_cache import rotate_positions
 from hal.training.controller_codec import BUTTONS_GROUP
 from hal.training.controller_codec import CONTROLLER_DECODE_ORDER
 from hal.training.controller_codec import CONTROLLER_GROUP_COUNT

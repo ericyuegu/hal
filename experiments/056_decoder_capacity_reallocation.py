@@ -98,8 +98,8 @@ from hal.eval.policy_sampling import sample_categorical
 from hal.eval.self_play import DecodeTelemetry
 from hal.eval.self_play import synthetic_context as build_synthetic_context
 from hal.inference.api import RuntimeConfig
-from hal.inference.o50 import O50Checkpoint
-from hal.inference.o50 import load_o50_checkpoint
+from hal.inference.backends.temporal_awr.policy import O50Checkpoint
+from hal.inference.backends.temporal_awr.policy import load_o50_checkpoint
 from hal.sim.rollout import covering_power_of_two
 from hal.training import returns as returns_lib
 from hal.training import scoring

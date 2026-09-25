@@ -9,9 +9,9 @@ import torch
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.inference.api import PolicyInput
-from hal.inference.o59 import O59Policy
-from hal.inference.o59_model import CONTROLLER_GROUP_NAMES
-from hal.inference.o59_model import Architecture
+from hal.inference.backends.history_decoder.model import CONTROLLER_GROUP_NAMES
+from hal.inference.backends.history_decoder.model import Architecture
+from hal.inference.backends.history_decoder.policy import O59Policy
 from hal.inference.transport import ActionTransport
 from hal.wire import ACTION_CHANNELS
 

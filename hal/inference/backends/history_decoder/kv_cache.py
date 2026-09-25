@@ -17,7 +17,7 @@ from hal.training.trunk import apply_rotary_emb
 from hal.training.trunk import rmsnorm
 
 if TYPE_CHECKING:
-    from hal.inference.o59_model import GPT
+    from hal.inference.backends.history_decoder.model import GPT
 
 
 @torch.library.custom_op("hal::append_kv", mutates_args=("cache",))

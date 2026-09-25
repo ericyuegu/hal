@@ -4,8 +4,8 @@ import numpy as np
 import torch
 
 from hal.data.feature_stats import FeatureStats
-from hal.inference.gpu_history import GpuContextHistory
-from hal.inference.o59 import _MODEL_FIELDS
+from hal.inference.backends.history_decoder.gpu_history import GpuContextHistory
+from hal.inference.backends.history_decoder.policy import _MODEL_FIELDS
 from hal.training.context_history import ContextHistory
 from hal.training.context_history import stack_context_windows
 from hal.training.controller_codec import DiscreteControllerCodec

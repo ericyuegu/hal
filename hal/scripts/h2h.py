@@ -67,8 +67,8 @@ from hal.eval.harness import usable_cpus
 from hal.eval.paired import summarize_paired
 from hal.eval.policy import PolicyBatchAdapter
 from hal.inference.api import RuntimeConfig
+from hal.inference.backends.temporal_awr.policy import load_o50_checkpoint
 from hal.inference.checkpoints import resolve_checkpoint
-from hal.inference.o50 import load_o50_checkpoint
 from hal.policy import INCLUDED_STAGES
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import checkpoint_sha256

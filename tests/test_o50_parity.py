@@ -6,15 +6,15 @@ from pathlib import Path
 import pytest
 import torch
 
-from hal.inference.o50_model import BASE_PLAYER_PREFIXES
-from hal.inference.o50_model import CAT_FEATURES
-from hal.inference.o50_model import CONTROLLER_GROUP_COUNT
-from hal.inference.o50_model import FLOAT_FEATURES
-from hal.inference.o50_model import ITEM_FLOATS
-from hal.inference.o50_model import ITEM_SLOTS
-from hal.inference.o50_model import O50Config
-from hal.inference.o50_model import O50Model
-from hal.inference.o50_model import item_column
+from hal.inference.backends.temporal_awr.model import BASE_PLAYER_PREFIXES
+from hal.inference.backends.temporal_awr.model import CAT_FEATURES
+from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_COUNT
+from hal.inference.backends.temporal_awr.model import FLOAT_FEATURES
+from hal.inference.backends.temporal_awr.model import ITEM_FLOATS
+from hal.inference.backends.temporal_awr.model import ITEM_SLOTS
+from hal.inference.backends.temporal_awr.model import O50Config
+from hal.inference.backends.temporal_awr.model import O50Model
+from hal.inference.backends.temporal_awr.model import item_column
 from hal.training.features import ACTION_CHANNELS
 
 

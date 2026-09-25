@@ -120,14 +120,14 @@ def _play_parser() -> argparse.ArgumentParser:
 
 
 def _export(args: argparse.Namespace) -> None:
-    from hal.inference.o50 import export_o50_policy
+    from hal.inference.backends.temporal_awr.policy import export_o50_policy
 
     export_o50_policy(args.checkpoint, args.output, cache_root=args.cache_root)
     print(args.output.resolve())
 
 
 def _export_o59(args: argparse.Namespace) -> None:
-    from hal.inference.o59 import export_o59_policy
+    from hal.inference.backends.history_decoder.policy import export_o59_policy
 
     export_o59_policy(args.checkpoint, args.output)
     print(args.output.resolve())

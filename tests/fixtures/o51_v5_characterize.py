@@ -17,8 +17,8 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR
 
 from hal.training.checkpoints import save_checkpoint
-from hal.training.o51_replay_loader import GenerationDescriptor
-from hal.training.o51_replay_loader import PhysicalRow
+from hal.training.physical_shard_loader import GenerationDescriptor
+from hal.training.physical_shard_loader import PhysicalRow
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT = ROOT / "experiments" / "051_muon_parameterization.py"

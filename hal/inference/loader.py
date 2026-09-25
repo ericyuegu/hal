@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import Literal
 
 from hal.inference.api import Policy
+from hal.inference.backends.history_decoder.policy import O59_BACKEND
+from hal.inference.backends.history_decoder.policy import O59_BACKEND_VERSION
+from hal.inference.backends.temporal_awr.model import O50_BACKEND
+from hal.inference.backends.temporal_awr.model import O50_BACKEND_VERSION
 from hal.inference.bundle import read_policy_manifest
-from hal.inference.o50_model import O50_BACKEND
-from hal.inference.o50_model import O50_BACKEND_VERSION
-from hal.inference.o59 import O59_BACKEND
-from hal.inference.o59 import O59_BACKEND_VERSION
 
 type HistoryMode = Literal["auto", "window", "kv_cache"]
 type ResolvedHistoryMode = Literal["window", "kv_cache"]
@@ -41,11 +41,11 @@ def load_policy(
     identity = (manifest.backend, manifest.backend_version)
     if identity == (O50_BACKEND, O50_BACKEND_VERSION):
         resolve_history_mode(manifest.backend, history_mode)
-        from hal.inference.o50 import load_o50_policy
+        from hal.inference.backends.temporal_awr.policy import load_o50_policy
 
         return load_o50_policy(path, device=device, seed=seed, compiled=compiled)
     if identity == (O59_BACKEND, O59_BACKEND_VERSION):
-        from hal.inference.o59 import load_o59_policy
+        from hal.inference.backends.history_decoder.policy import load_o59_policy
 
         return load_o59_policy(
             path,

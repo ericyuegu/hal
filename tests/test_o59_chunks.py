@@ -7,12 +7,12 @@ import torch
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.data.feature_stats import FeatureStats
 from hal.inference.api import RuntimeConfig
+from hal.inference.backends.history_decoder.model import GPT
+from hal.inference.backends.history_decoder.model import Architecture
+from hal.inference.backends.history_decoder.model import TrainConfig
+from hal.inference.backends.history_decoder.policy import _MODEL_FIELDS
+from hal.inference.backends.history_decoder.policy import O59Policy
 from hal.inference.chunks import ChunkRequest
-from hal.inference.o59 import _MODEL_FIELDS
-from hal.inference.o59 import O59Policy
-from hal.inference.o59_model import GPT
-from hal.inference.o59_model import Architecture
-from hal.inference.o59_model import TrainConfig
 from hal.training.ego_stats import consolidate_key
 from hal.training.features import ITEM_COLUMNS
 from hal.training.features import feature_kind

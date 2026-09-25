@@ -1,9 +1,48 @@
 import hashlib
+import pickle
+import zipfile
 from pathlib import Path
 
 import pytest
+import torch
 
 from hal.training import checkpoints
+from hal.training.physical_shard_loader import GenerationDescriptor
+from hal.training.physical_shard_loader import PhysicalRow
+
+
+def _legacy_physical_checkpoint(tmp_path: Path, *, unknown_class: bool = False) -> Path:
+    current = tmp_path / "current.pt"
+    legacy = tmp_path / "legacy.pt"
+    row = PhysicalRow("source", 2, 3)
+    torch.save({"row": row, "generation": GenerationDescriptor(1, row, 4, 5, 6)}, current)
+    with zipfile.ZipFile(current) as source, zipfile.ZipFile(legacy, "w") as destination:
+        for member in source.infolist():
+            content = source.read(member.filename)
+            if member.filename.endswith("data.pkl"):
+                content = content.replace(b"hal.training.physical_shard_loader", b"hal.training.o51_replay_loader")
+                if unknown_class:
+                    content = content.replace(b"PhysicalRow", b"UnlistedRow")
+            destination.writestr(member, content)
+    return legacy
+
+
+def test_legacy_physical_shard_checkpoint_loads_without_module_shim(tmp_path: Path) -> None:
+    path = _legacy_physical_checkpoint(tmp_path)
+
+    loaded = checkpoints.load_legacy_physical_shard_checkpoint(path, device="cpu")
+    resumed = checkpoints.load_for_resume("unused", tmp_path, device="cpu", name=path.name, legacy_physical_rows=True)
+
+    assert loaded == resumed
+    assert loaded["row"] == PhysicalRow("source", 2, 3)
+    assert loaded["generation"] == GenerationDescriptor(1, loaded["row"], 4, 5, 6)
+
+
+def test_legacy_physical_shard_checkpoint_rejects_unknown_class(tmp_path: Path) -> None:
+    path = _legacy_physical_checkpoint(tmp_path, unknown_class=True)
+
+    with pytest.raises(pickle.UnpicklingError, match="unsupported legacy physical-shard class"):
+        checkpoints.load_legacy_physical_shard_checkpoint(path, device="cpu")
 
 
 class _Client:

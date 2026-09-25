@@ -89,6 +89,7 @@ from hal.training import returns as returns_lib
 from hal.training.checkpoints import BackgroundUploader
 from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
+from hal.training.checkpoints import load_legacy_physical_shard_checkpoint
 from hal.training.checkpoints import save_checkpoint
 from hal.training.closed_loop import RecedingHorizon
 from hal.training.controller_codec import BUTTONS_GROUP
@@ -5969,7 +5970,7 @@ def load_checkpoint(
     device: str = DEVICE,
 ) -> tuple[Policy, TrainConfig, dict[str, FeatureStats], dict[str, object]]:
     """Load an O51 checkpoint without weakening strict resume compatibility."""
-    loaded = torch.load(path, map_location=device, weights_only=False)
+    loaded = load_legacy_physical_shard_checkpoint(path, device=device)
     if not isinstance(loaded, dict):
         raise TypeError("O51 checkpoint must contain a mapping")
     state = cast(dict[str, object], loaded)
@@ -6482,6 +6483,7 @@ def _run_train(args: TrainArgs) -> None:
             Path("runs") / args.resume,
             device=DEVICE,
             name=args.resume_checkpoint,
+            legacy_physical_rows=True,
         )
         if resume_state is None:
             raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")

@@ -16,7 +16,7 @@ import pytest
 import torch
 
 import hal.training.physical_shard_loader as replay_loader
-from hal.inference.o59_model import GPT as ServingGPT
+from hal.inference.backends.history_decoder.model import GPT as ServingGPT
 from hal.training.features import NEUTRAL_ACTION
 from hal.training.features import stack_actions
 

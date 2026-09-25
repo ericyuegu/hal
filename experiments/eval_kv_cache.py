@@ -22,11 +22,11 @@ from hal.eval.policy import PolicyBatchAdapter
 from hal.fixtures import DOLPHIN_EXIAI
 from hal.fixtures import ISO
 from hal.inference.api import RuntimeConfig
+from hal.inference.backends.history_decoder.policy import O59Policy
+from hal.inference.backends.history_decoder.policy import export_o59_policy
 from hal.inference.bundle import extract_policy_bundle
 from hal.inference.checkpoints import resolve_checkpoint
 from hal.inference.loader import load_policy
-from hal.inference.o59 import O59Policy
-from hal.inference.o59 import export_o59_policy
 from hal.sim.process_vec import ProcessVecTelemetry
 from hal.training.checkpoints import BackgroundUploader
 
