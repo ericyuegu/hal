@@ -147,6 +147,16 @@ class _TaggedPolicy:
         )
 
 
+def test_adapter_passes_return_target_and_temperature() -> None:
+    policy = _TaggedPolicy()
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)), desired_return=19.976, temperature=0.9)
+    adapter.plan_rows(
+        {Slot(0, 1): [ObservationRow(0, {"flat": 0}, controller_to_action_vec(NEUTRAL_CONTROLLER_ACTION))]}
+    )
+    assert policy.inputs[0].desired_return == 19.976
+    assert policy.inputs[0].temperature == 0.9
+
+
 @pytest.mark.parametrize("delay", [2, 3])
 def test_adapter_pairs_actual_actions_and_orders_pending_queue(
     monkeypatch: pytest.MonkeyPatch,

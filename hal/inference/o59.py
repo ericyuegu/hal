@@ -642,7 +642,11 @@ class O59Policy:
     def supported_horizons(self) -> tuple[int, ...]:
         return contiguous_horizons(self.model.head_offsets)
 
-    def reset_chunks(self) -> None:
+    def reset_chunks(self, *, seed: int | None = None) -> None:
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+                raise ValueError("sampling seed must be a nonnegative integer")
+            self._seed = seed
         self._stream = None
         self._chunk_streams.clear()
         self._chunk_generations.clear()

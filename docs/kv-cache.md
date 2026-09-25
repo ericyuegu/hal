@@ -69,3 +69,7 @@ The KV cache game advanced 3,000 frames between progress reports at frames 2,400
 Match artifacts are under `runs/netplay/streaming-o59/{streaming-selfplay,window-selfplay}`.
 
 The netplay runner accepts `--history-mode kv_cache`. The local launcher forwards `HAL_NETPLAY_HISTORY_MODE=kv_cache`; its default remains `window`.
+
+## Gameplay qualification
+
+`experiments/eval_kv_cache.py` runs the checkpoint's final 96-matchup, level-9 CPU protocol on a Modal L40S. Each matchup boot receives 7,200 emulator frames and can contain more than one game after instant restart. The program reads the checkpoint's exact p90 return target, compares net stocks per active minute with the published final evaluation, and saves replay rows, configuration, hashes, and metrics to R2. The library default changes only after that comparison meets the 0.2 NSM tolerance.

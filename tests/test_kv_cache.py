@@ -18,6 +18,7 @@ from hal.inference.o59_model import TrainConfig
 from hal.training.ego_stats import consolidate_key
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import ITEM_COLUMNS
+from hal.training.features import Context
 from hal.training.features import feature_kind
 from hal.training.trunk import rmsnorm
 
@@ -45,6 +46,19 @@ def policy() -> O59Policy:
         if feature_kind(n, ITEM_COLUMNS) not in ("cat", "button", "stick_trigger")
     }
     return O59Policy(GPT(cfg).eval(), cfg, stats, (), device=torch.device("cpu"), seed=5, compiled=False)
+
+
+def test_reseed_resets_decode_draws_without_rebuilding_policy() -> None:
+    candidate = policy()
+    context = Context({}, torch.zeros(1, dtype=torch.long), torch.tensor([0]), torch.tensor([True]))
+    candidate.reset_chunks(seed=17)
+    candidate._rng.begin(context)
+    first = candidate._rng.uniforms("main_stick", [True]).clone()
+    candidate.reset_chunks(seed=17)
+    candidate._rng.begin(context)
+    second = candidate._rng.uniforms("main_stick", [True])
+    torch.testing.assert_close(first, second)
+    assert candidate.sampling_seed == 17
 
 
 @pytest.mark.parametrize("update", [1, 2])

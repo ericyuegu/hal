@@ -1,5 +1,6 @@
 """Use the public policy interface in HAL's local Dolphin evaluator."""
 
+import math
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -42,10 +43,18 @@ class PolicyBatchAdapter:
         runtime: RuntimeConfig,
         *,
         player_identity: str | None = None,
+        desired_return: float | None = 20.0,
+        temperature: float = 1.0,
     ) -> None:
+        if desired_return is not None and (not math.isfinite(desired_return) or not 0.0 <= desired_return <= 40.0):
+            raise ValueError("desired return must be in [0, 40] or null")
+        if not math.isfinite(temperature) or not 0.8 <= temperature <= 1.1:
+            raise ValueError("temperature must be in [0.8, 1.1]")
         self.policy = policy
         self.runtime = runtime
         self.player_identity = player_identity
+        self.desired_return = desired_return
+        self.temperature = temperature
         self._states: dict[Slot, _StreamState] = {}
         self.neutral_actions = 0
         self.total_actions = 0
@@ -110,6 +119,8 @@ class PolicyBatchAdapter:
                     applied_action=applied,
                     pending_actions=state.transport.pending,
                     player_identity=self.player_identity,
+                    desired_return=self.desired_return,
+                    temperature=self.temperature,
                     reset=reset,
                 )
             )
