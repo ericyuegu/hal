@@ -1,0 +1,21 @@
+{
+  "control_git_sha": null,
+  "source_artifact": "ericyuegu/hal/source-hal-experiments_052_adamw_temporal_awr.py:v4",
+  "source_artifact_digest": "0251bdb8130e808df574746d1a0972b9",
+  "environment": {
+    "os": "Linux-4.4.0-x86_64-with-glibc2.39",
+    "python": "CPython 3.14.3",
+    "gpu": "NVIDIA B200",
+    "cudaVersion": "13.0",
+    "cpu_count": 48,
+    "cpu_count_logical": 48
+  },
+  "sha256": {
+    "final.pt": "16c702fe3964a59c2f26d88207ef90137d93c07bf67a5d4213f4fde5d25b8631",
+    "source/experiments/052_adamw_temporal_awr.py": "d0e75291dc3e0c322aea0cdd8b57573c5fec20b2c843b71943b8e3777f247b69",
+    "data/stats.json": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+    "data/train/index.json": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8",
+    "data/val/index.json": "95738bf46604a7e7b67320095efbcc2dbe1a8ae748aa6a269e19f0cee52da389",
+    "environment/requirements.txt": "87fa7c08abaea94178ccb7af736f636f44f62e229b9bc0837b1ff702ec018635"
+  }
+}

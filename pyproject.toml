@@ -114,6 +114,7 @@ ignore = ["E501"]
 "experiments/057_scaled_endpoint_flow.py" = ["F722"]
 "experiments/058_return_conditioning.py" = ["F722"]
 "experiments/059_muon_history_decoder.py" = ["F722"]
+"experiments/060_plain_bc.py" = ["F722"]
 "hal/training/trunk.py" = ["F722"]  # same jaxtyping dim specs as the experiment copies
 
 [tool.pytest.ini_options]

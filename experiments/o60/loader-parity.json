@@ -1,0 +1,7 @@
+{
+  "batches": 300,
+  "seed": 0,
+  "bit_exact": true,
+  "digest": "053b1a56eeaed2ba6ee23bbb24100870d90faf16efbf7b921fc7c8de4fbbff3f",
+  "control_loader_sha256": "c098ac84193b1c83c473689317ef757be46f47c9d5edb018bd6ed7095ee75e35"
+}

@@ -34,6 +34,7 @@ def _experiment(filename: str):
         ("050_scaled_temporal_awr.py", "050_scaled_temporal_awr_v6"),
         ("052_adamw_temporal_awr.py", "052_adamw_temporal_awr_v1"),
         ("056_decoder_capacity_reallocation.py", "056_decoder_capacity_reallocation_v1"),
+        ("060_plain_bc.py", "060_plain_bc_v1"),
     ],
 )
 def test_portable_model_matches_frozen_o50_family_trunk_and_decoder(
