@@ -1,6 +1,5 @@
 """Evaluate retained KV history against the final checkpoint's CPU protocol."""
 
-import contextlib
 import hashlib
 import importlib.metadata
 import itertools
@@ -13,7 +12,7 @@ from typing import cast
 
 import torch
 
-from hal import r2
+import wandb
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
@@ -32,7 +31,9 @@ from hal.sim.process_vec import ProcessVecTelemetry
 from hal.training.checkpoints import BackgroundUploader
 
 CHECKPOINT_URI = "r2://hal/runs/260921-092548_059_muon_history_decoder_o59v5-cooldown32768/checkpoints/step-0131072.pt"
-BASELINE_KEY = "runs/260921-092548_059_muon_history_decoder_o59v5-cooldown32768/eval96-step-0131072/metrics.json"
+BASELINE_RUN = "ericyuegu/hal/vywk3cih"
+BASELINE_HISTORY_STEP = 1322
+BASELINE_NSM = 1.204894549414064
 CHECKPOINT_SHA256 = "52b5233ed506f59f514f7e90a6a6111206152db7413f451dc35be5c30d1e671b"
 MATCHUPS = 96
 MAX_FRAMES = 7200
@@ -49,19 +50,31 @@ def _sha256(path: Path) -> str:
 
 
 def _baseline() -> dict[str, float]:
-    with contextlib.closing(r2.client()) as client:
-        response = client.get_object(Bucket=r2.bucket(), Key=BASELINE_KEY)
-        with contextlib.closing(response["Body"]) as body:
-            values = json.loads(body.read())
-    if not isinstance(values, dict):
-        raise ValueError("baseline metrics are not an object")
-    metrics = cast(dict[str, object], values)
-    if any(metrics.get(key) != MATCHUPS for key in ("scheduled_boots", "completed_boots", "boots")):
-        raise ValueError("baseline is not a complete 96-boot evaluation")
-    nsm = metrics.get("net_stock_per_min")
-    if not isinstance(nsm, int | float) or not math.isfinite(nsm):
-        raise ValueError("baseline NSM is missing")
-    return cast(dict[str, float], metrics)
+    run = wandb.Api(timeout=60).run(BASELINE_RUN)
+    for row in run.scan_history(page_size=1500):
+        if row.get("_step") != BASELINE_HISTORY_STEP:
+            continue
+        values = cast(dict[str, object], row)
+        expected = {
+            "eval/checkpoint_step": 131072,
+            "eval/boots": MATCHUPS,
+            "eval/crashed": 0,
+            "eval/captured_emulator_frames": MATCHUPS * MAX_FRAMES,
+            "eval/prediction_frames": 4,
+            "eval/delay_frames": 2,
+            "eval/replan_interval_frames": 2,
+        }
+        if any(values.get(key) != value for key, value in expected.items()):
+            raise ValueError("W&B baseline has a different evaluation protocol")
+        nsm = values.get("eval/net_stock_per_min")
+        if not isinstance(nsm, int | float) or not math.isclose(nsm, BASELINE_NSM, abs_tol=1e-12):
+            raise ValueError("W&B baseline NSM changed")
+        return {
+            key.removeprefix("eval/"): float(value)
+            for key, value in values.items()
+            if key.startswith("eval/") and isinstance(value, int | float)
+        }
+    raise ValueError("final p90 W&B evaluation row is missing")
 
 
 def _save_json(path: Path, value: object) -> None:
@@ -143,7 +156,8 @@ def main() -> None:
         "checkpoint_uri": CHECKPOINT_URI,
         "checkpoint_sha256": CHECKPOINT_SHA256,
         "bundle_sha256": _sha256(bundle),
-        "baseline_r2_key": BASELINE_KEY,
+        "baseline_wandb_run": BASELINE_RUN,
+        "baseline_history_step": BASELINE_HISTORY_STEP,
         "baseline_net_stock_per_min": baseline["net_stock_per_min"],
         "matchup_schedule_sha256": schedule_hash,
         "n_matchups": MATCHUPS,

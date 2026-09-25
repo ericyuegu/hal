@@ -72,4 +72,4 @@ The netplay runner accepts `--history-mode kv_cache`. The local launcher forward
 
 ## Gameplay qualification
 
-`experiments/eval_kv_cache.py` runs the checkpoint's final 96-matchup, level-9 CPU protocol on a Modal L40S. Each matchup boot receives 7,200 emulator frames and can contain more than one game after instant restart. The program reads the checkpoint's exact p90 return target, compares net stocks per active minute with the published final evaluation, and saves replay rows, configuration, hashes, and metrics to R2. The library default changes only after that comparison meets the 0.2 NSM tolerance.
+`experiments/eval_kv_cache.py` runs the checkpoint's final 96-matchup, level-9 CPU protocol on a Modal L40S. Each matchup boot receives 7,200 emulator frames and can contain more than one game after instant restart. The program reads the checkpoint's exact p90 return target, compares net stocks per active minute with the final p90 result in W&B history step 1322, and saves replay rows, configuration, hashes, and metrics to R2. The library default changes only after that comparison meets the 0.2 NSM tolerance.
