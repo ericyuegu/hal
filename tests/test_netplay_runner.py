@@ -139,6 +139,31 @@ def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch:
         ]
     )
     assert captured[0].compiled is False
+    assert captured[0].history_mode == "window"
+
+
+def test_runner_cli_selects_kv_cache_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    account = tmp_path / "user.json"
+    account.write_text('{"connectCode":"HAL#1"}')
+    policy = tmp_path / "policy.halpolicy"
+    policy.touch()
+    captured: list[runner.RunnerConfig] = []
+    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
+    monkeypatch.setattr(runner, "run", captured.append)
+    runner.main(
+        [
+            str(policy),
+            "--user-jsons",
+            str(account),
+            "--slippi-ports",
+            "51441",
+            "--git-sha",
+            "test-sha",
+            "--history-mode",
+            "kv_cache",
+        ]
+    )
+    assert captured[0].history_mode == "kv_cache"
 
 
 def test_runner_status_marks_a_stale_slot_for_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

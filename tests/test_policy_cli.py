@@ -45,6 +45,23 @@ def test_play_prepares_before_dolphin_connects(tmp_path: Path, monkeypatch: pyte
     bundle.write_bytes(b"policy")
 
     class Policy:
+        spec = None
+        sampling_seed = 0
+        context_frames = 8
+        supported_horizons = (8,)
+
+        def prepare_chunks(self, *_args):
+            pass
+
+        def reset_chunks(self):
+            pass
+
+        def warmup_context(self, *_args):
+            pass
+
+        def plan_chunks(self, *_args):
+            pass
+
         def prepare(self, runtime) -> None:
             assert runtime.transport_delays == (2,)
             events.append("prepare")
@@ -73,7 +90,13 @@ def test_play_prepares_before_dolphin_connects(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(cli, "resolve_checkpoint", lambda _path: bundle)
     monkeypatch.setattr(cli, "load_policy", lambda *_args, **_kwargs: Policy())
     monkeypatch.setattr(cli, "NetplaySession", Session)
-    monkeypatch.setattr(cli, "run_netplay_match", run_match)
+
+    def service(policy, runtime):
+        policy.prepare(runtime)
+        return nullcontext(policy)
+
+    monkeypatch.setattr(cli, "local_chunk_service", service)
+    monkeypatch.setattr(cli, "run_realtime_match", run_match)
     monkeypatch.setattr(cli, "require_completed_replay", lambda *_args: tmp_path / "game.slp")
     monkeypatch.setattr(cli.torch.compiler, "set_stance", lambda _value: nullcontext())
     args = cli._play_parser().parse_args(
@@ -88,3 +111,18 @@ def test_play_prepares_before_dolphin_connects(tmp_path: Path, monkeypatch: pyte
     )
     cli._play(args)
     assert events == ["prepare", "session", "enter", "connect"]
+
+
+def test_play_cli_exposes_kv_cache_history_without_changing_default() -> None:
+    assert cli._play_parser().parse_args(["policy.halpolicy", "HUMAN#1"]).history_mode == "window"
+    args = cli._play_parser().parse_args(
+        [
+            "policy.halpolicy",
+            "HUMAN#1",
+            "--history-mode",
+            "kv_cache",
+            "--kv-update-frames",
+            "1",
+        ]
+    )
+    assert args.history_mode == "kv_cache" and args.kv_update_frames == 1

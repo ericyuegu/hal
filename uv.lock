@@ -1166,7 +1166,7 @@ requires-dist = [
     { name = "libcst" },
     { name = "loguru" },
     { name = "matplotlib" },
-    { name = "melee", git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d" },
+    { name = "melee", path = "vendor/melee-0.47.0+hal.realtime.1.tar.gz" },
     { name = "modal", specifier = ">=1.5.3" },
     { name = "more-itertools" },
     { name = "mosaicml-streaming", specifier = "==0.13.0" },
@@ -1766,9 +1766,19 @@ wheels = [
 
 [[package]]
 name = "melee"
-version = "0.47.0"
-source = { git = "https://github.com/ericyuegu/libmelee?rev=222a399cd1368d33458b4c36f4823f7220ca889d#222a399cd1368d33458b4c36f4823f7220ca889d" }
+version = "0.47.0+hal.realtime.1"
+source = { path = "vendor/melee-0.47.0+hal.realtime.1.tar.gz" }
 dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "py-ubjson" },
+    { name = "pyenet-vladfi" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+]
+sdist = { hash = "sha256:f33c95a7d27bd8acce8705248bc0ad833748d10deba1a41837cf4bb1edbe7ac1" }
+
+[package.metadata]
+requires-dist = [
     { name = "numpy" },
     { name = "packaging" },
     { name = "py-ubjson" },

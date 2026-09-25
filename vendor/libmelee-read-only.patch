@@ -1,0 +1,62 @@
+--- a/melee/console.py
++++ b/melee/console.py
+@@ -468,6 +468,7 @@
+         self.cursor = 0
+         from melee.controller import Controller  # avoid circular import
+         self.controllers: list[Controller] = []
++        self._flush_controllers = True
+         self._current_stage = enums.Stage.NO_STAGE
+         self._frame = 0
+         self._polling_mode = polling_mode
+@@ -912,17 +913,24 @@
+         with open(dolphin_config_path, 'w') as dolphinfile:
+             config.write(dolphinfile)
+ 
+-    def step(self) -> Optional[GameState]:
++    def step(self, *, flush_controllers: bool = True) -> Optional[GameState]:
+         """ 'step' to the next state of the game and flushes all controllers
++
++        Args:
++            flush_controllers: Send pending input before reading. False makes
++                this call read-only, including game-start and rollback events.
++                The caller must explicitly flush selected controller states.
+ 
+         Returns:
+             GameState object that represents new current state of the game.
+         """
++        self._flush_controllers = flush_controllers
+         self.processingtime = time.time() - self._frametimestamp
+ 
+-        # Flush the controllers
+-        for controller in self.controllers:
+-            controller.flush()
++        # Observation draining must not replay historical controller submissions.
++        if flush_controllers:
++            for controller in self.controllers:
++                controller.flush()
+ 
+         if self._temp_gamestate is None:
+             self._temp_gamestate = GameState()
+@@ -1051,9 +1059,10 @@
+                 self.__game_start(gamestate, event_bytes)
+                 # The game needs to know what to press on the first frame of the game
+                 #   Just give it empty input. Characters are not actionable anyway.
+-                for controller in self.controllers:
+-                    controller.release_all()
+-                    controller.flush()
++                if self._flush_controllers:
++                    for controller in self.controllers:
++                        controller.release_all()
++                        controller.flush()
+ 
+             elif event_type == EventType.GAME_END:
+                 return self._use_manual_bookends
+@@ -1091,7 +1100,7 @@
+                 if is_rollback_reemit and self.skip_rollback_frames and self.rollback_resolution == 'first':
+                     # In blocking mode we still need to flush the controllers
+                     # on rollback frames, otherwise the game will hang.
+-                    if self.blocking_input:
++                    if self.blocking_input and self._flush_controllers:
+                         for controller in self.controllers:
+                             controller.flush()
+ 

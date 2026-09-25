@@ -16,12 +16,14 @@ import torch
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.play import PlayResult
 from hal.eval.play import require_completed_replay
-from hal.eval.play import run_netplay_match
+from hal.eval.realtime import run_realtime_match
 from hal.inference.api import RuntimeConfig
+from hal.inference.bundle import read_policy_manifest
+from hal.inference.chunks import ChunkPolicy
 from hal.inference.loader import load_policy
-from hal.netplay_service.inference import ContinuousBatcher
-from hal.netplay_service.inference import RemotePolicy
-from hal.netplay_service.inference import ServingArena
+from hal.netplay_service.calibration import calibrate
+from hal.netplay_service.chunks import ChunkBatcher
+from hal.netplay_service.chunks import RemoteChunkPolicy
 from hal.netplay_service.replays import soak_replay_directory
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
@@ -32,9 +34,8 @@ from hal.sim.netplay import NetplaySetup
 @dataclass(slots=True)
 class _Harness:
     runtime: RuntimeConfig
-    arena: ServingArena
-    clients: tuple[RemotePolicy, RemotePolicy]
-    batcher: ContinuousBatcher
+    clients: tuple[RemoteChunkPolicy, RemoteChunkPolicy]
+    batcher: ChunkBatcher
     stop: threading.Event
     engine: threading.Thread
     errors: list[BaseException]
@@ -63,18 +64,22 @@ def policy_harness() -> _Harness:
         pytest.skip("set HAL_REQUIRE_NETPLAY_POLICY_INTEGRATION=1 with two Slippi accounts")
     policy_path = _required_path("HAL_NETPLAY_POLICY")
     compiled = os.environ.get("HAL_NETPLAY_COMPILED", "0") == "1"
-    runtime = RuntimeConfig(2, (2, 3))
+    manifest = read_policy_manifest(policy_path)
+    runtime = RuntimeConfig(2, tuple(delay for delay in manifest.supported_transport_delays if delay in (2, 3)))
     policy = load_policy(policy_path, device="cuda", seed=0, compiled=compiled)
-    policy.prepare(runtime)
+    assert isinstance(policy, ChunkPolicy)
+    calibration = calibrate(policy, runtime, 0.0005)
     parent_0, child_0 = Pipe()
     parent_1, child_1 = Pipe()
-    arena = ServingArena.create(2, 3, policy.spec.required_observation_fields)
-    clients = (
-        RemotePolicy(policy.spec, runtime, arena, child_0, 0),
-        RemotePolicy(policy.spec, runtime, arena, child_1, 1),
-    )
-    batcher = ContinuousBatcher(policy, runtime, arena, {0: parent_0, 1: parent_1})
     stop = threading.Event()
+    lost = threading.Event()
+    clients = (
+        RemoteChunkPolicy(policy.spec, policy.context_frames, calibration.schedules, child_0, lost),
+        RemoteChunkPolicy(policy.spec, policy.context_frames, calibration.schedules, child_1, lost),
+    )
+    batcher = ChunkBatcher(
+        policy, calibration.schedules[0].horizon, {0: parent_0, 1: parent_1}, batch_wait_seconds=0.0005
+    )
     errors: list[BaseException] = []
 
     def serve() -> None:
@@ -83,10 +88,11 @@ def policy_harness() -> _Harness:
                 batcher.serve(stop)
         except BaseException as error:
             errors.append(error)
+            lost.set()
 
     engine = threading.Thread(target=serve, daemon=True)
     engine.start()
-    harness = _Harness(runtime, arena, clients, batcher, stop, engine, errors)
+    harness = _Harness(runtime, clients, batcher, stop, engine, errors)
     try:
         yield harness
     finally:
@@ -94,8 +100,6 @@ def policy_harness() -> _Harness:
         engine.join(timeout=2)
         for connection in (parent_0, child_0, parent_1, child_1):
             connection.close()
-        arena.close()
-        arena.unlink()
 
 
 @pytest.mark.integration
@@ -104,6 +108,8 @@ def test_checkpoint_completes_batched_self_play(
     delay: int,
     policy_harness: _Harness,
 ) -> None:
+    if delay not in policy_harness.runtime.transport_delays:
+        pytest.skip("transport delay is not supported by this checkpoint")
     account_1 = _required_path("HAL_NETPLAY_USER_JSON_1")
     account_2 = _required_path("HAL_NETPLAY_USER_JSON_2")
     code_1 = _required_code("HAL_NETPLAY_CONNECT_CODE_1")
@@ -126,6 +132,7 @@ def test_checkpoint_completes_batched_self_play(
                     replay_dir=replay_dir,
                     slippi_port=port,
                     connect_timeout_seconds=120,
+                    realtime=True,
                 )
             )
             for account, replay_dir, port in zip(
@@ -142,7 +149,7 @@ def test_checkpoint_completes_batched_self_play(
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
                 pool.submit(
-                    run_netplay_match,
+                    run_realtime_match,
                     session,
                     setup,
                     client,
@@ -159,15 +166,17 @@ def test_checkpoint_completes_batched_self_play(
 
         replays = tuple(require_completed_replay(replay_dir, ()) for replay_dir in replay_dirs)
         assert all(replay.stat().st_size > 0 for replay in replays)
-        _assert_gameplay(results, delay)
+        timing = next(
+            schedule for schedule in policy_harness.clients[0].schedules if schedule.transport_frames == delay
+        )
+        _assert_gameplay(results, timing.budget_frames * 1000 / 60)
 
     assert not policy_harness.errors
     assert policy_harness.batcher.batch_calls > before_calls
     assert policy_harness.batcher.max_batch_items == 2
 
 
-def _assert_gameplay(results: tuple[PlayResult, PlayResult], delay: int) -> None:
-    limit_ms = 33.3 if delay == 2 else 16.7
+def _assert_gameplay(results: tuple[PlayResult, PlayResult], limit_ms: float) -> None:
     for result in results:
         summary = summarize_trajectory(result.trajectory)
         assert min(summary.p1_stocks_left, summary.p2_stocks_left) == 0

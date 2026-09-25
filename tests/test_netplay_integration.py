@@ -171,3 +171,183 @@ def test_two_account_impulse_timing_replays_and_cleanup(
             assert replay_values[frame_id] == pytest.approx(live_value, abs=1e-6)
         replay_impulses = [frame_id for frame_id in expected_frame_ids if replay_values[frame_id] > 0.9]
         assert replay_impulses == [landing_frame_id]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("delay", [2, 3])
+def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path, delay: int) -> None:
+    """Qualify frame placement with inference and response-delivery overruns."""
+    import json
+    import threading
+    import time
+    from multiprocessing import Pipe
+
+    from hal.controller import NEUTRAL_CONTROLLER_ACTION
+    from hal.controller import ControllerAction
+    from hal.inference.api import PolicyInput
+    from hal.inference.api import PolicySpec
+    from hal.inference.chunks import TimingSchedule
+    from hal.inference.chunks import chunk_response
+    from hal.netplay_service.chunks import ChunkBatcher
+    from hal.netplay_service.chunks import RemoteChunkPolicy
+    from hal.netplay_service.schedule import FrameSchedule
+    from hal.sim.inputs import canonical_pre_to_action
+    from hal.sim.inputs import controller_actions_match
+
+    if os.environ.get("HAL_REQUIRE_NETPLAY_INTEGRATION") != "1":
+        pytest.skip("set HAL_REQUIRE_NETPLAY_INTEGRATION=1 with two Slippi accounts")
+    account_1, code_1 = _account("1")
+    account_2, code_2 = _account("2")
+    assert not account_1.samefile(account_2) and code_1 != code_2
+    timing = TimingSchedule(3, delay, 12)
+    stop = threading.Event()
+    lost = threading.Event()
+    errors = []
+    pairs = [Pipe(), Pipe()]
+
+    class DelayedPolicy:
+        spec = PolicySpec("timing qualification", "test", (), (2, 3))
+        context_frames = 16
+        supported_horizons = (12,)
+        sampling_seed = 0
+
+        def plan_chunks(self, requests):
+            # Periodic overruns exceed B=4; ordinary calls include 1.2 frames
+            # of computation and .6 frames of delivery delay below.
+            time.sleep(0.100 if requests[0].sequence % 7 == 3 else 0.020)
+            return tuple(
+                chunk_response(
+                    request,
+                    tuple(
+                        ControllerAction(0.8 if (request.source_frame + offset) % 24 < 12 else -0.8, 0, 0, 0, 0, 0, 0)
+                        for offset in range(len(request.forced_prefix) + 1, 13)
+                    ),
+                )
+                for request in requests
+            )
+
+    class DeliveryConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def recv(self):
+            return self.connection.recv()
+
+        def send(self, response):
+            time.sleep(0.010)
+            self.connection.send(response)
+
+        def fileno(self):
+            return self.connection.fileno()
+
+    policy = DelayedPolicy()
+    batcher = ChunkBatcher(
+        policy, 12, {slot: DeliveryConnection(pair[0]) for slot, pair in enumerate(pairs)}, batch_wait_seconds=0.0005
+    )
+    clients = [RemoteChunkPolicy(policy.spec, 16, (timing,), pair[1], lost) for pair in pairs]
+
+    def serve():
+        try:
+            batcher.serve(stop)
+        except BaseException as error:
+            errors.append(error)
+            lost.set()
+
+    engine = threading.Thread(target=serve, daemon=True)
+    engine.start()
+    replay_dirs = (tmp_path / "realtime-1", tmp_path / "realtime-2")
+    sessions = tuple(
+        NetplaySession(
+            ISO_PATH,
+            dolphin_path=NETPLAY_EMULATOR_PATH,
+            user_json_path=account,
+            online_delay=delay,
+            replay_dir=replay_dir,
+            slippi_port=51441 + slot,
+            realtime=True,
+        )
+        for slot, (account, replay_dir) in enumerate(zip((account_1, account_2), replay_dirs, strict=True))
+    )
+    setups = (
+        NetplaySetup(melee.Character.FOX, code_2, costume=0),
+        NetplaySetup(melee.Character.FOX, code_1, costume=1),
+    )
+
+    def play(slot, first):
+        session, client = sessions[slot], clients[slot]
+        assert session.ego_port is not None
+        schedule = FrameSchedule(timing, 16, client.start_match())
+        frames = [first]
+        observed = {}
+        submitted = {}
+        advanced_while_waiting = 0
+        latencies = []
+        timestamps = []
+        while frames[-1]["id"] < 360:
+            for frame in frames:
+                applied = canonical_pre_to_action(frame["ports"][session.ego_port]["leader"]["pre"])
+                observed[frame["id"]] = applied.main_x
+                schedule.observe(
+                    PolicyInput(slot, frame["id"], session.ego_port, {}, applied, (NEUTRAL_CONTROLLER_ACTION,) * delay)
+                )
+                advanced_while_waiting += client.busy
+            frame_id = frames[-1]["id"]
+            response = client.poll()
+            if response is not None:
+                schedule.receive(response)
+                latencies.append(client.last_latency)
+            schedule.handoff(frame_id)
+            if not client.busy:
+                request = schedule.begin_request()
+                if request is not None:
+                    client.submit(request)
+            selected = schedule.submit(frame_id)
+            submitted[frame_id + delay + 1] = selected
+            session.submit(selected)
+            frames, live = session.read_frames()
+            timestamps.extend(session.frame_times)
+            assert live
+        matches = sum(
+            controller_actions_match(expected, ControllerAction(observed[frame], 0, 0, 0, 0, 0, 0))
+            for frame, expected in submitted.items()
+            if frame in observed
+        )
+        targets = sum(frame in observed for frame in submitted)
+        elapsed = timestamps[-1] - timestamps[0]
+        metrics = {
+            "fps": (len(timestamps) - 1) / elapsed,
+            "frame_intervals_seconds": [b - a for a, b in zip(timestamps, timestamps[1:], strict=False)],
+            "request_seconds": latencies,
+            "deadline_misses": schedule.deadline_misses,
+            "transport_corrections": schedule.transport_corrections,
+            "advanced_while_waiting": advanced_while_waiting,
+            "matched_targets": matches,
+            "checked_targets": targets,
+        }
+        (tmp_path / f"realtime-{slot}-metrics.json").write_text(json.dumps(metrics))
+        assert advanced_while_waiting > 60
+        assert schedule.deadline_misses > 0
+        assert metrics["fps"] >= 59
+        assert any(abs(value) > 0.5 for value in observed.values())
+        assert matches / targets > 0.9
+        return session.ego_port, observed
+
+    try:
+        with sessions[0], sessions[1], ThreadPoolExecutor(max_workers=2) as pool:
+            starts = [pool.submit(session.start_match, setup) for session, setup in zip(sessions, setups, strict=True)]
+            first = [future.result(timeout=600) for future in starts]
+            futures = [pool.submit(play, slot, frame) for slot, frame in enumerate(first)]
+            results = [future.result(timeout=60) for future in futures]
+        for replay_dir, (port, observations) in zip(replay_dirs, results, strict=True):
+            replays = list(replay_dir.rglob("*.slp"))
+            assert len(replays) == 1
+            replay_values = _replay_stick_x(replays[0], port)
+            for frame, value in observations.items():
+                assert replay_values[frame] == pytest.approx(value, abs=1e-6)
+        assert not errors
+    finally:
+        stop.set()
+        engine.join(2)
+        for pair in pairs:
+            for connection in pair:
+                connection.close()

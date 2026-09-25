@@ -79,7 +79,7 @@ dev = [
 python-preference = "only-managed"
 
 [tool.uv.sources]
-melee = { git = "https://github.com/ericyuegu/libmelee", rev = "222a399cd1368d33458b4c36f4823f7220ca889d" }
+melee = { path = "vendor/melee-0.47.0+hal.realtime.1.tar.gz" }
 peppi-py = { git = "https://github.com/ericyuegu/peppi-py", rev = "6fca8045d891961c8c9a40ff21ea40bcf5367e0e" }
 
 [tool.setuptools.packages.find]

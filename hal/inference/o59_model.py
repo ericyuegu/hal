@@ -29,6 +29,8 @@ from hal import streams
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.eval.policy_sampling import sample_categorical
 from hal.eval.policy_sampling import validate_sampling_temperature
+from hal.inference.kv_cache import KVMemory
+from hal.inference.kv_cache import rotate_positions
 from hal.training.controller_codec import BUTTONS_GROUP
 from hal.training.controller_codec import CONTROLLER_DECODE_ORDER
 from hal.training.controller_codec import CONTROLLER_GROUP_COUNT
@@ -657,6 +659,17 @@ class HistoryCrossAttention(nn.Module):
         cos, sin = self.rotary.at(length, key.device, key.dtype)
         return apply_rotary_emb(key, cos, sin).transpose(1, 2), value
 
+    def forward_with_kv_cache(self, x: Tensor, memory: KVMemory) -> Tensor:
+        query = self.query(decoder_rmsnorm(x)).view(1, 1, self.n_heads, self.head_dim)
+        query = rotate_positions(query, memory.query_position, self.rotary).transpose(1, 2)
+        valid = (
+            (memory.positions >= 0)
+            & (memory.positions <= memory.query_position)
+            & (memory.positions > memory.query_position - memory.window)
+        )
+        attended = F.scaled_dot_product_attention(query, memory.kv[0], memory.kv[1], attn_mask=valid[None, None, None])
+        return x + self.scale * self.output(attended.transpose(1, 2).reshape_as(x))
+
     def forward_projected(
         self,
         x: Tensor,
@@ -784,7 +797,7 @@ class CausalTemporalDecoder(nn.Module):
         offset: int,
         state_bias: Tensor,
         caches: list[tuple[Tensor, Tensor] | None],
-        history: tuple[Tensor, Tensor, Tensor, Tensor],
+        history: tuple[Tensor, Tensor, Tensor, Tensor] | KVMemory,
         conditioning: tuple[Tensor, ...],
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
         """Advance the temporal chain by one selected frame offset."""
@@ -795,15 +808,18 @@ class CausalTemporalDecoder(nn.Module):
             block = cast(TemporalBlock, module)
             state, present = block.forward_step(state, past, conditioning[index])
             if index == 0:
-                key, value, ctx_pad, prefix_positions = history
-                state = self.history_attention.forward_projected(
-                    state[:, None],
-                    key,
-                    value,
-                    ctx_pad,
-                    prefix_positions,
-                    offsets_per_prefix=1,
-                )[:, 0]
+                if isinstance(history, KVMemory):
+                    state = self.history_attention.forward_with_kv_cache(state[:, None], history)[:, 0]
+                else:
+                    key, value, ctx_pad, prefix_positions = history
+                    state = self.history_attention.forward_projected(
+                        state[:, None],
+                        key,
+                        value,
+                        ctx_pad,
+                        prefix_positions,
+                        offsets_per_prefix=1,
+                    )[:, 0]
             next_caches.append(present)
         return decoder_rmsnorm(state), next_caches
 
@@ -1101,6 +1117,7 @@ class CausalTemporalDecoder(nn.Module):
         temperature: float | Tensor = 1.0,
         ctx_pad: Tensor | None = None,
         forced_prefix: Tensor | None = None,
+        history: KVMemory | None = None,
     ) -> Tensor:
         indices, _ = self._sample_indices_and_logits(
             hidden,
@@ -1115,6 +1132,7 @@ class CausalTemporalDecoder(nn.Module):
             capture_logits=False,
             ctx_pad=ctx_pad,
             forced_prefix=forced_prefix,
+            history=history,
         )
         return indices
 
@@ -1132,6 +1150,7 @@ class CausalTemporalDecoder(nn.Module):
         temperature: float | Tensor = 1.0,
         ctx_pad: Tensor | None = None,
         forced_prefix: Tensor | None = None,
+        history: KVMemory | None = None,
     ) -> tuple[Tensor, tuple[Tensor, ...]]:
         """Sample once and return the exact conditional logits used by each draw."""
         return self._sample_indices_and_logits(
@@ -1147,7 +1166,17 @@ class CausalTemporalDecoder(nn.Module):
             capture_logits=True,
             ctx_pad=ctx_pad,
             forced_prefix=forced_prefix,
+            history=history,
         )
+
+    def configure_live_horizons(self, horizons: tuple[int, ...]) -> None:
+        """Select runtime decode shapes without changing the saved training config."""
+        if not horizons or tuple(sorted(set(horizons))) != horizons:
+            raise ValueError("live horizons must be sorted and unique")
+        for horizon in horizons:
+            if horizon < 1 or self.head_offsets[:horizon] != tuple(range(1, horizon + 1)):
+                raise ValueError("live horizons require contiguous trained prediction heads")
+        self.live_horizons = horizons
 
     def _sample_indices_and_logits(
         self,
@@ -1164,6 +1193,7 @@ class CausalTemporalDecoder(nn.Module):
         capture_logits: bool,
         ctx_pad: Tensor | None,
         forced_prefix: Tensor | None,
+        history: KVMemory | None = None,
     ) -> tuple[Tensor, tuple[Tensor, ...]]:
         if not isinstance(temperature, Tensor):
             temperature = validate_sampling_temperature(temperature)
@@ -1185,12 +1215,12 @@ class CausalTemporalDecoder(nn.Module):
         trunk_logits = self._trunk_skip_logits(raw_trunk)
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
-        history = self._live_history(hidden, ctx_pad)
+        memory = self._live_history(hidden, ctx_pad) if history is None else history
         conditioning = self.return_conditioner(return_value, condition_present)
         frames: list[Tensor] = []
         captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
         for depth, offset in enumerate(offsets):
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
+            state, caches = self._decode_step(previous, offset, state_bias, caches, memory, conditioning)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:

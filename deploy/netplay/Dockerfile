@@ -17,6 +17,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 WORKDIR /opt/hal
 COPY pyproject.toml uv.lock README.md ./
 COPY hal ./hal
+COPY vendor ./vendor
 RUN uv sync --locked --extra netplay-server --no-editable
 
 FROM vastai/base-image:cuda-13.0.2-auto

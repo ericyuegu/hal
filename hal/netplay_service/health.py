@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Final
 from typing import cast
 
+from hal.inference.chunks import TimingSchedule
+
 TARGET_GAME_FPS: Final[float] = 60.0
 MIN_GAME_FPS: Final[float] = 59.0
 FRAME_INTERVAL_P95_LIMIT_MS: Final[float] = 20.0
@@ -22,8 +24,8 @@ SLOT_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 3.0
 SLOT_STARTUP_GRACE_SECONDS: Final[float] = 30.0
 RUNNER_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 5.0
 POLICY_DEADLINES_SECONDS: Final[dict[int, float]] = {2: 0.0333, 3: 0.0167}
-_SLOT_SCHEMA_VERSION: Final[int] = 1
-_RUNNER_SCHEMA_VERSION: Final[int] = 2
+_SLOT_SCHEMA_VERSION: Final[int] = 2
+_RUNNER_SCHEMA_VERSION: Final[int] = 3
 
 
 class SlotState(StrEnum):
@@ -63,9 +65,15 @@ class RuntimeHealth:
     """Measure one game's rolling frame and policy timing."""
 
     def __init__(self) -> None:
+        self._frame_ids: deque[int] = deque(maxlen=HEALTH_WINDOW_FRAMES + 1)
         self._frame_times: deque[float] = deque(maxlen=HEALTH_WINDOW_FRAMES + 1)
         self._dolphin_step_seconds: deque[float] = deque(maxlen=HEALTH_WINDOW_FRAMES)
         self._policy_seconds: deque[float] = deque(maxlen=HEALTH_WINDOW_FRAMES)
+        self.chunk_health: ChunkHealth | None = None
+        self._last_affected_at: float | None = None
+        self._affected_since: float | None = None
+        self._clean_since: float | None = None
+        self._degraded_reason: str | None = None
         self._active = False
         self._delay: int | None = None
         self._last_frame_at: float | None = None
@@ -76,9 +84,14 @@ class RuntimeHealth:
         if delay not in POLICY_DEADLINES_SECONDS:
             raise ValueError(f"runtime health does not support delay {delay}")
         _finite_non_negative(now, "runtime health clock")
+        self._frame_ids.clear()
         self._frame_times.clear()
         self._dolphin_step_seconds.clear()
         self._policy_seconds.clear()
+        self._last_affected_at = None
+        self._affected_since = None
+        self._clean_since = None
+        self._degraded_reason = None
         self._active = True
         self._delay = delay
         self._last_frame_at = now
@@ -86,6 +99,7 @@ class RuntimeHealth:
         self._snapshot = RuntimeSnapshot(None, None, None, None, None, False)
 
     def finish(self) -> None:
+        self._frame_ids.clear()
         self._frame_times.clear()
         self._dolphin_step_seconds.clear()
         self._policy_seconds.clear()
@@ -93,6 +107,21 @@ class RuntimeHealth:
         self._delay = None
         self._last_frame_at = None
         self._snapshot = RuntimeSnapshot(None, None, None, None, None, False)
+
+    def observe_chunks(self, health: ChunkHealth, now: float) -> None:
+        previous = self.chunk_health
+        self.chunk_health = health
+        if previous is not None and any(
+            getattr(health, name) > getattr(previous, name)
+            for name in (
+                "deadline_misses",
+                "prefix_mismatches",
+                "exhausted_chunks",
+                "neutral_fallback_frames",
+                "transport_corrections",
+            )
+        ):
+            self._last_affected_at = now
 
     def observe_frame(self, frame_id: int, dolphin_step_seconds: float, now: float) -> RuntimeSnapshot:
         self._require_active()
@@ -102,6 +131,7 @@ class RuntimeHealth:
         _finite_non_negative(now, "runtime health clock")
         self._last_frame_at = now
         if frame_id >= 0:
+            self._frame_ids.append(frame_id)
             self._frame_times.append(now)
             self._dolphin_step_seconds.append(dolphin_step_seconds)
         return self._assess_if_due(now)
@@ -132,7 +162,7 @@ class RuntimeHealth:
         frame_times = tuple(self._frame_times)
         frame_seconds = tuple(later - earlier for earlier, later in pairwise(frame_times))
         elapsed = frame_times[-1] - frame_times[0] if len(frame_times) > 1 else 0.0
-        game_fps = len(frame_seconds) / elapsed if elapsed > 0 else None
+        game_fps = (self._frame_ids[-1] - self._frame_ids[0]) / elapsed if elapsed > 0 else None
         frame_p95 = _p95(frame_seconds)
         dolphin_p95 = _p95(tuple(self._dolphin_step_seconds))
         policy_p95 = _p95(tuple(self._policy_seconds))
@@ -141,7 +171,8 @@ class RuntimeHealth:
         cadence_reason = self._cadence_reason(game_fps, frame_p95)
 
         slow_inference = (
-            self._delay is not None
+            self.chunk_health is None
+            and self._delay is not None
             and len(self._policy_seconds) >= MIN_HEALTH_FRAMES
             and policy_p95 is not None
             and policy_p95 > POLICY_DEADLINES_SECONDS[self._delay]
@@ -149,6 +180,22 @@ class RuntimeHealth:
         reason = "frame_stream_stalled" if stalled else cadence_reason
         if reason is None and slow_inference:
             reason = "slow_inference"
+        if self.chunk_health is not None and not stalled:
+            affected = self._last_affected_at is not None and now - self._last_affected_at < 1.0
+            current_reason = reason or ("chunk_deadlines_missed" if affected else None)
+            if current_reason is not None:
+                self._clean_since = None
+                if self._affected_since is None:
+                    self._affected_since = now
+                if now - self._affected_since >= 5.0:
+                    self._degraded_reason = current_reason
+            else:
+                self._affected_since = None
+                if self._clean_since is None:
+                    self._clean_since = now
+                if now - self._clean_since >= 5.0:
+                    self._degraded_reason = None
+            reason = self._degraded_reason
         return RuntimeSnapshot(
             game_fps=game_fps,
             frame_interval_p95_ms=None if frame_p95 is None else 1_000.0 * frame_p95,
@@ -169,6 +216,54 @@ class RuntimeHealth:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkHealth:
+    schedule: TimingSchedule
+    deadline_misses: int = 0
+    prefix_mismatches: int = 0
+    exhausted_chunks: int = 0
+    neutral_fallback_frames: int = 0
+    transport_corrections: int = 0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "deadline_misses",
+            "prefix_mismatches",
+            "exhausted_chunks",
+            "neutral_fallback_frames",
+            "transport_corrections",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError("chunk health counters must be non-negative integers")
+
+    @classmethod
+    def from_payload(cls, payload: object) -> ChunkHealth:
+        if not isinstance(payload, dict) or set(payload) != set(cls.__dataclass_fields__):
+            raise ValueError("invalid chunk health fields")
+        payload = cast(Mapping[str, object], payload)
+        raw = payload["schedule"]
+        if not isinstance(raw, dict) or set(raw) != {"compute_frames", "transport_frames", "horizon"}:
+            raise ValueError("invalid calibrated schedule")
+        raw = cast(Mapping[str, object], raw)
+        schedule = TimingSchedule(
+            *(_integer(raw[name], name) for name in ("compute_frames", "transport_frames", "horizon"))
+        )
+        return cls(
+            schedule,
+            *(
+                _integer(payload[name], name)
+                for name in (
+                    "deadline_misses",
+                    "prefix_mismatches",
+                    "exhausted_chunks",
+                    "neutral_fallback_frames",
+                    "transport_corrections",
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SlotStatus:
     slot: int
     state: SlotState
@@ -179,6 +274,7 @@ class SlotStatus:
     reason: str | None
     recoveries: int
     updated_at: float
+    chunk_health: ChunkHealth | None = None
 
     def __post_init__(self) -> None:
         if self.slot < 0:
@@ -213,6 +309,9 @@ class SlotStatus:
                 reason=_optional_string(values["reason"], "reason"),
                 recoveries=_integer(values["recoveries"], "recoveries"),
                 updated_at=_number(values["updated_at"], "updated_at"),
+                chunk_health=None
+                if values["chunk_health"] is None
+                else ChunkHealth.from_payload(values["chunk_health"]),
             )
         except (TypeError, ValueError) as error:
             raise ValueError("slot status contains invalid values") from error
@@ -234,6 +333,7 @@ class RunnerStatus:
     batch_wait_p95_ms: float | None
     recoveries: int
     updated_at: float
+    chunk_health: tuple[ChunkHealth, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.message:
@@ -279,6 +379,7 @@ class RunnerStatus:
                 batch_wait_p95_ms=_optional_number(values["batch_wait_p95_ms"], "batch_wait_p95_ms"),
                 recoveries=_integer(values["recoveries"], "recoveries"),
                 updated_at=_number(values["updated_at"], "updated_at"),
+                chunk_health=_chunk_health_list(values["chunk_health"]),
             )
         except (TypeError, ValueError) as error:
             raise ValueError("runner status contains invalid values") from error
@@ -298,7 +399,7 @@ def aggregate_runner_status(
     healthy_slots = sum(status.state in healthy_states for status in slots)
     if any(status.state is SlotState.DEGRADED for status in slots):
         state = RunnerState.DEGRADED
-        message = "Gameplay performance is below the 60 FPS target."
+        message = "Gameplay timing is degraded; the current game will continue."
     elif healthy_slots == len(slots):
         state = RunnerState.READY
         message = "Game servers are ready."
@@ -329,6 +430,7 @@ def aggregate_runner_status(
         batch_wait_p95_ms=batch_wait_p95_ms,
         recoveries=sum(status.recoveries for status in slots),
         updated_at=now,
+        chunk_health=tuple(status.chunk_health for status in slots if status.chunk_health is not None),
     )
 
 
@@ -413,3 +515,9 @@ def _string(value: object, name: str) -> str:
 
 def _optional_string(value: object, name: str) -> str | None:
     return None if value is None else _string(value, name)
+
+
+def _chunk_health_list(payload: object) -> tuple[ChunkHealth, ...]:
+    if not isinstance(payload, (list, tuple)):
+        raise ValueError("runner chunk health must be a list")
+    return tuple(ChunkHealth.from_payload(item) for item in payload)

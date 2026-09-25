@@ -472,6 +472,18 @@ class QueueStore:
             )
             return status
 
+    def forfeit_service_failure(self, job_id: str, worker_id: str) -> None:
+        """Record a bot forfeiture separately from gameplay results and no-shows."""
+        with self._transaction() as connection:
+            self._owned_job(connection, job_id, worker_id, (JobStatus.CONNECTING, JobStatus.PLAYING))
+            connection.execute(
+                """UPDATE jobs SET status = 'failed', last_result = 'win',
+                    error_code = 'service_failure_bot_forfeit', lease_owner = NULL,
+                    lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL,
+                    updated_at = ? WHERE id = ?""",
+                (self._now(), job_id),
+            )
+
     def reap_expired(self) -> int:
         timestamp = self._now()
         changed = 0

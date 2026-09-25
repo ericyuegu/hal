@@ -46,6 +46,7 @@ WORKDIR /opt/hal
 # cloned/mounted code, so this layer caches across all code edits — only uv.lock
 # busts it.
 COPY pyproject.toml uv.lock ./
+COPY vendor ./vendor
 RUN uv sync --locked --no-install-project
 
 # ---- runtime: slim; just the venv + interpreter + runtime libs ----

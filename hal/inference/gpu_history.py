@@ -86,3 +86,65 @@ class GpuContextHistory:
     def action_indices(self) -> Tensor:
         start = self.history.written % self.length
         return self.actions[start : start + self.length].unsqueeze(0)
+
+
+class GpuTokenHistory:
+    """Stage only the last two preprocessed frames for incremental inference."""
+
+    def __init__(self, history: ContextHistory, codec: DiscreteControllerCodec, device: torch.device) -> None:
+        if history.layout.spatial_at is not None:
+            raise ValueError("KV cache token staging requires per-frame features without window-relative spatial data")
+        self.history = history
+        self.codec = codec
+        self.device = device
+        layout = history.layout
+        self._float_host = np.zeros((len(layout.value_names) + len(layout.mask_names), 2), dtype=np.float32)
+        self._cat_host = np.zeros((len(layout.cat_names), 2), dtype=np.int64)
+        self._action_host = np.zeros((2, len(NEUTRAL_ACTION)), dtype=np.float32)
+        self.floats = torch.zeros_like(torch.from_numpy(self._float_host), device=device)
+        self.cats = torch.zeros_like(torch.from_numpy(self._cat_host), device=device)
+        self.actions = codec.quantize(torch.from_numpy(self._action_host).to(device)).unsqueeze(0)
+        self.player = torch.zeros((1, 1), dtype=torch.long, device=device)
+        self._dirty = False
+
+    def push(self, action: np.ndarray) -> None:
+        at = (self.history.written - 1) % self.history.L
+        values = len(self.history.layout.value_names)
+        self._float_host[:, 0] = self._float_host[:, 1]
+        self._cat_host[:, 0] = self._cat_host[:, 1]
+        self._action_host[0] = self._action_host[1]
+        self._float_host[:values, 1] = self.history.values[:, at]
+        self._float_host[values:, 1] = self.history.masks[:, at]
+        self._cat_host[:, 1] = self.history.cats[:, at]
+        self._action_host[1] = action
+        self._dirty = True
+
+    def context(self, player_id: int, stream_id: int, reset: bool) -> Context:
+        if self._dirty:
+            self.floats.copy_(torch.from_numpy(self._float_host))
+            self.cats.copy_(torch.from_numpy(self._cat_host))
+            self.actions = self.codec.quantize(torch.from_numpy(self._action_host).to(self.device)).unsqueeze(0)
+            self._dirty = False
+        self.player.fill_(player_id)
+        features = self.features_from(self.floats, self.cats, self.player)
+        # RNG identity metadata belongs on the host; it is read by Python each plan.
+        return Context(
+            features,
+            torch.tensor([max(0, 2 - self.history.count)], device=self.device),
+            torch.tensor([stream_id]),
+            torch.tensor([reset]),
+        )
+
+    def features_from(self, floats: Tensor, cats: Tensor, player: Tensor) -> dict[str, Tensor]:
+        layout = self.history.layout
+        features = {
+            name: floats[index : index + 1] for index, name in enumerate((*layout.value_names, *layout.mask_names))
+        }
+        features.update({name: cats[index : index + 1] for index, name in enumerate(layout.cat_names)})
+        features["ego_player_id"] = player.expand(1, 2)
+        return features
+
+    def action_indices(self) -> Tensor:
+        if self._dirty:
+            raise RuntimeError("read token context before its action indices")
+        return self.actions

@@ -14,11 +14,13 @@ from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import run_matches_vec
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.play import require_completed_replay
-from hal.eval.play import run_netplay_match
 from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.realtime import run_realtime_match
 from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
+from hal.inference.chunks import ChunkPolicy
 from hal.inference.loader import load_policy
+from hal.netplay_service.calibration import local_chunk_service
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
@@ -107,6 +109,13 @@ def _play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-frames", type=int, default=54_000)
+    parser.add_argument(
+        "--history-mode",
+        choices=("window", "kv_cache"),
+        default="window",
+        help="recompute the cropped window or retain KV states across frames",
+    )
+    parser.add_argument("--kv-update-frames", type=int, choices=(1, 2), default=2)
     return parser
 
 
@@ -166,34 +175,41 @@ def _eval(args: argparse.Namespace) -> None:
 def _play(args: argparse.Namespace) -> None:
     runtime = RuntimeConfig(max_batch_size=1, transport_delays=(args.online_delay,))
     bundle = resolve_checkpoint(args.policy)
-    policy = load_policy(bundle, device=args.device, seed=args.seed, compiled=args.compiled)
-    policy.prepare(runtime)
+    policy = load_policy(
+        bundle,
+        device=args.device,
+        seed=args.seed,
+        compiled=args.compiled,
+        history_mode=args.history_mode,
+        kv_update_frames=args.kv_update_frames,
+    )
+    if not isinstance(policy, ChunkPolicy):
+        raise ValueError("live netplay requires a chunk policy")
     user_json = _user_json(args.user_json)
     replay_dir = args.replay_dir.resolve()
     replay_dir.mkdir(parents=True, exist_ok=True)
     previous_replays = frozenset(replay_dir.rglob("*.slp"))
-    session = NetplaySession(
-        args.iso_path,
-        dolphin_path=args.dolphin_path,
-        user_json_path=user_json,
-        online_delay=args.online_delay,
-        replay_dir=replay_dir,
-        slippi_port=args.slippi_port,
-    )
-    setup = NetplaySetup(character=args.character, opponent_code=args.opponent_code)
-    with session, torch.compiler.set_stance("fail_on_recompile"):
-        result = run_netplay_match(
-            session,
-            setup,
-            policy,
-            runtime,
-            player_identity=args.imitate,
-            max_frames=args.max_frames,
+    with local_chunk_service(policy, runtime) as client:
+        session = NetplaySession(
+            args.iso_path,
+            dolphin_path=args.dolphin_path,
+            user_json_path=user_json,
+            online_delay=args.online_delay,
+            replay_dir=replay_dir,
+            slippi_port=args.slippi_port,
+            realtime=True,
         )
+        setup = NetplaySetup(character=args.character, opponent_code=args.opponent_code)
+        with session, torch.compiler.set_stance("fail_on_recompile"):
+            result = run_realtime_match(
+                session,
+                setup,
+                client,
+                runtime,
+                player_identity=args.imitate,
+                max_frames=args.max_frames,
+            )
     replay = require_completed_replay(replay_dir, previous_replays)
-    limit_ms = 33.3 if args.online_delay == 2 else 16.7
-    if result.inference_p95_ms >= limit_ms:
-        raise RuntimeError(f"policy p95 {result.inference_p95_ms:.1f} ms must stay below {limit_ms:.1f} ms")
     print(
         f"completed {len(result.trajectory)} frames at {result.game_fps:.1f} FPS; "
         f"frame p95={result.frame_interval_p95_ms:.1f} ms; policy p95={result.inference_p95_ms:.1f} ms; "

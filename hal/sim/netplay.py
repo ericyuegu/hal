@@ -18,6 +18,7 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
 from hal.sim.session import LIVE_MENU_STATES
+from hal.sim.session import FrameTimeout
 from hal.sim.session import canonical_frame
 from hal.sim.session import fix_dolphin_ini_case
 from hal.sim.session import kill_dolphin
@@ -61,7 +62,7 @@ class NetplaySetup:
 
 
 class NetplaySession:
-    """Drive one blocking, real-time Dolphin direct-connect session."""
+    """Drive a Dolphin direct-connect session with explicit real-time I/O."""
 
     def __init__(
         self,
@@ -74,9 +75,12 @@ class NetplaySession:
         slippi_port: int = 51441,
         step_timeout_seconds: float = 30.0,
         connect_timeout_seconds: float = 600.0,
+        realtime: bool = False,
     ) -> None:
         if online_delay not in (2, 3):
             raise ValueError(f"online_delay must be 2 or 3, got {online_delay}")
+        self.frame_times: list[float] = []
+        self.realtime = realtime
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
         self.user_json_path = str(user_json_path)
@@ -101,12 +105,12 @@ class NetplaySession:
                 slippi_port=self.slippi_port,
                 online_delay=self.online_delay,
                 user_json_path=self.user_json_path,
-                blocking_input=True,
+                blocking_input=not self.realtime,
                 polling_mode=True,
                 # Console.step() flushes every controller before it polls. A
                 # zero-timeout polling loop can therefore send several FLUSH
                 # commands for one returned frame and destroy call alignment.
-                polling_timeout=self.step_timeout_seconds,
+                polling_timeout=0.0 if self.realtime else self.step_timeout_seconds,
                 skip_rollback_frames=True,
                 rollback_resolution="first",
                 # Slippi 3.6.4 defaults to OpenGL, which stalls CUDA policy
@@ -118,7 +122,7 @@ class NetplaySession:
                 save_replays=True,
                 replay_dir=self.replay_dir,
                 replay_monthly_folders=False,
-                emulation_speed=0,
+                emulation_speed=1.0 if self.realtime else 0,
                 use_exi_inputs=False,
                 enable_ffw=False,
             )
@@ -140,6 +144,7 @@ class NetplaySession:
         setup: NetplaySetup,
         *,
         on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
+        on_countdown_observation: Callable[[dict], None] | None = None,
     ) -> dict:
         """Connect and emit countdown states before returning frame zero."""
         if self._console is None:
@@ -175,7 +180,9 @@ class NetplaySession:
             raise RuntimeError("failed to connect to Dolphin Slippi server")
         self._menu_helper = melee.MenuHelper()
         logger.info("waiting for direct-connect opponent {}", setup.opponent_code)
-        first_frame = self._navigate_to_live(setup, on_countdown_frame=on_countdown_frame)
+        first_frame = self._navigate_to_live(
+            setup, on_countdown_frame=on_countdown_frame, on_countdown_observation=on_countdown_observation
+        )
         frame_id = first_frame.get("id")
         if not isinstance(frame_id, int):
             raise RuntimeError(f"first netplay frame has invalid id {frame_id!r}")
@@ -187,6 +194,7 @@ class NetplaySession:
         setup: NetplaySetup,
         *,
         on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
+        on_countdown_observation: Callable[[dict], None] | None = None,
     ) -> dict:
         """Navigate to a rematch and emit countdown states before frame zero."""
         if self._console is None or self._controller is None or self._menu_helper is None:
@@ -198,7 +206,9 @@ class NetplaySession:
         self._menu_helper = melee.MenuHelper()
         self._controller.release_all()
         self._controller.flush()
-        first_frame = self._navigate_to_live(setup, on_countdown_frame=on_countdown_frame)
+        first_frame = self._navigate_to_live(
+            setup, on_countdown_frame=on_countdown_frame, on_countdown_observation=on_countdown_observation
+        )
         frame_id = first_frame.get("id")
         if not isinstance(frame_id, int):
             raise RuntimeError(f"first netplay frame has invalid id {frame_id!r}")
@@ -213,7 +223,7 @@ class NetplaySession:
             raise RuntimeError("cannot park the menu while a match is live")
         self._controller.release_all()
         self._controller.flush()
-        gamestate = step_blocking(self._console, self.step_timeout_seconds)
+        gamestate = self._read_state()
         if gamestate.menu_state in LIVE_MENU_STATES:
             raise RuntimeError("netplay entered a game while waiting for a rematch")
         return gamestate.menu_state
@@ -223,6 +233,7 @@ class NetplaySession:
         setup: NetplaySetup,
         *,
         on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
+        on_countdown_observation: Callable[[dict], None] | None = None,
     ) -> dict:
         assert self._console is not None
         assert self._controller is not None
@@ -235,7 +246,7 @@ class NetplaySession:
                     f"did not reach IN_GAME within {self.connect_timeout_seconds:.0f}s "
                     "while waiting for the remote player"
                 )
-            gamestate = step_blocking(self._console, self.step_timeout_seconds)
+            gamestate = self._read_state()
             status = (
                 gamestate.menu_state,
                 getattr(gamestate, "submenu", None),
@@ -251,6 +262,7 @@ class NetplaySession:
                 return self._reach_frame_zero(
                     gamestate,
                     on_countdown_frame=on_countdown_frame,
+                    on_countdown_observation=on_countdown_observation,
                 )
             if gamestate.menu_state in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
                 self._menu_helper.choose_direct_online(gamestate, self._controller)
@@ -270,6 +282,7 @@ class NetplaySession:
         gamestate: melee.GameState,
         *,
         on_countdown_frame: Callable[[dict], ControllerInputs] | None = None,
+        on_countdown_observation: Callable[[dict], None] | None = None,
     ) -> dict:
         """Apply countdown inputs and return exact playable frame zero."""
         assert self._console is not None
@@ -284,9 +297,18 @@ class NetplaySession:
                 if frame_id != 0:
                     raise RuntimeError(f"netplay reached playable frame {frame_id}; expected frame 0")
                 return frame
+            if on_countdown_observation is not None:
+                on_countdown_observation(frame)
+            if self.realtime:
+                next_state = self._console.step(flush_controllers=False)
+                if next_state is not None:
+                    gamestate = next_state
+                    if gamestate.menu_state not in LIVE_MENU_STATES:
+                        raise RuntimeError("netplay left the game during the pre-game countdown")
+                    continue
             inputs = NEUTRAL_CONTROLLER_ACTION if on_countdown_frame is None else on_countdown_frame(frame)
             apply_inputs(self._controller, inputs)
-            gamestate = step_blocking(self._console, self.step_timeout_seconds)
+            gamestate = self._read_state()
             if gamestate.menu_state not in LIVE_MENU_STATES:
                 raise RuntimeError("netplay left the game during the pre-game countdown")
 
@@ -337,7 +359,7 @@ class NetplaySession:
         if self._last_frame_id is None:
             raise RuntimeError("start_match did not establish a live frame")
         apply_inputs(self._controller, inputs)
-        gamestate = step_blocking(self._console, self.step_timeout_seconds)
+        gamestate = self._read_state()
         frame = canonical_frame(gamestate)
         in_game = gamestate.menu_state in LIVE_MENU_STATES
         if not in_game:
@@ -353,6 +375,60 @@ class NetplaySession:
             )
         self._last_frame_id = frame_id
         return frame, True
+
+    def _read_state(self) -> melee.GameState:
+        if self._console is None:
+            raise RuntimeError("netplay console is not initialized")
+        if not self.realtime:
+            return step_blocking(self._console, self.step_timeout_seconds)
+        if self._controller is not None:
+            self._controller.flush()
+        deadline = time.monotonic() + self.step_timeout_seconds
+        while True:
+            state = self._console.step(flush_controllers=False)
+            if state is not None:
+                return state
+            if time.monotonic() >= deadline:
+                raise FrameTimeout("netplay observation stream stalled")
+            time.sleep(0.0005)
+
+    def submit(self, inputs: ControllerInputs) -> None:
+        """Flush exactly the state selected by the game-frame scheduler."""
+        if self._controller is None:
+            raise RuntimeError("netplay controller is not connected")
+        apply_inputs(self._controller, inputs)
+        self._controller.flush()
+
+    def read_frames(self) -> tuple[list[dict], bool]:
+        """Wait for one observation, then drain available observations without writes."""
+        if self._console is None or not self.realtime or self._last_frame_id is None:
+            raise RuntimeError("read_frames requires an active real-time match")
+        deadline = time.monotonic() + self.step_timeout_seconds
+        frames = []
+        self.frame_times = []
+        while True:
+            state = self._console.step(flush_controllers=False)
+            if state is None:
+                if frames:
+                    return frames, True
+                if time.monotonic() >= deadline:
+                    raise FrameTimeout("netplay observation stream stalled")
+                time.sleep(0.0005)
+                continue
+            self.frame_times.append(time.perf_counter())
+            frame = canonical_frame(state)
+            if state.menu_state not in LIVE_MENU_STATES:
+                self._last_frame_id = None
+                frames.append(frame)
+                return frames, False
+            frame_id = frame.get("id")
+            if not isinstance(frame_id, int):
+                raise RuntimeError("invalid netplay frame ID")
+            if self._last_frame_id is not None and frame_id <= self._last_frame_id:
+                self.frame_times.pop()
+                continue
+            self._last_frame_id = frame_id
+            frames.append(frame)
 
     def _kill_dolphin_only(self) -> None:
         kill_dolphin(self._console)

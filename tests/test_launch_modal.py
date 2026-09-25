@@ -687,10 +687,16 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
         ("run", f"UV_INDEX_URL={_MODULE.PYPI_INDEX} uv sync --locked --offline --no-build-isolation", None, None)
     )
 
-    assert events[:4] == [
+    assert events[:5] == [
         ("base", "example/image:tag"),
         ("file", _MODULE.ROOT / "pyproject.toml", str(_MODULE.REMOTE_ROOT / "pyproject.toml"), True),
         ("file", _MODULE.ROOT / "uv.lock", str(_MODULE.REMOTE_ROOT / "uv.lock"), True),
+        (
+            "file",
+            _MODULE.ROOT / "vendor" / "melee-0.47.0+hal.realtime.1.tar.gz",
+            str(_MODULE.REMOTE_ROOT / "vendor" / "melee-0.47.0+hal.realtime.1.tar.gz"),
+            True,
+        ),
         ("workdir", str(_MODULE.REMOTE_ROOT)),
     ]
     assert dependency_run < helper_copy < fixture_run < source_copy < ignored_command_copy < project_run

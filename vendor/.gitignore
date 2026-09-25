@@ -1,0 +1,5 @@
+*
+!.gitignore
+!README.md
+!libmelee-read-only.patch
+!melee-0.47.0+hal.realtime.1.tar.gz

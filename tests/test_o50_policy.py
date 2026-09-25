@@ -904,3 +904,46 @@ import hal.inference.o50
 assert not any(name == 'experiments' or name.startswith('experiments.') for name in sys.modules)
 """
     subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).parents[1])
+
+
+def test_chunk_decode_matches_existing_decoder_with_same_context_prefix_and_rng() -> None:
+    from hal.inference.chunks import ChunkRequest
+
+    torch.manual_seed(31)
+    synchronous = _policy(prediction_frames=6)
+    torch.manual_seed(31)
+    chunks = _policy(prediction_frames=6)
+    runtime = RuntimeConfig(1, (2,))
+    synchronous.prepare(runtime)
+    chunks.prepare_chunks(runtime, 6, 2)
+    context = tuple(
+        replace(_input(frame, 2, reset=frame == 0), applied_action=ControllerAction(frame / 10, 0, 0, 0, 0, 0, 0))
+        for frame in range(4)
+    )
+    for item in context:
+        state = synchronous._ingest(item)
+    synchronous._plan(((context[-1], state),))
+    request = ChunkRequest(3, 1, 0, 3, context, context[-1].pending_actions)
+    response = chunks.plan_chunks((request,))[0]
+    assert tuple(item.action for item in response.actions[2:]) == tuple(state.queued)
+    assert [item.target_frame for item in response.actions] == list(range(4, 10))
+    assert chunks._config.prediction_frames == 4  # saved training configuration is unchanged
+
+
+def test_chunk_context_keeps_observations_received_during_inference() -> None:
+    from hal.inference.chunks import ChunkRequest
+
+    policy = _policy(prediction_frames=6)
+    policy.prepare_chunks(RuntimeConfig(1, (2,)), 6, 4)
+    first = tuple(_input(frame, 2, reset=frame == 0) for frame in range(4))
+    policy.plan_chunks((ChunkRequest(3, 1, 0, 3, first, (NEUTRAL_CONTROLLER_ACTION,) * 4),))
+    context = tuple(
+        replace(_input(frame, 2), observation={**_observation(), "p1_position_x": float(frame)})
+        for frame in range(2, 6)
+    )
+    policy.plan_chunks((ChunkRequest(3, 1, 1, 5, context, (NEUTRAL_CONTROLLER_ACTION,) * 4),))
+    state = policy._states[3]
+    assert state.last_frame_id == 5
+    assert state.history is not None and state.history.written == 6
+    policy.reset_chunks()
+    assert policy._states == {}

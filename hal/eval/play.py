@@ -30,6 +30,10 @@ from hal.sim.trajectory import Trajectory
 from hal.training.canonical import flatten_canonical_frame
 from hal.wire import BUTTON_BITS
 
+# Slippi 3.6.4 masks game inputs before frame -45 during the opening countdown.
+# Two-account direct-connect replay and live-state measurements agree at this boundary.
+_FIRST_COUNTDOWN_INPUT_FRAME = -45
+
 
 @dataclass(frozen=True, slots=True)
 class PlayResult:
@@ -262,7 +266,11 @@ def run_netplay_match(
         if session.ego_port is None:
             raise RuntimeError("netplay local port was not discovered before the countdown")
         ego_port = session.ego_port
-        if expected_countdown_action is not None and countdown_policy_frames > delay:
+        if (
+            expected_countdown_action is not None
+            and countdown_policy_frames > delay
+            and frame["id"] >= _FIRST_COUNTDOWN_INPUT_FRAME
+        ):
             transport_correction_frames += _transport_was_corrected(
                 frame,
                 ego_port,

@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 from typing import cast
@@ -27,6 +28,7 @@ from safetensors.torch import save_model
 from torch import Tensor
 
 from hal import streams
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
@@ -44,6 +46,11 @@ from hal.inference.bundle import PolicyBundleManifest
 from hal.inference.bundle import extract_policy_bundle
 from hal.inference.bundle import write_policy_bundle
 from hal.inference.checkpoints import resolve_checkpoint
+from hal.inference.chunks import ChunkRequest
+from hal.inference.chunks import ChunkResponse
+from hal.inference.chunks import chunk_response
+from hal.inference.chunks import contiguous_horizons
+from hal.inference.chunks import validate_chunk_request
 from hal.inference.o50_model import CONTROLLER_GROUP_COUNT
 from hal.inference.o50_model import CONTROLLER_GROUP_NAMES
 from hal.inference.o50_model import O50_BACKEND
@@ -665,6 +672,9 @@ class O50Policy:
         self._allow_masked_player_identity = allow_masked_player_identity
         self._decode_observer = decode_observer
         self._compiled = False
+        self._chunk_mode = False
+        self._prefix_frames = 0
+        self._chunk_generations: dict[int, int] = {}
         self._runtime: RuntimeConfig | None = None
         self._states: dict[int, _StreamState] = {}
         self._rng: SlotGroupRng | None = None
@@ -688,16 +698,21 @@ class O50Policy:
         unsupported = set(config.transport_delays) - set(_SUPPORTED_DELAYS)
         if unsupported:
             raise ValueError(f"O50 does not support transport delays {sorted(unsupported)}")
-        if len(config.transport_delays) > 1 and config.replan_interval_frames is not None:
+        if not self._chunk_mode and len(config.transport_delays) > 1 and config.replan_interval_frames is not None:
             raise ValueError("mixed-delay O50 derives each stream's replan interval")
-        for delay in config.transport_delays:
-            self._replan_for_delay(delay, config.replan_interval_frames)
+        if not self._chunk_mode:
+            for delay in config.transport_delays:
+                self._replan_for_delay(delay, config.replan_interval_frames)
         self._runtime = config
         self._states.clear()
         self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
         self._compiled = self._compiled_requested and self._device.type == "cuda"
         trunk: TrunkCall = self._model.forward_dense
-        sample_start = min(config.transport_delays)
+        sample_start = (
+            self._prefix_frames - max(config.transport_delays) + min(config.transport_delays)
+            if self._chunk_mode
+            else min(config.transport_delays)
+        )
 
         def decode_tail(
             hidden: Tensor,
@@ -785,7 +800,12 @@ class O50Policy:
         neutral = torch.zeros(rows, self._prediction_frames, len(ACTION_CHANNELS), device=self._device)
         forced = self._model.codec.quantize(neutral)
         delays = torch.tensor(
-            [runtime.transport_delays[row % len(runtime.transport_delays)] for row in range(rows)],
+            [
+                self._prefix_frames
+                if self._chunk_mode
+                else runtime.transport_delays[row % len(runtime.transport_delays)]
+                for row in range(rows)
+            ],
             device=self._device,
         )
         depths = torch.arange(self._prediction_frames, device=self._device)
@@ -959,9 +979,93 @@ class O50Policy:
             self._decode_observer(real_rows, horizon, time.perf_counter() - started)
         for row, (item, state) in enumerate(due):
             delay = len(item.pending_actions)
-            replan = self._replan_for_delay(delay, runtime.replan_interval_frames)
+            replan = (
+                horizon - delay if self._chunk_mode else self._replan_for_delay(delay, runtime.replan_interval_frames)
+            )
             state.queued.extend(_controller_action(action) for action in values[row, delay : delay + replan])
             state.reset_pending = False
+
+    @property
+    def sampling_seed(self) -> int:
+        return self._seed
+
+    @property
+    def context_frames(self) -> int:
+        return self._config.architecture.L_ctx
+
+    @property
+    def supported_horizons(self) -> tuple[int, ...]:
+        return contiguous_horizons(self._config.architecture.head_offsets)
+
+    def reset_chunks(self) -> None:
+        self._states.clear()
+        self._chunk_generations.clear()
+        self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
+
+    def prepare_chunks(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None:
+        if horizon not in self.supported_horizons or not 0 <= prefix_frames < horizon:
+            raise ValueError("O50 chunk shape requires contiguous trained heads and an unforced tail")
+        self._chunk_mode = True
+        self._prediction_frames = horizon
+        self._prefix_frames = prefix_frames
+        self._runtime = None
+        self.reset_chunks()
+        self.prepare(runtime)
+
+    def warmup_context(self, stream_id: int, source_frame: int, transport: int) -> tuple[PolicyInput, ...]:
+        observation = {
+            name: (0 if feature_kind(_relative_name(name, 1), ITEM_COLUMNS) in ("cat", "button") else 0.0)
+            for name in self.spec.required_observation_fields
+        }
+        return tuple(
+            PolicyInput(
+                stream_id,
+                frame,
+                1,
+                observation,
+                NEUTRAL_CONTROLLER_ACTION,
+                (NEUTRAL_CONTROLLER_ACTION,) * transport,
+                player_identity="PLATINUM",
+                reset=frame == source_frame - self.context_frames + 1,
+            )
+            for frame in range(source_frame - self.context_frames + 1, source_frame + 1)
+        )
+
+    def plan_chunks(self, requests: Sequence[ChunkRequest]) -> Sequence[ChunkResponse]:
+        runtime = self._require_runtime()
+        if not self._chunk_mode or not requests or len(requests) > runtime.max_batch_size:
+            raise ValueError("invalid O50 chunk batch")
+        if len({request.stream_id for request in requests}) != len(requests):
+            raise ValueError("duplicate O50 chunk stream")
+        due = []
+        for request in requests:
+            validate_chunk_request(
+                self.spec,
+                runtime,
+                request,
+                context_frames=self.context_frames,
+                prefix_frames=self._prefix_frames
+                - max(runtime.transport_delays)
+                + len(request.context[-1].pending_actions),
+            )
+            state = self._states.get(request.stream_id)
+            if self._chunk_generations.get(request.stream_id) != request.generation:
+                state = None
+            for item in request.context:
+                if state is None or state.last_frame_id is None or item.frame_id > state.last_frame_id:
+                    state = self._ingest(replace(item, reset=state is None))
+            if state is None or state.last_frame_id != request.source_frame:
+                raise ValueError("obsolete O50 chunk request")
+            state.queued.clear()
+            due.append((replace(request.context[-1], pending_actions=request.forced_prefix), state))
+            self._chunk_generations[request.stream_id] = request.generation
+        self._plan(due)
+        responses = tuple(
+            chunk_response(request, tuple(state.queued)) for request, (_, state) in zip(requests, due, strict=True)
+        )
+        for _, state in due:
+            state.queued.clear()
+        return responses
 
     def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
         runtime = self._require_runtime()

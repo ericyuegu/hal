@@ -73,12 +73,14 @@ class _Session:
         self,
         *,
         countdown_start: int | None = None,
+        mask_countdown_before: int | None = None,
         corrupt_frame: int | None = None,
         replay_frame: int | None = None,
         replay_age: int = 1,
     ) -> None:
         self.frame_id = 0
         self.countdown_start = countdown_start
+        self.mask_countdown_before = mask_countdown_before
         self.queue = deque([NEUTRAL_CONTROLLER_ACTION] * self.online_delay)
         self.submitted: list[ControllerAction] = []
         self.corrupt_frame = corrupt_frame
@@ -106,7 +108,12 @@ class _Session:
         applied = NEUTRAL_CONTROLLER_ACTION
         if self.countdown_start is not None and on_countdown_frame is not None:
             for frame_id in range(self.countdown_start, 0):
-                action = on_countdown_frame(_frame(frame_id, applied))
+                observed = (
+                    NEUTRAL_CONTROLLER_ACTION
+                    if self.mask_countdown_before is not None and frame_id < self.mask_countdown_before
+                    else applied
+                )
+                action = on_countdown_frame(_frame(frame_id, observed))
                 due = self.queue.popleft()
                 self.queue.append(action)
                 self.applied.append(due)
@@ -218,6 +225,40 @@ def test_countdown_primes_policy_context_before_frame_zero(monkeypatch: pytest.M
     assert [action.main_x for action in policy.inputs[3].pending_actions] == [0.2, 0.3]
     assert policy.inputs[3].applied_action.main_x == 0.1
     assert session.submitted[0].main_x == 0.4
+
+
+def test_countdown_accepts_slippi_masked_inputs_before_frame_minus_45(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    policy = _Policy()
+    session = _Session(countdown_start=-48, mask_countdown_before=-45)
+
+    result = run_netplay_match(
+        session,
+        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+        policy,
+        RuntimeConfig(1, (2,), 2),
+        max_frames=10,
+    )
+
+    assert [item.frame_id for item in policy.inputs[:4]] == [-48, -47, -46, -45]
+    assert result.transport_correction_frames == 0
+
+
+def test_countdown_counts_masked_input_at_frame_minus_45_as_correction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal.eval.play.flatten_canonical_frame", _flatten)
+    monkeypatch.setattr("hal.eval.play.Trajectory.from_capture", lambda frames, _ports: frames)
+    session = _Session(countdown_start=-48, mask_countdown_before=-44)
+
+    result = run_netplay_match(
+        session,
+        NetplaySetup(character=melee.Character.FOX, opponent_code="A#1"),
+        _Policy(),
+        RuntimeConfig(1, (2,), 2),
+        max_frames=10,
+    )
+
+    assert result.transport_correction_frames == 1
 
 
 def test_countdown_validates_scheduled_non_neutral_frame_zero(

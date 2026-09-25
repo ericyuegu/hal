@@ -320,7 +320,7 @@ def test_finished_match_can_rematch_without_relaunching_dolphin(
     console.run.assert_not_called()
     controller.release_all.assert_called_once()
     controller.flush.assert_called_once()
-    navigate.assert_called_once_with(setup, on_countdown_frame=None)
+    navigate.assert_called_once_with(setup, on_countdown_frame=None, on_countdown_observation=None)
     assert session._menu_helper is helper_type.return_value
 
 

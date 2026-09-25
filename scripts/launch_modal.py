@@ -982,6 +982,11 @@ def _image(
         modal.Image.from_registry(tag)
         .add_local_file(ROOT / "pyproject.toml", str(REMOTE_ROOT / "pyproject.toml"), copy=True)
         .add_local_file(ROOT / "uv.lock", str(REMOTE_ROOT / "uv.lock"), copy=True)
+        .add_local_file(
+            ROOT / "vendor" / "melee-0.47.0+hal.realtime.1.tar.gz",
+            str(REMOTE_ROOT / "vendor" / "melee-0.47.0+hal.realtime.1.tar.gz"),
+            copy=True,
+        )
         .workdir(str(REMOTE_ROOT))
         # Modal's build-time UV_INDEX_URL points at its internal mirror. If it
         # reaches uv, the resolver wants to rewrite every registry URL in the

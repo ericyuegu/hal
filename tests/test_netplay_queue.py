@@ -262,3 +262,19 @@ def test_replay_recording_is_idempotent_for_recovery(tmp_path: Path) -> None:
     store.record_replay(job.id, 1, **values)
     with pytest.raises(InvalidTransitionError, match="different replay"):
         store.record_replay(job.id, 1, key="other.slp", sha256="b" * 64, size=11, etag="other")
+
+
+def test_service_failure_records_bot_forfeit_without_requeue(tmp_path: Path) -> None:
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    credentials = store.create_job("CRYO#610", _choices())
+    job = store.claim_next("slot-0")
+    assert job is not None
+    store.mark_connecting(job.id, "slot-0", "HAL#1")
+    store.mark_playing(job.id, "slot-0")
+    store.forfeit_service_failure(job.id, "slot-0")
+    failed = store.get_job(job.id, credentials.token)
+    assert failed.status is JobStatus.FAILED
+    assert failed.last_result == "win"
+    assert failed.error_code == "service_failure_bot_forfeit"
+    assert store.claim_next("slot-0") is None

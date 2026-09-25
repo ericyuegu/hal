@@ -66,3 +66,40 @@ def test_compiled_policy_latency_has_no_post_prepare_recompile(delay: int, limit
         p95_ms = _measure(policy, rows, delay)
 
     assert p95_ms < limit_ms
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("rows", [1, 2])
+def test_calibrated_chunks_do_not_compile_during_play(rows: int) -> None:
+    from hal.inference.chunks import ChunkPolicy
+    from hal.inference.chunks import ChunkRequest
+    from hal.netplay_service.calibration import calibrate
+
+    if os.environ.get("HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION") != "1":
+        pytest.skip("set HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1 on the production GPU")
+    value = os.environ.get("HAL_NETPLAY_POLICY")
+    if not value or not Path(value).is_file():
+        pytest.fail("HAL_NETPLAY_POLICY must name the production policy bundle")
+    manifest = read_policy_manifest(value)
+    runtime = RuntimeConfig(rows, tuple(delay for delay in manifest.supported_transport_delays if delay in (2, 3)))
+    policy = load_policy(value, device="cuda", seed=0, compiled=True)
+    assert isinstance(policy, ChunkPolicy)
+    result = calibrate(policy, runtime, 0.0005)
+    with torch.compiler.set_stance("fail_on_recompile"):
+        for timing in result.schedules:
+            policy.reset_chunks()
+            for sequence in range(30):
+                source = policy.context_frames + sequence * timing.replan_frames
+                requests = tuple(
+                    ChunkRequest(
+                        slot,
+                        0,
+                        sequence,
+                        source,
+                        policy.warmup_context(slot, source, timing.transport_frames),
+                        (NEUTRAL_CONTROLLER_ACTION,) * timing.prefix_frames,
+                    )
+                    for slot in range(rows)
+                )
+                responses = policy.plan_chunks(requests)
+                assert all(len(response.actions) == timing.horizon for response in responses)

@@ -5,7 +5,9 @@ import hashlib
 import json
 import multiprocessing as mp
 import os
+import platform
 import signal
+import sys
 import threading
 import time
 from collections.abc import Sequence
@@ -17,6 +19,7 @@ from datetime import datetime
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from typing import Literal
 from typing import Protocol
 
 import melee
@@ -28,10 +31,17 @@ from hal.eval.match_summary import summarize_trajectory
 from hal.eval.play import PlayResult
 from hal.eval.play import read_new_replay_end
 from hal.eval.play import run_netplay_match
+from hal.eval.realtime import run_realtime_match
 from hal.inference.api import PolicySpec
 from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
+from hal.inference.chunks import ChunkPolicy
+from hal.inference.chunks import TimingSchedule
 from hal.inference.loader import load_policy
+from hal.netplay_service.calibration import calibrate
+from hal.netplay_service.chunks import ChunkBatcher
+from hal.netplay_service.chunks import EngineLost
+from hal.netplay_service.chunks import RemoteChunkPolicy
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -39,6 +49,7 @@ from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.health import FRAME_STALL_SECONDS
 from hal.netplay_service.health import SLOT_HEARTBEAT_MAX_AGE_SECONDS
 from hal.netplay_service.health import SLOT_STARTUP_GRACE_SECONDS
+from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import RunnerState
 from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.health import RuntimeHealth
@@ -49,14 +60,12 @@ from hal.netplay_service.health import aggregate_runner_status
 from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.health import write_runner_status
 from hal.netplay_service.health import write_slot_status
-from hal.netplay_service.inference import ContinuousBatcher
 from hal.netplay_service.inference import RemotePolicy
-from hal.netplay_service.inference import ServingArena
-from hal.netplay_service.inference import ServingArenaDescriptor
 from hal.netplay_service.queue import InvalidTransitionError
 from hal.netplay_service.queue import QueueStore
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
+from hal.netplay_service.schedule import FrameSchedule
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
@@ -114,6 +123,7 @@ class RunnerConfig:
     device: str = "cuda"
     seed: int | None = None
     compiled: bool = False
+    history_mode: Literal["window", "kv_cache"] = "window"
     batch_wait_seconds: float = 0.0005
     max_frames: int = 54_000
 
@@ -202,6 +212,24 @@ class _SlotHealthReporter:
             snapshot = self._monitor.observe_frame(frame_id, dolphin_step_seconds, time.monotonic())
         self._raise_if_recovery_required(snapshot)
 
+    def configure_schedule(self, schedule: TimingSchedule) -> None:
+        with self._lock:
+            self._monitor.chunk_health = ChunkHealth(schedule)
+
+    def observe_schedule(self, schedule: FrameSchedule) -> None:
+        with self._lock:
+            self._monitor.observe_chunks(
+                ChunkHealth(
+                    schedule.timing,
+                    schedule.deadline_misses,
+                    schedule.prefix_mismatches,
+                    schedule.exhausted_chunks,
+                    schedule.neutral_fallback_frames,
+                    schedule.transport_corrections,
+                ),
+                time.monotonic(),
+            )
+
     def observe_policy(self, seconds: float) -> None:
         with self._lock:
             self._raise_if_publisher_failed()
@@ -236,6 +264,7 @@ class _SlotHealthReporter:
                 reason=reason,
                 recoveries=self._recoveries,
                 updated_at=time.time(),
+                chunk_health=self._monitor.chunk_health,
             )
 
     @staticmethod
@@ -522,7 +551,7 @@ class _LivePolicySettings:
 def _run_reservation(
     config: SlotConfig,
     store: QueueStore,
-    policy: RemotePolicy,
+    policy: RemotePolicy | RemoteChunkPolicy,
     runtime: RuntimeConfig,
     job: Job,
     stop: _StopEvent,
@@ -578,25 +607,42 @@ def _run_reservation(
                 slippi_port=config.slippi_port,
                 step_timeout_seconds=FRAME_STALL_SECONDS,
                 connect_timeout_seconds=60.0,
+                realtime=isinstance(policy, RemoteChunkPolicy),
             ) as session,
         ):
             rematch = False
             while not stop.is_set():
                 previous = frozenset(replay_dir.rglob("*.slp"))
                 started_at = datetime.now(UTC)
-                result = run_netplay_match(
-                    session,
-                    _setup(job, rematch=rematch),
-                    policy,
-                    runtime,
-                    player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
-                    policy_settings=settings.current,
-                    max_frames=config.max_frames,
-                    rematch=rematch,
-                    on_live=mark_live,
-                    observer=health,
-                    stream_id=config.stream_id,
-                )
+                if isinstance(policy, RemoteChunkPolicy):
+                    result = run_realtime_match(
+                        session,
+                        _setup(job, rematch=rematch),
+                        policy,
+                        runtime,
+                        player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
+                        policy_settings=settings.current,
+                        max_frames=config.max_frames,
+                        rematch=rematch,
+                        on_live=mark_live,
+                        observer=health,
+                        schedule_observer=health,
+                        stream_id=config.stream_id,
+                    )
+                else:
+                    result = run_netplay_match(
+                        session,
+                        _setup(job, rematch=rematch),
+                        policy,
+                        runtime,
+                        player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
+                        policy_settings=settings.current,
+                        max_frames=config.max_frames,
+                        rematch=rematch,
+                        on_live=mark_live,
+                        observer=health,
+                        stream_id=config.stream_id,
+                    )
                 ended_at = datetime.now(UTC)
                 replay_end = read_new_replay_end(replay_dir, previous)
                 if replay_end.method is EndMethod.NO_CONTEST:
@@ -613,7 +659,11 @@ def _run_reservation(
                 replay = replay_end.path
                 actual_stage = _stage_name(result.stage)
                 human_result = _human_result(result)
-                limit_ms = 33.3 if job.choices.online_delay == 2 else 16.7
+                if isinstance(policy, RemoteChunkPolicy):
+                    timing = next(s for s in policy.schedules if s.transport_frames == job.choices.online_delay)
+                    limit_ms = timing.budget_frames * 1000 / 60
+                else:
+                    limit_ms = 33.3 if job.choices.online_delay == 2 else 16.7
                 if result.inference_p95_ms >= limit_ms:
                     logger.warning(
                         "reservation {} missed the delay-{} policy deadline: p95={:.1f}ms limit={:.1f}ms",
@@ -692,11 +742,12 @@ def _run_reservation(
 
 def _slot_worker(
     config: SlotConfig,
-    descriptor: ServingArenaDescriptor,
     spec: PolicySpec,
     runtime: RuntimeConfig,
     connection: Connection,
     stop: _StopEvent,
+    schedules: tuple[TimingSchedule, ...],
+    context_frames: int,
 ) -> None:
     # The supervisor owns terminal signals. A SIGINT in Event.wait() can kill
     # a spawned worker while it holds the event lock and deadlock shutdown.
@@ -705,10 +756,10 @@ def _slot_worker(
     next_upload_attempt = 0.0
     with (
         connection,
-        ServingArena.attach(descriptor) as arena,
         _SlotHealthReporter(config.slot, config.status_path) as health,
     ):
-        policy = RemotePolicy(spec, runtime, arena, connection, config.slot)
+        policy = RemoteChunkPolicy(spec, context_frames, schedules, connection, stop)
+        health.configure_schedule(schedules[0])
         while not stop.is_set():
             health.idle()
             next_upload_attempt = _retry_pending_uploads(
@@ -727,7 +778,7 @@ def _slot_worker(
 def _handle_reservation(
     config: SlotConfig,
     store: QueueStore,
-    policy: RemotePolicy,
+    policy: RemotePolicy | RemoteChunkPolicy,
     runtime: RuntimeConfig,
     job: Job,
     stop: _StopEvent,
@@ -735,6 +786,11 @@ def _handle_reservation(
 ) -> None:
     try:
         _run_reservation(config, store, policy, runtime, job, stop, health)
+    except EngineLost as error:
+        health.recovering("inference_engine_lost")
+        logger.error("reservation {}: {}", job.id, error)
+        with suppress(InvalidTransitionError):
+            store.forfeit_service_failure(job.id, config.worker_id)
     except _RecoverableRuntimeError as error:
         logger.error(
             "reservation {} degraded on slot {}: {}; retrying with a fresh Dolphin",
@@ -767,6 +823,7 @@ def _start_slot_process(process: BaseProcess, child_connection: Connection) -> N
 
 def run(config: RunnerConfig) -> None:
     """Load and prepare one policy, then supervise fixed Dolphin slots."""
+    config.status_path.unlink(missing_ok=True)
     bot_connect_codes = _bot_connect_codes(config.user_jsons)
     started = time.perf_counter()
     policy = load_policy(
@@ -774,22 +831,50 @@ def run(config: RunnerConfig) -> None:
         device=config.device,
         seed=config.seed,
         compiled=config.compiled,
+        history_mode=config.history_mode,
     )
     runtime = RuntimeConfig(
         max_batch_size=len(config.user_jsons),
         transport_delays=(2,) if policy.spec.backend == "o59-history-decoder" else (2, 3),
-        replan_interval_frames=2 if policy.spec.backend == "o59-history-decoder" else None,
     )
     logger.info(
-        "loading netplay policy {} on {} mode={} slots={} delays={} display={}",
+        "loading netplay policy {} on {} mode={} history={} slots={} delays={} display={}",
         config.policy,
         config.device,
         "compiled" if config.compiled else "eager",
+        config.history_mode,
         len(config.user_jsons),
         runtime.transport_delays,
         os.environ.get("DISPLAY", "unset"),
     )
-    policy.prepare(runtime)
+    if not isinstance(policy, ChunkPolicy):
+        raise ValueError("netplay serving requires an asynchronous chunk backend")
+    calibration = calibrate(policy, runtime, config.batch_wait_seconds)
+    config.status_path.parent.mkdir(parents=True, exist_ok=True)
+    calibration_path = config.status_path.with_suffix(".calibration.json")
+    calibration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "calibration": asdict(calibration),
+                "git_sha": config.git_sha,
+                "model_sha256": _sha256(config.policy),
+                "python": sys.version,
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda,
+                "hardware": torch.cuda.get_device_name() if config.device.startswith("cuda") else platform.processor(),
+                "platform": platform.platform(),
+                "runtime": asdict(runtime),
+                "batch_wait_seconds": config.batch_wait_seconds,
+                "compiled": config.compiled,
+                "history_mode": config.history_mode,
+                "seed": policy.sampling_seed,
+                "libmelee": melee.version.__version__,
+            },
+            allow_nan=False,
+            indent=2,
+        )
+    )
     logger.info("netplay policy ready after {:.2f}s", time.perf_counter() - started)
     stop = mp.get_context("spawn").Event()
     thread_stop = threading.Event()
@@ -824,11 +909,9 @@ def run(config: RunnerConfig) -> None:
         model_inference_p95_ms=None,
         batch_wait_p95_ms=None,
     )
-    with ServingArena.create(
-        len(config.user_jsons),
-        max(runtime.transport_delays),
-        policy.spec.required_observation_fields,
-    ) as arena:
+    engine: threading.Thread | None = None
+    engine_error: list[BaseException] = []
+    try:
         for slot, (user_json, bot_connect_code, slippi_port) in enumerate(
             zip(config.user_jsons, bot_connect_codes, config.slippi_ports, strict=True)
         ):
@@ -852,22 +935,22 @@ def run(config: RunnerConfig) -> None:
                 target=_slot_worker,
                 args=(
                     slot_config,
-                    arena.descriptor,
                     policy.spec,
                     runtime,
                     child_connections[slot],
                     stop,
+                    calibration.schedules,
+                    policy.context_frames,
                 ),
                 name=f"hal-netplay-slot-{slot}",
             )
             _start_slot_process(process, child_connections[slot])
             processes.append(process)
 
-        engine_error: list[BaseException] = []
-        batcher = ContinuousBatcher(
+        status_lock = threading.Lock()
+        batcher = ChunkBatcher(
             policy,
-            runtime,
-            arena,
+            calibration.schedules[0].horizon,
             parent_connections,
             batch_wait_seconds=config.batch_wait_seconds,
         )
@@ -877,21 +960,26 @@ def run(config: RunnerConfig) -> None:
                 with torch.compiler.set_stance("fail_on_recompile"):
                     batcher.serve(thread_stop)
             except BaseException as error:
-                engine_error.append(error)
-                stop.set()
+                with status_lock:
+                    engine_error.append(error)
+                    config.status_path.unlink(missing_ok=True)
+                    stop.set()
 
         engine = threading.Thread(target=serve, name="hal-netplay-inference", daemon=True)
         engine.start()
         logger.info("netplay runner ready slots={} policy_sha256={}", len(processes), policy_sha256)
         previous_state: RunnerState | None = None
-        try:
-            while not shutdown_requested:
+        while not shutdown_requested:
+            if engine_error:
+                raise RuntimeError("netplay inference engine failed") from engine_error[0]
+            failed = [process for process in processes if not process.is_alive()]
+            if failed:
+                config.status_path.unlink(missing_ok=True)
+                raise RuntimeError(f"netplay slot process exited with code {failed[0].exitcode}")
+            model_p95_ms, batch_wait_p95_ms = batcher.timing_p95_ms()
+            with status_lock:
                 if engine_error:
                     raise RuntimeError("netplay inference engine failed") from engine_error[0]
-                failed = [process for process in processes if not process.is_alive()]
-                if failed:
-                    raise RuntimeError(f"netplay slot process exited with code {failed[0].exitcode}")
-                model_p95_ms, batch_wait_p95_ms = batcher.timing_p95_ms()
                 status = _write_status(
                     config.status_path,
                     policy_sha256=policy_sha256,
@@ -900,40 +988,41 @@ def run(config: RunnerConfig) -> None:
                     model_inference_p95_ms=model_p95_ms,
                     batch_wait_p95_ms=batch_wait_p95_ms,
                 )
-                if status.state is not previous_state:
-                    logger.info(
-                        "netplay service state={} healthy_slots={}/{} game_fps={} "
-                        "frame_p95_ms={} dolphin_p95_ms={} policy_p95_ms={} "
-                        "model_p95_ms={} batch_wait_p95_ms={} recoveries={}",
-                        status.state.value,
-                        status.healthy_slots,
-                        status.slots,
-                        status.game_fps,
-                        status.frame_interval_p95_ms,
-                        status.dolphin_step_p95_ms,
-                        status.policy_round_trip_p95_ms,
-                        status.model_inference_p95_ms,
-                        status.batch_wait_p95_ms,
-                        status.recoveries,
-                    )
-                    previous_state = status.state
-                time.sleep(0.5)
-        finally:
-            stop.set()
-            thread_stop.set()
-            for process in processes:
-                process.join(timeout=10.0)
-                if process.is_alive():
-                    process.terminate()
+            if status.state is not previous_state:
+                logger.info(
+                    "netplay service state={} healthy_slots={}/{} game_fps={} "
+                    "frame_p95_ms={} dolphin_p95_ms={} policy_p95_ms={} "
+                    "model_p95_ms={} batch_wait_p95_ms={} recoveries={}",
+                    status.state.value,
+                    status.healthy_slots,
+                    status.slots,
+                    status.game_fps,
+                    status.frame_interval_p95_ms,
+                    status.dolphin_step_p95_ms,
+                    status.policy_round_trip_p95_ms,
+                    status.model_inference_p95_ms,
+                    status.batch_wait_p95_ms,
+                    status.recoveries,
+                )
+                previous_state = status.state
+            time.sleep(0.5)
+    finally:
+        stop.set()
+        thread_stop.set()
+        for process in processes:
+            process.join(timeout=10.0)
+            if process.is_alive():
+                process.terminate()
+        if engine is not None:
             engine.join(timeout=2.0)
-            for connection in (*parent_connections.values(), *child_connections.values()):
-                connection.close()
-            config.status_path.unlink(missing_ok=True)
-            for status_path in slot_status_paths:
-                status_path.unlink(missing_ok=True)
-            logger.info("netplay runner stopped")
-        if engine_error:
-            raise RuntimeError("netplay inference engine failed") from engine_error[0]
+        for connection in (*parent_connections.values(), *child_connections.values()):
+            connection.close()
+        config.status_path.unlink(missing_ok=True)
+        for status_path in slot_status_paths:
+            status_path.unlink(missing_ok=True)
+        logger.info("netplay runner stopped")
+    if engine_error:
+        raise RuntimeError("netplay inference engine failed") from engine_error[0]
 
 
 def _paths(value: str) -> tuple[Path, ...]:
@@ -957,6 +1046,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--history-mode", choices=("window", "kv_cache"), default="window")
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
     if args.user_jsons is None:
@@ -981,6 +1071,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             device=args.device,
             seed=args.seed,
             compiled=args.compiled,
+            history_mode=args.history_mode,
             max_frames=args.max_frames,
         )
     )
