@@ -19,7 +19,6 @@ from datetime import datetime
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import Literal
 from typing import Protocol
 
 import melee
@@ -37,7 +36,9 @@ from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
 from hal.inference.chunks import ChunkPolicy
 from hal.inference.chunks import TimingSchedule
+from hal.inference.loader import HistoryMode
 from hal.inference.loader import load_policy
+from hal.inference.loader import resolve_history_mode
 from hal.netplay_service.calibration import calibrate
 from hal.netplay_service.chunks import ChunkBatcher
 from hal.netplay_service.chunks import EngineLost
@@ -123,7 +124,7 @@ class RunnerConfig:
     device: str = "cuda"
     seed: int | None = None
     compiled: bool = False
-    history_mode: Literal["window", "kv_cache"] = "window"
+    history_mode: HistoryMode = "auto"
     batch_wait_seconds: float = 0.0005
     max_frames: int = 54_000
 
@@ -833,6 +834,7 @@ def run(config: RunnerConfig) -> None:
         compiled=config.compiled,
         history_mode=config.history_mode,
     )
+    history_mode = resolve_history_mode(policy.spec.backend, config.history_mode)
     runtime = RuntimeConfig(
         max_batch_size=len(config.user_jsons),
         transport_delays=(2,) if policy.spec.backend == "o59-history-decoder" else (2, 3),
@@ -842,7 +844,7 @@ def run(config: RunnerConfig) -> None:
         config.policy,
         config.device,
         "compiled" if config.compiled else "eager",
-        config.history_mode,
+        history_mode,
         len(config.user_jsons),
         runtime.transport_delays,
         os.environ.get("DISPLAY", "unset"),
@@ -867,7 +869,7 @@ def run(config: RunnerConfig) -> None:
                 "runtime": asdict(runtime),
                 "batch_wait_seconds": config.batch_wait_seconds,
                 "compiled": config.compiled,
-                "history_mode": config.history_mode,
+                "history_mode": history_mode,
                 "seed": policy.sampling_seed,
                 "libmelee": melee.version.__version__,
             },
@@ -1046,7 +1048,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--history-mode", choices=("window", "kv_cache"), default="window")
+    parser.add_argument("--history-mode", choices=("auto", "window", "kv_cache"), default="auto")
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
     if args.user_jsons is None:

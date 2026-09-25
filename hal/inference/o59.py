@@ -741,7 +741,7 @@ def load_o59_policy(
     device: str,
     seed: int | None,
     compiled: bool,
-    history_mode: Literal["window", "kv_cache"] = "window",
+    history_mode: Literal["window", "kv_cache"] = "kv_cache",
     kv_update_frames: int = 2,
     kv_cuda_graphs: bool = True,
 ) -> O59Policy:

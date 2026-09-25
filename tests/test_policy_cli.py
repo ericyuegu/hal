@@ -113,8 +113,8 @@ def test_play_prepares_before_dolphin_connects(tmp_path: Path, monkeypatch: pyte
     assert events == ["prepare", "session", "enter", "connect"]
 
 
-def test_play_cli_exposes_kv_cache_history_without_changing_default() -> None:
-    assert cli._play_parser().parse_args(["policy.halpolicy", "HUMAN#1"]).history_mode == "window"
+def test_play_cli_defaults_to_backend_history_and_exposes_controls() -> None:
+    assert cli._play_parser().parse_args(["policy.halpolicy", "HUMAN#1"]).history_mode == "auto"
     args = cli._play_parser().parse_args(
         [
             "policy.halpolicy",
@@ -126,3 +126,19 @@ def test_play_cli_exposes_kv_cache_history_without_changing_default() -> None:
         ]
     )
     assert args.history_mode == "kv_cache" and args.kv_update_frames == 1
+
+
+def test_cpu_evaluation_keeps_cropped_window_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Loaded(Exception):
+        pass
+
+    monkeypatch.setattr(cli, "resolve_checkpoint", lambda _path: Path("policy.halpolicy"))
+
+    def load(_path: object, **options: object) -> None:
+        assert options["history_mode"] == "window"
+        raise Loaded
+
+    monkeypatch.setattr(cli, "load_policy", load)
+    args = cli._policy_parser().parse_args(["eval", "policy.halpolicy"])
+    with pytest.raises(Loaded):
+        cli._eval(args)

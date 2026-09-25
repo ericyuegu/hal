@@ -139,7 +139,7 @@ def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch:
         ]
     )
     assert captured[0].compiled is False
-    assert captured[0].history_mode == "window"
+    assert captured[0].history_mode == "auto"
 
 
 def test_runner_cli_selects_kv_cache_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

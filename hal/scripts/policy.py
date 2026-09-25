@@ -111,9 +111,9 @@ def _play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-frames", type=int, default=54_000)
     parser.add_argument(
         "--history-mode",
-        choices=("window", "kv_cache"),
-        default="window",
-        help="recompute the cropped window or retain KV states across frames",
+        choices=("auto", "window", "kv_cache"),
+        default="auto",
+        help="use the backend default, recompute a cropped window, or retain KV states",
     )
     parser.add_argument("--kv-update-frames", type=int, choices=(1, 2), default=2)
     return parser
@@ -143,7 +143,7 @@ def _eval(args: argparse.Namespace) -> None:
         replan_interval_frames=args.replan_interval,
     )
     bundle = resolve_checkpoint(args.policy)
-    policy = load_policy(bundle, device=args.device, seed=args.seed, compiled=args.compiled)
+    policy = load_policy(bundle, device=args.device, seed=args.seed, compiled=args.compiled, history_mode="window")
     policy.prepare(runtime)
     matches = [
         VecMatch(

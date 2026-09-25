@@ -103,7 +103,7 @@ process_groups+=("$!")
 
 xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --compiled \
-  --history-mode "${HAL_NETPLAY_HISTORY_MODE:-window}" \
+  --history-mode "${HAL_NETPLAY_HISTORY_MODE:-auto}" \
   --database "$state_dir/queue.sqlite3" \
   --user-jsons "$HAL_NETPLAY_USER_JSON_A" \
   --slippi-ports 51441 \

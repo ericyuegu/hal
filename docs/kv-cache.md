@@ -1,6 +1,6 @@
 # KV cache inference
 
-`load_policy(..., history_mode="kv_cache", compiled=True)` retains bounded attention KV history across frames. `hal-play` exposes the same choice through `--history-mode kv_cache`. Window recomputation remains the default.
+The history decoder now defaults to bounded KV cache inference when loaded through `load_policy`, `hal-play`, or the netplay runner. The older O50 backend keeps its cropped-window default. Use `--history-mode window` for the history decoder's control path. `--compiled` enables the measured CUDA graph path.
 
 The KV cache changes the model's history semantics. Each layer attends to the last 256 frames, but retained keys and values keep information from older frames. This is an inference experiment with the original weights, not exact cropped-window parity.
 
@@ -68,8 +68,10 @@ The KV cache game advanced 3,000 frames between progress reports at frames 2,400
 
 Match artifacts are under `runs/netplay/streaming-o59/{streaming-selfplay,window-selfplay}`.
 
-The netplay runner accepts `--history-mode kv_cache`. The local launcher forwards `HAL_NETPLAY_HISTORY_MODE=kv_cache`; its default remains `window`.
+The netplay runner accepts `--history-mode auto`, `window`, or `kv_cache`. The local launcher forwards `HAL_NETPLAY_HISTORY_MODE`; its default is `auto`, which selects the backend's default.
 
 ## Gameplay qualification
 
-`experiments/eval_kv_cache.py` runs the checkpoint's final 96-matchup, level-9 CPU protocol on a Modal L40S. Each matchup boot receives 7,200 emulator frames and can contain more than one game after instant restart. The program reads the checkpoint's exact p90 return target, compares net stocks per active minute with the final p90 result in W&B history step 1322, and saves replay rows, configuration, hashes, and metrics to R2. The library default changes only after that comparison meets the 0.2 NSM tolerance.
+`experiments/eval_kv_cache.py` ran the checkpoint's final 96-matchup, level-9 CPU protocol on a Modal L40S. Each matchup boot received 7,200 emulator frames and could contain more than one game after instant restart. The return target was the checkpoint's exact p90 value, 19.9760597229004. The original [W&B evaluation](https://wandb.ai/ericyuegu/hal/runs/vywk3cih?nw=nwuserericyuegu) at history step 1322 scored 1.204895 net stocks per active minute with cropped-window inference. KV cache scored 1.225828, a difference of +0.020933 NSM, within the 0.2 NSM tolerance. All 96 boots completed, with 151 games, 691,200 emulator frames, and no crashes. Full-job emulator throughput was 134.45 FPS; the broker's inference latency p95 was 6.06 ms.
+
+The KV run used one active session because this cache implementation has batch size 1. Wall throughput therefore is not a matched comparison with the original parallel evaluation. The matchup schedule, frame budget, transport delay, replan interval, player masking, and p90 target match the original protocol. Source commit `68a69eb054a9108524b7be731d880feda889f40b`, configuration, replay rows, metrics, and 157 artifact hashes are under `r2://hal/runs/kv-cache-eval-vywk3cih-68a69eb0/eval96-p90/`.
