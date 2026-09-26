@@ -2,18 +2,20 @@
 
 The history decoder now defaults to bounded KV cache inference when loaded through `load_policy`, `hal-play`, or the netplay runner. The older O50 backend keeps its cropped-window default. Use `--history-mode window` for the history decoder's control path. `--compiled` enables the measured CUDA graph path.
 
-The KV cache changes the model's history semantics. Each layer attends to the last 256 frames, but retained keys and values keep information from older frames. This is an inference experiment with the original weights, not exact cropped-window parity.
+The KV cache changes the model's history semantics. Each layer attends to the last 256 frames, but retained keys and values keep information from older frames. This retained-history behavior is explicitly accepted for production inference because of the measured speedup. It is not exact cropped-window parity. BF16 differences from changed matrix shapes and RoPE coordinates are also accepted. Cache correctness is checked against an uncached full-sequence reference with the same causal sliding attention window; cropped-window comparisons remain numerical diagnostics.
+
+The [DeepSeek-V4.1 report, section 3.2.2](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf) makes a related tradeoff: its bounded replay reconstructs approximate sliding-window states to reduce serving costs. HAL uses a different mechanism, retaining streaming states rather than reconstructing them. The shared decision is to accept measured numerical differences for performance; the report is not evidence of HAL correctness.
 
 ## Implementation
 
 - Each trunk layer owns a GPU KV ring. The decoder's projected history uses another ring. Attention reads physical slots directly, with absolute RoPE positions and a causal window mask.
-- Two new frames are processed together. The rings have 257 slots so the first query retains its full 256-frame window. One-frame updates are available with `--kv-update-frames 1`.
-- KV append uses an in-place custom operator. This keeps compilation from materializing a complete cache update. The two-frame feature staging buffer also avoids a full GPU feature history.
+- Updates process one, two, or four new frames together. Each ring has `256 + update_frames - 1` slots so every query retains its full causal window. The default remains two; `--kv-update-frames 4` processes a four-frame replan interval in one trunk call.
+- KV append uses an in-place custom operator. This keeps compilation from materializing a complete cache update. The bounded feature staging buffer also avoids a full GPU feature history.
 - CUDA graph replay copies only new inputs. Cache storage stays fixed across frames and game resets. Reset invalidates position metadata rather than clearing all keys and values.
 - CUDA linear weights are converted to BF16 once. Other parameters retain their original types. This removes repeated autocast conversions of the same linear weights.
-- The temporal action cache still starts fresh for each plan. Temperature and return settings remain live decoder inputs.
+- The temporal action cache starts fresh for each plan. Known fixed-prefix actions are processed in parallel before the sampled tail. This preserves the causal computation but can introduce BF16 rounding differences and change individual sampled actions. Temperature and return settings remain live decoder inputs.
 
-The blocking 4/2/2 path forces the first two predictions and sends offsets +3 and +4. The existing real-time chunk path retains its separately calibrated prefix and horizon.
+Both local and netplay runtimes use the same prediction API. The target live schedule uses input delay 2, thinking allowance 1, replan interval 4, and prediction horizon 8: offsets +1 through +3 are fixed, +4 through +7 are used, and +8 is a reserve action.
 
 ## RTX 3060 measurements
 
@@ -45,7 +47,7 @@ PYTHONPATH=. uv run python experiments/benchmark_kv_cache.py \
 
 Use `--history-mode window`, `--bf16-window-linears`, `--update-frames 1`, `--no-cuda-graphs`, or `--no-compiled` for the corresponding controls. The output directory must be new.
 
-`experiments/benchmark_kv_netplay.py` runs one peer of a blocking 4/2/2 comparison. Start two peers with distinct accounts and Slippi ports, each targeting the other's connect code. It records completed replays, timing, final stocks, resolved configuration, and source/artifact hashes. Policy seeds do not fix Slippi's game RNG; each replay records the actual game state.
+`experiments/benchmark_kv_netplay.py` runs one peer through the nonblocking netplay runtime with an explicit prediction shape. Start two peers with distinct accounts and Slippi ports, each targeting the other's connect code. It records completed replays, timing, final stocks, resolved configuration, and source/artifact hashes. Policy seeds do not fix Slippi's game RNG; each replay records the actual game state.
 
 ## Numerical checks
 
@@ -54,6 +56,8 @@ An eager BF16-autocast diagnostic uses identical recorded observations and teach
 For the KV cache versus the BF16 window control, mean conditional KL divergence is 0.000049 nats before eviction and 0.000232 nats after eviction. All 208 conditional argmax decisions match. Maximum finite logit differences are 1.0 and 1.5 respectively; these raw differences include low-probability categories. The latest hidden state's relative L2 difference reaches 3.7%.
 
 Before eviction, BF16 matrix shapes and RoPE coordinates already introduce rounding differences. After eviction, retained KV states also change the effective history. These diagnostics do not establish gameplay equivalence or identical stochastic actions. The inputs, per-group results, and diagnostic source are saved as `runs/netplay/streaming-o59/numerics.{json,py}`.
+
+A separate check of parallel fixed-prefix decoding used the same O59 checkpoint at 13 replay positions through frame 2,047, with neutral observed/fixed actions and unchanged streaming KV. Mean conditional KL against serial prefix decoding was 0.00000615 nats (maximum 0.0000961). All 260 argmax choices matched; 5 of 260 stochastic group choices differed with the same uniforms, including downstream autoregressive effects. Float32 tests verify prefix states, per-layer K/V, and RNG draw counts. This is an accepted BF16 execution-order difference, not a guarantee of identical sampled actions. The diagnostic is saved as `runs/runtime-final/{numerics_final.py,prefix-numerics.json}`.
 
 ## Matched netplay throughput
 

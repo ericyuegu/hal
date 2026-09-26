@@ -19,10 +19,11 @@ from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.harness import default_session_cfg
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.scheduling import FrameTiming
 from hal.fixtures import DOLPHIN_EXIAI
 from hal.fixtures import ISO
 from hal.inference.api import RuntimeConfig
-from hal.inference.backends.history_decoder.policy import O59Policy
+from hal.inference.backends.history_decoder.policy import HistoryDecoderPolicy
 from hal.inference.backends.history_decoder.policy import export_o59_policy
 from hal.inference.bundle import extract_policy_bundle
 from hal.inference.checkpoints import resolve_checkpoint
@@ -107,9 +108,10 @@ def main() -> None:
 
     runtime = RuntimeConfig(max_batch_size=1, transport_delays=(2,), replan_interval_frames=2)
     policy = load_policy(bundle, device="cuda", seed=EVAL_SEED, compiled=True, history_mode="kv_cache")
-    if not isinstance(policy, O59Policy):
+    if not isinstance(policy, HistoryDecoderPolicy):
         raise ValueError("checkpoint bundle did not load the expected history decoder")
-    policy.prepare(runtime)
+    timing = FrameTiming(2, 0, 2, 4)
+    policy.prepare_prediction(runtime, timing.prediction_horizon_frames, timing.fixed_prefix_frames)
     print(f"[eval] prepared KV cache; p90 return={p90:.6f}", flush=True)
 
     schedule = [(int(ego.value), int(cpu.value)) for ego, cpu in matchups_for_vs_cpu(MATCHUPS)]
@@ -123,8 +125,8 @@ def main() -> None:
     def factory() -> PolicyBatchAdapter:
         seed = EVAL_SEED + next(wave)
         print(f"[eval] starting matchup wave with sampling seed {seed}", flush=True)
-        policy.reset_chunks(seed=seed)
-        return PolicyBatchAdapter(policy, runtime, desired_return=p90)
+        policy.reset_prediction(seed=seed)
+        return PolicyBatchAdapter(policy, runtime, timing, desired_return=p90)
 
     started = time.perf_counter()
     with torch.compiler.set_stance("fail_on_recompile"):

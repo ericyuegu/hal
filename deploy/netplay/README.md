@@ -95,6 +95,12 @@ uv run --env-file deploy/netplay/.env \
 
 ## GPU qualification
 
+For a debug VM, set `HAL_NETPLAY_PREDICTION_HORIZON=12` and
+`HAL_NETPLAY_PREDICTION_PREFIX=6` to qualify that one trained shape instead of
+searching all candidates. At transport delay 2, this gives three compute frames
+(50 ms) and a four-frame replan interval. Startup still measures the complete
+request path and rejects excess latency. Omit both values for automatic selection.
+
 Before production, qualify the policy and GPU. Delay 2 policy p95 must be below
 33.3 ms, delay 3 must be below 16.7 ms, and no compilation can occur after
 connect:
@@ -105,3 +111,13 @@ TMPDIR="$PWD/runs/netplay/tmp" \
 HAL_NETPLAY_POLICY=/absolute/path/to/policy.halpolicy \
 uv run pytest -q tests/test_netplay_hardware.py -m integration
 ```
+
+The runtime layout and timing contract are documented in
+[Inference runtime](../../docs/inference-runtime.md). Startup checks write
+`.budget.json` schema 3. Slot health uses schema 3 and runner health uses schema 4;
+restart the API and runner together when upgrading from the earlier schemas.
+
+For input delay 2, one thinking frame, and four-frame replanning, set
+`HAL_NETPLAY_PREDICTION_HORIZON=8`, `HAL_NETPLAY_PREDICTION_PREFIX=3`, and
+`HAL_NETPLAY_REPLAN_INTERVAL=4`. Startup must still pass latency qualification.
+Set `HAL_NETPLAY_KV_UPDATE_FRAMES=4` to use the measured four-frame KV update.

@@ -1,46 +1,11 @@
 # Real-time netplay
 
-The live runner and `hal-play` use nonblocking Dolphin at speed 1.0. Offline
-and historical synchronous evaluation retain their original execution settings.
-The training configuration and checkpoint formats are unchanged.
+The current module layout, frame contract, and measurement limits are documented
+in [Inference runtime](inference-runtime.md). Local evaluation and nonblocking
+netplay share prediction and scheduling contracts. Checkpoint formats are unchanged.
 
-The timing contract is `B = C + 1`, `D = B + T`, `R = B`, and `H >= D + R`.
-An action at offset +1 produces the next state. With `C=1, T=2, H=8`, offsets
-+1 through +4 are forced, new actions start at +5, and two actions remain in
-reserve. The worker uses absolute game frames, retains actual observations,
-and submits only for the latest observation after draining buffered frames.
-
-One request may be outstanding per stream. Early results wait for their
-handoff. Late results skip expired submission deadlines and retain a reachable
-suffix, with conditioning mismatches recorded. An exhausted plan uses neutral;
-slow inference does not terminate a game. Confirmed inference loss drains the
-available plan, flushes neutral, and records a service failure and bot forfeiture.
-The runner removes its availability record and exits; its supervisor must restart
-it, which runs calibration again before workers can claim reservations.
-
-Calibration measures each feasible contiguous horizon/prefix shape through the
-same request transport and batching path used in play. Each configured transport
-delay receives 20 warmup and 200 measured calls at the configured slot count.
-Compilation is excluded and forbidden during measured calls and live serving.
-The selected shape is qualified again. The adjacent `.calibration.json` records
-samples, schedule, resolved sampling seed, model bundle hash, Git SHA, runtime
-configuration, hardware, and software versions. History and policy random streams
-are reset before serving. No feasible schedule means no available server.
-
-Slot health schema 2 and runner health schema 3 include the schedule, missed
-deadlines, conditioning mismatches, exhausted chunks, neutral fallback frames,
-and transport corrections. Existing frontend service status displays sustained
-degradation; it does not terminate a match. Deadline counts include skipped
-new-plan offsets and frame opportunities lost while draining observations.
-
-The pinned libmelee source archive and its patch are in `vendor/`. It adds
-`Console.step(flush_controllers=False)`, including suppression of game-start
-and rollback writes. Defaults remain backward compatible. The same patch was
-applied to the separate libmelee checkout without changing its unrelated edits.
-
-Figures 1 and 14 and the article are maintained in the separate `ericyuegu2`
-checkout. Both figures use `src/figures/timing-math.mjs`; Figure 14 no longer
-extracts its active markup or renderer from the archived bundle.
+The following sections retain the historical qualification record. Their module
+names, schema versions, and validation counts describe that earlier revision.
 
 ## Qualification status
 

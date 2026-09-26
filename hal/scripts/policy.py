@@ -13,14 +13,16 @@ from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import run_matches_vec
 from hal.eval.matchups import matchups_for_vs_cpu
-from hal.eval.play import require_completed_replay
+from hal.eval.netplay import run_netplay_match
 from hal.eval.policy import PolicyBatchAdapter
-from hal.eval.realtime import run_realtime_match
+from hal.eval.qualification import check_realtime_budget
+from hal.eval.replays import require_completed_replay
+from hal.eval.scheduling import FrameTiming
+from hal.inference.api import PredictionPolicy
 from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
-from hal.inference.chunks import ChunkPolicy
 from hal.inference.loader import load_policy
-from hal.netplay_service.calibration import local_chunk_service
+from hal.inference.worker import start_inference_worker
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
@@ -75,7 +77,15 @@ def _policy_parser() -> argparse.ArgumentParser:
         help="exact connect code or PLATINUM, DIAMOND, or MASTER",
     )
     evaluate.add_argument("--transport-delay", type=int, choices=(0, 2, 3), default=2)
+    evaluate.add_argument("--prediction-horizon", type=int)
+    evaluate.add_argument("--thinking-allowance", type=int, default=0)
     evaluate.add_argument("--replan-interval", type=int)
+    evaluate.add_argument(
+        "--history-mode",
+        choices=("auto", "window", "kv_cache"),
+        default="auto",
+    )
+    evaluate.add_argument("--kv-update-frames", type=int, choices=(1, 2, 4), default=2)
     evaluate.add_argument("--n-matches", type=int, default=1)
     evaluate.add_argument("--max-parallel", type=int)
     evaluate.add_argument("--max-frames", type=int, default=28_800)
@@ -115,7 +125,10 @@ def _play_parser() -> argparse.ArgumentParser:
         default="auto",
         help="use the backend default, recompute a cropped window, or retain KV states",
     )
-    parser.add_argument("--kv-update-frames", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--kv-update-frames", type=int, choices=(1, 2, 4), default=2)
+    parser.add_argument("--prediction-horizon", type=int)
+    parser.add_argument("--thinking-allowance", type=int)
+    parser.add_argument("--replan-interval", type=int)
     return parser
 
 
@@ -137,14 +150,30 @@ def _eval(args: argparse.Namespace) -> None:
     if args.n_matches < 1:
         raise ValueError("n-matches must be positive")
     parallel = resolve_parallelism(args.n_matches, args.max_parallel)
+    bundle = resolve_checkpoint(args.policy)
+    policy = load_policy(
+        bundle,
+        device=args.device,
+        seed=args.seed,
+        compiled=args.compiled,
+        history_mode=args.history_mode,
+        kv_update_frames=args.kv_update_frames,
+    )
+    if not isinstance(policy, PredictionPolicy):
+        raise ValueError("local evaluation requires a prediction policy")
+    horizon = policy.prediction_horizon if args.prediction_horizon is None else args.prediction_horizon
+    replan = (
+        args.replan_interval
+        if args.replan_interval is not None
+        else (1 if args.transport_delay == 0 else horizon - args.transport_delay)
+    )
+    timing = FrameTiming(args.transport_delay, args.thinking_allowance, replan, horizon)
     runtime = RuntimeConfig(
         max_batch_size=parallel,
         transport_delays=(args.transport_delay,),
-        replan_interval_frames=args.replan_interval,
+        replan_interval_frames=replan,
     )
-    bundle = resolve_checkpoint(args.policy)
-    policy = load_policy(bundle, device=args.device, seed=args.seed, compiled=args.compiled, history_mode="window")
-    policy.prepare(runtime)
+    policy.prepare_prediction(runtime, horizon, timing.fixed_prefix_frames)
     matches = [
         VecMatch(
             Matchup(
@@ -158,7 +187,7 @@ def _eval(args: argparse.Namespace) -> None:
         )
         for ego, cpu in matchups_for_vs_cpu(args.n_matches)
     ]
-    adapter = PolicyBatchAdapter(policy, runtime, player_identity=args.imitate)
+    adapter = PolicyBatchAdapter(policy, runtime, timing, player_identity=args.imitate)
     boots = run_matches_vec(
         default_session_cfg(args.replay_dir),
         matches,
@@ -173,7 +202,13 @@ def _eval(args: argparse.Namespace) -> None:
 
 
 def _play(args: argparse.Namespace) -> None:
-    runtime = RuntimeConfig(max_batch_size=1, transport_delays=(args.online_delay,))
+    if (args.prediction_horizon is None) != (args.thinking_allowance is None):
+        raise ValueError("prediction horizon and thinking allowance must be set together")
+    runtime = RuntimeConfig(
+        max_batch_size=1,
+        transport_delays=(args.online_delay,),
+        replan_interval_frames=args.replan_interval,
+    )
     bundle = resolve_checkpoint(args.policy)
     policy = load_policy(
         bundle,
@@ -183,13 +218,19 @@ def _play(args: argparse.Namespace) -> None:
         history_mode=args.history_mode,
         kv_update_frames=args.kv_update_frames,
     )
-    if not isinstance(policy, ChunkPolicy):
-        raise ValueError("live netplay requires a chunk policy")
+    if not isinstance(policy, PredictionPolicy):
+        raise ValueError("live netplay requires a prediction policy")
     user_json = _user_json(args.user_json)
     replay_dir = args.replay_dir.resolve()
     replay_dir.mkdir(parents=True, exist_ok=True)
     previous_replays = frozenset(replay_dir.rglob("*.slp"))
-    with local_chunk_service(policy, runtime) as client:
+    if args.prediction_horizon is None:
+        budget_check = check_realtime_budget(policy, runtime, 0.0005)
+    else:
+        shape = (args.prediction_horizon, args.online_delay + args.thinking_allowance)
+        budget_check = check_realtime_budget(policy, runtime, 0.0005, shape=shape)
+    timing = next(t for t in budget_check.timings if t.input_delay_frames == args.online_delay)
+    with start_inference_worker(policy, timing.prediction_horizon_frames, 0.0005) as client:
         session = NetplaySession(
             args.iso_path,
             dolphin_path=args.dolphin_path,
@@ -201,11 +242,12 @@ def _play(args: argparse.Namespace) -> None:
         )
         setup = NetplaySetup(character=args.character, opponent_code=args.opponent_code)
         with session, torch.compiler.set_stance("fail_on_recompile"):
-            result = run_realtime_match(
+            result = run_netplay_match(
                 session,
                 setup,
                 client,
                 runtime,
+                timing,
                 player_identity=args.imitate,
                 max_frames=args.max_frames,
             )

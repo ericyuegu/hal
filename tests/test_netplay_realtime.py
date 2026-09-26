@@ -12,22 +12,25 @@ import pytest
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION as NEUTRAL
 from hal.controller import ControllerAction
+from hal.eval.qualification import latency_frames
+from hal.eval.qualification import select_frame_timing
+from hal.eval.scheduling import ActionScheduler
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicyInput
 from hal.inference.api import PolicySpec
-from hal.inference.chunks import ChunkRequest
-from hal.inference.chunks import TimingSchedule
-from hal.inference.chunks import chunk_response
-from hal.inference.chunks import contiguous_horizons
-from hal.inference.chunks import latency_frames
-from hal.netplay_service.calibration import Measurement
-from hal.netplay_service.calibration import select_schedule
-from hal.netplay_service.chunks import EngineLost
-from hal.netplay_service.chunks import RemoteChunkPolicy
+from hal.inference.api import PredictionRequest
+from hal.inference.api import action_plan
+from hal.inference.api import contiguous_horizons
+from hal.inference.benchmark import LatencyMeasurement
+from hal.inference.worker import InferenceClient
+from hal.inference.worker import InferenceUnavailable
+from hal.inference.worker import InferenceWorker
+from hal.inference.worker import WorkerFailure
+from hal.inference.worker import start_inference_worker
 from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import RuntimeHealth
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
-from hal.netplay_service.schedule import FrameSchedule
 from hal.sim.netplay import NetplaySession
 
 
@@ -39,109 +42,179 @@ def observation(frame: int, applied: ControllerAction = NEUTRAL) -> PolicyInput:
     return PolicyInput(0, frame, 1, {}, applied, (NEUTRAL,) * 2)
 
 
-def scheduler() -> FrameSchedule:
-    result = FrameSchedule(TimingSchedule(1, 2, 8), 8, 1)
+def scheduler() -> ActionScheduler:
+    result = ActionScheduler(FrameTiming(2, 2, 2, 8), 8, 1)
     result.observe(observation(0))
     return result
 
 
 def test_single_buffer_and_offset_one_contract() -> None:
-    timing = TimingSchedule(1, 2, 8)
-    assert (timing.budget_frames, timing.prefix_frames, timing.replan_frames, timing.reserve_frames) == (2, 4, 2, 2)
+    timing = FrameTiming(2, 2, 2, 8)
+    assert (
+        timing.thinking_allowance_frames,
+        timing.fixed_prefix_frames,
+        timing.replan_interval_frames,
+        timing.reserve_frames,
+    ) == (2, 4, 2, 2)
     schedule = scheduler()
     schedule.submitted[1] = action(0.1)
     schedule.submitted[2] = action(0.2)
     schedule.planned.update({3: action(0.3), 4: action(0.4)})
-    request = schedule.begin_request()
+    request = schedule.request_plan()
     assert request is not None
-    assert request.forced_prefix == tuple(action(i / 10) for i in range(1, 5))
-    assert schedule.begin_request() is None
-    response = chunk_response(request, (action(0.5), action(0.6), action(0.7), action(0.8)))
-    assert response.actions[4].target_frame == 5
-    assert schedule.receive(response)
-    schedule.handoff(1)
+    assert request.fixed_actions == tuple(action(i / 10) for i in range(1, 5))
+    assert schedule.request_plan() is None
+    response = action_plan(request, (action(0.5), action(0.6), action(0.7), action(0.8)))
+    assert response.actions[0].target_frame == 5
+    assert schedule.accept_plan(response)
+    schedule.apply_ready_plan(1)
     assert schedule.request is request
-    assert schedule.submit(1) == action(0.4)
-    schedule.handoff(2)
+    assert schedule.action_to_submit(1) == action(0.4)
+    schedule.apply_ready_plan(2)
     assert schedule.request is None
-    assert schedule.submit(2) == action(0.5)
+    assert schedule.action_to_submit(2) == action(0.5)
+
+
+def test_synchronous_plan_can_start_at_first_available_input_frame() -> None:
+    timing = FrameTiming(2, 0, 2, 4)
+    schedule = ActionScheduler(timing, 8, 1)
+    schedule.observe(observation(0))
+    request = schedule.request_plan()
+    assert request is not None
+    assert len(request.fixed_actions) == 2
+    assert schedule.accept_plan(action_plan(request, (action(0.5), action(0.6))))
+    schedule.apply_ready_plan(0)
+    assert schedule.action_to_submit(0) == action(0.5)
+
+
+@pytest.mark.parametrize("arrival_frame", (5, 6))
+def test_consecutive_plans_send_only_new_observations_and_keep_reserve(arrival_frame: int) -> None:
+    timing = FrameTiming(2, 1, 4, 8)
+    schedule = ActionScheduler(timing, 16, 1)
+    schedule.observe(observation(0))
+    first = schedule.request_plan()
+    assert first is not None
+    assert [item.frame_id for item in first.observations] == [0]
+    assert [item.target_frame for item in action_plan(first, (NEUTRAL,) * 5).actions] == [4, 5, 6, 7, 8]
+    schedule.action_to_submit(0)
+    schedule.observe(observation(1))
+    assert schedule.accept_plan(action_plan(first, tuple(action(value / 10) for value in range(4, 9))))
+    schedule.apply_ready_plan(1)
+    for frame in range(1, 5):
+        if frame > 1:
+            schedule.observe(observation(frame))
+        schedule.action_to_submit(frame)
+    second = schedule.request_plan()
+    assert second is not None
+    assert [item.frame_id for item in second.observations] == [1, 2, 3, 4]
+    assert second.fixed_actions == (action(0.5), action(0.6), action(0.7))
+    second_plan = action_plan(second, tuple(action(value / 10) for value in range(1, 6)))
+    assert [item.target_frame for item in second_plan.actions] == [8, 9, 10, 11, 12]
+    for frame in range(5, arrival_frame + 1):
+        schedule.observe(observation(frame))
+        if frame < arrival_frame:
+            schedule.action_to_submit(frame)
+    assert schedule.accept_plan(second_plan)
+    schedule.apply_ready_plan(arrival_frame)
+    expected = action(0.1) if arrival_frame == 5 else action(0.2)
+    assert schedule.action_to_submit(arrival_frame) == expected
+    assert schedule.submitted[8] == (action(0.1) if arrival_frame == 5 else action(0.8))
+    assert schedule.deadline_misses == arrival_frame - 5
+    for frame in range(arrival_frame + 1, 9):
+        schedule.observe(observation(frame))
+    third = schedule.request_plan()
+    assert third is not None
+    assert [item.frame_id for item in third.observations] == [5, 6, 7, 8]
+
+
+def test_fixed_action_mismatch_uses_actual_observation() -> None:
+    schedule = scheduler()
+    request = schedule.request_plan()
+    assert request is not None
+    schedule.observe(observation(1, action(0.5)))
+    schedule.observe(observation(2))
+    assert schedule.accept_plan(action_plan(request, (NEUTRAL,) * 4))
+    schedule.apply_ready_plan(2)
+    assert schedule.prefix_mismatches == 1
 
 
 def test_late_suffix_retains_previous_reserve_and_records_conditioning_mismatch() -> None:
     schedule = scheduler()
     schedule.planned = {frame: action(-0.5) for frame in range(1, 10)}
-    request = schedule.begin_request()
+    request = schedule.request_plan()
     assert request is not None
     for frame in range(5):
         if frame:
             schedule.observe(observation(frame, action(-0.5)))
-        assert schedule.submit(frame) == action(-0.5)
-    response = chunk_response(request, (action(0.5), action(0.6), action(0.7), action(0.8)))
-    schedule.receive(response)
+        assert schedule.action_to_submit(frame) == action(-0.5)
+    response = action_plan(request, (action(0.5), action(0.6), action(0.7), action(0.8)))
+    schedule.accept_plan(response)
     schedule.observe(observation(5, action(-0.5)))
-    schedule.handoff(5)
+    schedule.apply_ready_plan(5)
     assert schedule.deadline_misses == 3
     assert schedule.prefix_mismatches == 3
-    assert schedule.submit(5) == action(0.8)
-    assert schedule.submit(6) == action(-0.5)  # unused old tail survives the handoff
-    next_request = schedule.begin_request()
+    assert schedule.action_to_submit(5) == action(0.8)
+    assert schedule.action_to_submit(6) == action(-0.5)  # unused old tail survives the handoff
+    next_request = schedule.request_plan()
     assert next_request is not None and next_request.source_frame == 5
-    assert next_request.context[-1].applied_action == action(-0.5)
+    assert next_request.observations[-1].applied_action == action(-0.5)
 
 
-def test_exhaustion_keeps_playing_neutral_and_requests_latest_context() -> None:
+def test_exhaustion_does_not_retry_with_a_truncated_history() -> None:
     schedule = scheduler()
-    request = schedule.begin_request()
+    request = schedule.request_plan()
     assert request is not None
     for frame in range(15):
         if frame:
             schedule.observe(observation(frame))
-        schedule.submit(frame)
-    schedule.receive(chunk_response(request, (action(0.5),) * 4))
-    schedule.handoff(14)
+        schedule.action_to_submit(frame)
+    schedule.accept_plan(action_plan(request, (action(0.5),) * 4))
+    schedule.apply_ready_plan(14)
     assert schedule.exhausted_chunks == 1
     assert schedule.neutral_fallback_frames > 0
-    latest = schedule.begin_request()
-    assert latest is not None and latest.source_frame == 14
-    assert [item.frame_id for item in latest.context] == list(range(7, 15))
-    assert schedule.submit(15) == NEUTRAL
+    with pytest.raises(RuntimeError, match="unreported observations"):
+        schedule.request_plan()
+    assert schedule.action_to_submit(15) == NEUTRAL
 
 
 def test_countdown_rollback_and_rematch_identity() -> None:
-    schedule = FrameSchedule(TimingSchedule(1, 2, 8), 8, 1)
+    schedule = ActionScheduler(FrameTiming(2, 2, 2, 8), 8, 1)
     for frame in range(-5, 1):
         assert schedule.observe(observation(frame))
     assert not schedule.observe(observation(-1))
-    request = schedule.begin_request()
+    request = schedule.request_plan()
     assert request is not None
-    response = chunk_response(request, (NEUTRAL,) * 4)
-    assert not schedule.receive(replace(response, generation=0))
-    rematch = FrameSchedule(schedule.timing, 8, 2)
+    response = action_plan(request, (NEUTRAL,) * 4)
+    assert not schedule.accept_plan(replace(response, generation=0))
+    rematch = ActionScheduler(schedule.timing, 8, 2)
     rematch.observe(observation(0))
-    rematch.begin_request()
-    assert not rematch.receive(response)
-    assert rematch.submit(0) == NEUTRAL
+    rematch.request_plan()
+    assert not rematch.accept_plan(response)
+    assert rematch.action_to_submit(0) == NEUTRAL
 
 
-def test_observation_gap_counts_missed_submissions_and_rebuilds_context() -> None:
+def test_observation_gap_rejects_without_changing_pending_plan() -> None:
     schedule = scheduler()
-    schedule.submit(0)
-    schedule.observe(observation(3, action(0.5)))
-    schedule.submit(3)
+    request = schedule.request_plan()
+    assert request is not None
+    submitted = schedule.action_to_submit(0)
+    with pytest.raises(ValueError, match="consecutive"):
+        schedule.observe(observation(3, action(0.5)))
     assert len(schedule.history) == 1
-    assert schedule.transport_corrections == 1
-    assert schedule.deadline_misses == 2
+    assert schedule.request is request
+    assert schedule.submitted[3] == submitted
+    assert schedule.transport_corrections == 0
 
 
 def test_engine_loss_drains_plan_before_neutral() -> None:
     schedule = scheduler()
     schedule.planned = {4: action(0.4), 5: action(0.5)}
-    schedule.fail_engine()
-    assert schedule.begin_request() is None
+    schedule.fail_inference()
+    assert schedule.request_plan() is None
     assert not schedule.drained(3)
-    assert schedule.submit(1) == action(0.4)
-    assert schedule.submit(2) == action(0.5)
-    assert schedule.submit(3) == NEUTRAL
+    assert schedule.action_to_submit(1) == action(0.4)
+    assert schedule.action_to_submit(2) == action(0.5)
+    assert schedule.action_to_submit(3) == NEUTRAL
     assert schedule.drained(5)
 
 
@@ -150,16 +223,16 @@ def test_calibration_rounding_shape_and_longest_feasible_horizon() -> None:
     assert latency_frames(1 / 60 + 1e-9) == 2
     assert contiguous_horizons((1, 2, 3, 4, 8, 12)) == (1, 2, 3, 4)
     samples = (
-        Measurement(6, 4, (0.010,) * 200),
-        Measurement(8, 4, (0.012,) * 200),
-        Measurement(12, 5, (0.020,) * 200),
-        Measurement(12, 3, (0.010,) * 200),  # measured shape cannot cover latency
+        LatencyMeasurement(6, 4, (0.010,) * 200),
+        LatencyMeasurement(8, 4, (0.020,) * 200),
+        LatencyMeasurement(12, 5, (0.020,) * 200),
+        LatencyMeasurement(12, 3, (0.020,) * 200),  # measured shape cannot cover latency
     )
-    assert select_schedule(samples, 2) == TimingSchedule(1, 2, 8)
+    assert select_frame_timing(samples, 2) == FrameTiming(2, 2, 2, 8)
     with pytest.raises(RuntimeError, match="unavailable"):
-        select_schedule((Measurement(4, 3, (0.030,) * 200),), 2)
+        select_frame_timing((LatencyMeasurement(4, 3, (0.030,) * 200),), 2)
     with pytest.raises(ValueError, match="horizon"):
-        TimingSchedule(1, 3, 6)
+        FrameTiming(3, 2, 2, 6)
 
 
 def test_libmelee_read_only_step_does_not_flush_but_default_does() -> None:
@@ -198,14 +271,14 @@ def test_observation_drain_has_no_implicit_writes(tmp_path, monkeypatch) -> None
 def test_delivery_does_not_block_worker_and_engine_loss_is_explicit() -> None:
     parent, child = Pipe()
     lost = threading.Event()
-    client = RemoteChunkPolicy(PolicySpec("test", "test", (), (2,)), 8, (TimingSchedule(1, 2, 8),), child, lost)
-    request = ChunkRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4)
+    client = InferenceClient(PolicySpec("test", "test", (), (2,)), 8, child, lost)
+    request = PredictionRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4)
     gate = threading.Event()
 
     def engine() -> None:
         received = parent.recv()
         gate.wait(2)
-        parent.send(chunk_response(received, (action(0.5),) * 4))
+        parent.send(action_plan(received, (action(0.5),) * 4))
 
     thread = threading.Thread(target=engine)
     thread.start()
@@ -224,7 +297,7 @@ def test_delivery_does_not_block_worker_and_engine_loss_is_explicit() -> None:
             time.sleep(0.001)
         assert response is not None and response.source_frame == 0
         lost.set()
-        with pytest.raises(EngineLost):
+        with pytest.raises(InferenceUnavailable):
             client.poll()
     finally:
         gate.set()
@@ -233,9 +306,73 @@ def test_delivery_does_not_block_worker_and_engine_loss_is_explicit() -> None:
         child.close()
 
 
+def test_worker_rejects_invalid_plan_and_notifies_client() -> None:
+    parent, child = Pipe()
+    policy = Mock()
+    request = PredictionRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4)
+    policy.predict.return_value = (action_plan(request, (NEUTRAL,)),)
+    worker = InferenceWorker(policy, 8, {0: parent}, batch_wait_seconds=0)
+    try:
+        child.send(request)
+        with pytest.raises(ValueError, match="prediction horizon"):
+            worker.serve_batch((parent,), 0)
+        assert isinstance(child.recv(), WorkerFailure)
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_worker_validates_entire_batch_before_sending_any_plan() -> None:
+    first_parent, first_child = Pipe()
+    second_parent, second_child = Pipe()
+    first = PredictionRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4)
+    second = PredictionRequest(1, 1, 0, 0, (replace(observation(0), stream_id=1),), (NEUTRAL,) * 4)
+    policy = Mock()
+    policy.predict.return_value = (action_plan(first, (NEUTRAL,) * 4), action_plan(second, (NEUTRAL,)))
+    worker = InferenceWorker(policy, 8, {0: first_parent, 1: second_parent}, batch_wait_seconds=0)
+    try:
+        first_child.send(first)
+        second_child.send(second)
+        with pytest.raises(ValueError, match="prediction horizon"):
+            worker.serve_batch((first_parent, second_parent), 0)
+        assert isinstance(first_child.recv(), WorkerFailure)
+        assert isinstance(second_child.recv(), WorkerFailure)
+    finally:
+        first_parent.close()
+        first_child.close()
+        second_parent.close()
+        second_child.close()
+
+
+def test_delivery_thread_start_failure_clears_outstanding_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    parent, child = Pipe()
+    client = InferenceClient(PolicySpec("test", "test", (), (2,)), 8, child, threading.Event())
+
+    def fail_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("thread capacity exhausted")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    try:
+        with pytest.raises(InferenceUnavailable, match="could not start"):
+            client.submit(PredictionRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4))
+        assert not client.busy
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_inference_worker_scope_closes_client_on_caller_error() -> None:
+    policy = Mock()
+    policy.spec = PolicySpec("test", "test", (), (2,))
+    policy.context_frames = 8
+    with pytest.raises(RuntimeError, match="caller failed"), start_inference_worker(policy, 8, 0) as client:
+        raise RuntimeError("caller failed")
+    assert client.connection.closed
+
+
 def test_calibrated_health_requires_five_affected_and_five_clean_seconds() -> None:
     monitor = RuntimeHealth()
-    timing = TimingSchedule(1, 2, 8)
+    timing = FrameTiming(2, 2, 2, 8)
     monitor.chunk_health = ChunkHealth(timing)
     monitor.begin(2, 0)
     for frame in range(1, 361):
@@ -258,9 +395,9 @@ def test_calibrated_health_requires_five_affected_and_five_clean_seconds() -> No
     assert SlotStatus.from_payload(record.to_payload()) == record
 
 
-def test_full_request_calibration_counts_warmups_and_measurements_for_each_delay() -> None:
+def test_incremental_benchmark_counts_warmups_and_measurements_for_each_delay() -> None:
     from hal.inference.api import RuntimeConfig
-    from hal.netplay_service.calibration import measure_shape
+    from hal.inference.benchmark import measure_prediction_shape
 
     class Policy:
         spec = PolicySpec("test", "test", (), (2, 3))
@@ -269,40 +406,76 @@ def test_full_request_calibration_counts_warmups_and_measurements_for_each_delay
         calls = 0
         resets = 0
         prefixes = set()
+        sources = []
+        observation_counts = []
+        reset_flags = []
 
-        def prepare_chunks(self, runtime, horizon, prefix):
+        def prepare_prediction(self, runtime, horizon, prefix):
             assert (runtime.max_batch_size, horizon, prefix) == (2, 8, 5)
 
-        def reset_chunks(self):
+        def reset_prediction(self):
             self.resets += 1
 
-        def warmup_context(self, stream, source, delay):
-            return tuple(
-                PolicyInput(stream, frame, 1, {}, NEUTRAL, (NEUTRAL,) * delay)
-                for frame in range(source - 3, source + 1)
-            )
-
-        def plan_chunks(self, requests):
+        def predict(self, requests):
             self.calls += len(requests)
-            self.prefixes.update(len(request.forced_prefix) for request in requests)
-            return tuple(
-                chunk_response(request, (NEUTRAL,) * (8 - len(request.forced_prefix))) for request in requests
-            )
+            self.prefixes.update(len(request.fixed_actions) for request in requests)
+            self.sources.append(requests[0].source_frame)
+            self.observation_counts.append(len(requests[0].observations))
+            self.reset_flags.append(requests[0].observations[0].reset)
+            return tuple(action_plan(request, (NEUTRAL,) * (8 - len(request.fixed_actions))) for request in requests)
 
     policy = Policy()
-    result = measure_shape(policy, RuntimeConfig(2, (2, 3)), 8, 5, 0.001)
+    result = measure_prediction_shape(policy, RuntimeConfig(2, (2, 3), replan_interval_frames=1), 8, 5, 0.001)
     assert policy.calls == 2 * 2 * (20 + 200)
     assert len(result.seconds) == 400
     assert policy.prefixes == {4, 5}
+    assert policy.sources[:3] == [4, 5, 6]
+    assert policy.observation_counts[:3] == [4, 1, 1]
+    assert policy.reset_flags[:3] == [True, False, False]
     assert policy.resets == 3
 
 
+def test_benchmark_does_not_reset_policy_while_worker_is_still_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal.inference.benchmark as benchmark
+    from hal.inference.api import PredictionPolicy
+    from hal.inference.api import RuntimeConfig
+
+    policy = Mock(spec=PredictionPolicy)
+    policy.spec = PolicySpec("test", "test", (), (2,))
+    policy.context_frames = 8
+    ready = threading.Event()
+    release = threading.Event()
+    threads: list[threading.Thread] = []
+
+    def blocked_serve(_worker: InferenceWorker, _stop: threading.Event) -> None:
+        threads.append(threading.current_thread())
+        ready.set()
+        release.wait(10)
+
+    def failed_submit(_client: InferenceClient, _request: PredictionRequest) -> None:
+        assert ready.wait(1)
+        policy.reset_prediction.reset_mock()
+        raise RuntimeError("request failed")
+
+    monkeypatch.setattr(benchmark.InferenceWorker, "serve", blocked_serve)
+    monkeypatch.setattr(benchmark.InferenceClient, "submit", failed_submit)
+    try:
+        with pytest.raises(RuntimeError, match="worker did not stop; policy cannot be reused"):
+            benchmark.measure_prediction_shape(policy, RuntimeConfig(1, (2,)), 8, 3, 0)
+        policy.reset_prediction.assert_not_called()
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+
+
 def test_worker_drains_chunk_and_flushes_neutral_on_confirmed_engine_loss(monkeypatch) -> None:
-    import hal.eval.realtime as realtime
+    import hal.eval.netplay as netplay
     from hal.inference.api import RuntimeConfig
 
     class Client:
-        schedules = (TimingSchedule(1, 2, 8),)
+        spec = PolicySpec("test", "test", (), (2,))
         context_frames = 8
         busy = False
         last_latency = 0.010
@@ -319,11 +492,11 @@ def test_worker_drains_chunk_and_flushes_neutral_on_confirmed_engine_loss(monkey
 
         def poll(self):
             if self.frame >= 3:
-                raise EngineLost("confirmed loss")
+                raise InferenceUnavailable("confirmed loss")
             if self.request is not None and not self.delivered:
                 self.delivered = True
                 self.busy = False
-                return chunk_response(self.request, (action(0.5),) * 4)
+                return action_plan(self.request, (action(0.5),) * 4)
             return None
 
     client = Client()
@@ -368,9 +541,9 @@ def test_worker_drains_chunk_and_flushes_neutral_on_confirmed_engine_loss(monkey
             return [frame(client.frame)], True
 
     session = Session()
-    monkeypatch.setattr(realtime, "flatten_canonical_frame", lambda _frame: {})
-    with pytest.raises(EngineLost, match="forfeit"):
-        realtime.run_realtime_match(session, Mock(), client, RuntimeConfig(1, (2,)))
+    monkeypatch.setattr(netplay, "policy_input_from_frame", lambda frame, **kwargs: observation(int(frame["id"])))
+    with pytest.raises(InferenceUnavailable, match="forfeit"):
+        netplay.run_netplay_match(session, Mock(), client, RuntimeConfig(1, (2,)), FrameTiming(2, 2, 2, 8))
     assert client.frame == 8
     assert any(selected == action(0.5) for _, selected in session.submitted)
     assert session.submitted[-1] == (8, NEUTRAL)
@@ -401,17 +574,75 @@ def test_libmelee_read_only_mode_also_suppresses_event_side_effects(flush, event
 
 def test_neutral_fallback_counts_reserved_startup_and_exhausted_tail_once() -> None:
     schedule = scheduler()
-    request = schedule.begin_request()
+    request = schedule.request_plan()
     assert request is not None
-    schedule.submit(0)
-    schedule.submit(1)
+    schedule.action_to_submit(0)
+    schedule.action_to_submit(1)
     assert schedule.neutral_fallback_frames == 2
-    schedule.receive(chunk_response(request, (NEUTRAL,) * 4))
-    schedule.handoff(2)
+    schedule.accept_plan(action_plan(request, (NEUTRAL,) * 4))
+    schedule.apply_ready_plan(2)
     for frame in range(2, 6):
-        schedule.submit(frame)
+        schedule.action_to_submit(frame)
     assert schedule.neutral_fallback_frames == 2  # these neutral actions came from a usable plan
-    schedule.submit(6)
-    schedule.submit(7)
+    schedule.action_to_submit(6)
+    schedule.action_to_submit(7)
     assert schedule.neutral_fallback_frames == 4
     assert schedule.exhausted_chunks == 1
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_realtime_request_preserves_required_fields_and_omits_unused_fields(missing: bool) -> None:
+    from hal.eval.netplay import DolphinConnectionLost
+    from hal.eval.netplay import run_netplay_match
+    from hal.inference.api import RuntimeConfig
+    from hal.sim.netplay import NetplaySetup
+    from hal.sim.session import FrameTimeout
+    from hal.training.canonical import flatten_canonical_frame
+
+    frame = {
+        "id": 0,
+        "stage": 31,
+        "ports": {
+            port: {
+                "leader": {
+                    "pre": {
+                        "joystick": {"x": 0.0, "y": 0.0},
+                        "cstick": {"x": 0.0, "y": 0.0},
+                        "triggers_physical": {"l": 0.0, "r": 0.0},
+                        "buttons_physical": 0,
+                    },
+                    "post": {"character": 1, "percent": 12.0},
+                }
+            }
+            for port in (1, 2)
+        },
+    }
+    required = ("missing",) if missing else ("p1_percent", "p2_percent", "stage")
+    client = Mock(spec=InferenceClient)
+    client.spec = PolicySpec("test", "test", required, (2,))
+    client.context_frames = 8
+    client.start_match.return_value = 1
+    client.busy = False
+    client.poll.return_value = None
+    session = Mock(spec=NetplaySession)
+    session.online_delay = 2
+    session.realtime = True
+    session.ego_port = 1
+    session.opponent_port = 2
+    session.start_match.return_value = frame
+    session.read_frames.side_effect = FrameTimeout("test stops after the first request")
+    with pytest.raises(KeyError if missing else DolphinConnectionLost):
+        run_netplay_match(
+            session,
+            NetplaySetup(melee.Character.FOX, "TEST#1"),
+            client,
+            RuntimeConfig(1, (2,)),
+            FrameTiming(2, 2, 2, 8),
+        )
+    if missing:
+        client.submit.assert_not_called()
+        return
+    request = client.submit.call_args.args[0]
+    flat = flatten_canonical_frame({**frame, "_matchup": {"stage": 31, "character": {1: 1, 2: 1}}})
+    assert len(flat) > len(required)
+    assert request.observations[0].observation == {name: flat[name] for name in required}

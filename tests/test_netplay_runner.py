@@ -12,7 +12,8 @@ import pytest
 from peppi_py.game import EndMethod
 
 import hal.netplay_service.runner as runner
-from hal.eval.play import ReplayEnd
+from hal.eval.replays import ReplayEnd
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import RuntimeConfig
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -290,6 +291,7 @@ def test_recoverable_failure_closes_dolphin_before_retry(
             _job(),
             stop,
             Mock(),
+            FrameTiming(2, 2, 2, 8),
         )
 
     assert events == ["enter", "close"]
@@ -316,6 +318,7 @@ def test_recoverable_failure_resets_slot_and_retries_once(
         _job(),
         stop,
         health,
+        FrameTiming(2, 2, 2, 8),
     )
 
     health.recovering.assert_called_once_with("frame_stutter")
@@ -364,11 +367,13 @@ def test_no_contest_ends_reservation_without_a_result(
         _job(),
         stop,
         health,
+        FrameTiming(2, 2, 2, 8),
     )
 
     store.mark_no_contest.assert_called_once_with("reservation", "slot-0")
     store.finish_game.assert_not_called()
     health.playing.assert_called_once_with()
+    health.configure_schedule.assert_called_once_with(FrameTiming(2, 2, 2, 8))
 
 
 def test_first_game_is_random_and_rematch_uses_requested_stage() -> None:
@@ -454,3 +459,53 @@ def test_result_is_reported_from_the_human_side(
     )
     result = SimpleNamespace(trajectory=object(), ego_port=ego_port)
     assert runner._human_result(result) == expected  # type: ignore[arg-type]
+
+
+def test_dolphin_connection_failure_does_not_report_inference_loss(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runner, "_run_reservation", Mock(side_effect=runner.DolphinConnectionLost("closed")))
+    store, health, stop = Mock(), Mock(), Mock()
+    runner._handle_reservation(
+        _slot_config(tmp_path),
+        store,
+        Mock(),
+        RuntimeConfig(1, (2,)),
+        _job(),
+        stop,
+        health,
+        FrameTiming(2, 2, 2, 8),
+    )
+    health.recovering.assert_called_once_with("dolphin_connection_lost")
+    store.forfeit_service_failure.assert_called_once_with("reservation", "slot-0")
+    store.fail.assert_not_called()
+
+
+def test_runner_cli_accepts_explicit_prediction_timing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    account = tmp_path / "user.json"
+    account.write_text('{"connectCode":"HAL#1"}')
+    policy = tmp_path / "policy.halpolicy"
+    policy.touch()
+    captured: list[runner.RunnerConfig] = []
+    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
+    monkeypatch.setattr(runner, "run", captured.append)
+    runner.main(
+        [
+            str(policy),
+            "--user-jsons",
+            str(account),
+            "--slippi-ports",
+            "51441",
+            "--git-sha",
+            "test-sha",
+            "--prediction-shape",
+            "8",
+            "3",
+            "--replan-interval",
+            "4",
+            "--kv-update-frames",
+            "4",
+        ]
+    )
+    config = captured[0]
+    assert config.prediction_shape == (8, 3)
+    assert config.replan_interval_frames == 4
+    assert config.kv_update_frames == 4

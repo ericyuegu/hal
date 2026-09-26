@@ -9,7 +9,6 @@ import re
 import secrets
 import tempfile
 import time
-from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -28,19 +27,20 @@ from safetensors.torch import save_model
 from torch import Tensor
 
 from hal import streams
-from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import Rank
 from hal.eval.policy_sampling import SlotGroupRng
+from hal.inference.api import ActionPlan
 from hal.inference.api import ObservationScalar
-from hal.inference.api import Policy
 from hal.inference.api import PolicyInput
-from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
-from hal.inference.api import validate_policy_inputs
+from hal.inference.api import action_plan
+from hal.inference.api import contiguous_horizons
+from hal.inference.api import validate_prediction_request
 from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_COUNT
 from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_NAMES
 from hal.inference.backends.temporal_awr.model import O50_BACKEND
@@ -53,11 +53,6 @@ from hal.inference.bundle import PolicyBundleManifest
 from hal.inference.bundle import extract_policy_bundle
 from hal.inference.bundle import write_policy_bundle
 from hal.inference.checkpoints import resolve_checkpoint
-from hal.inference.chunks import ChunkRequest
-from hal.inference.chunks import ChunkResponse
-from hal.inference.chunks import chunk_response
-from hal.inference.chunks import contiguous_horizons
-from hal.inference.chunks import validate_chunk_request
 from hal.training.checkpoints import checkpoint_sha256
 from hal.training.context_history import ContextHistory
 from hal.training.context_history import stack_context_windows
@@ -437,9 +432,9 @@ class O50Checkpoint:
         allow_masked_player_identity: bool = False,
         decode_observer: DecodeObserver | None = None,
         name: str | None = None,
-    ) -> O50Policy:
+    ) -> TemporalAwrPolicy:
         """Build fresh stream and sampling state over the validated weights."""
-        return O50Policy(
+        return TemporalAwrPolicy(
             self.model,
             self.config,
             self.stats,
@@ -604,7 +599,6 @@ def _relative_observation(item: PolicyInput) -> dict[str, ObservationScalar]:
 class _StreamState:
     history: ContextHistory | None = None
     observation_types: dict[str, bool] = field(default_factory=dict)
-    queued: deque[ControllerAction] = field(default_factory=deque)
     last_frame_id: int | None = None
     controlled_port: int | None = None
     player_id: int | None = None
@@ -614,7 +608,6 @@ class _StreamState:
     def reset(self) -> None:
         self.history = None
         self.observation_types.clear()
-        self.queued.clear()
         self.last_frame_id = None
         self.controlled_port = None
         self.player_id = None
@@ -627,7 +620,7 @@ DecoderCall = Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], Tensor]
 DecodeObserver = Callable[[int, int, float], None]
 
 
-class O50Policy:
+class TemporalAwrPolicy:
     """Stateful O50 adapter over flat canonical observations."""
 
     def __init__(
@@ -672,9 +665,9 @@ class O50Policy:
         self._allow_masked_player_identity = allow_masked_player_identity
         self._decode_observer = decode_observer
         self._compiled = False
-        self._chunk_mode = False
         self._prefix_frames = 0
-        self._chunk_generations: dict[int, int] = {}
+        self._prediction_generations: dict[int, int] = {}
+        self._prediction_sequences: dict[int, int] = {}
         self._runtime: RuntimeConfig | None = None
         self._states: dict[int, _StreamState] = {}
         self._rng: SlotGroupRng | None = None
@@ -692,27 +685,19 @@ class O50Policy:
     def spec(self) -> PolicySpec:
         return self._spec
 
-    def prepare(self, config: RuntimeConfig) -> None:
-        if self._runtime is not None:
-            raise RuntimeError("O50 policy is already prepared")
-        unsupported = set(config.transport_delays) - set(_SUPPORTED_DELAYS)
+    def prepare_prediction(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None:
+        if horizon not in self.supported_horizons or not max(runtime.transport_delays) <= prefix_frames < horizon:
+            raise ValueError("O50 prediction shape requires contiguous trained heads and a fixed input prefix")
+        unsupported = set(runtime.transport_delays) - set(_SUPPORTED_DELAYS)
         if unsupported:
             raise ValueError(f"O50 does not support transport delays {sorted(unsupported)}")
-        if not self._chunk_mode and len(config.transport_delays) > 1 and config.replan_interval_frames is not None:
-            raise ValueError("mixed-delay O50 derives each stream's replan interval")
-        if not self._chunk_mode:
-            for delay in config.transport_delays:
-                self._replan_for_delay(delay, config.replan_interval_frames)
-        self._runtime = config
-        self._states.clear()
-        self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
+        self._prediction_frames = horizon
+        self._prefix_frames = prefix_frames
+        self._runtime = runtime
+        self.reset_prediction()
         self._compiled = self._compiled_requested and self._device.type == "cuda"
         trunk: TrunkCall = self._model.forward_dense
-        sample_start = (
-            self._prefix_frames - max(config.transport_delays) + min(config.transport_delays)
-            if self._chunk_mode
-            else min(config.transport_delays)
-        )
+        sample_start = self._prefix_frames - max(runtime.transport_delays) + min(runtime.transport_delays)
 
         def decode_tail(
             hidden: Tensor,
@@ -749,24 +734,6 @@ class O50Policy:
             self._rng = None
             raise
 
-    def _replan_for_delay(self, delay: int, override: int | None) -> int:
-        if delay in (2, 3):
-            expected = self._prediction_frames - delay
-            if expected < 1:
-                raise ValueError(
-                    f"O50 prediction horizon {self._prediction_frames} must exceed transport delay {delay}"
-                )
-            replan = expected if override is None else override
-            if replan != expected:
-                raise ValueError(f"O50 delay {delay} requires replan interval {expected}, got {replan}")
-            return replan
-        replan = 1 if override is None else override
-        if replan < 1 or replan > self._prediction_frames:
-            raise ValueError(
-                f"O50 delay 0 requires a replan interval from 1 through {self._prediction_frames}, got {replan}"
-            )
-        return replan
-
     def _synthetic_features(self, rows: int) -> dict[str, Tensor]:
         length = self._config.architecture.L_ctx
         features: dict[str, Tensor] = {}
@@ -799,15 +766,7 @@ class O50Policy:
         padding = torch.zeros(rows, dtype=torch.long, device=self._device)
         neutral = torch.zeros(rows, self._prediction_frames, len(ACTION_CHANNELS), device=self._device)
         forced = self._model.codec.quantize(neutral)
-        delays = torch.tensor(
-            [
-                self._prefix_frames
-                if self._chunk_mode
-                else runtime.transport_delays[row % len(runtime.transport_delays)]
-                for row in range(rows)
-            ],
-            device=self._device,
-        )
+        delays = torch.full((rows,), self._prefix_frames, dtype=torch.long, device=self._device)
         depths = torch.arange(self._prediction_frames, device=self._device)
         force_mask = depths[None, :] < delays[:, None]
         uniforms = torch.full(
@@ -823,7 +782,7 @@ class O50Policy:
 
     def _require_runtime(self) -> RuntimeConfig:
         if self._runtime is None:
-            raise RuntimeError("O50 policy must be prepared before step")
+            raise RuntimeError("O50 policy must be prepared before prediction")
         return self._runtime
 
     @torch.inference_mode()
@@ -866,8 +825,9 @@ class O50Policy:
         if is_new and not item.reset:
             raise ValueError(f"new O50 stream {item.stream_id} must start with reset=True")
         state = self._states.setdefault(item.stream_id, _StreamState())
-        discontinuity = state.last_frame_id is not None and item.frame_id != state.last_frame_id + 1
-        if item.reset or discontinuity:
+        if state.last_frame_id is not None and item.frame_id != state.last_frame_id + 1 and not item.reset:
+            raise ValueError("O50 prediction observations omit the next frame")
+        if item.reset:
             state.reset()
         if state.controlled_port is not None and state.controlled_port != item.controlled_port:
             raise ValueError(f"stream {item.stream_id} changed controlled port without a reset")
@@ -943,7 +903,11 @@ class O50Policy:
         return features, padding
 
     @torch.inference_mode()
-    def _plan(self, due: Sequence[tuple[PolicyInput, _StreamState]]) -> None:
+    def _plan(
+        self,
+        due: Sequence[tuple[PolicyInput, _StreamState]],
+        fixed_actions: Sequence[tuple[ControllerAction, ...]],
+    ) -> tuple[tuple[ControllerAction, ...], ...]:
         runtime = self._require_runtime()
         context = self._context(due)
         real_rows = len(due)
@@ -953,11 +917,11 @@ class O50Policy:
         forced_actions = np.zeros((inference_rows, horizon, len(ACTION_CHANNELS)), dtype=np.float32)
         force_mask = np.zeros((inference_rows, horizon), dtype=np.bool_)
         delays = []
-        for row, (item, _state) in enumerate(due):
-            delay = len(item.pending_actions)
+        for row, actions in enumerate(fixed_actions):
+            delay = len(actions)
             delays.append(delay)
             if delay:
-                forced_actions[row, :delay] = np.stack([_action_vector(action) for action in item.pending_actions])
+                forced_actions[row, :delay] = np.stack([_action_vector(action) for action in actions])
                 force_mask[row, :delay] = True
         forced = self._model.codec.quantize(torch.from_numpy(forced_actions).to(self._device))
         force_mask_tensor = torch.from_numpy(force_mask).to(self._device)
@@ -977,13 +941,13 @@ class O50Policy:
         values = planned.float().cpu().numpy()
         if self._decode_observer is not None:
             self._decode_observer(real_rows, horizon, time.perf_counter() - started)
-        for row, (item, state) in enumerate(due):
-            delay = len(item.pending_actions)
-            replan = (
-                horizon - delay if self._chunk_mode else self._replan_for_delay(delay, runtime.replan_interval_frames)
-            )
-            state.queued.extend(_controller_action(action) for action in values[row, delay : delay + replan])
+        results = []
+        for row, (_item, state) in enumerate(due):
+            delay = len(fixed_actions[row])
+            replan = horizon - delay
+            results.append(tuple(_controller_action(action) for action in values[row, delay : delay + replan]))
             state.reset_pending = False
+        return tuple(results)
 
     @property
     def sampling_seed(self) -> int:
@@ -997,94 +961,62 @@ class O50Policy:
     def supported_horizons(self) -> tuple[int, ...]:
         return contiguous_horizons(self._config.architecture.head_offsets)
 
-    def reset_chunks(self) -> None:
+    @property
+    def prediction_horizon(self) -> int:
+        return self._prediction_frames
+
+    def reset_prediction(self) -> None:
         self._states.clear()
-        self._chunk_generations.clear()
+        self._prediction_generations.clear()
+        self._prediction_sequences.clear()
         self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
 
-    def prepare_chunks(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None:
-        if horizon not in self.supported_horizons or not 0 <= prefix_frames < horizon:
-            raise ValueError("O50 chunk shape requires contiguous trained heads and an unforced tail")
-        self._chunk_mode = True
-        self._prediction_frames = horizon
-        self._prefix_frames = prefix_frames
-        self._runtime = None
-        self.reset_chunks()
-        self.prepare(runtime)
-
-    def warmup_context(self, stream_id: int, source_frame: int, transport: int) -> tuple[PolicyInput, ...]:
-        observation = {
-            name: (0 if feature_kind(_relative_name(name, 1), ITEM_COLUMNS) in ("cat", "button") else 0.0)
-            for name in self.spec.required_observation_fields
-        }
-        return tuple(
-            PolicyInput(
-                stream_id,
-                frame,
-                1,
-                observation,
-                NEUTRAL_CONTROLLER_ACTION,
-                (NEUTRAL_CONTROLLER_ACTION,) * transport,
-                player_identity="PLATINUM",
-                reset=frame == source_frame - self.context_frames + 1,
-            )
-            for frame in range(source_frame - self.context_frames + 1, source_frame + 1)
-        )
-
-    def plan_chunks(self, requests: Sequence[ChunkRequest]) -> Sequence[ChunkResponse]:
+    def predict(self, requests: Sequence[PredictionRequest]) -> Sequence[ActionPlan]:
         runtime = self._require_runtime()
-        if not self._chunk_mode or not requests or len(requests) > runtime.max_batch_size:
-            raise ValueError("invalid O50 chunk batch")
+        if not requests or len(requests) > runtime.max_batch_size:
+            raise ValueError("invalid O50 prediction batch")
         if len({request.stream_id for request in requests}) != len(requests):
-            raise ValueError("duplicate O50 chunk stream")
+            raise ValueError("duplicate O50 prediction stream")
         due = []
         for request in requests:
-            validate_chunk_request(
+            validate_prediction_request(
                 self.spec,
                 runtime,
                 request,
                 context_frames=self.context_frames,
                 prefix_frames=self._prefix_frames
                 - max(runtime.transport_delays)
-                + len(request.context[-1].pending_actions),
+                + len(request.observations[-1].pending_actions),
             )
+            generation = self._prediction_generations.get(request.stream_id)
+            if generation is not None and request.generation < generation:
+                raise ValueError("obsolete O50 prediction generation")
+            if generation == request.generation and request.sequence <= self._prediction_sequences.get(
+                request.stream_id, -1
+            ):
+                raise ValueError("obsolete O50 prediction sequence")
             state = self._states.get(request.stream_id)
-            if self._chunk_generations.get(request.stream_id) != request.generation:
+            if generation != request.generation:
+                self._states.pop(request.stream_id, None)
                 state = None
-            for item in request.context:
-                if state is None or state.last_frame_id is None or item.frame_id > state.last_frame_id:
-                    state = self._ingest(replace(item, reset=state is None))
+            if (
+                state is not None
+                and state.last_frame_id is not None
+                and request.observations[0].frame_id != state.last_frame_id + 1
+            ):
+                raise ValueError("prediction observations must start at the next frame")
+            for item in request.observations:
+                if state is not None and item.reset:
+                    raise ValueError("prediction reset requires a new generation")
+                state = self._ingest(replace(item, reset=state is None))
             if state is None or state.last_frame_id != request.source_frame:
-                raise ValueError("obsolete O50 chunk request")
-            state.queued.clear()
-            due.append((replace(request.context[-1], pending_actions=request.forced_prefix), state))
-            self._chunk_generations[request.stream_id] = request.generation
-        self._plan(due)
-        responses = tuple(
-            chunk_response(request, tuple(state.queued)) for request, (_, state) in zip(requests, due, strict=True)
-        )
-        for _, state in due:
-            state.queued.clear()
-        return responses
-
-    def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
-        runtime = self._require_runtime()
-        validate_policy_inputs(self._spec, runtime, inputs)
-        return self.step_prevalidated(inputs)
-
-    def step_prevalidated(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
-        """Step after the caller has enforced the model-independent contract."""
-        self._require_runtime()
-        states = [(item, self._ingest(item)) for item in inputs]
-        due = [(item, state) for item, state in states if not state.queued]
-        if due:
-            self._plan(due)
-        outputs = []
-        for item, state in states:
-            if not state.queued:
-                raise RuntimeError(f"O50 stream {item.stream_id} has no planned action")
-            outputs.append(PolicyOutput(stream_id=item.stream_id, action=state.queued.popleft()))
-        return outputs
+                raise ValueError("obsolete O50 prediction request")
+            due.append((request.observations[-1], state))
+            self._prediction_generations[request.stream_id] = request.generation
+            self._prediction_sequences[request.stream_id] = request.sequence
+        predictions = self._plan(due, tuple(request.fixed_actions for request in requests))
+        plans = tuple(action_plan(request, actions) for request, actions in zip(requests, predictions, strict=True))
+        return plans
 
 
 def load_o50_policy(
@@ -1095,7 +1027,7 @@ def load_o50_policy(
     compiled: bool = False,
     allow_masked_player_identity: bool = False,
     decode_observer: DecodeObserver | None = None,
-) -> Policy:
+) -> TemporalAwrPolicy:
     """Load and validate a portable O50 bundle without importing an experiment."""
     target = torch.device(device)
     with extract_policy_bundle(bundle_path) as (manifest, root):
@@ -1125,7 +1057,7 @@ def load_o50_policy(
         if embedded_codes != player_codes:
             raise ValueError("O50 weights and player vocabulary member disagree")
         model.eval()
-    return O50Policy(
+    return TemporalAwrPolicy(
         model,
         config,
         stats,

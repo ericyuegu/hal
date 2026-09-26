@@ -1,6 +1,7 @@
 """Replay fixed observations to measure O59 batch-size-one inference on CUDA."""
 
 import argparse
+import gc
 import hashlib
 import json
 import subprocess
@@ -16,6 +17,7 @@ from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.data.extract import extract_replay
 from hal.inference.api import PolicyInput
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.backends.history_decoder.policy import load_o59_policy
 from hal.wire import ACTION_CHANNELS
@@ -40,13 +42,18 @@ def main() -> None:
     parser.add_argument("replay", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--history-mode", choices=("window", "kv_cache"), default="kv_cache")
-    parser.add_argument("--update-frames", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--update-frames", type=int, choices=(1, 2, 4), default=2)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cuda-graphs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--bf16-window-linears", action="store_true")
     parser.add_argument("--frames", type=int, default=1600)
     parser.add_argument("--seed", type=int, default=1001)
+    parser.add_argument("--prediction-horizon", type=int, default=4)
+    parser.add_argument("--fixed-prefix", type=int, default=2)
+    parser.add_argument("--replan-interval", type=int, default=2)
     args = parser.parse_args()
+    if args.replan_interval < 1 or args.fixed_prefix < 2 or args.prediction_horizon <= args.fixed_prefix:
+        raise ValueError("invalid prediction workload")
     if args.frames < 600:
         raise ValueError("benchmark requires at least 600 frames, including 300 warmup frames")
     torch.set_num_threads(1)
@@ -68,7 +75,7 @@ def main() -> None:
         for module in policy.model.modules():
             if isinstance(module, torch.nn.Linear):
                 module.to(dtype=torch.bfloat16)
-    policy.prepare(RuntimeConfig(1, (2,)))
+    policy.prepare_prediction(RuntimeConfig(1, (2,)), args.prediction_horizon, args.fixed_prefix)
     prepare_seconds = time.perf_counter() - started
     inputs = []
     for index in range(args.frames):
@@ -94,41 +101,73 @@ def main() -> None:
                 reset=index == 0,
             )
         )
+    gc.collect()
+    gc.freeze()
     times = []
+    source_frames = []
+    sequence = 0
     torch.cuda.reset_peak_memory_stats()
     with torch.inference_mode(), torch.compiler.set_stance("fail_on_recompile"):
-        for item in inputs:
+        for start in range(0, len(inputs), args.replan_interval):
+            observations = tuple(inputs[start : start + args.replan_interval])
+            request = PredictionRequest(
+                0,
+                1,
+                sequence,
+                observations[-1].frame_id,
+                observations,
+                (NEUTRAL_CONTROLLER_ACTION,) * args.fixed_prefix,
+            )
             started = time.perf_counter()
-            policy.step((item,))
+            policy.predict((request,))
             torch.cuda.synchronize()
             times.append(1000 * (time.perf_counter() - started))
+            source_frames.append(request.source_frame)
+            sequence += 1
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
             record_shapes=True,
             profile_memory=True,
         ) as profile:
             for index in range(20):
-                policy.step((replace(inputs[-1], frame_id=args.frames + index),))
+                observations = tuple(
+                    replace(inputs[-1], frame_id=args.frames + index * args.replan_interval + offset, reset=False)
+                    for offset in range(args.replan_interval)
+                )
+                request = PredictionRequest(
+                    0,
+                    1,
+                    sequence,
+                    observations[-1].frame_id,
+                    observations,
+                    (NEUTRAL_CONTROLLER_ACTION,) * args.fixed_prefix,
+                )
+                policy.predict((request,))
+                sequence += 1
             torch.cuda.synchronize()
     profile.export_chrome_trace(str(args.output / "trace.json"))
     (args.output / "profile.txt").write_text(
         profile.key_averages().table(sort_by="self_cuda_time_total", row_limit=50)
     )
     result = {
+        "schema_version": 2,
+        "gc_frozen": True,
         "config": {
             **vars(args),
             "batch_size": 1,
-            "transport_frames": 2,
-            "replan_frames": 2,
+            "input_delay_frames": 2,
+            "request_observations": "incremental",
             "temperature": 1.0,
             "desired_return": 20.0,
             "identity": "IBDW#0",
         },
         "prepare_seconds": prepare_seconds,
         "cold_ms": times[0],
-        "frame_ms": percentiles(times[300:]),
-        "replan_ms": percentiles(times[300::2]),
-        "queued_frame_ms": percentiles(times[301::2]),
+        "source_frames": source_frames,
+        "prediction_samples_ms": times,
+        "prediction_ms": percentiles(
+            [value for frame, value in zip(source_frames, times, strict=True) if frame >= 300]
+        ),
         "peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
         "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(),
@@ -139,7 +178,7 @@ def main() -> None:
             str(path): sha256(path)
             for path in (
                 Path(__file__),
-                *sorted(Path("hal/inference").glob("*.py")),
+                *sorted(Path("hal/inference").rglob("*.py")),
             )
         },
     }

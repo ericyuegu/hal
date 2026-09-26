@@ -8,10 +8,12 @@ from hal.eval.harness import SessionConfig
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import run_matches_vec
 from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicyInput
-from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
+from hal.inference.api import action_plan
 from hal.sim.inputs import action_vec_to_controller
 from hal.sim.inputs import controller_to_action_vec
 from hal.sim.rollout import ObservationRow
@@ -21,8 +23,12 @@ from hal.sim.vec import Slot
 from hal.sim.vec import VecMatch
 
 
+def _timing(delay: int = 2) -> FrameTiming:
+    return FrameTiming(delay, 0, 1, delay + 1)
+
+
 def test_conditioned_adapter_routes_to_process_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = PolicyBatchAdapter(_TaggedPolicy(), RuntimeConfig(1, (2,)))
+    adapter = PolicyBatchAdapter(_TaggedPolicy(), RuntimeConfig(1, (2,)), _timing())
     called = []
 
     def process_driver(kwargs, matches, policy, **options):
@@ -55,8 +61,8 @@ def test_conditioned_adapter_routes_to_process_driver(monkeypatch: pytest.Monkey
 def test_process_adapter_matches_frame_adapter_through_reset(monkeypatch, delay: int) -> None:
     monkeypatch.setattr("hal.eval.policy.flatten_canonical_frame", lambda frame: {"flat": frame["flat"]})
     left_policy, right_policy = _TaggedPolicy(), _TaggedPolicy()
-    left = PolicyBatchAdapter(left_policy, RuntimeConfig(2, (delay,)))
-    right = PolicyBatchAdapter(right_policy, RuntimeConfig(2, (delay,)))
+    left = PolicyBatchAdapter(left_policy, RuntimeConfig(2, (delay,)), _timing(delay))
+    right = PolicyBatchAdapter(right_policy, RuntimeConfig(2, (delay,)), _timing(delay))
     slots = (Slot(0, 1), Slot(1, 1))
     applied = dict.fromkeys(slots, NEUTRAL_CONTROLLER_ACTION)
     for tick in range(12):
@@ -77,7 +83,7 @@ def test_process_adapter_matches_frame_adapter_through_reset(monkeypatch, delay:
 
 
 def test_process_adapter_rejects_multiple_observations() -> None:
-    adapter = PolicyBatchAdapter(_TaggedPolicy(), RuntimeConfig(1, (2,)))
+    adapter = PolicyBatchAdapter(_TaggedPolicy(), RuntimeConfig(1, (2,)), _timing())
     with pytest.raises(ValueError, match="exactly one"):
         adapter.plan_rows({Slot(0, 1): []})
 
@@ -86,14 +92,15 @@ def test_process_adapter_rejects_multiple_observations() -> None:
 def test_process_adapter_observes_real_dolphin_inputs(tmp_path) -> None:
     class MovingPolicy:
         spec = PolicySpec("moving", "test", (), (2,))
+        context_frames = 4
 
-        def step(self, inputs):
-            return tuple(PolicyOutput(item.stream_id, ControllerAction(0.5, 0, 0, 0, 0, 0, 0)) for item in inputs)
+        def predict(self, requests):
+            return tuple(action_plan(request, (ControllerAction(0.5, 0, 0, 0, 0, 0, 0),)) for request in requests)
 
-        def prepare(self, config):
+        def reset_prediction(self):
             pass
 
-    adapter = PolicyBatchAdapter(MovingPolicy(), RuntimeConfig(1, (2,)))
+    adapter = PolicyBatchAdapter(MovingPolicy(), RuntimeConfig(1, (2,)), _timing())
     match = VecMatch(
         Matchup(
             stage=melee.Stage.FINAL_DESTINATION,
@@ -132,24 +139,25 @@ def _frame(frame_id: int, action: ControllerAction) -> dict:
 
 class _TaggedPolicy:
     spec = PolicySpec("tagged", "tests.tagged", ("flat",), (2, 3))
+    context_frames = 8
 
     def __init__(self) -> None:
         self.inputs: list[PolicyInput] = []
 
-    def prepare(self, _config: RuntimeConfig) -> None:
+    def reset_prediction(self) -> None:
         pass
 
-    def step(self, inputs) -> tuple[PolicyOutput, ...]:
-        self.inputs.extend(inputs)
+    def predict(self, requests: tuple[PredictionRequest, ...]):
+        self.inputs.extend(request.observations[-1] for request in requests)
         return tuple(
-            PolicyOutput(item.stream_id, ControllerAction((len(self.inputs) % 10) / 10, 0, 0, 0, 0, 0, 0))
-            for item in inputs
+            action_plan(request, (ControllerAction((len(self.inputs) % 10) / 10, 0, 0, 0, 0, 0, 0),))
+            for request in requests
         )
 
 
 def test_adapter_passes_return_target_and_temperature() -> None:
     policy = _TaggedPolicy()
-    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)), desired_return=19.976, temperature=0.9)
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)), _timing(), desired_return=19.976, temperature=0.9)
     adapter.plan_rows(
         {Slot(0, 1): [ObservationRow(0, {"flat": 0}, controller_to_action_vec(NEUTRAL_CONTROLLER_ACTION))]}
     )
@@ -164,7 +172,7 @@ def test_adapter_pairs_actual_actions_and_orders_pending_queue(
 ) -> None:
     monkeypatch.setattr("hal.eval.policy.flatten_canonical_frame", lambda frame: {"flat": frame["flat"]})
     policy = _TaggedPolicy()
-    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (delay,)))
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (delay,)), _timing(delay))
     slot = Slot(0, 1)
     applied = NEUTRAL_CONTROLLER_ACTION
     returned = []
@@ -181,13 +189,41 @@ def test_adapter_pairs_actual_actions_and_orders_pending_queue(
     assert adapter.neutral_actions == delay
 
 
-def test_adapter_resets_transport_on_frame_discontinuity(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_adapter_resets_transport_on_backward_episode_restart(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("hal.eval.policy.flatten_canonical_frame", lambda frame: {"flat": frame["flat"]})
     policy = _TaggedPolicy()
-    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)))
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)), _timing())
     slot = Slot(0, 1)
     adapter(0, {slot: _frame(10, NEUTRAL_CONTROLLER_ACTION)})
     result = adapter(1, {slot: _frame(-123, NEUTRAL_CONTROLLER_ACTION)})
     assert result[slot] == NEUTRAL_CONTROLLER_ACTION
+    assert policy.inputs[-1].reset
+    assert policy.inputs[-1].pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2
+
+
+@pytest.mark.parametrize("next_frame", [10, 12])
+def test_adapter_rejects_missing_or_repeated_frame(next_frame: int) -> None:
+    policy = _TaggedPolicy()
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)), _timing())
+    slot = Slot(0, 1)
+    neutral = controller_to_action_vec(NEUTRAL_CONTROLLER_ACTION)
+    adapter.plan_rows({slot: [ObservationRow(10, {"flat": 10}, neutral)]})
+
+    with pytest.raises(ValueError, match=f"expected frame 11, got {next_frame}"):
+        adapter.plan_rows({slot: [ObservationRow(next_frame, {"flat": next_frame}, neutral)]})
+
+    adapter.plan_rows({slot: [ObservationRow(11, {"flat": 11}, neutral)]})
+    assert policy.inputs[-1].frame_id == 11
+    assert not policy.inputs[-1].reset
+
+
+def test_adapter_accepts_explicit_reset_after_forward_frame_jump() -> None:
+    policy = _TaggedPolicy()
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (2,)), _timing())
+    slot = Slot(0, 1)
+    neutral = controller_to_action_vec(NEUTRAL_CONTROLLER_ACTION)
+    adapter.plan_rows({slot: [ObservationRow(10, {"flat": 10}, neutral)]})
+    adapter.plan_rows({slot: [ObservationRow(20, {"flat": 20}, neutral, reset=True)]})
+
     assert policy.inputs[-1].reset
     assert policy.inputs[-1].pending_actions == (NEUTRAL_CONTROLLER_ACTION,) * 2

@@ -1,10 +1,8 @@
 import json
 import subprocess
 import sys
-import threading
 from dataclasses import asdict
 from dataclasses import replace
-from multiprocessing import Pipe
 from pathlib import Path
 from types import MethodType
 
@@ -18,20 +16,20 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import Rank
+from hal.eval.scheduling import ActionScheduler
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicyInput
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.backends.temporal_awr.model import CONTROLLER_GROUP_COUNT
 from hal.inference.backends.temporal_awr.model import O50Architecture
 from hal.inference.backends.temporal_awr.model import O50Config
 from hal.inference.backends.temporal_awr.model import O50Model
 from hal.inference.backends.temporal_awr.policy import O50_REQUIRED_OBSERVATION_FIELDS
-from hal.inference.backends.temporal_awr.policy import O50Policy
+from hal.inference.backends.temporal_awr.policy import TemporalAwrPolicy
 from hal.inference.backends.temporal_awr.policy import export_o50_policy
 from hal.inference.backends.temporal_awr.policy import load_o50_checkpoint
 from hal.inference.backends.temporal_awr.policy import load_o50_policy
-from hal.netplay_service.inference import ContinuousBatcher
-from hal.netplay_service.inference import RemotePolicy
-from hal.netplay_service.inference import ServingArena
 from hal.training.features import ACTION_CHANNELS
 from hal.training.features import preprocess
 from hal.training.physical_shard_loader import PhysicalRow
@@ -117,9 +115,9 @@ def _model() -> tuple[O50Model, O50Config, tuple[str, ...], bytes]:
     return model, config, codes, player_codes
 
 
-def _policy(*, seed: int = 7, prediction_frames: int | None = None) -> O50Policy:
+def _policy(*, seed: int = 7, prediction_frames: int | None = None) -> TemporalAwrPolicy:
     model, config, codes, _player_codes = _model()
-    return O50Policy(
+    return TemporalAwrPolicy(
         model,
         config,
         _stats(),
@@ -160,6 +158,24 @@ def _input(
         pending_actions=pending,
         player_identity=player_identity,
         reset=reset,
+    )
+
+
+def _request(
+    item: PolicyInput,
+    *,
+    generation: int = 1,
+    sequence: int = 0,
+    observations: tuple[PolicyInput, ...] | None = None,
+    fixed_actions: tuple[ControllerAction, ...] | None = None,
+) -> PredictionRequest:
+    return PredictionRequest(
+        item.stream_id,
+        generation,
+        sequence,
+        item.frame_id,
+        (item,) if observations is None else observations,
+        item.pending_actions if fixed_actions is None else fixed_actions,
     )
 
 
@@ -264,7 +280,7 @@ def test_stats_content_and_provenance_hashes_are_strict() -> None:
 
 
 @pytest.mark.parametrize(("delay", "replan", "frames", "expected_plans"), [(2, 2, 4, 2), (3, 1, 4, 4)])
-def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
+def test_prediction_forces_pending_prefix_and_samples_only_tail(
     delay: int,
     replan: int,
     frames: int,
@@ -272,7 +288,7 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(delay,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=2, transport_delays=(delay,)), 4, delay)
     forced_calls: list[tuple[Tensor, Tensor]] = []
 
     def fake_decode(
@@ -289,9 +305,17 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
         return output
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
-    outputs = [policy.step([_input(frame, delay, reset=frame == 0)])[0] for frame in range(frames)]
+    outputs = []
+    previous_source = -1
+    for sequence, source in enumerate(range(0, frames, replan)):
+        observations = tuple(
+            _input(frame, delay, reset=frame == 0) for frame in range(previous_source + 1, source + 1)
+        )
+        request = _request(observations[-1], sequence=sequence, observations=observations)
+        outputs.extend(item.action for item in policy.predict((request,))[0].actions)
+        previous_source = source
     assert len(forced_calls) == expected_plans
-    assert [output.action.main_x for output in outputs[:replan]] == [0.25 + 0.25 * index for index in range(replan)]
+    assert [output.main_x for output in outputs[:replan]] == [0.25 + 0.25 * index for index in range(replan)]
     pending = torch.from_numpy(np.stack([o50._action_vector(action) for action in _input(0, delay).pending_actions]))
     expected_forced = policy._model.codec.quantize(pending)
     assert torch.equal(forced_calls[0][0][0, :delay], expected_forced)
@@ -301,18 +325,20 @@ def test_runtime_forces_pending_prefix_and_caches_only_sampled_tail(
 
 
 @pytest.mark.parametrize(("horizon", "replan"), [(3, 1), (4, 2), (5, 3), (6, 4)])
-def test_runtime_sizes_conditioned_decode_and_queue_from_selected_horizon(
+def test_prediction_sizes_conditioned_decode_from_selected_horizon(
     horizon: int,
     replan: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy(prediction_frames=horizon)
-    policy.prepare(
+    policy.prepare_prediction(
         RuntimeConfig(
             max_batch_size=1,
             transport_delays=(2,),
             replan_interval_frames=replan,
-        )
+        ),
+        horizon,
+        2,
     )
     calls: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = []
 
@@ -329,11 +355,11 @@ def test_runtime_sizes_conditioned_decode_and_queue_from_selected_horizon(
         return output
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
-    first = policy.step([_input(0, 2, reset=True)])[0]
+    first = policy.predict((_request(_input(0, 2, reset=True)),))[0]
 
-    assert first.action.main_x == 0.25
+    assert first.actions[0].action.main_x == 0.25
     assert calls == [((1, horizon, 4), (1, horizon), (horizon, 4, 1))]
-    assert len(policy._states[3].queued) == replan - 1
+    assert len(first.actions) == replan
     assert policy._rng is not None
     assert {counter for *_key, counter in policy._rng.state()} == {horizon - 2}
 
@@ -344,12 +370,14 @@ def test_zero_delay_runtime_consumes_the_selected_horizon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy(prediction_frames=horizon)
-    policy.prepare(
+    policy.prepare_prediction(
         RuntimeConfig(
             max_batch_size=1,
             transport_delays=(0,),
             replan_interval_frames=horizon,
-        )
+        ),
+        horizon,
+        0,
     )
     calls: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = []
 
@@ -367,26 +395,19 @@ def test_zero_delay_runtime_consumes_the_selected_horizon(
         return output
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
-    outputs = [policy.step([_input(frame, 0, reset=frame == 0)])[0] for frame in range(horizon)]
+    plan = policy.predict((_request(_input(0, 0, reset=True)),))[0]
 
-    assert [output.action.main_x for output in outputs] == [0.25 * (index + 1) for index in range(horizon)]
+    assert [entry.action.main_x for entry in plan.actions] == [0.25 * (index + 1) for index in range(horizon)]
     assert calls == [((1, horizon, 4), (1, horizon), (horizon, 4, 1))]
-    assert not policy._states[3].queued
     assert policy._rng is not None
     assert {counter for *_key, counter in policy._rng.state()} == {horizon}
 
 
-def test_zero_delay_replan_interval_cannot_exceed_selected_horizon() -> None:
+def test_fixed_prefix_cannot_consume_selected_horizon() -> None:
     policy = _policy(prediction_frames=3)
 
-    with pytest.raises(ValueError, match="replan interval from 1 through 3"):
-        policy.prepare(
-            RuntimeConfig(
-                max_batch_size=1,
-                transport_delays=(0,),
-                replan_interval_frames=4,
-            )
-        )
+    with pytest.raises(ValueError, match="fixed input prefix"):
+        policy.prepare_prediction(RuntimeConfig(1, (0,)), 3, 3)
 
 
 def test_prediction_horizon_requires_a_dense_available_head_prefix() -> None:
@@ -400,7 +421,7 @@ def test_prediction_horizon_requires_a_dense_available_head_prefix() -> None:
     sparse_model = O50Model(sparse_config)
     sparse_model.load_state_dict(model.state_dict(), strict=False)
     with pytest.raises(ValueError, match="prediction_frames=5 requires dense heads"):
-        O50Policy(
+        TemporalAwrPolicy(
             sparse_model,
             sparse_config,
             _stats(),
@@ -417,7 +438,7 @@ def test_runtime_batches_delay_two_and_three_without_crossing_stream_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)), 4, 3)
     masks: list[Tensor] = []
 
     def fake_decode(
@@ -434,25 +455,23 @@ def test_runtime_batches_delay_two_and_three_without_crossing_stream_state(
         return output
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
-    outputs = policy.step(
-        [
-            _input(0, 2, stream_id=2, reset=True),
-            _input(0, 3, stream_id=3, reset=True),
-        ]
+    plans = policy.predict(
+        (
+            _request(_input(0, 2, stream_id=2, reset=True)),
+            _request(_input(0, 3, stream_id=3, reset=True)),
+        )
     )
 
-    assert [output.action.main_x for output in outputs] == [0.25, 0.75]
+    assert [[item.action.main_x for item in plan.actions] for plan in plans] == [[0.25, 0.5], [0.75]]
     assert masks[0].tolist() == [
         [True, True, False, False],
         [True, True, True, False],
     ]
-    assert len(policy._states[2].queued) == 1
-    assert len(policy._states[3].queued) == 0
 
 
 def test_eager_runtime_decodes_only_active_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)), 4, 3)
     shapes: list[int] = []
 
     def fake_decode(
@@ -472,14 +491,14 @@ def test_eager_runtime_decodes_only_active_rows(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
 
-    policy.step([_input(0, 3, reset=True)])
+    policy.predict((_request(_input(0, 3, reset=True)),))
 
     assert shapes == [1]
 
 
 def test_compiled_runtime_keeps_the_prepared_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=2, transport_delays=(2, 3)), 4, 3)
     policy._compiled = True
     shapes: list[int] = []
 
@@ -490,56 +509,61 @@ def test_compiled_runtime_keeps_the_prepared_shape(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(policy, "_decode", fake_decode)
 
-    policy.step([_input(0, 3, reset=True)])
+    policy.predict((_request(_input(0, 3, reset=True)),))
 
     assert shapes == [2]
 
 
-@pytest.mark.parametrize("delay", [2, 3])
-def test_remote_policy_actions_exactly_match_the_direct_path(delay: int) -> None:
+@pytest.mark.parametrize("delay", [0, 2, 3])
+def test_incremental_prediction_is_deterministic_for_twenty_frames(delay: int) -> None:
     runtime = RuntimeConfig(max_batch_size=1, transport_delays=(delay,))
     torch.manual_seed(17)
-    direct = _policy(seed=11)
+    first_policy = _policy(seed=11)
     torch.manual_seed(17)
-    served = _policy(seed=11)
-    direct.prepare(runtime)
-    served.prepare(runtime)
-    parent, child = Pipe()
-    with ServingArena.create(1, delay, served.spec.required_observation_fields) as arena:
-        stop = threading.Event()
-        batcher = ContinuousBatcher(served, runtime, arena, {0: parent})
-        server = threading.Thread(target=batcher.serve, args=(stop,), daemon=True)
-        server.start()
-        remote = RemotePolicy(served.spec, runtime, arena, child, 0)
-        try:
-            for frame_id in range(6):
-                item = _input(frame_id, delay, stream_id=5, reset=frame_id == 0)
-                assert remote.step((item,)) == tuple(direct.step((item,)))
-        finally:
-            stop.set()
-            server.join(timeout=1.0)
-            parent.close()
-            child.close()
+    second_policy = _policy(seed=11)
+    first_policy.prepare_prediction(runtime, 4, delay)
+    second_policy.prepare_prediction(runtime, 4, delay)
+    replan = 1 if delay == 0 else 4 - delay
+    scheduler = ActionScheduler(FrameTiming(delay, 0, replan, 4), first_policy.context_frames, generation=1)
+    for frame_id in range(20):
+        item = _input(frame_id, delay, stream_id=5, reset=frame_id == 0)
+        item = replace(
+            item,
+            applied_action=scheduler.submitted.get(frame_id, NEUTRAL_CONTROLLER_ACTION),
+            pending_actions=tuple(
+                scheduler.submitted.get(target, scheduler.planned.get(target, NEUTRAL_CONTROLLER_ACTION))
+                for target in range(frame_id + 1, frame_id + delay + 1)
+            ),
+        )
+        assert scheduler.observe(item)
+        request = scheduler.request_plan()
+        if request is not None:
+            first_plan = first_policy.predict((request,))[0]
+            second_plan = second_policy.predict((request,))[0]
+            assert first_plan == second_plan
+            assert scheduler.accept_plan(first_plan)
+            scheduler.apply_ready_plan(frame_id)
+        scheduler.action_to_submit(frame_id)
 
 
 def test_stream_delay_can_change_only_with_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2, 3)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(2, 3)), 4, 3)
     monkeypatch.setattr(policy, "_decode", lambda *_args: torch.zeros(1, 4, 14))
-    policy.step([_input(0, 2, reset=True)])
+    policy.predict((_request(_input(0, 2, reset=True)),))
     with pytest.raises(ValueError, match="changed transport delay"):
-        policy.step([_input(1, 3)])
-    policy.step([_input(1, 3, reset=True)])
+        policy.predict((_request(_input(1, 3), sequence=1),))
+    policy.predict((_request(_input(1, 3, reset=True), generation=2),))
 
 
-def test_public_step_rejects_invalid_observation_before_the_fast_path() -> None:
+def test_public_prediction_rejects_invalid_observation_before_ingest() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(2,)), 4, 2)
     item = _input(0, 2, reset=True)
     invalid = replace(item, observation={**item.observation, "stage": float("inf")})
 
     with pytest.raises(ValueError, match="observation 'stage'.*infinite"):
-        policy.step([invalid])
+        policy.predict((_request(invalid),))
 
     assert not policy._states
 
@@ -626,11 +650,11 @@ def test_temporal_decoder_advances_forced_prefix_before_h6_tail(
 
 def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(3,)), 4, 3)
     with pytest.raises(KeyError, match="ibdw"):
-        policy.step([_input(0, 3, player_identity="ibdw#0")])
+        policy.predict((_request(_input(0, 3, player_identity="ibdw#0")),))
     with pytest.raises(KeyError, match="IBDW#0 "):
-        policy.step([_input(0, 3, player_identity="IBDW#0 ")])
+        policy.predict((_request(_input(0, 3, player_identity="IBDW#0 ")),))
     assert policy._player_id("PLATINUM") == int(Rank.PLATINUM)
     assert policy._player_id("DIAMOND") == int(Rank.DIAMOND)
     assert policy._player_id("MASTER") == int(Rank.MASTER)
@@ -641,7 +665,7 @@ def test_player_identity_resolves_ranks_and_exact_connect_codes() -> None:
 
 def test_masked_identity_requires_explicit_runtime_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     model, config, codes, _player_codes = _model()
-    policy = O50Policy(
+    policy = TemporalAwrPolicy(
         model,
         config,
         _stats(),
@@ -652,20 +676,20 @@ def test_masked_identity_requires_explicit_runtime_opt_in(monkeypatch: pytest.Mo
         compiled=False,
         allow_masked_player_identity=True,
     )
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(2,)), 4, 2)
     monkeypatch.setattr(policy, "_decode", lambda *_args: torch.zeros(1, 4, 14))
 
-    output = policy.step([_input(0, 2, player_identity=None, reset=True)])
+    output = policy.predict((_request(_input(0, 2, player_identity=None, reset=True)),))
 
     assert not policy.spec.requires_player_identity
     assert policy._states[3].player_id == 0
     assert len(output) == 1
 
 
-def test_decode_observer_measures_only_replans(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decode_observer_measures_predictions(monkeypatch: pytest.MonkeyPatch) -> None:
     model, config, codes, _player_codes = _model()
     observations = []
-    policy = O50Policy(
+    policy = TemporalAwrPolicy(
         model,
         config,
         _stats(),
@@ -676,11 +700,10 @@ def test_decode_observer_measures_only_replans(monkeypatch: pytest.MonkeyPatch) 
         compiled=False,
         decode_observer=lambda rows, horizon, seconds: observations.append((rows, horizon, seconds)),
     )
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(2,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(2,)), 4, 2)
     monkeypatch.setattr(policy, "_decode", lambda *_args: torch.zeros(1, 4, 14))
 
-    policy.step([_input(0, 2, reset=True)])
-    policy.step([_input(1, 2)])
+    policy.predict((_request(_input(0, 2, reset=True)),))
 
     assert len(observations) == 1
     assert observations[0][:2] == (1, 4)
@@ -738,7 +761,7 @@ def test_resolve_export_stats_loads_only_checkpoint_sources(monkeypatch: pytest.
 
 def test_port_relative_adapter_and_applied_action_alignment() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(3,)), 4, 3)
     item = _input(0, 3, controlled_port=2, reset=True)
     observation = dict(item.observation)
     observation["p1_position_x"] = 1.0
@@ -764,20 +787,20 @@ def test_port_relative_adapter_and_applied_action_alignment() -> None:
     assert context.features["ego_main_stick_y"][0, -1] == -0.5
 
 
-def test_new_stream_requires_reset_and_frame_gap_clears_context() -> None:
+def test_frame_gap_requires_new_generation() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
-    with pytest.raises(ValueError, match="reset=True"):
-        policy.step([_input(0, 3)])
-    policy.step([_input(0, 3, reset=True)])
-    policy.step([_input(2, 3)])
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(3,)), 4, 3)
+    policy.predict((_request(_input(0, 3, reset=True)),))
+    with pytest.raises(ValueError, match="next frame"):
+        policy.predict((_request(_input(2, 3), sequence=1),))
+    policy.predict((_request(_input(2, 3, reset=True), generation=2),))
     assert policy._states[3].history is not None
     assert policy._states[3].history.count == 1
 
 
 def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None:
     policy = _policy()
-    policy.prepare(RuntimeConfig(max_batch_size=1, transport_delays=(3,)))
+    policy.prepare_prediction(RuntimeConfig(max_batch_size=1, transport_delays=(3,)), 4, 3)
     original = _input(0, 3, reset=True)
     observation = dict(original.observation)
     observation["item0_type"] = (1 << 31) - 1
@@ -798,7 +821,7 @@ def test_integer_item_sentinel_is_masked_instead_of_clamped_to_unknown() -> None
     assert context.features["item0_state"][0, -1].item() == 0
 
 
-def _reference_context_features(policy: O50Policy, histories: list[list[PolicyInput]]) -> dict[str, Tensor]:
+def _reference_context_features(policy: TemporalAwrPolicy, histories: list[list[PolicyInput]]) -> dict[str, Tensor]:
     """Build observation columns and controller history independently of ingestion."""
     length = policy._config.architecture.L_ctx
     columns = {}
@@ -906,44 +929,40 @@ assert not any(name == 'experiments' or name.startswith('experiments.') for name
     subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).parents[1])
 
 
-def test_chunk_decode_matches_existing_decoder_with_same_context_prefix_and_rng() -> None:
-    from hal.inference.chunks import ChunkRequest
-
-    torch.manual_seed(31)
-    synchronous = _policy(prediction_frames=6)
-    torch.manual_seed(31)
-    chunks = _policy(prediction_frames=6)
-    runtime = RuntimeConfig(1, (2,))
-    synchronous.prepare(runtime)
-    chunks.prepare_chunks(runtime, 6, 2)
-    context = tuple(
-        replace(_input(frame, 2, reset=frame == 0), applied_action=ControllerAction(frame / 10, 0, 0, 0, 0, 0, 0))
-        for frame in range(4)
-    )
-    for item in context:
-        state = synchronous._ingest(item)
-    synchronous._plan(((context[-1], state),))
-    request = ChunkRequest(3, 1, 0, 3, context, context[-1].pending_actions)
-    response = chunks.plan_chunks((request,))[0]
-    assert tuple(item.action for item in response.actions[2:]) == tuple(state.queued)
-    assert [item.target_frame for item in response.actions] == list(range(4, 10))
-    assert chunks._config.prediction_frames == 4  # saved training configuration is unchanged
-
-
-def test_chunk_context_keeps_observations_received_during_inference() -> None:
-    from hal.inference.chunks import ChunkRequest
-
+def test_prediction_keeps_observations_received_during_inference() -> None:
     policy = _policy(prediction_frames=6)
-    policy.prepare_chunks(RuntimeConfig(1, (2,)), 6, 4)
+    policy.prepare_prediction(RuntimeConfig(1, (2,)), 6, 4)
     first = tuple(_input(frame, 2, reset=frame == 0) for frame in range(4))
-    policy.plan_chunks((ChunkRequest(3, 1, 0, 3, first, (NEUTRAL_CONTROLLER_ACTION,) * 4),))
-    context = tuple(
+    policy.predict((PredictionRequest(3, 1, 0, 3, first, (NEUTRAL_CONTROLLER_ACTION,) * 4),))
+    delta = tuple(
         replace(_input(frame, 2), observation={**_observation(), "p1_position_x": float(frame)})
-        for frame in range(2, 6)
+        for frame in range(4, 6)
     )
-    policy.plan_chunks((ChunkRequest(3, 1, 1, 5, context, (NEUTRAL_CONTROLLER_ACTION,) * 4),))
+    plan = policy.predict((PredictionRequest(3, 1, 1, 5, delta, (NEUTRAL_CONTROLLER_ACTION,) * 4),))[0]
+    assert [item.target_frame for item in plan.actions] == [10, 11]
+    assert policy._config.prediction_frames == 4  # Saved training configuration is unchanged.
     state = policy._states[3]
     assert state.last_frame_id == 5
     assert state.history is not None and state.history.written == 6
-    policy.reset_chunks()
+    policy.reset_prediction()
     assert policy._states == {}
+
+
+def test_prediction_rejects_missing_frames_and_duplicate_streams() -> None:
+    policy = _policy(prediction_frames=6)
+    policy.prepare_prediction(RuntimeConfig(2, (2,)), 6, 4)
+    first = tuple(_input(frame, 2, reset=frame == 0) for frame in range(4))
+    request = PredictionRequest(3, 1, 0, 3, first, (NEUTRAL_CONTROLLER_ACTION,) * 4)
+    with pytest.raises(ValueError, match="duplicate"):
+        policy.predict((request, request))
+    policy.predict((request,))
+    with pytest.raises(ValueError, match="next frame"):
+        policy.predict((PredictionRequest(3, 1, 1, 5, (_input(5, 2),), (NEUTRAL_CONTROLLER_ACTION,) * 4),))
+    with pytest.raises(ValueError, match="next frame"):
+        policy.predict(
+            (
+                PredictionRequest(
+                    3, 1, 1, 5, (_input(3, 2), _input(4, 2), _input(5, 2)), (NEUTRAL_CONTROLLER_ACTION,) * 4
+                ),
+            )
+        )

@@ -101,9 +101,20 @@ HAL_NETPLAY_RUNNER_STATUS="$state_dir/runner-status.json" \
 uv run hal-netplay-api --host 127.0.0.1 --port 8080 </dev/null &
 process_groups+=("$!")
 
+prediction_args=()
+if [[ -n ${HAL_NETPLAY_PREDICTION_HORIZON:-} || -n ${HAL_NETPLAY_PREDICTION_PREFIX:-} ]]; then
+  prediction_args=(--prediction-shape "${HAL_NETPLAY_PREDICTION_HORIZON:?}" "${HAL_NETPLAY_PREDICTION_PREFIX:?}")
+fi
+
+if [[ -n ${HAL_NETPLAY_REPLAN_INTERVAL:-} ]]; then
+  prediction_args+=(--replan-interval "$HAL_NETPLAY_REPLAN_INTERVAL")
+fi
+
 xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --compiled \
   --history-mode "${HAL_NETPLAY_HISTORY_MODE:-auto}" \
+  --kv-update-frames "${HAL_NETPLAY_KV_UPDATE_FRAMES:-2}" \
+  "${prediction_args[@]}" \
   --database "$state_dir/queue.sqlite3" \
   --user-jsons "$HAL_NETPLAY_USER_JSON_A" \
   --slippi-ports 51441 \

@@ -1,24 +1,29 @@
 """O59 uses contiguous trained heads without changing checkpoint configuration."""
 
 from dataclasses import replace
+from typing import Literal
 
+import pytest
 import torch
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.data.feature_stats import FeatureStats
+from hal.eval.scheduling import ActionScheduler
+from hal.eval.scheduling import FrameTiming
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.backends.history_decoder.model import GPT
 from hal.inference.backends.history_decoder.model import Architecture
 from hal.inference.backends.history_decoder.model import TrainConfig
 from hal.inference.backends.history_decoder.policy import _MODEL_FIELDS
-from hal.inference.backends.history_decoder.policy import O59Policy
-from hal.inference.chunks import ChunkRequest
+from hal.inference.backends.history_decoder.policy import HistoryDecoderPolicy
+from hal.inference.warmup import make_warmup_observations
 from hal.training.ego_stats import consolidate_key
 from hal.training.features import ITEM_COLUMNS
 from hal.training.features import feature_kind
 
 
-def policy() -> O59Policy:
+def policy(*, history_mode: Literal["window", "kv_cache"] = "window") -> HistoryDecoderPolicy:
     arch = replace(
         Architecture(),
         d_model=32,
@@ -41,33 +46,122 @@ def policy() -> O59Policy:
         for name in _MODEL_FIELDS
         if feature_kind(name, ITEM_COLUMNS) not in ("cat", "button", "stick_trigger")
     }
-    return O59Policy(model, cfg, stats, (), device=torch.device("cpu"), seed=5, compiled=False)
-
-
-def test_o59_chunk_and_existing_plan_decode_identically() -> None:
-    torch.manual_seed(5)
-    old = policy()
-    torch.manual_seed(5)
-    chunks = policy()
-    runtime = RuntimeConfig(1, (2,))
-    old.prepare(runtime)
-    chunks.prepare_chunks(runtime, 4, 2)
-    context = old.warmup_context(0, 7, 2)
-    for item in context:
-        stream = old._ingest(item)
-    old._plan(context[-1], stream)
-    request = ChunkRequest(0, 1, 0, 7, context, (NEUTRAL_CONTROLLER_ACTION,) * 2)
-    response = chunks.plan_chunks((request,))[0]
-    assert tuple(item.action for item in response.actions[2:]) == tuple(stream.queued)
+    return HistoryDecoderPolicy(
+        model, cfg, stats, (), device=torch.device("cpu"), seed=5, compiled=False, history_mode=history_mode
+    )
 
 
 def test_o59_can_decode_twelve_contiguous_heads_and_reset_calibration_state() -> None:
     chunks = policy()
     assert chunks.supported_horizons == tuple(range(1, 13))
-    chunks.prepare_chunks(RuntimeConfig(1, (2,)), 12, 4)
-    request = ChunkRequest(0, 1, 0, 7, chunks.warmup_context(0, 7, 2), (NEUTRAL_CONTROLLER_ACTION,) * 4)
-    first = chunks.plan_chunks((request,))[0]
-    assert len(first.actions) == 12 and first.actions[4].target_frame == 12
+    chunks.prepare_prediction(RuntimeConfig(1, (2,)), 12, 4)
+    request = PredictionRequest(
+        0,
+        1,
+        0,
+        7,
+        make_warmup_observations(chunks.spec, chunks.context_frames, 0, 7, 2),
+        (NEUTRAL_CONTROLLER_ACTION,) * 4,
+    )
+    first = chunks.predict((request,))[0]
+    assert len(first.actions) == 8 and first.actions[0].target_frame == 12
     assert (chunks.cfg.prediction_frames, chunks.cfg.delay_frames, chunks.cfg.replan_interval_frames) == (4, 2, 2)
-    chunks.reset_chunks()
-    assert chunks.plan_chunks((request,))[0] == first
+    chunks.reset_prediction()
+    assert chunks.predict((request,))[0] == first
+
+
+def test_prediction_requires_contiguous_new_observations() -> None:
+    chunks = policy()
+    chunks.prepare_prediction(RuntimeConfig(1, (2,)), 4, 2)
+    context = make_warmup_observations(chunks.spec, chunks.context_frames, 0, 7, 2)
+    chunks.predict((PredictionRequest(0, 1, 0, 7, context, (NEUTRAL_CONTROLLER_ACTION,) * 2),))
+    next_context = make_warmup_observations(chunks.spec, chunks.context_frames, 0, 10, 2)
+    with pytest.raises(ValueError, match="next frame"):
+        chunks.predict((PredictionRequest(0, 1, 1, 10, next_context[-2:], (NEUTRAL_CONTROLLER_ACTION,) * 2),))
+
+
+def test_prediction_rejects_overlapping_observations() -> None:
+    chunks = policy()
+    chunks.prepare_prediction(RuntimeConfig(1, (2,)), 4, 2)
+    context = make_warmup_observations(chunks.spec, chunks.context_frames, 0, 7, 2)
+    chunks.predict((PredictionRequest(0, 1, 0, 7, context, (NEUTRAL_CONTROLLER_ACTION,) * 2),))
+    overlap = make_warmup_observations(chunks.spec, 3, 0, 9, 2)
+    with pytest.raises(ValueError, match="next frame"):
+        chunks.predict((PredictionRequest(0, 1, 1, 9, overlap, (NEUTRAL_CONTROLLER_ACTION,) * 2),))
+
+
+def test_prediction_accepts_delta_and_rejects_unannounced_reset() -> None:
+    chunks = policy()
+    chunks.prepare_prediction(RuntimeConfig(1, (2,)), 4, 2)
+    context = make_warmup_observations(chunks.spec, chunks.context_frames, 0, 7, 2)
+    chunks.predict((PredictionRequest(0, 1, 0, 7, context, (NEUTRAL_CONTROLLER_ACTION,) * 2),))
+    next_context = make_warmup_observations(chunks.spec, chunks.context_frames, 0, 9, 2)
+    delta = tuple(replace(item, reset=False) for item in next_context[-2:])
+    plan = chunks.predict((PredictionRequest(0, 1, 1, 9, delta, (NEUTRAL_CONTROLLER_ACTION,) * 2),))[0]
+    assert [item.target_frame for item in plan.actions] == [12, 13]
+    with pytest.raises(ValueError, match="reset requires a new generation"):
+        chunks.predict(
+            (
+                PredictionRequest(
+                    0,
+                    1,
+                    2,
+                    10,
+                    (replace(next_context[-1], frame_id=10, reset=True),),
+                    (NEUTRAL_CONTROLLER_ACTION,) * 2,
+                ),
+            )
+        )
+
+
+def test_prediction_rejects_replayed_sequence_and_older_generation() -> None:
+    chunks = policy()
+    chunks.prepare_prediction(RuntimeConfig(1, (2,)), 4, 2)
+    request = PredictionRequest(
+        0,
+        2,
+        3,
+        7,
+        make_warmup_observations(chunks.spec, chunks.context_frames, 0, 7, 2),
+        (NEUTRAL_CONTROLLER_ACTION,) * 2,
+    )
+    chunks.predict((request,))
+    with pytest.raises(ValueError, match="sequence"):
+        chunks.predict((request,))
+    with pytest.raises(ValueError, match="generation"):
+        chunks.predict((replace(request, generation=1),))
+
+
+@pytest.mark.parametrize("history_mode", ["window", "kv_cache"])
+def test_incremental_prediction_is_deterministic_for_twenty_frames(
+    history_mode: Literal["window", "kv_cache"],
+) -> None:
+    torch.manual_seed(29)
+    first_policy = policy(history_mode=history_mode)
+    torch.manual_seed(29)
+    second_policy = policy(history_mode=history_mode)
+    runtime = RuntimeConfig(1, (2,))
+    first_policy.prepare_prediction(runtime, 4, 2)
+    second_policy.prepare_prediction(runtime, 4, 2)
+    scheduler = ActionScheduler(FrameTiming(2, 0, 2, 4), first_policy.context_frames, generation=1)
+
+    for frame in range(20):
+        item = make_warmup_observations(first_policy.spec, 1, 0, frame, 2)[0]
+        item = replace(
+            item,
+            reset=frame == 0,
+            applied_action=scheduler.submitted.get(frame, NEUTRAL_CONTROLLER_ACTION),
+            pending_actions=tuple(
+                scheduler.submitted.get(target, scheduler.planned.get(target, NEUTRAL_CONTROLLER_ACTION))
+                for target in (frame + 1, frame + 2)
+            ),
+        )
+        assert scheduler.observe(item)
+        request = scheduler.request_plan()
+        if request is not None:
+            first_plan = first_policy.predict((request,))[0]
+            second_plan = second_policy.predict((request,))[0]
+            assert first_plan == second_plan
+            assert scheduler.accept_plan(first_plan)
+            scheduler.apply_ready_plan(frame)
+        scheduler.action_to_submit(frame)

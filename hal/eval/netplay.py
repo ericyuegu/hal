@@ -1,4 +1,4 @@
-"""Real-time netplay: the Dolphin worker runs independently of model inference."""
+"""Nonblocking netplay with inference running beside Dolphin."""
 
 import time
 from collections.abc import Callable
@@ -8,109 +8,106 @@ from typing import Protocol
 from loguru import logger
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
-from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
-from hal.eval.play import PlayObserver
-from hal.eval.play import PlayResult
-from hal.inference.api import PolicyInput
+from hal.eval import results
+from hal.eval.observations import policy_input_from_frame
+from hal.eval.scheduling import ActionScheduler
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import RuntimeConfig
-from hal.netplay_service.chunks import EngineLost
-from hal.netplay_service.chunks import RemoteChunkPolicy
-from hal.netplay_service.schedule import FrameSchedule
-from hal.sim.inputs import canonical_pre_to_action
+from hal.inference.worker import InferenceClient
+from hal.inference.worker import InferenceUnavailable
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import FrameTimeout
 from hal.sim.trajectory import Trajectory
-from hal.training.canonical import flatten_canonical_frame
 
 
 class ScheduleObserver(Protocol):
-    def observe_schedule(self, schedule: FrameSchedule) -> None: ...
+    def observe_schedule(self, schedule: ActionScheduler) -> None: ...
 
 
-def run_realtime_match(
+class DolphinConnectionLost(RuntimeError):
+    """The live emulator stopped delivering controller or frame data."""
+
+
+def run_netplay_match(
     session: NetplaySession,
     setup: NetplaySetup,
-    policy: RemoteChunkPolicy,
+    client: InferenceClient,
     runtime: RuntimeConfig,
+    timing: FrameTiming,
     *,
     player_identity: str | None = None,
     policy_settings: Callable[[], tuple[float | None, float]] | None = None,
     max_frames: int = 28_800,
     rematch: bool = False,
     on_live: Callable[[], None] | None = None,
-    observer: PlayObserver | None = None,
+    observer: results.PlayObserver | None = None,
     schedule_observer: ScheduleObserver | None = None,
     stream_id: int = 0,
-) -> PlayResult:
+) -> results.PlayResult:
     if session.online_delay not in runtime.transport_delays or not session.realtime:
-        raise ValueError("real-time match requires a calibrated transport delay and a nonblocking session")
-    timing = next((s for s in policy.schedules if s.transport_frames == session.online_delay), None)
-    if timing is None:
-        raise ValueError("session transport delay was not calibrated")
-    schedule = FrameSchedule(timing, policy.context_frames, policy.start_match())
+        raise ValueError("netplay requires a prepared input delay and a nonblocking session")
+    if timing.input_delay_frames != session.online_delay:
+        raise ValueError("netplay timing input delay differs from the session")
+    schedule = ActionScheduler(timing, client.context_frames, client.start_match())
     inference_seconds: list[float] = []
+    matchup_characters: dict[int, int] | None = None
 
-    def advance(frame: dict) -> ControllerAction:
+    def advance(frame: dict) -> None:
+        nonlocal matchup_characters
         if session.ego_port is None:
             raise RuntimeError("local port was not discovered before countdown")
+        if matchup_characters is None:
+            matchup_characters = {port: int(frame["ports"][port]["leader"]["post"]["character"]) for port in (1, 2)}
         port = session.ego_port
-        action = canonical_pre_to_action(frame["ports"][port]["leader"]["pre"])
-        applied = ControllerAction(
-            action.main_x,
-            action.main_y,
-            action.c_x,
-            action.c_y,
-            action.trigger_l,
-            action.trigger_r,
-            action.buttons & POLICY_BUTTON_MASK,
-        )
-        characters = {p: int(frame["ports"][p]["leader"]["post"]["character"]) for p in (1, 2)}
-        flat = flatten_canonical_frame({**frame, "_matchup": {"stage": frame["stage"], "character": characters}})
         desired_return, temperature = (20.0, 1.0) if policy_settings is None else policy_settings()
         frame_id = int(frame["id"])
+        if schedule.history and frame_id > schedule.history[-1].frame_id + 1:
+            raise RuntimeError(
+                f"netplay skipped observation frame {schedule.history[-1].frame_id + 1} before {frame_id}"
+            )
         pending = tuple(
             schedule.submitted.get(f, NEUTRAL_CONTROLLER_ACTION)
             for f in range(frame_id + 1, frame_id + session.online_delay + 1)
         )
-        item = PolicyInput(
-            stream_id,
-            frame_id,
-            port,
-            flat,
-            applied,
-            pending,
-            player_identity,
-            desired_return,
-            temperature,
+        item = policy_input_from_frame(
+            frame,
+            spec=client.spec,
+            stream_id=stream_id,
+            controlled_port=port,
+            pending_actions=pending,
+            player_identity=player_identity,
+            desired_return=desired_return,
+            temperature=temperature,
             reset=not schedule.history,
+            matchup_characters=matchup_characters,
         )
         schedule.observe(item)
-        return applied
 
     def choose(frame_id: int) -> ControllerAction:
-        if not schedule.engine_failed:
+        if not schedule.inference_failed:
             try:
-                response = policy.poll()
-                if response is not None and schedule.receive(response):
-                    inference_seconds.append(policy.last_latency)
+                response = client.poll()
+                if response is not None and schedule.accept_plan(response):
+                    inference_seconds.append(client.last_latency)
                     if observer is not None and frame_id >= 0:
-                        observer.observe_policy(policy.last_latency)
-                schedule.handoff(frame_id)
-                if not policy.busy:
-                    request = schedule.begin_request()
+                        observer.observe_policy(client.last_latency)
+                schedule.apply_ready_plan(frame_id)
+                if not client.busy:
+                    request = schedule.request_plan()
                     if request is not None:
-                        policy.submit(request)
-            except EngineLost as error:
+                        client.submit(request)
+            except InferenceUnavailable as error:
                 logger.error("netplay inference lost; draining current plan: {}", error)
-                schedule.fail_engine()
-        action = schedule.submit(frame_id)
+                schedule.fail_inference()
+        action = schedule.action_to_submit(frame_id)
         if schedule_observer is not None and frame_id >= 0:
             schedule_observer.observe_schedule(schedule)
         if schedule.drained(frame_id):
-            session.submit(NEUTRAL_CONTROLLER_ACTION)
-            raise EngineLost("service failure: inference lost; bot forfeits after draining its plan")
+            with suppress(OSError, EOFError):
+                session.submit(NEUTRAL_CONTROLLER_ACTION)
+            raise InferenceUnavailable("service failure: inference lost; bot forfeits after draining its plan")
         return action
 
     def countdown(frame: dict) -> ControllerAction:
@@ -141,7 +138,7 @@ def run_realtime_match(
         except (OSError, EOFError, FrameTimeout) as error:
             with suppress(OSError, EOFError):
                 session.submit(NEUTRAL_CONTROLLER_ACTION)
-            raise EngineLost("service failure: Dolphin connection lost; bot forfeits") from error
+            raise DolphinConnectionLost("Dolphin connection lost during netplay") from error
         steps.append(time.perf_counter() - step_started)
         # Every received observation is retained, but only the latest can select an input.
         for frame in frames if in_game else frames[:-1]:
@@ -169,7 +166,7 @@ def run_realtime_match(
         schedule.neutral_fallback_frames,
         schedule.transport_corrections,
     )
-    return PlayResult(
+    return results.PlayResult(
         Trajectory.from_capture(captured, (1, 2)),
         session.ego_port,
         session.opponent_port,

@@ -14,16 +14,17 @@ import pytest
 import torch
 
 from hal.eval.match_summary import summarize_trajectory
-from hal.eval.play import PlayResult
-from hal.eval.play import require_completed_replay
-from hal.eval.realtime import run_realtime_match
+from hal.eval.netplay import run_netplay_match
+from hal.eval.qualification import check_realtime_budget
+from hal.eval.replays import require_completed_replay
+from hal.eval.results import PlayResult
+from hal.eval.scheduling import FrameTiming
+from hal.inference.api import PredictionPolicy
 from hal.inference.api import RuntimeConfig
 from hal.inference.bundle import read_policy_manifest
-from hal.inference.chunks import ChunkPolicy
 from hal.inference.loader import load_policy
-from hal.netplay_service.calibration import calibrate
-from hal.netplay_service.chunks import ChunkBatcher
-from hal.netplay_service.chunks import RemoteChunkPolicy
+from hal.inference.worker import InferenceClient
+from hal.inference.worker import InferenceWorker
 from hal.netplay_service.replays import soak_replay_directory
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
@@ -34,8 +35,9 @@ from hal.sim.netplay import NetplaySetup
 @dataclass(slots=True)
 class _Harness:
     runtime: RuntimeConfig
-    clients: tuple[RemoteChunkPolicy, RemoteChunkPolicy]
-    batcher: ChunkBatcher
+    timings: tuple[FrameTiming, ...]
+    clients: tuple[InferenceClient, InferenceClient]
+    batcher: InferenceWorker
     stop: threading.Event
     engine: threading.Thread
     errors: list[BaseException]
@@ -67,18 +69,18 @@ def policy_harness() -> _Harness:
     manifest = read_policy_manifest(policy_path)
     runtime = RuntimeConfig(2, tuple(delay for delay in manifest.supported_transport_delays if delay in (2, 3)))
     policy = load_policy(policy_path, device="cuda", seed=0, compiled=compiled)
-    assert isinstance(policy, ChunkPolicy)
-    calibration = calibrate(policy, runtime, 0.0005)
+    assert isinstance(policy, PredictionPolicy)
+    calibration = check_realtime_budget(policy, runtime, 0.0005)
     parent_0, child_0 = Pipe()
     parent_1, child_1 = Pipe()
     stop = threading.Event()
     lost = threading.Event()
     clients = (
-        RemoteChunkPolicy(policy.spec, policy.context_frames, calibration.schedules, child_0, lost),
-        RemoteChunkPolicy(policy.spec, policy.context_frames, calibration.schedules, child_1, lost),
+        InferenceClient(policy.spec, policy.context_frames, child_0, lost),
+        InferenceClient(policy.spec, policy.context_frames, child_1, lost),
     )
-    batcher = ChunkBatcher(
-        policy, calibration.schedules[0].horizon, {0: parent_0, 1: parent_1}, batch_wait_seconds=0.0005
+    batcher = InferenceWorker(
+        policy, calibration.timings[0].prediction_horizon_frames, {0: parent_0, 1: parent_1}, batch_wait_seconds=0.0005
     )
     errors: list[BaseException] = []
 
@@ -92,7 +94,7 @@ def policy_harness() -> _Harness:
 
     engine = threading.Thread(target=serve, daemon=True)
     engine.start()
-    harness = _Harness(runtime, clients, batcher, stop, engine, errors)
+    harness = _Harness(runtime, calibration.timings, clients, batcher, stop, engine, errors)
     try:
         yield harness
     finally:
@@ -149,11 +151,12 @@ def test_checkpoint_completes_batched_self_play(
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
                 pool.submit(
-                    run_realtime_match,
+                    run_netplay_match,
                     session,
                     setup,
                     client,
                     policy_harness.runtime,
+                    next(t for t in policy_harness.timings if t.input_delay_frames == delay),
                     player_identity="IBDW#0",
                     max_frames=54_000,
                     stream_id=slot,
@@ -166,10 +169,8 @@ def test_checkpoint_completes_batched_self_play(
 
         replays = tuple(require_completed_replay(replay_dir, ()) for replay_dir in replay_dirs)
         assert all(replay.stat().st_size > 0 for replay in replays)
-        timing = next(
-            schedule for schedule in policy_harness.clients[0].schedules if schedule.transport_frames == delay
-        )
-        _assert_gameplay(results, timing.budget_frames * 1000 / 60)
+        timing = next(schedule for schedule in policy_harness.timings if schedule.input_delay_frames == delay)
+        _assert_gameplay(results, timing.thinking_allowance_frames * 1000 / 60)
 
     assert not policy_harness.errors
     assert policy_harness.batcher.batch_calls > before_calls

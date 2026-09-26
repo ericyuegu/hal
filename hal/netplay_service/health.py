@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final
 from typing import cast
 
-from hal.inference.chunks import TimingSchedule
+from hal.eval.scheduling import FrameTiming
 
 TARGET_GAME_FPS: Final[float] = 60.0
 MIN_GAME_FPS: Final[float] = 59.0
@@ -24,8 +24,8 @@ SLOT_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 3.0
 SLOT_STARTUP_GRACE_SECONDS: Final[float] = 30.0
 RUNNER_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 5.0
 POLICY_DEADLINES_SECONDS: Final[dict[int, float]] = {2: 0.0333, 3: 0.0167}
-_SLOT_SCHEMA_VERSION: Final[int] = 2
-_RUNNER_SCHEMA_VERSION: Final[int] = 3
+_SLOT_SCHEMA_VERSION: Final[int] = 3
+_RUNNER_SCHEMA_VERSION: Final[int] = 4
 
 
 class SlotState(StrEnum):
@@ -217,7 +217,7 @@ class RuntimeHealth:
 
 @dataclass(frozen=True, slots=True)
 class ChunkHealth:
-    schedule: TimingSchedule
+    schedule: FrameTiming
     deadline_misses: int = 0
     prefix_mismatches: int = 0
     exhausted_chunks: int = 0
@@ -242,12 +242,10 @@ class ChunkHealth:
             raise ValueError("invalid chunk health fields")
         payload = cast(Mapping[str, object], payload)
         raw = payload["schedule"]
-        if not isinstance(raw, dict) or set(raw) != {"compute_frames", "transport_frames", "horizon"}:
+        if not isinstance(raw, dict) or set(raw) != set(FrameTiming.__dataclass_fields__):
             raise ValueError("invalid calibrated schedule")
         raw = cast(Mapping[str, object], raw)
-        schedule = TimingSchedule(
-            *(_integer(raw[name], name) for name in ("compute_frames", "transport_frames", "horizon"))
-        )
+        schedule = FrameTiming(*(_integer(raw[name], name) for name in FrameTiming.__dataclass_fields__))
         return cls(
             schedule,
             *(

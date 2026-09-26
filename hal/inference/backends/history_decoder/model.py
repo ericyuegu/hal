@@ -633,6 +633,20 @@ class TemporalBlock(nn.Module):
         x = x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
         return x, (k, v)
 
+    def prefill(self, x: Tensor, modulation: Tensor) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+        """Advance a known action prefix in parallel and retain its unrotated K/V."""
+        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        q, k, v = self._qkv(x, scale_attn, shift_attn)
+        cos, sin = self.rotary(q)
+        query = apply_rotary_emb(q, cos, sin).transpose(1, 2)
+        key = apply_rotary_emb(k, cos, sin).transpose(1, 2)
+        value = v.transpose(1, 2)
+        attended = F.scaled_dot_product_attention(query, key, value, is_causal=True)
+        attended = attended.transpose(1, 2).contiguous().view_as(x)
+        x = x + self.scale * self.proj(attended)
+        x = x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
+        return x, (k.transpose(1, 2), value)
+
 
 class HistoryCrossAttention(nn.Module):
     """Attend packed prefix/offset queries to one shared trunk memory."""
@@ -660,8 +674,11 @@ class HistoryCrossAttention(nn.Module):
         return apply_rotary_emb(key, cos, sin).transpose(1, 2), value
 
     def forward_with_kv_cache(self, x: Tensor, memory: KVMemory) -> Tensor:
-        query = self.query(decoder_rmsnorm(x)).view(1, 1, self.n_heads, self.head_dim)
-        query = rotate_positions(query, memory.query_position, self.rotary).transpose(1, 2)
+        batch, queries, _ = x.shape
+        if batch != 1:
+            raise ValueError("KV history attention requires one stream")
+        query = self.query(decoder_rmsnorm(x)).view(batch, queries, self.n_heads, self.head_dim)
+        query = rotate_positions(query, memory.query_position.expand(queries), self.rotary).transpose(1, 2)
         valid = (
             (memory.positions >= 0)
             & (memory.positions <= memory.query_position)
@@ -822,6 +839,40 @@ class CausalTemporalDecoder(nn.Module):
                     )[:, 0]
             next_caches.append(present)
         return decoder_rmsnorm(state), next_caches
+
+    def _prefill_forced_prefix(
+        self,
+        observed: Tensor,
+        offsets: tuple[int, ...],
+        forced_prefix: Tensor,
+        state_bias: Tensor,
+        history: tuple[Tensor, Tensor, Tensor, Tensor] | KVMemory,
+        conditioning: tuple[Tensor, ...],
+    ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
+        """Compute known prefix states together before the sampled tail."""
+        count = forced_prefix.shape[1]
+        previous = torch.cat((observed[:, None], forced_prefix[:, :-1]), dim=1)
+        offset_ids = torch.tensor(offsets[:count], device=observed.device).expand(observed.shape[0], count)
+        state = decoder_rmsnorm(state_bias[:, None] + self._step_features(previous, offset_ids))
+        caches: list[tuple[Tensor, Tensor] | None] = []
+        for index, module in enumerate(self.blocks):
+            block = cast(TemporalBlock, module)
+            state, present = block.prefill(state, conditioning[index][:, None])
+            if index == 0:
+                if isinstance(history, KVMemory):
+                    state = self.history_attention.forward_with_kv_cache(state, history)
+                else:
+                    key, value, ctx_pad, prefix_positions = history
+                    state = self.history_attention.forward_projected(
+                        state,
+                        key,
+                        value,
+                        ctx_pad,
+                        prefix_positions,
+                        offsets_per_prefix=count,
+                    )
+            caches.append(present)
+        return state, caches
 
     def teacher_forced_states(
         self,
@@ -1219,7 +1270,14 @@ class CausalTemporalDecoder(nn.Module):
         conditioning = self.return_conditioner(return_value, condition_present)
         frames: list[Tensor] = []
         captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
-        for depth, offset in enumerate(offsets):
+        forced_count = 0
+        if forced_prefix is not None and not capture_logits and forced_prefix.shape[1]:
+            forced_count = forced_prefix.shape[1]
+            _, caches = self._prefill_forced_prefix(observed, offsets, forced_prefix, state_bias, memory, conditioning)
+            previous = forced_prefix[:, forced_count - 1]
+            frames.extend(forced_prefix.unbind(dim=1))
+        for depth in range(forced_count, len(offsets)):
+            offset = offsets[depth]
             state, caches = self._decode_step(previous, offset, state_bias, caches, memory, conditioning)
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}

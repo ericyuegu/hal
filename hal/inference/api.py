@@ -100,30 +100,128 @@ class PolicyInput:
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyOutput:
-    """The newly submitted controller action for one policy stream."""
+class PredictionRequest:
+    """Advance one model stream and predict actions after its fixed prefix."""
 
     stream_id: int
+    generation: int
+    sequence: int
+    source_frame: int
+    observations: tuple[PolicyInput, ...]
+    fixed_actions: tuple[ControllerAction, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("stream_id", "generation", "sequence", "source_frame"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"prediction {name} must be an integer")
+        if self.generation < 0 or self.sequence < 0:
+            raise ValueError("prediction generation and sequence must be non-negative")
+        if not self.observations or self.observations[-1].frame_id != self.source_frame:
+            raise ValueError("prediction observations must end at the source frame")
+        for index, item in enumerate(self.observations):
+            if item.stream_id != self.stream_id:
+                raise ValueError("prediction observations contain another stream")
+            if index and item.frame_id != self.observations[index - 1].frame_id + 1:
+                raise ValueError("prediction observations must be contiguous")
+        for action in self.fixed_actions:
+            validate_controller_action(action)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameAction:
+    target_frame: int
     action: ControllerAction
 
 
+@dataclass(frozen=True, slots=True)
+class ActionPlan:
+    """New predictions only; fixed actions remain on the request."""
+
+    stream_id: int
+    generation: int
+    sequence: int
+    source_frame: int
+    actions: tuple[FrameAction, ...]
+
+
+def action_plan(request: PredictionRequest, tail: Sequence[ControllerAction]) -> ActionPlan:
+    first = request.source_frame + len(request.fixed_actions) + 1
+    return ActionPlan(
+        request.stream_id,
+        request.generation,
+        request.sequence,
+        request.source_frame,
+        tuple(FrameAction(first + index, action) for index, action in enumerate(tail)),
+    )
+
+
+def contiguous_horizons(offsets: tuple[int, ...]) -> tuple[int, ...]:
+    """Return horizons whose prediction heads start at frame one without gaps."""
+    count = 0
+    for expected, actual in enumerate(offsets, start=1):
+        if actual != expected:
+            break
+        count += 1
+    return tuple(range(1, count + 1))
+
+
+def validate_prediction_request(
+    spec: PolicySpec,
+    runtime: RuntimeConfig,
+    request: PredictionRequest,
+    *,
+    context_frames: int,
+    prefix_frames: int,
+) -> None:
+    """Validate a complete or incremental observation request."""
+    if len(request.observations) > context_frames or len(request.fixed_actions) != prefix_frames:
+        raise ValueError("prediction observations or fixed actions differ from the prepared shape")
+    for item in request.observations:
+        validate_policy_inputs(spec, runtime, (item,))
+
+
+def validate_action_plan(request: PredictionRequest, plan: ActionPlan, horizon: int) -> None:
+    if (plan.stream_id, plan.generation, plan.sequence, plan.source_frame) != (
+        request.stream_id,
+        request.generation,
+        request.sequence,
+        request.source_frame,
+    ):
+        raise ValueError("action plan does not match its request")
+    if len(plan.actions) != horizon - len(request.fixed_actions):
+        raise ValueError("action plan has the wrong prediction horizon")
+    first = request.source_frame + len(request.fixed_actions) + 1
+    for index, item in enumerate(plan.actions):
+        if item.target_frame != first + index:
+            raise ValueError("action plan target frames are not contiguous")
+        validate_controller_action(item.action)
+
+
 @runtime_checkable
-class Policy(Protocol):
-    """A batched stateful policy with explicit preparation."""
+class PredictionPolicy(Protocol):
+    """A stateful model that predicts actions for one or more streams."""
 
     @property
     def spec(self) -> PolicySpec: ...
 
-    def prepare(self, config: RuntimeConfig) -> None: ...
+    @property
+    def sampling_seed(self) -> int: ...
 
-    def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]: ...
+    @property
+    def context_frames(self) -> int: ...
 
+    @property
+    def supported_horizons(self) -> tuple[int, ...]: ...
 
-@runtime_checkable
-class PrevalidatedPolicy(Protocol):
-    """Policy fast path for a caller that already validated the whole batch."""
+    @property
+    def prediction_horizon(self) -> int: ...
 
-    def step_prevalidated(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]: ...
+    def prepare_prediction(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None: ...
+
+    def reset_prediction(self) -> None: ...
+
+    def predict(self, requests: Sequence[PredictionRequest]) -> Sequence[ActionPlan]: ...
 
 
 def validate_controller_action(action: ControllerAction) -> None:
@@ -180,9 +278,11 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
         for name, value in item.observation.items():
             if not isinstance(name, str):
                 raise ValueError(f"stream {item.stream_id} has a non-string observation field")
-            if not isinstance(value, (Real, Integral)) or isinstance(value, bool):
+            # Live frames use built-in scalars; avoid numeric ABC dispatch for each field.
+            native = type(value) in (int, float)
+            if not native and (not isinstance(value, (Real, Integral)) or isinstance(value, bool)):
                 raise ValueError(f"stream {item.stream_id} observation {name!r} must be numeric, got {value!r}")
-            if isinstance(value, Real) and math.isinf(float(value)):
+            if (native or isinstance(value, Real)) and math.isinf(float(value)):
                 raise ValueError(f"stream {item.stream_id} observation {name!r} must not be infinite")
         if item.player_identity is not None and (
             not isinstance(item.player_identity, str) or not item.player_identity
@@ -207,33 +307,3 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
         validate_controller_action(item.applied_action)
         for action in item.pending_actions:
             validate_controller_action(action)
-
-
-def step_policy(
-    policy: Policy,
-    config: RuntimeConfig,
-    inputs: Sequence[PolicyInput],
-) -> Sequence[PolicyOutput]:
-    """Validate once, then use the policy's trusted fast path when available."""
-    validate_policy_inputs(policy.spec, config, inputs)
-    if isinstance(policy, PrevalidatedPolicy):
-        return policy.step_prevalidated(inputs)
-    return policy.step(inputs)
-
-
-def validate_policy_outputs(
-    inputs: Sequence[PolicyInput],
-    outputs: Sequence[PolicyOutput],
-) -> dict[int, ControllerAction]:
-    """Return outputs by stream after checking exact batch correspondence."""
-    expected = {item.stream_id for item in inputs}
-    actual = [item.stream_id for item in outputs]
-    if len(set(actual)) != len(actual):
-        raise ValueError("policy returned duplicate stream IDs")
-    if set(actual) != expected:
-        raise ValueError(f"policy returned streams {sorted(actual)}, expected {sorted(expected)}")
-    result = {}
-    for output in outputs:
-        validate_controller_action(output.action)
-        result[output.stream_id] = output.action
-    return result

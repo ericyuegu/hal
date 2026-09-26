@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from hal.inference.api import Policy
+from hal.inference.api import PredictionPolicy
 from hal.inference.backends.history_decoder.policy import O59_BACKEND
 from hal.inference.backends.history_decoder.policy import O59_BACKEND_VERSION
 from hal.inference.backends.temporal_awr.model import O50_BACKEND
@@ -35,7 +35,7 @@ def load_policy(
     compiled: bool = False,
     history_mode: HistoryMode = "auto",
     kv_update_frames: int = 2,
-) -> Policy:
+) -> PredictionPolicy:
     """Load a known backend without importing an experiment module."""
     manifest = read_policy_manifest(path)
     identity = (manifest.backend, manifest.backend_version)

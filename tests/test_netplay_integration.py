@@ -184,13 +184,13 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
 
     from hal.controller import NEUTRAL_CONTROLLER_ACTION
     from hal.controller import ControllerAction
+    from hal.eval.scheduling import ActionScheduler
+    from hal.eval.scheduling import FrameTiming
     from hal.inference.api import PolicyInput
     from hal.inference.api import PolicySpec
-    from hal.inference.chunks import TimingSchedule
-    from hal.inference.chunks import chunk_response
-    from hal.netplay_service.chunks import ChunkBatcher
-    from hal.netplay_service.chunks import RemoteChunkPolicy
-    from hal.netplay_service.schedule import FrameSchedule
+    from hal.inference.api import action_plan
+    from hal.inference.worker import InferenceClient
+    from hal.inference.worker import InferenceWorker
     from hal.sim.inputs import canonical_pre_to_action
     from hal.sim.inputs import controller_actions_match
 
@@ -199,7 +199,7 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
     account_1, code_1 = _account("1")
     account_2, code_2 = _account("2")
     assert not account_1.samefile(account_2) and code_1 != code_2
-    timing = TimingSchedule(3, delay, 12)
+    timing = FrameTiming(delay, 4, 4, 12)
     stop = threading.Event()
     lost = threading.Event()
     errors = []
@@ -211,16 +211,16 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
         supported_horizons = (12,)
         sampling_seed = 0
 
-        def plan_chunks(self, requests):
+        def predict(self, requests):
             # Periodic overruns exceed B=4; ordinary calls include 1.2 frames
             # of computation and .6 frames of delivery delay below.
             time.sleep(0.100 if requests[0].sequence % 7 == 3 else 0.020)
             return tuple(
-                chunk_response(
+                action_plan(
                     request,
                     tuple(
                         ControllerAction(0.8 if (request.source_frame + offset) % 24 < 12 else -0.8, 0, 0, 0, 0, 0, 0)
-                        for offset in range(len(request.forced_prefix) + 1, 13)
+                        for offset in range(len(request.fixed_actions) + 1, 13)
                     ),
                 )
                 for request in requests
@@ -241,10 +241,10 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
             return self.connection.fileno()
 
     policy = DelayedPolicy()
-    batcher = ChunkBatcher(
+    batcher = InferenceWorker(
         policy, 12, {slot: DeliveryConnection(pair[0]) for slot, pair in enumerate(pairs)}, batch_wait_seconds=0.0005
     )
-    clients = [RemoteChunkPolicy(policy.spec, 16, (timing,), pair[1], lost) for pair in pairs]
+    clients = [InferenceClient(policy.spec, 16, pair[1], lost) for pair in pairs]
 
     def serve():
         try:
@@ -276,7 +276,7 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
     def play(slot, first):
         session, client = sessions[slot], clients[slot]
         assert session.ego_port is not None
-        schedule = FrameSchedule(timing, 16, client.start_match())
+        schedule = ActionScheduler(timing, 16, client.start_match())
         frames = [first]
         observed = {}
         submitted = {}
@@ -294,14 +294,14 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
             frame_id = frames[-1]["id"]
             response = client.poll()
             if response is not None:
-                schedule.receive(response)
+                schedule.accept_plan(response)
                 latencies.append(client.last_latency)
-            schedule.handoff(frame_id)
+            schedule.apply_ready_plan(frame_id)
             if not client.busy:
-                request = schedule.begin_request()
+                request = schedule.request_plan()
                 if request is not None:
                     client.submit(request)
-            selected = schedule.submit(frame_id)
+            selected = schedule.action_to_submit(frame_id)
             submitted[frame_id + delay + 1] = selected
             session.submit(selected)
             frames, live = session.read_frames()

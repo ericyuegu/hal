@@ -49,11 +49,11 @@ class KVMemory:
 
 class KVCache:
     def __init__(self, model: GPT, update_frames: int, device: torch.device) -> None:
-        if update_frames not in (1, 2):
-            raise ValueError("KV cache updates must contain one or two frames")
+        if update_frames not in (1, 2, 4):
+            raise ValueError("KV cache updates must contain one, two, or four frames")
         arch = model.cfg.arch
         self.window = arch.L_ctx
-        # The first query in a two-token update still needs the oldest extra key.
+        # Earlier queries in an update still need keys that later queries would evict.
         self.capacity = self.window + update_frames - 1
         dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
         self.layers = tuple(

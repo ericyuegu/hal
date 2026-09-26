@@ -1,4 +1,4 @@
-"""Portable O59 checkpoint export and one-slot live inference."""
+"""Portable O59 checkpoint export and history decoder inference."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import math
 import secrets
 import tempfile
 import time
-from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import fields
@@ -30,11 +29,14 @@ from hal.controller import ControllerAction
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import Rank
 from hal.eval.policy_sampling import SlotGroupRng
+from hal.inference.api import ActionPlan
 from hal.inference.api import PolicyInput
-from hal.inference.api import PolicyOutput
 from hal.inference.api import PolicySpec
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
-from hal.inference.api import validate_policy_inputs
+from hal.inference.api import action_plan
+from hal.inference.api import contiguous_horizons
+from hal.inference.api import validate_prediction_request
 from hal.inference.backends.history_decoder.gpu_history import GpuContextHistory
 from hal.inference.backends.history_decoder.gpu_history import GpuTokenHistory
 from hal.inference.backends.history_decoder.kv_cache import KVCache
@@ -50,11 +52,6 @@ from hal.inference.bundle import PolicyBundleManifest
 from hal.inference.bundle import extract_policy_bundle
 from hal.inference.bundle import write_policy_bundle
 from hal.inference.checkpoints import resolve_checkpoint
-from hal.inference.chunks import ChunkRequest
-from hal.inference.chunks import ChunkResponse
-from hal.inference.chunks import chunk_response
-from hal.inference.chunks import contiguous_horizons
-from hal.inference.chunks import validate_chunk_request
 from hal.inference.cuda_graph import CapturedCall
 from hal.training.context_history import ContextHistory
 from hal.training.controller_codec import CONTROLLER_GROUP_NAMES
@@ -291,13 +288,12 @@ class _Stream:
     player_id: int
     last_frame: int
     reset_pending: bool
-    queued: deque[ControllerAction]
     cache: KVCache | None = None
     pending_frames: int = 0
 
 
-class O59Policy:
-    """Saved 4/2/2 synchronous behavior and configurable real-time chunks."""
+class HistoryDecoderPolicy:
+    """Stateful history decoder with explicit prediction requests."""
 
     _prediction_frames = 4
     _prefix_frames = 2
@@ -318,8 +314,8 @@ class O59Policy:
         kv_cuda_graphs: bool = True,
     ) -> None:
         self.model = model
-        if history_mode not in ("window", "kv_cache") or kv_update_frames not in (1, 2):
-            raise ValueError("history must be window or kv_cache, with one or two frames per update")
+        if history_mode not in ("window", "kv_cache") or kv_update_frames not in (1, 2, 4):
+            raise ValueError("history must be window or kv_cache, with one, two, or four frames per update")
         self.history_mode = history_mode
         self.kv_update_frames = kv_update_frames
         self.kv_cuda_graphs = kv_cuda_graphs and compiled and device.type == "cuda"
@@ -332,16 +328,15 @@ class O59Policy:
         self._seed = secrets.randbits(64) if seed is None else seed
         self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
         self._runtime: RuntimeConfig | None = None
-        self._stream: _Stream | None = None
         self._trunk = model.forward_dense
         self._decoder = self._sample
         self._kv_trunk = self._advance
         self._caches: dict[int, KVCache] = {}
         self._kv_decoder = self._sample_with_kv_cache
         self.decode_seconds: list[float] = []
-        self._chunk_streams: dict[int, _Stream] = {}
-        self._chunk_generations: dict[int, int] = {}
-        self._chunk_mode = False
+        self._prediction_streams: dict[int, _Stream] = {}
+        self._prediction_generations: dict[int, int] = {}
+        self._prediction_sequences: dict[int, int] = {}
 
     def _player_id(self, identity: str | None) -> int:
         if identity is None:
@@ -378,16 +373,16 @@ class O59Policy:
             forced_prefix=forced,
         )
 
-    def prepare(self, config: RuntimeConfig) -> None:
-        if self._runtime is not None:
-            raise RuntimeError("O59 policy is already prepared")
-        if not self._chunk_mode and (
-            config.max_batch_size != 1
-            or config.transport_delays != (2,)
-            or config.replan_interval_frames not in (None, 2)
-        ):
-            raise ValueError("O59 serving requires one slot, delay 2, replan 2")
-        self._runtime = config
+    def prepare_prediction(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None:
+        if horizon not in self.supported_horizons or not max(runtime.transport_delays) <= prefix_frames < horizon:
+            raise ValueError("O59 prediction shape requires contiguous trained heads and a fixed input prefix")
+        if set(runtime.transport_delays) - set(self.spec.supported_transport_delays):
+            raise ValueError("O59 prediction input delay is unsupported")
+        self.model.temporal.configure_live_horizons((horizon,))
+        self._prediction_frames = horizon
+        self._prefix_frames = prefix_frames
+        self._runtime = runtime
+        self.reset_prediction()
         if self.history_mode == "kv_cache":
             self._prepare_kv_cache()
             return
@@ -428,20 +423,7 @@ class O59Policy:
                     )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
-        if self._compiled and not self._chunk_mode:
-            warm = PolicyInput(
-                stream_id=0,
-                frame_id=0,
-                controlled_port=1,
-                observation=dummy,
-                applied_action=NEUTRAL_CONTROLLER_ACTION,
-                pending_actions=(NEUTRAL_CONTROLLER_ACTION,) * 2,
-                reset=True,
-            )
-            self.step((warm,))
-            self._stream = None
-            self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
-            self.decode_seconds.clear()
+        self.reset_prediction()
 
     def _advance(self, features: dict[str, Tensor], observed: Tensor, cache: KVCache) -> Tensor:
         return forward_with_kv_cache(self.model, features, observed, cache)
@@ -471,6 +453,8 @@ class O59Policy:
         )
 
     def _prepare_kv_cache(self) -> None:
+        from hal.inference.warmup import make_warmup_observations
+
         self._caches.clear()
         if self.device.type == "cuda":
             # Autocast uses these same rounded weights; retain them between calls.
@@ -483,24 +467,28 @@ class O59Policy:
         with torch.inference_mode():
             assert self._runtime is not None
             for slot in range(self._runtime.max_batch_size):
-                self._stream = None
-                for item in self.warmup_context(slot, self.context_frames - 1, 2):
-                    stream = self._ingest(item)
-                    if not stream.queued:
-                        self._plan(
-                            replace(item, pending_actions=(NEUTRAL_CONTROLLER_ACTION,) * self._prefix_frames), stream
-                        )
-                    stream.queued.popleft()
+                for count in range(1, self.kv_update_frames + 1):
+                    stream = None
+                    for item in make_warmup_observations(self.spec, count, slot, count - 1, 2):
+                        stream = self._ingest(item, stream)
+                    assert stream is not None
+                    self._advance_stream(stream)
+                    if count == 1:
+                        self._plan(item, stream, (NEUTRAL_CONTROLLER_ACTION,) * self._prefix_frames)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
-        self.reset_chunks()
+        self.reset_prediction()
 
     def _advance_stream(self, stream: _Stream) -> None:
         if stream.cache is None or not stream.pending_frames:
             return
-        context = stream.gpu.context(stream.player_id, 0, False)
         count = stream.pending_frames
-        features = {name: value[:, -count:] for name, value in context.features.items()}
+        if self.kv_cuda_graphs:
+            assert isinstance(stream.gpu, GpuTokenHistory)
+            stream.gpu.upload(stream.player_id)
+        else:
+            context = stream.gpu.context(stream.player_id, 0, False)
+            features = {name: value[:, -count:] for name, value in context.features.items()}
         observed = stream.gpu.action_indices()[:, -count:]
         with (
             torch.inference_mode(),
@@ -526,10 +514,9 @@ class O59Policy:
                 self._kv_trunk(features, observed, stream.cache)
         stream.pending_frames = 0
 
-    def _ingest(self, item: PolicyInput) -> _Stream:
+    def _ingest(self, item: PolicyInput, stream: _Stream | None) -> _Stream:
         player_id = self._player_id(item.player_identity)
-        stream = self._stream
-        if item.reset or stream is None or item.frame_id != stream.last_frame + 1:
+        if item.reset or (stream is not None and item.frame_id != stream.last_frame + 1):
             stream = None
         if stream is not None and (stream.port != item.controlled_port or stream.player_id != player_id):
             raise ValueError("O59 port or identity changed without reset")
@@ -545,16 +532,14 @@ class O59Policy:
             )
             stream = _Stream(
                 history,
-                GpuTokenHistory(history, self.model.codec, self.device)
+                GpuTokenHistory(history, self.model.codec, self.device, self.kv_update_frames)
                 if self.history_mode == "kv_cache"
                 else GpuContextHistory(history, self.model.codec, self.device),
                 item.controlled_port,
                 player_id,
                 item.frame_id,
                 True,
-                deque(),
             )
-            self._stream = stream
             if self.history_mode == "kv_cache":
                 cache = self._caches.get(item.stream_id)
                 if cache is None:
@@ -574,10 +559,17 @@ class O59Policy:
         return stream
 
     @torch.inference_mode()
-    def _plan(self, item: PolicyInput, stream: _Stream) -> None:
-        context = stream.gpu.context(stream.player_id, item.stream_id, stream.reset_pending)
+    def _plan(
+        self, item: PolicyInput, stream: _Stream, fixed_actions: tuple[ControllerAction, ...]
+    ) -> tuple[ControllerAction, ...]:
+        if self.kv_cuda_graphs:
+            assert isinstance(stream.gpu, GpuTokenHistory)
+            stream.gpu.upload(stream.player_id)
+            context = stream.gpu.metadata(item.stream_id, stream.reset_pending)
+        else:
+            context = stream.gpu.context(stream.player_id, item.stream_id, stream.reset_pending)
         observed = stream.gpu.action_indices()
-        committed = np.stack([_action_vector(action) for action in item.pending_actions])
+        committed = np.stack([_action_vector(action) for action in fixed_actions])
         forced = self.model.codec.quantize(torch.from_numpy(committed).to(self.device).unsqueeze(0))
         self._rng.begin(context)
         draws = []
@@ -627,8 +619,8 @@ class O59Policy:
                 .numpy()
             )
         self.decode_seconds.append(time.perf_counter() - started)
-        stream.queued.extend(_controller_action(row) for row in planned)
         stream.reset_pending = False
+        return tuple(_controller_action(row) for row in planned)
 
     @property
     def sampling_seed(self) -> int:
@@ -642,97 +634,63 @@ class O59Policy:
     def supported_horizons(self) -> tuple[int, ...]:
         return contiguous_horizons(self.model.head_offsets)
 
-    def reset_chunks(self, *, seed: int | None = None) -> None:
+    @property
+    def prediction_horizon(self) -> int:
+        return self._prediction_frames
+
+    def reset_prediction(self, *, seed: int | None = None) -> None:
         if seed is not None:
             if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
                 raise ValueError("sampling seed must be a nonnegative integer")
             self._seed = seed
-        self._stream = None
-        self._chunk_streams.clear()
-        self._chunk_generations.clear()
+        self._prediction_streams.clear()
+        self._prediction_generations.clear()
+        self._prediction_sequences.clear()
         self._rng = SlotGroupRng(self._seed, CONTROLLER_GROUP_NAMES)
         self.decode_seconds.clear()
 
-    def prepare_chunks(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None:
-        if horizon not in self.supported_horizons or not 0 <= prefix_frames < horizon:
-            raise ValueError("O59 chunk shape requires contiguous trained heads and an unforced tail")
-        if set(runtime.transport_delays) - set(self.spec.supported_transport_delays):
-            raise ValueError("O59 chunk transport delay is unsupported")
-        self.model.temporal.configure_live_horizons((horizon,))
-        self._chunk_mode = True
-        self._prediction_frames = horizon
-        self._prefix_frames = prefix_frames
-        self._runtime = None
-        self.reset_chunks()
-        self.prepare(runtime)
-
-    def warmup_context(self, stream_id: int, source_frame: int, transport: int) -> tuple[PolicyInput, ...]:
-        observation = {
-            name: (0 if feature_kind(relative, ITEM_COLUMNS) in ("cat", "button") else 0.0)
-            for name, relative in _ROUTES[1]
-        }
-        return tuple(
-            PolicyInput(
-                stream_id,
-                frame,
-                1,
-                observation,
-                NEUTRAL_CONTROLLER_ACTION,
-                (NEUTRAL_CONTROLLER_ACTION,) * transport,
-                reset=frame == source_frame - self.context_frames + 1,
-            )
-            for frame in range(source_frame - self.context_frames + 1, source_frame + 1)
-        )
-
     @torch.inference_mode()
-    def plan_chunks(self, requests: Sequence[ChunkRequest]) -> Sequence[ChunkResponse]:
-        if self._runtime is None or not self._chunk_mode:
-            raise RuntimeError("O59 chunk policy is not prepared")
-        if not requests or len(requests) > self._runtime.max_batch_size:
-            raise ValueError("invalid O59 chunk batch size")
+    def predict(self, requests: Sequence[PredictionRequest]) -> Sequence[ActionPlan]:
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("history decoder is not prepared for prediction")
+        if not requests or len(requests) > runtime.max_batch_size:
+            raise ValueError("invalid history decoder prediction batch size")
         if len({request.stream_id for request in requests}) != len(requests):
-            raise ValueError("duplicate O59 chunk stream")
-        responses = []
+            raise ValueError("duplicate history decoder prediction stream")
+        plans = []
         for request in requests:
-            validate_chunk_request(
+            validate_prediction_request(
                 self.spec,
-                self._runtime,
+                runtime,
                 request,
                 context_frames=self.context_frames,
                 prefix_frames=self._prefix_frames,
             )
-            stream = self._chunk_streams.get(request.stream_id)
-            if self._chunk_generations.get(request.stream_id) != request.generation:
+            generation = self._prediction_generations.get(request.stream_id)
+            if generation is not None and request.generation < generation:
+                raise ValueError("obsolete history decoder prediction generation")
+            if generation == request.generation and request.sequence <= self._prediction_sequences.get(
+                request.stream_id, -1
+            ):
+                raise ValueError("obsolete history decoder prediction sequence")
+            stream = self._prediction_streams.get(request.stream_id)
+            if generation != request.generation:
                 stream = None
-            self._stream = stream
-            for item in request.context:
-                if stream is None or item.frame_id > stream.last_frame:
-                    stream = self._ingest(replace(item, reset=stream is None))
+            if stream is not None and request.observations[0].frame_id != stream.last_frame + 1:
+                raise ValueError("prediction observations must start at the next frame")
+            for item in request.observations:
+                if stream is not None and item.reset:
+                    raise ValueError("prediction reset requires a new generation")
+                stream = self._ingest(replace(item, reset=stream is None), stream)
             if stream is None or stream.last_frame != request.source_frame:
-                raise ValueError("obsolete O59 chunk request")
-            stream.queued.clear()
-            self._plan(replace(request.context[-1], pending_actions=request.forced_prefix), stream)
-            responses.append(chunk_response(request, tuple(stream.queued)))
-            stream.queued.clear()
-            self._chunk_streams[request.stream_id] = stream
-            self._chunk_generations[request.stream_id] = request.generation
-        return tuple(responses)
-
-    def step(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
-        if self._runtime is None:
-            raise RuntimeError("O59 policy is not prepared")
-        validate_policy_inputs(self.spec, self._runtime, inputs)
-        return self.step_prevalidated(inputs)
-
-    @torch.inference_mode()
-    def step_prevalidated(self, inputs: Sequence[PolicyInput]) -> Sequence[PolicyOutput]:
-        if len(inputs) != 1:
-            raise ValueError("O59 policy requires one input")
-        item = inputs[0]
-        stream = self._ingest(item)
-        if not stream.queued:
-            self._plan(item, stream)
-        return (PolicyOutput(item.stream_id, stream.queued.popleft()),)
+                raise ValueError("obsolete history decoder prediction request")
+            planned = self._plan(request.observations[-1], stream, request.fixed_actions)
+            plans.append(action_plan(request, planned))
+            self._prediction_streams[request.stream_id] = stream
+            self._prediction_generations[request.stream_id] = request.generation
+            self._prediction_sequences[request.stream_id] = request.sequence
+        return tuple(plans)
 
 
 def load_o59_policy(
@@ -744,7 +702,7 @@ def load_o59_policy(
     history_mode: Literal["window", "kv_cache"] = "kv_cache",
     kv_update_frames: int = 2,
     kv_cuda_graphs: bool = True,
-) -> O59Policy:
+) -> HistoryDecoderPolicy:
     with extract_policy_bundle(path) as (manifest, root):
         if (
             manifest.backend != O59_BACKEND
@@ -785,7 +743,7 @@ def load_o59_policy(
             model = GPT(cfg, vocabulary)
         model.load_state_dict(cast(dict[str, Tensor], raw["model"]), strict=True, assign=True)
         model = model.to(device).eval()
-    return O59Policy(
+    return HistoryDecoderPolicy(
         model,
         cfg,
         stats,

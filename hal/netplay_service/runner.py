@@ -27,22 +27,23 @@ from loguru import logger
 from peppi_py.game import EndMethod
 
 from hal.eval.match_summary import summarize_trajectory
-from hal.eval.play import PlayResult
-from hal.eval.play import read_new_replay_end
-from hal.eval.play import run_netplay_match
-from hal.eval.realtime import run_realtime_match
+from hal.eval.netplay import DolphinConnectionLost
+from hal.eval.netplay import run_netplay_match
+from hal.eval.qualification import check_realtime_budget
+from hal.eval.replays import read_new_replay_end
+from hal.eval.results import PlayResult
+from hal.eval.scheduling import ActionScheduler
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicySpec
+from hal.inference.api import PredictionPolicy
 from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
-from hal.inference.chunks import ChunkPolicy
-from hal.inference.chunks import TimingSchedule
 from hal.inference.loader import HistoryMode
 from hal.inference.loader import load_policy
 from hal.inference.loader import resolve_history_mode
-from hal.netplay_service.calibration import calibrate
-from hal.netplay_service.chunks import ChunkBatcher
-from hal.netplay_service.chunks import EngineLost
-from hal.netplay_service.chunks import RemoteChunkPolicy
+from hal.inference.worker import InferenceClient
+from hal.inference.worker import InferenceUnavailable
+from hal.inference.worker import InferenceWorker
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -61,12 +62,10 @@ from hal.netplay_service.health import aggregate_runner_status
 from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.health import write_runner_status
 from hal.netplay_service.health import write_slot_status
-from hal.netplay_service.inference import RemotePolicy
 from hal.netplay_service.queue import InvalidTransitionError
 from hal.netplay_service.queue import QueueStore
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
-from hal.netplay_service.schedule import FrameSchedule
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
@@ -125,6 +124,9 @@ class RunnerConfig:
     seed: int | None = None
     compiled: bool = False
     history_mode: HistoryMode = "auto"
+    kv_update_frames: int = 2
+    prediction_shape: tuple[int, int] | None = None
+    replan_interval_frames: int | None = None
     batch_wait_seconds: float = 0.0005
     max_frames: int = 54_000
 
@@ -139,6 +141,8 @@ class RunnerConfig:
             raise ValueError("runner Slippi ports must be in [1, 65535]")
         if not self.git_sha or "/" in self.git_sha:
             raise ValueError("runner git_sha must be a non-empty identifier")
+        if self.replan_interval_frames is not None and self.replan_interval_frames < 1:
+            raise ValueError("runner replan interval must be positive")
         if self.max_frames < 6:
             raise ValueError("runner max_frames must be at least 6")
 
@@ -213,11 +217,11 @@ class _SlotHealthReporter:
             snapshot = self._monitor.observe_frame(frame_id, dolphin_step_seconds, time.monotonic())
         self._raise_if_recovery_required(snapshot)
 
-    def configure_schedule(self, schedule: TimingSchedule) -> None:
+    def configure_schedule(self, schedule: FrameTiming) -> None:
         with self._lock:
             self._monitor.chunk_health = ChunkHealth(schedule)
 
-    def observe_schedule(self, schedule: FrameSchedule) -> None:
+    def observe_schedule(self, schedule: ActionScheduler) -> None:
         with self._lock:
             self._monitor.observe_chunks(
                 ChunkHealth(
@@ -552,11 +556,12 @@ class _LivePolicySettings:
 def _run_reservation(
     config: SlotConfig,
     store: QueueStore,
-    policy: RemotePolicy | RemoteChunkPolicy,
+    policy: InferenceClient,
     runtime: RuntimeConfig,
     job: Job,
     stop: _StopEvent,
     health: _SlotHealthReporter,
+    timing: FrameTiming,
 ) -> None:
     replay_dir = config.replay_dir / f"slot-{config.slot}"
     replay_dir.mkdir(parents=True, exist_ok=True)
@@ -595,6 +600,7 @@ def _run_reservation(
         )
 
     store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=60.0)
+    health.configure_schedule(timing)
     health.connecting(job.choices.online_delay)
     try:
         with (
@@ -608,42 +614,28 @@ def _run_reservation(
                 slippi_port=config.slippi_port,
                 step_timeout_seconds=FRAME_STALL_SECONDS,
                 connect_timeout_seconds=60.0,
-                realtime=isinstance(policy, RemoteChunkPolicy),
+                realtime=True,
             ) as session,
         ):
             rematch = False
             while not stop.is_set():
                 previous = frozenset(replay_dir.rglob("*.slp"))
                 started_at = datetime.now(UTC)
-                if isinstance(policy, RemoteChunkPolicy):
-                    result = run_realtime_match(
-                        session,
-                        _setup(job, rematch=rematch),
-                        policy,
-                        runtime,
-                        player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
-                        policy_settings=settings.current,
-                        max_frames=config.max_frames,
-                        rematch=rematch,
-                        on_live=mark_live,
-                        observer=health,
-                        schedule_observer=health,
-                        stream_id=config.stream_id,
-                    )
-                else:
-                    result = run_netplay_match(
-                        session,
-                        _setup(job, rematch=rematch),
-                        policy,
-                        runtime,
-                        player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
-                        policy_settings=settings.current,
-                        max_frames=config.max_frames,
-                        rematch=rematch,
-                        on_live=mark_live,
-                        observer=health,
-                        stream_id=config.stream_id,
-                    )
+                result = run_netplay_match(
+                    session,
+                    _setup(job, rematch=rematch),
+                    policy,
+                    runtime,
+                    timing,
+                    player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
+                    policy_settings=settings.current,
+                    max_frames=config.max_frames,
+                    rematch=rematch,
+                    on_live=mark_live,
+                    observer=health,
+                    schedule_observer=health,
+                    stream_id=config.stream_id,
+                )
                 ended_at = datetime.now(UTC)
                 replay_end = read_new_replay_end(replay_dir, previous)
                 if replay_end.method is EndMethod.NO_CONTEST:
@@ -660,11 +652,7 @@ def _run_reservation(
                 replay = replay_end.path
                 actual_stage = _stage_name(result.stage)
                 human_result = _human_result(result)
-                if isinstance(policy, RemoteChunkPolicy):
-                    timing = next(s for s in policy.schedules if s.transport_frames == job.choices.online_delay)
-                    limit_ms = timing.budget_frames * 1000 / 60
-                else:
-                    limit_ms = 33.3 if job.choices.online_delay == 2 else 16.7
+                limit_ms = timing.thinking_allowance_frames * 1000 / 60
                 if result.inference_p95_ms >= limit_ms:
                     logger.warning(
                         "reservation {} missed the delay-{} policy deadline: p95={:.1f}ms limit={:.1f}ms",
@@ -722,6 +710,7 @@ def _run_reservation(
                     if job.status is JobStatus.REMATCH_READY:
                         rematch = True
                         live = False
+                        health.configure_schedule(timing)
                         health.connecting(job.choices.online_delay)
                         break
                     if job.status in TERMINAL_STATUSES:
@@ -747,7 +736,7 @@ def _slot_worker(
     runtime: RuntimeConfig,
     connection: Connection,
     stop: _StopEvent,
-    schedules: tuple[TimingSchedule, ...],
+    schedules: tuple[FrameTiming, ...],
     context_frames: int,
 ) -> None:
     # The supervisor owns terminal signals. A SIGINT in Event.wait() can kill
@@ -759,8 +748,7 @@ def _slot_worker(
         connection,
         _SlotHealthReporter(config.slot, config.status_path) as health,
     ):
-        policy = RemoteChunkPolicy(spec, context_frames, schedules, connection, stop)
-        health.configure_schedule(schedules[0])
+        policy = InferenceClient(spec, context_frames, connection, stop)
         while not stop.is_set():
             health.idle()
             next_upload_attempt = _retry_pending_uploads(
@@ -773,21 +761,28 @@ def _slot_worker(
                 stop.wait(0.25)
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
-            _handle_reservation(config, store, policy, runtime, job, stop, health)
+            timing = next(s for s in schedules if s.input_delay_frames == job.choices.online_delay)
+            _handle_reservation(config, store, policy, runtime, job, stop, health, timing)
 
 
 def _handle_reservation(
     config: SlotConfig,
     store: QueueStore,
-    policy: RemotePolicy | RemoteChunkPolicy,
+    policy: InferenceClient,
     runtime: RuntimeConfig,
     job: Job,
     stop: _StopEvent,
     health: _SlotHealthReporter,
+    timing: FrameTiming,
 ) -> None:
     try:
-        _run_reservation(config, store, policy, runtime, job, stop, health)
-    except EngineLost as error:
+        _run_reservation(config, store, policy, runtime, job, stop, health, timing)
+    except DolphinConnectionLost as error:
+        health.recovering("dolphin_connection_lost")
+        logger.error("reservation {}: {}", job.id, error)
+        with suppress(InvalidTransitionError):
+            store.forfeit_service_failure(job.id, config.worker_id)
+    except InferenceUnavailable as error:
         health.recovering("inference_engine_lost")
         logger.error("reservation {}: {}", job.id, error)
         with suppress(InvalidTransitionError):
@@ -833,10 +828,12 @@ def run(config: RunnerConfig) -> None:
         seed=config.seed,
         compiled=config.compiled,
         history_mode=config.history_mode,
+        kv_update_frames=config.kv_update_frames,
     )
     history_mode = resolve_history_mode(policy.spec.backend, config.history_mode)
     runtime = RuntimeConfig(
         max_batch_size=len(config.user_jsons),
+        replan_interval_frames=config.replan_interval_frames,
         transport_delays=(2,) if policy.spec.backend == "o59-history-decoder" else (2, 3),
     )
     logger.info(
@@ -849,16 +846,16 @@ def run(config: RunnerConfig) -> None:
         runtime.transport_delays,
         os.environ.get("DISPLAY", "unset"),
     )
-    if not isinstance(policy, ChunkPolicy):
-        raise ValueError("netplay serving requires an asynchronous chunk backend")
-    calibration = calibrate(policy, runtime, config.batch_wait_seconds)
+    if not isinstance(policy, PredictionPolicy):
+        raise ValueError("netplay serving requires a prediction backend")
+    budget_check = check_realtime_budget(policy, runtime, config.batch_wait_seconds, shape=config.prediction_shape)
     config.status_path.parent.mkdir(parents=True, exist_ok=True)
-    calibration_path = config.status_path.with_suffix(".calibration.json")
-    calibration_path.write_text(
+    budget_path = config.status_path.with_suffix(".budget.json")
+    budget_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
-                "calibration": asdict(calibration),
+                "schema_version": 3,
+                "budget_check": asdict(budget_check),
                 "git_sha": config.git_sha,
                 "model_sha256": _sha256(config.policy),
                 "python": sys.version,
@@ -941,7 +938,7 @@ def run(config: RunnerConfig) -> None:
                     runtime,
                     child_connections[slot],
                     stop,
-                    calibration.schedules,
+                    budget_check.timings,
                     policy.context_frames,
                 ),
                 name=f"hal-netplay-slot-{slot}",
@@ -950,9 +947,9 @@ def run(config: RunnerConfig) -> None:
             processes.append(process)
 
         status_lock = threading.Lock()
-        batcher = ChunkBatcher(
+        batcher = InferenceWorker(
             policy,
-            calibration.schedules[0].horizon,
+            budget_check.timings[0].prediction_horizon_frames,
             parent_connections,
             batch_wait_seconds=config.batch_wait_seconds,
         )
@@ -1049,6 +1046,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--history-mode", choices=("auto", "window", "kv_cache"), default="auto")
+    parser.add_argument("--kv-update-frames", type=int, choices=(1, 2, 4), default=2)
+    parser.add_argument("--replan-interval", type=int)
+    parser.add_argument("--prediction-shape", nargs=2, type=int, metavar=("HORIZON", "PREFIX"))
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
     if args.user_jsons is None:
@@ -1074,6 +1074,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=args.seed,
             compiled=args.compiled,
             history_mode=args.history_mode,
+            kv_update_frames=args.kv_update_frames,
+            prediction_shape=(args.prediction_shape[0], args.prediction_shape[1])
+            if args.prediction_shape is not None
+            else None,
+            replan_interval_frames=args.replan_interval,
             max_frames=args.max_frames,
         )
     )

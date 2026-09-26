@@ -66,6 +66,7 @@ from hal.eval.h2h import run_h2h
 from hal.eval.harness import usable_cpus
 from hal.eval.paired import summarize_paired
 from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.scheduling import FrameTiming
 from hal.inference.api import RuntimeConfig
 from hal.inference.backends.temporal_awr.policy import load_o50_checkpoint
 from hal.inference.checkpoints import resolve_checkpoint
@@ -525,8 +526,9 @@ def _load_conditioned_temporal_builder(
             allow_masked_player_identity=identity is None,
             name=args.name,
         )
-        policy.prepare(runtime)
-        return PolicyBatchAdapter(policy, runtime, player_identity=identity)
+        timing = FrameTiming(delay, 0, replan, horizon)
+        policy.prepare_prediction(runtime, horizon, timing.fixed_prefix_frames)
+        return PolicyBatchAdapter(policy, runtime, timing, player_identity=identity)
 
     protocol: dict[str, Any] = {
         "name": args.name,

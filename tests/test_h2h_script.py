@@ -199,8 +199,12 @@ def test_conditioned_o52_builder_uses_portable_transport_path(monkeypatch) -> No
     built = []
 
     class FakePolicy:
-        def prepare(self, runtime) -> None:
+        def prepare_prediction(self, runtime, horizon, prefix_frames) -> None:
+            assert (horizon, prefix_frames) == (4, 2)
             prepared.append(runtime)
+
+        def reset_prediction(self) -> None:
+            pass
 
     source = SimpleNamespace(
         config=SimpleNamespace(
