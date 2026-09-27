@@ -2,6 +2,65 @@
   "dense_continuation": {
     "app_id": "ap-8UEh60S0Vp1tB6GiHtqeDr",
     "archive_sha256": "c35a596d0936a5ea6b46e056e325aad4c7ec7aec5799399222eda5e8e1850453",
+    "candidate_trial_1": {
+      "compile_seconds": 38.99880501200005,
+      "completed_boots": 96,
+      "emulator_fps": 328.8922759735285,
+      "failed_boot_indices": [
+        10,
+        39
+      ],
+      "failed_workers": 2,
+      "frames_per_boot": 7200,
+      "load_seconds": 2.4048974780002936,
+      "log_sha256": "a807aaa023d7b7a9e446616d51f47e2ddd8e063c04f48edccc7fe6a94f3197f6",
+      "net_stock_per_min": 1.3936597415475878,
+      "peak_gpu_allocated_bytes": 3148174336,
+      "peak_gpu_reserved_bytes": 3172990976,
+      "remaining_dolphin_pids": [],
+      "report_sha256": "a5a1c05f82d7478eef11575bb33503a51cfbb4176e8ce843ad0aad28d21d5ae4",
+      "runtime_specs": 26,
+      "sampled_peak_tree_rss_bytes": 20854140928,
+      "sweep_seconds": 2101.5999781509995
+    },
+    "comparison_trial_1": {
+      "gpu_memory_ratio": 0.9975691789477237,
+      "host_rss_ratio": 0.9969205434818791,
+      "is_clean_crash_free_trial": false,
+      "net_stock_uncertainty": {
+        "bootstrap_resamples": 2000,
+        "bootstrap_seed": 0,
+        "candidate_minus_control_mean_net_stock_per_min": 0.20071496427203842,
+        "percentile_95_ci": [
+          0.027413299557249308,
+          0.36360260890481877
+        ],
+        "scope": "Character-matched boot bootstrap; not common game randomness. Retries occur at different boots. These are diagnostic outcomes, not a clean crash-free gameplay qualification."
+      },
+      "paired_boot_deltas": {
+        "damage_dealt_per_min_delta_ci_hi": 15.094628516623382,
+        "damage_dealt_per_min_delta_ci_lo": -0.658046858826783,
+        "damage_dealt_per_min_delta_mean": 6.956070591359331,
+        "damage_taken_per_min_delta_ci_hi": 2.758967314655481,
+        "damage_taken_per_min_delta_ci_lo": -7.359404829067542,
+        "damage_taken_per_min_delta_mean": -2.329625852537813,
+        "matching_rate": 1.0,
+        "n_boots": 96.0,
+        "n_boots_rated": 96.0,
+        "n_rows_a": 160.0,
+        "n_rows_b": 146.0,
+        "stocks_lost_per_min_delta_ci_hi": 0.017354011892625084,
+        "stocks_lost_per_min_delta_ci_lo": -0.21761485293358585,
+        "stocks_lost_per_min_delta_mean": -0.10020914798151064,
+        "stocks_taken_per_min_delta_ci_hi": 0.21551848340988786,
+        "stocks_taken_per_min_delta_ci_lo": -0.013484191106516304,
+        "stocks_taken_per_min_delta_mean": 0.10050581629052781
+      },
+      "scope": "Both runs retry two in-game Dolphin crashes at different boots. Character-matched bootstrap is diagnostic, not common randomness; throughput includes differing failed attempts and is not a clean identical-workload gate.",
+      "stock_rate_delta": 0.2012615031124989,
+      "throughput_ratio": 1.7282567060381053,
+      "trial": 1
+    },
     "container_id": "ta-01M3J4C30440DJV5DQTMGVKFQR",
     "control_identity": {
       "archive_sha256": "c63d8d0b1b409aebe45cb4f4fbe6202005b942e8296c80346e21fb1c28890cdc",
@@ -79,7 +138,7 @@
     "recovery_bound_seconds": 120,
     "retries": 0,
     "review_sha256": "4dd38cbc096930493e1a692e3010512396f08efd95ef35870ec914b1eb3a875f",
-    "status": "running dense-candidate-1; first control completed96 boots after2 in-game emulator crashes/retries; no clean control qualification claim",
+    "status": "dense-control-2 running; control and candidate trial1 each finish all96 boots after2 mid-game crashes/retries. Neither is a clean crash-free qualification.",
     "supplemental_review": {
       "control_source_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
       "memory_observer_sha256": "106bba203c9fbe6cf900a88c0a7265dea9eb3c72507c2781ad074d4f7f448df0",
@@ -360,7 +419,7 @@
   "limitations": [
     "RTX PRO 6000 Blackwell Server Edition is not RTX 6000 Ada.",
     "Short live diagnostics do not qualify real-time capacity or long soaks.",
-    "Production resumes and has matching data/loss/RNG state, but strict next-update bitwise equality remains unresolved; repeated unmodified control also differs.",
+    "Production resumes, but next-update bitwise equality remains unresolved. The third trial has broader tensor/loss differences than trial1 and requires its own quantitative control-repeat diagnosis.",
     "Memory observations are sampled cgroup maxima where kernel high-water counters are unavailable; end-of-run RSS is not a peak.",
     "First dense control retries two mid-game emulator crashes; final accepted boots alone do not establish crash-free or unchanged per-wave sampling."
   ],
@@ -436,13 +495,93 @@
     "source_sha": "18dfb4b9a591fe3eb1c8fb5545ffa150fd93a414",
     "transport_probe_sha256": "e0af8b739dc877a8d5c6e6b47e5da2114483dbeded28cad30918cdbcdba77c88"
   },
-  "recorded_at": "2026-09-27T20:44:00Z",
+  "offline_neutral_control": {
+    "a": {
+      "first_600_fps": 27.96811488070996,
+      "gap_over_100_ms_count": 39,
+      "median_gap_period_frames": 15.0,
+      "median_gap_period_ms": 541.39849,
+      "raw_sha256": "8517a85456088da8cb8b980d1e276782389f19b45857f0dc65b0c18665dfef61"
+    },
+    "b": {
+      "first_600_fps": 28.122479330766176,
+      "gap_over_100_ms_count": 39,
+      "median_gap_period_frames": 15.0,
+      "median_gap_period_ms": 538.150648,
+      "raw_sha256": "976ee70a3a4163ea3652b45b0a622492712d7ef3793fb9d514e4fd9aae0be002"
+    },
+    "cleanup_errors": [],
+    "container_removed": true,
+    "control_sha256": "c7149c8e84d9de5e54a79ea89ae871d76f9f805d72e729e9e9adf2c306a1a0ea",
+    "cpu_limit": 6,
+    "cross_session_gap_overlap": {
+      "a_gap_count": 39,
+      "a_overlapping_gap_count": 39,
+      "b_gap_count": 39,
+      "b_overlapping_gap_count": 39,
+      "median_overlap_ms": 263.603349,
+      "overlap_pair_count": 39
+    },
+    "exit_code": 0,
+    "image_id": "sha256:5e9389dc6e30af672831c55f244bee2fc1227a61bb439fbe5515a2b4534d49dd",
+    "launcher_sha256": "17f96565ad579e61c1c76556d326901c34cca27c5021ba03a7754d2b2cf08493",
+    "maximum_dolphin_processes": 2,
+    "memory_gib": 12,
+    "result_sha256": "71cceb0d9f78b20a2aecacde414cd52efcdaf95ebd30f7463c1532f331a0a7d0",
+    "scope": "Two independent local-VS games retain synchronized long pauses without netplay, policy, or inference. Remaining differences are menu/controller and polling cadence, recorded in the manifest. This points to the shared emulator/graphics/host setup but does not identify the cause.",
+    "shutdown": {
+      "exit_codes": {
+        "offline-a": 0,
+        "offline-b": 0
+      },
+      "killed": [],
+      "live_workers": [],
+      "seconds": 0.37040220107883215,
+      "terminated": []
+    },
+    "source_archive_sha256": "98477439a6eb95bc7501778a77aef07e95d8f950b9d61d04d01f9d92b24c5b02",
+    "source_sha": "18dfb4b9a591fe3eb1c8fb5545ffa150fd93a414",
+    "transport_probe_sha256": "e0af8b739dc877a8d5c6e6b47e5da2114483dbeded28cad30918cdbcdba77c88"
+  },
+  "offline_training_evidence": {
+    "bytes": 4979600,
+    "files": 65,
+    "r2_key": "runs/refactor-059/qualification-offline-and-training/evidence-10e52d19cdfdd030623f1da4658894f91e9bf37839e998f992c87c2f731733ae.tar.gz",
+    "sha256": "10e52d19cdfdd030623f1da4658894f91e9bf37839e998f992c87c2f731733ae",
+    "upload_verified": true
+  },
+  "progress_clock_validation": {
+    "cpu_deselected": 18,
+    "cpu_passed": 1325,
+    "cpu_seconds": 100.58,
+    "cpu_skipped": 24,
+    "cpu_warnings": 10,
+    "focused_tests": 30,
+    "integration_deselected": 6,
+    "integration_passed": 7,
+    "integration_seconds": 53.56,
+    "integration_warnings": 6,
+    "regression": "Before fix, test_progress_clock_is_independent_of_request_timestamp failed on cumulative FPS=-0.0. A request nanosecond timestamp overwrote the monotonic-seconds progress start.",
+    "ruff_format": "pass",
+    "ruff_lint": "pass",
+    "scope": "Only cumulative progress logging changed; broker total_seconds and independent sweep_seconds were unaffected.",
+    "source_sha": "f15a15ac",
+    "ty": "pass"
+  },
+  "recorded_at": "2026-09-27T21:18:13.774689+00:00",
   "schema_version": 1,
   "supplemental_sources": {
     "bytes": 20480,
     "download_sha256_verified": true,
     "r2_key": "runs/refactor-059/supplemental-review/sources-6d76b32889a6cb7e225c1a7f668f7d0b746efd247a43918ab8f89356128f7ae8.tar",
     "sha256": "6d76b32889a6cb7e225c1a7f668f7d0b746efd247a43918ab8f89356128f7ae8"
+  },
+  "third_trial_diagnosis_evidence": {
+    "bytes": 56463,
+    "files": 17,
+    "r2_key": "runs/refactor-059/resume-third-trial-diagnosis/evidence-c455a3731facfd9da6149d6249ca819ffeff9377de3c49e662530bb2b8eb51d0.tar.gz",
+    "sha256": "c455a3731facfd9da6149d6249ca819ffeff9377de3c49e662530bb2b8eb51d0",
+    "upload_verified": true
   },
   "training": {
     "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
@@ -891,7 +1030,7 @@
         }
       ]
     },
-    "status": "Third resume pair running. Three loader pairs and two training pairs complete; strict bitwise comparison still differs on embedding-related tensors, including repeated unmodified control.",
+    "status": "All20 stages complete. Training/loader commands exit0; exact comparisons fail. Three-pair performance complete. Third numerical diagnosis shows wider gradient and parameter differences despite a one-FP32-step loss difference; strict next-update qualification remains open.",
     "steps": [
       {
         "command": [
@@ -1189,7 +1328,46 @@
         "sampled_cgroup_peak_gib": 134.02132415771484
       }
     ],
+    "third_resume_comparison": {
+      "candidate3_vs_control1_mismatch_count": 426,
+      "changed_gradient_records": 123,
+      "changed_model_records": 131,
+      "changed_optimizer_records": 168,
+      "diagnostic_helper_sha256": "8ec5f4a98229f1712620e3ca087619bd900b921a24ab6c8719e8cdd3346b078d",
+      "gradient_max_absolute_difference": 2.0343344658613205e-05,
+      "gradient_norm_absolute_difference": 5.364418029785156e-06,
+      "includes_loss_and_gradient_norm_differences": true,
+      "leaf_count": 989116,
+      "model_max_absolute_difference": 0.0012065432965755463,
+      "nll_sum_max_absolute_difference": 0.00048828125,
+      "nll_sum_max_relative_difference": 1.9973231874641604e-07,
+      "paired_nan_corrected_mismatch_count": 426,
+      "raw_columns_sha256": "f5c4ccfc25f958ca937b8348906e42f40d90ef34ffa89b606ffcb4a25f1145a4",
+      "raw_mismatch_count": 428,
+      "reports": {
+        "resume-candidate-3-vs-control-1-comparison.json": "2d934944ddd644344d03d690a334f32b0bde4e6262c8dd0bce62c1fa34edc959",
+        "resume-candidate-3-vs-control-1-diagnosis.json": "756c817d6b1608dc70cab9a8f3df432655d0cfbb73e97afd347fba87b9331572",
+        "resume-candidate-repeat-3-comparison.json": "edbbc3b719370e31bda3dbaca9e9fda79b1ad4f78c3b40d73782eb89853fd3bd",
+        "resume-comparison-3-paired-nans.json": "c41aee2e0a8a8e88b67072c99937ab852bb9d4d9de45637db4b46c7279d8371a",
+        "resume-control-repeat-3-comparison.json": "b20a8aab94a909826fdb71dfbb6c60720237436aa1bda4896df71143007c82d4",
+        "resume-control-repeat-3-diagnosis.json": "0557f63001497e7432b6ed69360abdb842a8de0d2bac8067d580aa93742de2a9",
+        "resume-diagnosis-3.json": "4828485e54ca150f1180fc3ccbdca34a6dc34f7dfd7a04bba9006e57414ab356"
+      },
+      "same_candidate_source_trial1_vs_trial3_mismatch_count": 426,
+      "same_candidate_source_trial1_vs_trial3_scope": "This broader variation also occurs between two runs of source24bf25ec with identical checkpoint, data, and RNG records. Its cause and whether extraction affected numerical stability remain unresolved.",
+      "scope": "All 989116 saved leaves compared after verifying capture hashes. Data and RNG records match; candidate3 has one-FP32-step loss variation, wider gradient differences, and updated parameters differing by up to0.00120654. Repeated controls1/3 only differ in embedding-related records. No numerical tolerance relaxed; cause and strict next-update qualification remain unresolved.",
+      "snapshot_hashes_verified_by_comparer": true,
+      "training_loss_absolute_difference": 1.1920928955078125e-07,
+      "training_loss_fp32_steps": 1,
+      "unchanged_control_trial1_vs_trial3_mismatch_count": 47,
+      "unchanged_control_trial1_vs_trial3_scope": "Only embedding-related tensors differ; losses match and changed parameters differ by one FP32 step."
+    },
     "timeout_seconds": 21600,
+    "training_three_trial_summary": {
+      "maximum_paired_sampled_memory_ratio": 1.0006154271161507,
+      "median_paired_throughput_ratio": 0.999634640189211,
+      "scope": "Three production pairs, each100 warmup and200 measured updates. Throughput and sampled memory meet proposed limits. Numerical resume qualification is separate and remains unresolved."
+    },
     "training_trial_1": {
       "candidate_measurement_seconds": 80.1379798349999,
       "candidate_peak_gpu_allocated_bytes": 3382684672,
@@ -1230,6 +1408,27 @@
       "last_measured_update": 8493,
       "measured_updates": 200,
       "throughput_ratio": 0.9992388381032256,
+      "warm_updates": 100
+    },
+    "training_trial_3": {
+      "candidate_measurement_seconds": 80.11751466799979,
+      "candidate_peak_gpu_allocated_bytes": 3382687232,
+      "candidate_peak_gpu_reserved_bytes": 135444561920,
+      "candidate_performance_sha256": "beb485af6689d33da14929b0fb088ba3e59cd80d80553c07adc674f400e09d98",
+      "candidate_sampled_cgroup_peak_gib": 134.1364860534668,
+      "candidate_samples_per_second": 1278.1225232002885,
+      "candidate_warm_seconds": 43.01040191299944,
+      "control_measurement_seconds": 80.08824294799979,
+      "control_peak_gpu_allocated_bytes": 3382687232,
+      "control_peak_gpu_reserved_bytes": 135444561920,
+      "control_performance_sha256": "fa1d5c334115646c8ebeba64611fc8a3ff2caae7210db9603a9a6134bb945077",
+      "control_sampled_cgroup_peak_gib": 134.05398559570312,
+      "control_samples_per_second": 1278.589668479641,
+      "control_warm_seconds": 42.9555925249997,
+      "first_measured_update": 8294,
+      "last_measured_update": 8493,
+      "measured_updates": 200,
+      "throughput_ratio": 0.999634640189211,
       "warm_updates": 100
     }
   }
