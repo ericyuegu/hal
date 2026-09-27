@@ -265,6 +265,13 @@ transition names parent checkpoint hash, old/new source SHA and parity report
 identity; all other provenance comparisons remain strict. Preserve lineage in
 subsequent checkpoints. No general provenance bypass is allowed.
 
+On 2026-09-27 the user reduced checkpoint qualification to one representative
+production checkpoint. Format/loading compatibility already passes with update
+131072. Use the retained update-8192 checkpoint for the real next-batch and
+next-update resume comparison, where AWR is active and the learning rate is
+nonzero. Keep the existing synthetic coverage before and after AWR activation.
+Do not continue searching for the original update-2048 and update-4096 fixtures.
+
 Existing version-1 bundles retain delay 2. A new capability version declares the
 new local and netplay profiles. Export accepts supported 059 descendants based on
 contracts and lineage, without a fixed W&B run identifier.
@@ -278,7 +285,7 @@ satisfy a gate. Raw large results belong in the existing run/artifact store.
 |---|---|---|
 | A Ownership | Final tree, one model/loader/scheduler/process driver, import boundaries, typed code, protected edits | Runtime retirement and import-boundary tests pass; final inventory/checks in progress. |
 | B Data | `.slp` full path/parity, 44-source audit, hashes, 2048 validation identities/tensors, sampler/resume geometry | Real cohort and statistics match exactly; synthetic loader resume and `.slp`→MDS→R2 publication audit pass. The complete 44-source v8 row audit remains open. |
-| C Model/resume | Count/order/init/groups; real 2048→2049 and 4096→4097 next batch/update incl non-unit AWR and all state | Proxy exact and default count pass. Required real boundary checkpoints have not been located; no substitute is claimed. |
+| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy exact, synthetic boundary resume, and default count pass. The retained update-8192 checkpoint is selected for the production comparison; that run remains open. |
 | D Artifacts | Old artifacts, descendants, new profiles, identity rejection | Actual update-131072 checkpoint validates without changing caller RNG, and re-exports as capability v2 with its checkpoint hash preserved. Artifact contract suite passes on CPU; qualified new profiles remain open. |
 | E Cache | B1/2/4/8/16/32, Q1/2/4/decomposition, wraps, sparse/permutation/reset/identity/temp/prefix0/2/3/4, dummy rows, one weights copy | Focused CPU/CUDA independence tests and real-checkpoint B2 BF16 conditional KL pass. Complete capacity/profile matrix remains open. |
 | F Scheduling | Exact deadlines, wire prefix, whole-plan rejection, consumed cursor, malformed replies, fallback counters | Focused scheduler/client/engine tests pass. Official intended-action chunk trace matches control. Live qualification remains open. |
@@ -327,8 +334,9 @@ HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_se
   and is not the real-time service gate or the required alternating-trial report.
 - Initial benchmark attempt failed with temporary-directory quota exhaustion.
   The rerun used `runs/refactor-059/tmp` and completed. No user files were deleted.
-- R2 inventory found retained059 milestones starting at8192; required2048/4096
-  boundaries remain unlocated. Do not replace these with a synthetic test.
+- R2 inventory found retained 059 milestones starting at 8192. The user reduced
+  the production resume gate to one representative checkpoint; update 8192 is
+  available. Loading more checkpoints is not required to establish the format.
 
 ### Numerical and process measurements
 
@@ -488,9 +496,9 @@ closing the corresponding gates.
 The default loader-core buffer needs 67.68 GiB for replay slots alone. Its
 conservative host estimate is 71.68 GiB, versus about 22 GiB free on this host.
 The production 131,072-slot performance gate therefore needs a larger host;
-a smaller local geometry must be labeled separately. Real update-2048 and
-update-4096 checkpoints, the pinned training GPU/environment, and an RTX 6000
-Ada host are also still required. No provenance bypass, lower-concurrency
+a smaller local geometry must be labeled separately. The selected production
+resume comparison still needs the matching training GPU/environment. The RTX
+6000 Ada hardware gates are also open. No provenance bypass, lower-concurrency
 substitute, or passing CPU suite closes those gates. The memory preflight is
 recorded in `runs/refactor-059/loader-preflight-default-v3.json`.
 

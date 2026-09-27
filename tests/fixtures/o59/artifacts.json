@@ -493,8 +493,7 @@
     "sha256": "81af02a949c3c436d5e527b5dd83600d42338887d4445de4dc515e489e6cbe94"
   },
   "required_resume_checkpoints": {
-    "update_2048": "not located",
-    "update_4096": "not located"
+    "update_8192": "available in R2; next-batch and next-update comparison not run"
   },
   "schema_version": 1,
   "validation_cohort": "tests/fixtures/o59/validation_cohort.json"

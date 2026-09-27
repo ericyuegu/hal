@@ -27,6 +27,6 @@ in `runs/refactor-059/evaluation-device-seam.log`. A full final-source CUDA
 rerun remains outstanding.
 
 This suite uses proxy training geometry for next-update resume. It does not
-replace the required real update-2048 and update-4096 checkpoint comparison.
+replace the required representative production-checkpoint resume comparison.
 The opt-in complete-path netplay hardware tests are separate and have not run
 in this record.
