@@ -70,6 +70,45 @@ def test_host_launcher_skips_cloudflare_for_local_mode(tmp_path: Path) -> None:
     assert "cloudflared" not in command_log
 
 
+def test_host_launcher_uses_two_distinct_workers_when_second_account_is_set(tmp_path: Path) -> None:
+    command_dir = tmp_path / "bin"
+    command_dir.mkdir()
+    log_path = tmp_path / "commands.log"
+    _write_executable(
+        command_dir / "uv",
+        'printf "uv|%s|%s\\n" "${HAL_NETPLAY_CAPACITY:-}" "$*" >> "$HAL_DEPLOY_TEST_LOG"\n'
+        "if [[ $* == *hal-netplay-api* ]]; then sleep 0.2; fi\n",
+    )
+    _write_executable(command_dir / "xvfb-run", 'shift\nexec "$@"\n')
+    environment_file = tmp_path / "netplay.env"
+    environment_file.write_text(
+        "\n".join(
+            (
+                "HAL_GIT_SHA=" + "a" * 40,
+                "HAL_NETPLAY_POLICY=/policy.halpolicy",
+                "HAL_NETPLAY_USER_JSON_A=/user-a.json",
+                "HAL_NETPLAY_USER_JSON_B=/user-b.json",
+                "HAL_ISO_PATH=/ssbm.ciso",
+                "HAL_NETPLAY_EMULATOR_PATH=/Slippi.AppImage",
+                "AWS_ENDPOINT_URL=https://example.invalid",
+                "AWS_ACCESS_KEY_ID=test",
+                "AWS_SECRET_ACCESS_KEY=test",
+                "AWS_BUCKET=test",
+                f"HAL_NETPLAY_STATE_DIR={tmp_path / 'state'}",
+                "",
+            )
+        )
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = f"{command_dir}:/usr/bin:/bin"
+    environment["HAL_DEPLOY_TEST_LOG"] = str(log_path)
+    result = subprocess.run([_RUN_HOST, environment_file], capture_output=True, env=environment, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    commands = log_path.read_text()
+    assert "uv|2|run hal-netplay-api" in commands
+    assert "--user-jsons /user-a.json,/user-b.json --slippi-ports 51441,51442" in commands
+
+
 def test_host_launcher_stops_runner_when_api_fails(tmp_path: Path) -> None:
     command_dir = tmp_path / "bin"
     command_dir.mkdir()

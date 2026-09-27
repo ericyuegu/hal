@@ -54,7 +54,7 @@ def test_best_candidate_needs_only_two_measurements() -> None:
     policy.supported_horizons = tuple(range(1, 13))
     measure = Mock(return_value=LatencyMeasurement(12, 3, (0.010,)))
     result = check_realtime_budget(cast(PredictionPolicy, policy), RuntimeConfig(1, (2,)), 0.0005, measure=measure)
-    assert result.timings == (FrameTiming(2, 1, 1, 12),)
+    assert result.timings == (FrameTiming(2, 1, 3, 1, 12),)
     assert measure.call_count == 2
     assert all(call.args[2:4] == (12, 3) for call in measure.call_args_list)
 
@@ -65,7 +65,7 @@ def test_replan_interval_can_be_set_independently_of_handoff() -> None:
     measure = Mock(return_value=LatencyMeasurement(5, 3, (0.010,)))
     runtime = RuntimeConfig(1, (2,), replan_interval_frames=1)
     result = check_realtime_budget(cast(PredictionPolicy, policy), runtime, 0.0005, measure=measure)
-    assert result.timings == (FrameTiming(2, 1, 1, 5),)
+    assert result.timings == (FrameTiming(2, 1, 3, 1, 5),)
 
 
 def test_one_frame_thinking_allowance_accepts_one_frame_latency() -> None:
@@ -74,7 +74,7 @@ def test_one_frame_thinking_allowance_accepts_one_frame_latency() -> None:
     runtime = RuntimeConfig(1, (2,), replan_interval_frames=4)
     measure = Mock(return_value=LatencyMeasurement(8, 3, (1 / 60,)))
     result = check_realtime_budget(cast(PredictionPolicy, policy), runtime, 0.0005, measure=measure)
-    assert result.timings == (FrameTiming(2, 1, 4, 8),)
+    assert result.timings == (FrameTiming(2, 1, 3, 4, 8),)
     assert result.timings[0].reserve_frames == 1
     assert measure.call_count == 2
 
@@ -112,8 +112,30 @@ def test_explicit_debug_shape_is_qualified_without_search() -> None:
     result = check_realtime_budget(
         cast(PredictionPolicy, policy), RuntimeConfig(1, (2,)), 0.0005, shape=(12, 6), measure=measure
     )
-    assert result.timings == (FrameTiming(2, 4, 4, 12),)
+    assert result.timings == (FrameTiming(2, 4, 6, 4, 12),)
     assert measure.call_count == 1
+
+
+def test_delay_two_and_three_have_distinct_measured_prefixes() -> None:
+    policy = Mock(spec=PredictionPolicy)
+    policy.supported_horizons = (8,)
+    calls: list[tuple[int, int]] = []
+
+    def measure(
+        _policy: PredictionPolicy, _runtime: RuntimeConfig, horizon: int, prefix: int, _wait: float
+    ) -> LatencyMeasurement:
+        calls.append((horizon, prefix))
+        return LatencyMeasurement(horizon, prefix, (0.010,))
+
+    result = check_realtime_budget(
+        cast(PredictionPolicy, policy),
+        RuntimeConfig(2, (2, 3), replan_interval_frames=4),
+        0.0005,
+        shape=(8, 4),
+        measure=measure,
+    )
+    assert result.timings == (FrameTiming(2, 1, 3, 4, 8), FrameTiming(3, 1, 4, 4, 8))
+    assert calls == [(8, 4), (8, 3)]
 
 
 def test_measurement_shape_must_match_requested_shape() -> None:

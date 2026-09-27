@@ -24,8 +24,8 @@ SLOT_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 3.0
 SLOT_STARTUP_GRACE_SECONDS: Final[float] = 30.0
 RUNNER_HEARTBEAT_MAX_AGE_SECONDS: Final[float] = 5.0
 POLICY_DEADLINES_SECONDS: Final[dict[int, float]] = {2: 0.0333, 3: 0.0167}
-_SLOT_SCHEMA_VERSION: Final[int] = 3
-_RUNNER_SCHEMA_VERSION: Final[int] = 4
+_SLOT_SCHEMA_VERSION: Final[int] = 4
+_RUNNER_SCHEMA_VERSION: Final[int] = 5
 
 
 class SlotState(StrEnum):
@@ -118,6 +118,7 @@ class RuntimeHealth:
                 "prefix_mismatches",
                 "exhausted_chunks",
                 "neutral_fallback_frames",
+                "submission_gaps",
                 "transport_corrections",
             )
         ):
@@ -222,6 +223,7 @@ class ChunkHealth:
     prefix_mismatches: int = 0
     exhausted_chunks: int = 0
     neutral_fallback_frames: int = 0
+    submission_gaps: int = 0
     transport_corrections: int = 0
 
     def __post_init__(self) -> None:
@@ -230,6 +232,7 @@ class ChunkHealth:
             "prefix_mismatches",
             "exhausted_chunks",
             "neutral_fallback_frames",
+            "submission_gaps",
             "transport_corrections",
         ):
             value = getattr(self, name)
@@ -255,6 +258,7 @@ class ChunkHealth:
                     "prefix_mismatches",
                     "exhausted_chunks",
                     "neutral_fallback_frames",
+                    "submission_gaps",
                     "transport_corrections",
                 )
             ),

@@ -28,6 +28,7 @@ from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from hal.inference.bundle import read_policy_manifest
@@ -277,53 +278,68 @@ def _capacity(config: ApiConfig, queue: QueueStore) -> CapacityResponse:
     )
 
 
-def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
-    queue = QueueStore(config.database) if store is None else store
-    registry = CollectorRegistry()
-    requests = Counter(
-        "hal_netplay_http_requests_total", "HTTP requests", ("method", "path", "status"), registry=registry
-    )
-    queue_gauge = Gauge("hal_netplay_queue_depth", "Queued reservations", registry=registry)
-    active_gauge = Gauge("hal_netplay_active_reservations", "Active reservations", registry=registry)
-    healthy_slots_gauge = Gauge("hal_netplay_healthy_slots", "Healthy Dolphin slots", registry=registry)
-    game_fps_gauge = Gauge("hal_netplay_game_fps", "Lowest recent Dolphin frame rate", registry=registry)
-    frame_p95_gauge = Gauge(
-        "hal_netplay_frame_interval_p95_ms",
-        "Highest recent p95 Dolphin frame interval",
-        registry=registry,
-    )
-    dolphin_p95_gauge = Gauge(
-        "hal_netplay_dolphin_step_p95_ms",
-        "Highest recent p95 blocking Dolphin step",
-        registry=registry,
-    )
-    policy_p95_gauge = Gauge(
-        "hal_netplay_policy_round_trip_p95_ms",
-        "Highest recent p95 worker-to-policy round trip",
-        registry=registry,
-    )
-    model_p95_gauge = Gauge(
-        "hal_netplay_model_inference_p95_ms",
-        "Recent p95 model inference time",
-        registry=registry,
-    )
-    batch_wait_p95_gauge = Gauge(
-        "hal_netplay_batch_wait_p95_ms",
-        "Recent p95 request-coalescing wait",
-        registry=registry,
-    )
-    recoveries_gauge = Gauge("hal_netplay_slot_recoveries", "Automatic Dolphin slot recoveries", registry=registry)
+_BEARER = HTTPBearer(auto_error=False)
 
-    async def reap() -> None:
+
+def _require_job_token(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER)]) -> str:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="job token is required")
+    return credentials.credentials
+
+
+class _ApiLifecycle:
+    """Own the queue background task, route handlers, and per-app metrics."""
+
+    def __init__(self, config: ApiConfig, queue: QueueStore) -> None:
+        self.config = config
+        self.queue = queue
+        self.registry = CollectorRegistry()
+        self.requests = Counter(
+            "hal_netplay_http_requests_total", "HTTP requests", ("method", "path", "status"), registry=self.registry
+        )
+        self.queue_gauge = Gauge("hal_netplay_queue_depth", "Queued reservations", registry=self.registry)
+        self.active_gauge = Gauge("hal_netplay_active_reservations", "Active reservations", registry=self.registry)
+        self.healthy_slots_gauge = Gauge("hal_netplay_healthy_slots", "Healthy Dolphin slots", registry=self.registry)
+        self.game_fps_gauge = Gauge("hal_netplay_game_fps", "Lowest recent Dolphin frame rate", registry=self.registry)
+        self.frame_p95_gauge = Gauge(
+            "hal_netplay_frame_interval_p95_ms",
+            "Highest recent p95 Dolphin frame interval",
+            registry=self.registry,
+        )
+        self.dolphin_p95_gauge = Gauge(
+            "hal_netplay_dolphin_step_p95_ms",
+            "Highest recent p95 blocking Dolphin step",
+            registry=self.registry,
+        )
+        self.policy_p95_gauge = Gauge(
+            "hal_netplay_policy_round_trip_p95_ms",
+            "Highest recent p95 worker-to-policy round trip",
+            registry=self.registry,
+        )
+        self.model_p95_gauge = Gauge(
+            "hal_netplay_model_inference_p95_ms",
+            "Recent p95 model inference time",
+            registry=self.registry,
+        )
+        self.batch_wait_p95_gauge = Gauge(
+            "hal_netplay_batch_wait_p95_ms",
+            "Recent p95 request-coalescing wait",
+            registry=self.registry,
+        )
+        self.recoveries_gauge = Gauge(
+            "hal_netplay_slot_recoveries", "Automatic Dolphin slot recoveries", registry=self.registry
+        )
+
+    async def reap(self) -> None:
         while True:
             await asyncio.sleep(1)
-            expired = await asyncio.to_thread(queue.reap_expired)
+            expired = await asyncio.to_thread(self.queue.reap_expired)
             if expired:
                 logger.info("expired {} stale netplay reservations", expired)
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        task = asyncio.create_task(reap())
+    async def lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
+        task = asyncio.create_task(self.reap())
         try:
             yield
         finally:
@@ -331,20 +347,7 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await task
 
-    app = FastAPI(title="HAL Netplay", version="1", docs_url=None, redoc_url=None, lifespan=lifespan)
-    app.state.queue = queue
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.allowed_hosts))
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(config.allowed_origins),
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
-        max_age=600,
-    )
-
-    @app.middleware("http")
-    async def secure_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def secure_requests(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
@@ -360,71 +363,58 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        requests.labels(request.method, request.url.path, response.status_code).inc()
+        self.requests.labels(request.method, request.url.path, response.status_code).inc()
         return response
 
-    bearer = HTTPBearer(auto_error=False)
-
-    def token(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> str:
-        if credentials is None or credentials.scheme.lower() != "bearer":
-            raise HTTPException(status_code=401, detail="job token is required")
-        return credentials.credentials
-
-    @app.get("/health/live", include_in_schema=False)
-    def live() -> dict[str, str]:
+    def live(self) -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/health/ready", include_in_schema=False)
-    def ready() -> dict[str, str]:
-        queue.queue_depth()
+    def ready(self) -> dict[str, str]:
+        self.queue.queue_depth()
         try:
-            _runner_health(config)
+            _runner_health(self.config)
         except _RunnerUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return {"status": "ready"}
 
-    @app.get("/metrics", include_in_schema=False)
-    def metrics() -> Response:
-        capacity_status = _capacity(config, queue)
-        queue_gauge.set(capacity_status.queued)
-        active_gauge.set(capacity_status.active)
-        healthy_slots_gauge.set(capacity_status.healthy_slots)
-        game_fps_gauge.set(capacity_status.game_fps or 0.0)
-        frame_p95_gauge.set(capacity_status.frame_interval_p95_ms or 0.0)
-        dolphin_p95_gauge.set(capacity_status.dolphin_step_p95_ms or 0.0)
-        policy_p95_gauge.set(capacity_status.policy_round_trip_p95_ms or 0.0)
-        model_p95_gauge.set(capacity_status.model_inference_p95_ms or 0.0)
-        batch_wait_p95_gauge.set(capacity_status.batch_wait_p95_ms or 0.0)
-        recoveries_gauge.set(capacity_status.recoveries)
-        return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+    def metrics(self) -> Response:
+        capacity_status = _capacity(self.config, self.queue)
+        self.queue_gauge.set(capacity_status.queued)
+        self.active_gauge.set(capacity_status.active)
+        self.healthy_slots_gauge.set(capacity_status.healthy_slots)
+        self.game_fps_gauge.set(capacity_status.game_fps or 0.0)
+        self.frame_p95_gauge.set(capacity_status.frame_interval_p95_ms or 0.0)
+        self.dolphin_p95_gauge.set(capacity_status.dolphin_step_p95_ms or 0.0)
+        self.policy_p95_gauge.set(capacity_status.policy_round_trip_p95_ms or 0.0)
+        self.model_p95_gauge.set(capacity_status.model_inference_p95_ms or 0.0)
+        self.batch_wait_p95_gauge.set(capacity_status.batch_wait_p95_ms or 0.0)
+        self.recoveries_gauge.set(capacity_status.recoveries)
+        return Response(generate_latest(self.registry), media_type=CONTENT_TYPE_LATEST)
 
-    @app.get("/v1/options", response_model=OptionsResponse)
-    def options() -> OptionsResponse:
+    def options(self) -> OptionsResponse:
         return OptionsResponse(
             characters=_choices(CHARACTERS),
-            imitations=_choices(IMITATIONS if config.masked_identity else IMITATIONS[1:]),
+            imitations=_choices(IMITATIONS if self.config.masked_identity else IMITATIONS[1:]),
             stages=_choices(STAGES),
-            online_delays=config.supported_delays,
+            online_delays=self.config.supported_delays,
         )
 
-    @app.get("/v1/capacity", response_model=CapacityResponse)
-    def capacity() -> CapacityResponse:
-        return _capacity(config, queue)
+    def capacity(self) -> CapacityResponse:
+        return _capacity(self.config, self.queue)
 
-    @app.post("/v1/jobs", response_model=CreatedJobResponse, status_code=201)
-    def create_job(body: CreateJobRequest) -> CreatedJobResponse:
-        if body.online_delay not in config.supported_delays:
+    def create_job(self, body: CreateJobRequest) -> CreatedJobResponse:
+        if body.online_delay not in self.config.supported_delays:
             raise HTTPException(status_code=422, detail="online delay is unsupported by this policy")
-        if body.imitation == "MASKED" and not config.masked_identity:
+        if body.imitation == "MASKED" and not self.config.masked_identity:
             raise HTTPException(status_code=422, detail="masked identity is unsupported by this policy")
         try:
-            status = _runner_health(config)
+            status = _runner_health(self.config)
         except _RunnerUnavailableError as error:
             raise HTTPException(status_code=503, detail="Game servers are unavailable. Try again shortly.") from error
         if status.healthy_slots == 0:
             raise HTTPException(status_code=503, detail=status.message)
         try:
-            credentials = queue.create_job(
+            credentials = self.queue.create_job(
                 body.player_code,
                 MatchChoices(
                     body.character,
@@ -449,28 +439,26 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
         )
         return CreatedJobResponse(**_job(credentials.job).model_dump(), token=credentials.token)
 
-    @app.get("/v1/jobs/{job_id}", response_model=JobResponse)
-    def get_job(job_id: str, job_token: Annotated[str, Depends(token)]) -> JobResponse:
+    def get_job(self, job_id: str, job_token: Annotated[str, Depends(_require_job_token)]) -> JobResponse:
         try:
-            return _job(queue.get_job(job_id, job_token))
+            return _job(self.queue.get_job(job_id, job_token))
         except AuthenticationError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
 
-    @app.patch("/v1/jobs/{job_id}/policy", response_model=JobResponse)
     def update_policy(
-        job_id: str, body: UpdatePolicyRequest, job_token: Annotated[str, Depends(token)]
+        self, job_id: str, body: UpdatePolicyRequest, job_token: Annotated[str, Depends(_require_job_token)]
     ) -> JobResponse:
         if not body.model_fields_set:
             raise HTTPException(status_code=422, detail="provide desired_return or temperature")
         try:
-            current = queue.get_job(job_id, job_token)
+            current = self.queue.get_job(job_id, job_token)
             target = (
                 body.desired_return if "desired_return" in body.model_fields_set else current.choices.desired_return
             )
             sampling = body.temperature if "temperature" in body.model_fields_set else current.choices.temperature
             if sampling is None:
                 raise ValueError("temperature cannot be null")
-            return _job(queue.update_policy(job_id, job_token, desired_return=target, temperature=sampling))
+            return _job(self.queue.update_policy(job_id, job_token, desired_return=target, temperature=sampling))
         except AuthenticationError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
         except InvalidTransitionError as error:
@@ -478,19 +466,19 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.delete("/v1/jobs/{job_id}", response_model=JobResponse)
-    def cancel_job(job_id: str, job_token: Annotated[str, Depends(token)]) -> JobResponse:
+    def cancel_job(self, job_id: str, job_token: Annotated[str, Depends(_require_job_token)]) -> JobResponse:
         try:
-            job = queue.cancel(job_id, job_token)
+            job = self.queue.cancel(job_id, job_token)
         except AuthenticationError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
         logger.info("reservation {} cancel requested status={}", job.id, job.status.value)
         return _job(job)
 
-    @app.post("/v1/jobs/{job_id}/rematch", response_model=JobResponse)
-    def rematch(job_id: str, body: RematchRequest, job_token: Annotated[str, Depends(token)]) -> JobResponse:
+    def rematch(
+        self, job_id: str, body: RematchRequest, job_token: Annotated[str, Depends(_require_job_token)]
+    ) -> JobResponse:
         try:
-            job = queue.request_rematch(
+            job = self.queue.request_rematch(
                 job_id,
                 job_token,
                 character=body.character,
@@ -512,6 +500,32 @@ def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
         )
         return _job(job)
 
+
+def create_app(config: ApiConfig, store: QueueStore | None = None) -> FastAPI:
+    queue = QueueStore(config.database) if store is None else store
+    api = _ApiLifecycle(config, queue)
+    app = FastAPI(title="HAL Netplay", version="1", docs_url=None, redoc_url=None, lifespan=api.lifespan)
+    app.state.queue = queue
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.allowed_hosts))
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(config.allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+        max_age=600,
+    )
+    app.middleware("http")(api.secure_requests)
+    app.get("/health/live", include_in_schema=False)(api.live)
+    app.get("/health/ready", include_in_schema=False)(api.ready)
+    app.get("/metrics", include_in_schema=False)(api.metrics)
+    app.get("/v1/options", response_model=OptionsResponse)(api.options)
+    app.get("/v1/capacity", response_model=CapacityResponse)(api.capacity)
+    app.post("/v1/jobs", response_model=CreatedJobResponse, status_code=201)(api.create_job)
+    app.get("/v1/jobs/{job_id}", response_model=JobResponse)(api.get_job)
+    app.patch("/v1/jobs/{job_id}/policy", response_model=JobResponse)(api.update_policy)
+    app.delete("/v1/jobs/{job_id}", response_model=JobResponse)(api.cancel_job)
+    app.post("/v1/jobs/{job_id}/rematch", response_model=JobResponse)(api.rematch)
     return app
 
 

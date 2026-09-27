@@ -48,6 +48,22 @@ done
 export HAL_NETPLAY_ALLOWED_ORIGINS=${HAL_NETPLAY_ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000}
 export HAL_NETPLAY_ALLOWED_HOSTS=${HAL_NETPLAY_ALLOWED_HOSTS:-127.0.0.1,localhost}
 
+user_jsons=("$HAL_NETPLAY_USER_JSON_A")
+slippi_ports=("${HAL_NETPLAY_SLIPPI_PORT_A:-51441}")
+if [[ -n ${HAL_NETPLAY_USER_JSON_B:-} ]]; then
+  user_jsons+=("$HAL_NETPLAY_USER_JSON_B")
+  slippi_ports+=("${HAL_NETPLAY_SLIPPI_PORT_B:-51442}")
+fi
+if (( ${#user_jsons[@]} == 2 )) && [[ ${user_jsons[0]} == "${user_jsons[1]}" || ${slippi_ports[0]} == "${slippi_ports[1]}" ]]; then
+  echo "netplay workers need distinct Slippi credentials and ports" >&2
+  exit 2
+fi
+capacity=${#user_jsons[@]}
+printf -v user_jsons_csv '%s,' "${user_jsons[@]}"
+printf -v slippi_ports_csv '%s,' "${slippi_ports[@]}"
+user_jsons_csv=${user_jsons_csv%,}
+slippi_ports_csv=${slippi_ports_csv%,}
+
 required_commands=(uv xvfb-run)
 if [[ -n ${CLOUDFLARE_TUNNEL_TOKEN:-} && ${HAL_NETPLAY_NO_TUNNEL:-0} != 1 ]]; then
   required_commands+=(cloudflared)
@@ -96,28 +112,16 @@ trap stop EXIT INT TERM
 
 set -m
 HAL_NETPLAY_DATABASE="$state_dir/queue.sqlite3" \
-HAL_NETPLAY_CAPACITY=1 \
+HAL_NETPLAY_CAPACITY="$capacity" \
 HAL_NETPLAY_RUNNER_STATUS="$state_dir/runner-status.json" \
 uv run hal-netplay-api --host 127.0.0.1 --port 8080 </dev/null &
 process_groups+=("$!")
 
-prediction_args=()
-if [[ -n ${HAL_NETPLAY_PREDICTION_HORIZON:-} || -n ${HAL_NETPLAY_PREDICTION_PREFIX:-} ]]; then
-  prediction_args=(--prediction-shape "${HAL_NETPLAY_PREDICTION_HORIZON:?}" "${HAL_NETPLAY_PREDICTION_PREFIX:?}")
-fi
-
-if [[ -n ${HAL_NETPLAY_REPLAN_INTERVAL:-} ]]; then
-  prediction_args+=(--replan-interval "$HAL_NETPLAY_REPLAN_INTERVAL")
-fi
-
 xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --compiled \
-  --history-mode "${HAL_NETPLAY_HISTORY_MODE:-auto}" \
-  --kv-update-frames "${HAL_NETPLAY_KV_UPDATE_FRAMES:-2}" \
-  "${prediction_args[@]}" \
   --database "$state_dir/queue.sqlite3" \
-  --user-jsons "$HAL_NETPLAY_USER_JSON_A" \
-  --slippi-ports 51441 \
+  --user-jsons "$user_jsons_csv" \
+  --slippi-ports "$slippi_ports_csv" \
   --iso-path "$HAL_ISO_PATH" \
   --dolphin-path "$HAL_NETPLAY_EMULATOR_PATH" \
   --replay-dir "$state_dir/replays" \

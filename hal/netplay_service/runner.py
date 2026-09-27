@@ -3,19 +3,23 @@
 import argparse
 import hashlib
 import json
+import math
 import multiprocessing as mp
 import os
 import platform
+import secrets
 import signal
 import sys
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import closing
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -28,22 +32,28 @@ from peppi_py.game import EndMethod
 
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.netplay import DolphinConnectionLost
+from hal.eval.netplay import NoUsableActionPlan
 from hal.eval.netplay import run_netplay_match
+from hal.eval.qualification import RealtimeBudgetCheck
 from hal.eval.qualification import check_realtime_budget
 from hal.eval.replays import read_new_replay_end
+from hal.eval.results import NetplayProgress
 from hal.eval.results import PlayResult
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
+from hal.inference.action_sequence_artifact import read_action_sequence_artifact
+from hal.inference.action_sequence_policy import ActionSequencePolicy
 from hal.inference.api import PolicySpec
 from hal.inference.api import PredictionPolicy
+from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
-from hal.inference.loader import HistoryMode
-from hal.inference.loader import load_policy
-from hal.inference.loader import resolve_history_mode
-from hal.inference.worker import InferenceClient
-from hal.inference.worker import InferenceUnavailable
-from hal.inference.worker import InferenceWorker
+from hal.inference.client import InferenceClient
+from hal.inference.client import InferenceUnavailable
+from hal.inference.engine import InferenceEngine
+from hal.inference.engine import ModelRegistry
+from hal.inference.engine import configure_inference_process
+from hal.inference.engine import freeze_inference_runtime
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -81,6 +91,12 @@ class _StopEvent(Protocol):
 
     def wait(self, timeout: float | None = None) -> bool: ...
 
+    def set(self) -> None: ...
+
+
+class _PipeContext(Protocol):
+    def Pipe(self, duplex: bool = True) -> tuple[Connection, Connection]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class SlotConfig:
@@ -98,13 +114,22 @@ class SlotConfig:
     replay_dir: Path
     status_path: Path
     policy_sha256: str
+    checkpoint_sha256: str
     git_sha: str
     max_frames: int = 54_000
     recovery_cooldown_seconds: float = 2.0
+    measurement_dir: Path | None = None
+    publish_replays: bool = True
 
     def __post_init__(self) -> None:
-        if self.recovery_cooldown_seconds < 0:
+        if (
+            type(self.recovery_cooldown_seconds) not in (int, float)
+            or not math.isfinite(self.recovery_cooldown_seconds)
+            or self.recovery_cooldown_seconds < 0
+        ):
             raise ValueError("slot recovery cooldown must be non-negative")
+        if type(self.publish_replays) is not bool:
+            raise ValueError("slot replay publication must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +148,10 @@ class RunnerConfig:
     device: str = "cuda"
     seed: int | None = None
     compiled: bool = False
-    history_mode: HistoryMode = "auto"
-    kv_update_frames: int = 2
-    prediction_shape: tuple[int, int] | None = None
-    replan_interval_frames: int | None = None
     batch_wait_seconds: float = 0.0005
     max_frames: int = 54_000
+    measurement_dir: Path | None = None
+    publish_replays: bool = True
 
     def __post_init__(self) -> None:
         if not self.user_jsons:
@@ -137,14 +160,181 @@ class RunnerConfig:
             raise ValueError("runner needs one Slippi port per account slot")
         if len(set(self.slippi_ports)) != len(self.slippi_ports):
             raise ValueError("runner Slippi ports must be unique")
-        if any(not 1 <= port <= 65_535 for port in self.slippi_ports):
+        if any(type(port) is not int or not 1 <= port <= 65_535 for port in self.slippi_ports):
             raise ValueError("runner Slippi ports must be in [1, 65535]")
         if not self.git_sha or "/" in self.git_sha:
             raise ValueError("runner git_sha must be a non-empty identifier")
-        if self.replan_interval_frames is not None and self.replan_interval_frames < 1:
-            raise ValueError("runner replan interval must be positive")
-        if self.max_frames < 6:
+        if (
+            isinstance(self.batch_wait_seconds, bool)
+            or not isinstance(self.batch_wait_seconds, (float, int))
+            or not math.isfinite(self.batch_wait_seconds)
+            or not 0 <= self.batch_wait_seconds <= 0.0005
+        ):
+            raise ValueError("netplay batch coalescing must be in [0, 0.5] ms")
+        if type(self.max_frames) is not int or self.max_frames < 6:
             raise ValueError("runner max_frames must be at least 6")
+        if type(self.publish_replays) is not bool:
+            raise ValueError("runner replay publication must be a boolean")
+
+
+_NETPLAY_TIMINGS = (
+    FrameTiming(2, 1, 3, 4, 8),
+    FrameTiming(3, 1, 4, 4, 8),
+)
+_ENGINE_STARTUP_TIMEOUT_SECONDS = 120.0
+_ENGINE_PROGRESS_TIMEOUT_SECONDS = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class _InferenceProcessConfig:
+    policy: Path
+    device: str
+    seed: int | None
+    compiled: bool
+    capacity: int
+    batch_wait_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineReady:
+    spec: PolicySpec
+    context_frames: int
+    checkpoint_sha256: str
+    capability_version: int
+    budgets: tuple[RealtimeBudgetCheck, ...]
+    sampling_seeds: tuple[int, ...]
+    hardware: str
+    profiles: tuple[PreparedInferenceProfile, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EnginePulse:
+    model_inference_p95_ms: float | None
+    batch_wait_p95_ms: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineFailure:
+    reason: str
+
+
+class _EngineLost(RuntimeError):
+    pass
+
+
+class _ShutdownRequested(RuntimeError):
+    pass
+
+
+class _ShutdownFlag:
+    def __init__(self) -> None:
+        self.requested = False
+
+    def __call__(self, _signum: int, _frame: object) -> None:
+        self.requested = True
+
+
+def _prepare_netplay_engine(
+    config: _InferenceProcessConfig,
+    connections: dict[int, Connection],
+) -> tuple[InferenceEngine, _EngineReady]:
+    artifact = read_action_sequence_artifact(config.policy)
+    if artifact.capability_version < 2 or not {2, 3}.issubset(artifact.spec.supported_transport_delays):
+        raise ValueError("netplay delay-2 and delay-3 profiles require a qualified 059 capability-v2 bundle")
+    inference_dtype = torch.bfloat16 if torch.device(config.device).type == "cuda" else torch.float32
+    registry = ModelRegistry()
+    model = registry.register_artifact(artifact, device=config.device, inference_dtype=inference_dtype)
+    device = next(model.parameters()).device
+    policies: dict[PreparedInferenceProfile, PredictionPolicy] = {}
+    budgets: list[RealtimeBudgetCheck] = []
+    seeds: list[int] = []
+    for timing in _NETPLAY_TIMINGS:
+        runtime = RuntimeConfig(config.capacity, (timing.physical_delay_frames,), timing.replan_interval_frames)
+        policy = ActionSequencePolicy(
+            model,
+            artifact.statistics,
+            artifact.vocabulary.codes,
+            spec=artifact.spec,
+            checkpoint_sha256=artifact.checkpoint_sha256,
+            return_p90=artifact.return_p90,
+            capability_version=artifact.capability_version,
+            device=device,
+            seed=config.seed,
+            compiled=config.compiled,
+            history_mode="kv_cache",
+            kv_update_frames=4,
+        )
+        budget = check_realtime_budget(
+            policy,
+            runtime,
+            config.batch_wait_seconds,
+            shape=(timing.prediction_horizon_frames, timing.fixed_prefix_frames),
+        )
+        if budget.timings != (timing,):
+            raise RuntimeError("netplay timing qualification changed the declared profile")
+        profile = PreparedInferenceProfile(
+            name=f"netplay-delay-{timing.physical_delay_frames}",
+            checkpoint_sha256=artifact.checkpoint_sha256,
+            execution_mode="kv_cache",
+            prediction_horizon_frames=timing.prediction_horizon_frames,
+            fixed_prefix_frames=timing.fixed_prefix_frames,
+            update_shapes=(1, 2, 4),
+            capacity=config.capacity,
+        )
+        policies[profile] = policy
+        budgets.append(budget)
+        seeds.append(policy.sampling_seed)
+    if registry.model_count != 1:
+        raise RuntimeError("netplay profiles allocated more than one checkpoint model")
+    freeze_inference_runtime()
+    hardware = torch.cuda.get_device_name(device) if device.type == "cuda" else platform.processor()
+    engine = InferenceEngine(policies, connections, batch_wait_seconds=config.batch_wait_seconds)
+    return engine, _EngineReady(
+        artifact.spec,
+        model.cfg.L_ctx,
+        artifact.checkpoint_sha256,
+        artifact.capability_version,
+        tuple(budgets),
+        tuple(seeds),
+        hardware,
+        tuple(policies),
+    )
+
+
+class _EnginePulseSender:
+    def __init__(self, connection: Connection, engine: InferenceEngine) -> None:
+        self.connection = connection
+        self.engine = engine
+        self.last_sent = 0.0
+
+    def __call__(self) -> None:
+        now = time.monotonic()
+        if now - self.last_sent < 0.2:
+            return
+        self.connection.send(_EnginePulse(*self.engine.timing_p95_ms()))
+        self.last_sent = now
+
+
+def _gpu_inference_process(
+    config: _InferenceProcessConfig,
+    connections: dict[int, Connection],
+    status: Connection,
+    stop: _StopEvent,
+) -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        configure_inference_process()
+        engine, ready = _prepare_netplay_engine(config, connections)
+        status.send(ready)
+        engine.serve(stop, _EnginePulseSender(status, engine))
+    except BaseException as error:
+        with suppress(OSError, EOFError):
+            status.send(_EngineFailure(f"{type(error).__name__}: {error}"))
+        raise
+    finally:
+        status.close()
+        for connection in connections.values():
+            connection.close()
 
 
 class _RecoverableRuntimeError(RuntimeError):
@@ -230,6 +420,7 @@ class _SlotHealthReporter:
                     schedule.prefix_mismatches,
                     schedule.exhausted_chunks,
                     schedule.neutral_fallback_frames,
+                    schedule.submission_gaps,
                     schedule.transport_corrections,
                 ),
                 time.monotonic(),
@@ -297,7 +488,7 @@ class _SlotHealthReporter:
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -553,6 +744,135 @@ class _LivePolicySettings:
         self._thread.join()
 
 
+class _ReservationLive:
+    """Mark a reservation live when the netplay countdown completes."""
+
+    def __init__(self, config: SlotConfig, store: QueueStore, job: Job, health: _SlotHealthReporter) -> None:
+        self.config = config
+        self.store = store
+        self.job = job
+        self.health = health
+        self.live = False
+
+    def __call__(self) -> None:
+        self.store.mark_playing(self.job.id, self.config.worker_id)
+        self.health.playing()
+        self.live = True
+        logger.info(
+            "reservation {} live on slot {} game={} delay={}",
+            self.job.id,
+            self.config.slot,
+            self.job.game_count + 1,
+            self.job.choices.online_delay,
+        )
+
+    def reset(self, job: Job) -> None:
+        self.job = job
+        self.live = False
+
+
+def _write_match_measurement(
+    config: SlotConfig,
+    job: Job,
+    result: PlayResult,
+    timing: FrameTiming,
+    health: _SlotHealthReporter,
+    started_at: datetime,
+    ended_at: datetime,
+) -> Path | None:
+    directory = config.measurement_dir
+    if directory is None:
+        return None
+    if len(result.inference_source_frames) != len(result.inference_seconds):
+        raise ValueError("match inference timing samples lack source frame IDs")
+    directory.mkdir(parents=True, exist_ok=True)
+    elapsed = (ended_at - started_at).total_seconds()
+    counters = health.status().chunk_health
+    payload = {
+        "schema_version": 1,
+        "reservation_id": job.id,
+        "game_number": job.game_count + 1,
+        "slot": config.slot,
+        "worker_id": config.worker_id,
+        "stream_id": config.stream_id,
+        "source_git_sha": config.git_sha,
+        "policy_bundle_sha256": config.policy_sha256,
+        "checkpoint_sha256": config.checkpoint_sha256,
+        "character": job.choices.character,
+        "player_identity": job.choices.imitation,
+        "desired_return": job.choices.desired_return,
+        "temperature": job.choices.temperature,
+        "requested_stage": job.choices.requested_stage,
+        "timing": asdict(timing),
+        "observation_mode": "first_seen_speculative",
+        "started_at": started_at.isoformat(),
+        "ended_at": ended_at.isoformat(),
+        "total_elapsed_seconds": elapsed,
+        "connection_countdown_seconds": result.connection_countdown_seconds,
+        "gameplay_seconds": result.wall_seconds,
+        "match_end_seconds": result.match_end_seconds,
+        "frame_ids": result.trajectory.frame_id.tolist(),
+        "frames": len(result.trajectory),
+        "game_fps": result.game_fps,
+        "inference_source_frames": result.inference_source_frames,
+        "inference_seconds": result.inference_seconds,
+        "frame_interval_seconds": result.frame_interval_seconds,
+        "dolphin_step_seconds": result.dolphin_step_seconds,
+        "schedule": None if counters is None else asdict(counters),
+        "schedule_events": [asdict(event) for event in result.schedule_events],
+        "controller_submission_gaps": None if counters is None else counters.submission_gaps,
+        "transport_correction_frames": result.transport_correction_frames,
+    }
+    path = directory / f"{job.id}-game-{job.game_count + 1}.json"
+    pending = path.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(payload, allow_nan=False, sort_keys=True))
+    pending.replace(path)
+    return path
+
+
+def _write_match_failure(
+    config: SlotConfig,
+    job: Job,
+    timing: FrameTiming,
+    health: _SlotHealthReporter,
+    started_at: datetime,
+    progress: NetplayProgress,
+    error: BaseException,
+) -> None:
+    directory = config.measurement_dir
+    if directory is None:
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    counters = health.status().chunk_health
+    payload = {
+        "schema_version": 1,
+        "reservation_id": job.id,
+        "game_number": job.game_count + 1,
+        "slot": config.slot,
+        "worker_id": config.worker_id,
+        "source_git_sha": config.git_sha,
+        "policy_bundle_sha256": config.policy_sha256,
+        "checkpoint_sha256": config.checkpoint_sha256,
+        "character": job.choices.character,
+        "player_identity": job.choices.imitation,
+        "desired_return": job.choices.desired_return,
+        "temperature": job.choices.temperature,
+        "requested_stage": job.choices.requested_stage,
+        "timing": asdict(timing),
+        "observation_mode": "first_seen_speculative",
+        "started_at": started_at.isoformat(),
+        "failed_at": datetime.now(UTC).isoformat(),
+        "failure": f"{type(error).__name__}: {error}",
+        "progress": asdict(progress),
+        "schedule": None if counters is None else asdict(counters),
+        "controller_submission_gaps": None if counters is None else counters.submission_gaps,
+    }
+    path = directory / f"{job.id}-game-{job.game_count + 1}-failure.json"
+    pending = path.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(payload, allow_nan=False, sort_keys=True))
+    pending.replace(path)
+
+
 def _run_reservation(
     config: SlotConfig,
     store: QueueStore,
@@ -572,7 +892,7 @@ def _run_reservation(
         daemon=True,
     )
     heartbeat.start()
-    live = False
+    live = _ReservationLive(config, store, job, health)
     logger.info(
         "reservation {} starting on slot {} player={} character={} delay={} first_stage=random "
         "requested_stage={} imitate={} game={}",
@@ -585,19 +905,6 @@ def _run_reservation(
         job.choices.imitation,
         job.game_count + 1,
     )
-
-    def mark_live() -> None:
-        nonlocal live
-        store.mark_playing(job.id, config.worker_id)
-        health.playing()
-        live = True
-        logger.info(
-            "reservation {} live on slot {} game={} delay={}",
-            job.id,
-            config.slot,
-            job.game_count + 1,
-            job.choices.online_delay,
-        )
 
     store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=60.0)
     health.configure_schedule(timing)
@@ -631,12 +938,14 @@ def _run_reservation(
                     policy_settings=settings.current,
                     max_frames=config.max_frames,
                     rematch=rematch,
-                    on_live=mark_live,
+                    on_live=live,
+                    on_failure=partial(_write_match_failure, config, job, timing, health, started_at),
                     observer=health,
                     schedule_observer=health,
                     stream_id=config.stream_id,
                 )
                 ended_at = datetime.now(UTC)
+                _write_match_measurement(config, job, result, timing, health, started_at, ended_at)
                 replay_end = read_new_replay_end(replay_dir, previous)
                 if replay_end.method is EndMethod.NO_CONTEST:
                     store.mark_no_contest(job.id, config.worker_id)
@@ -652,7 +961,7 @@ def _run_reservation(
                 replay = replay_end.path
                 actual_stage = _stage_name(result.stage)
                 human_result = _human_result(result)
-                limit_ms = timing.thinking_allowance_frames * 1000 / 60
+                limit_ms = timing.inference_allowance_frames * 1000 / 60
                 if result.inference_p95_ms >= limit_ms:
                     logger.warning(
                         "reservation {} missed the delay-{} policy deadline: p95={:.1f}ms limit={:.1f}ms",
@@ -694,10 +1003,11 @@ def _run_reservation(
                     ended_at=ended_at,
                 )
                 sidecar = _write_pending_upload(replay, metadata)
-                try:
-                    _complete_pending_upload(sidecar, store)
-                except Exception as error:  # R2 availability must not end a session.
-                    logger.warning("replay upload deferred: {}: {}", type(error).__name__, error)
+                if config.publish_replays:
+                    try:
+                        _complete_pending_upload(sidecar, store)
+                    except Exception as error:  # R2 availability must not end a session.
+                        logger.warning("replay upload deferred: {}: {}", type(error).__name__, error)
                 if next_status is JobStatus.COMPLETE:
                     return
                 health.idle()
@@ -709,7 +1019,7 @@ def _run_reservation(
                         return
                     if job.status is JobStatus.REMATCH_READY:
                         rematch = True
-                        live = False
+                        live.reset(job)
                         health.configure_schedule(timing)
                         health.connecting(job.choices.online_delay)
                         break
@@ -720,12 +1030,14 @@ def _run_reservation(
     except FrameTimeout:
         raise _RecoverableRuntimeError("frame_stream_stalled") from None
     except TimeoutError:
-        if not live:
+        if not live.live:
             with suppress(InvalidTransitionError):
                 store.mark_no_show(job.id, config.worker_id)
             return
         raise
     finally:
+        with suppress(InferenceUnavailable):
+            policy.close_match()
         heartbeat_stop.set()
         heartbeat.join(timeout=1.0)
 
@@ -738,6 +1050,7 @@ def _slot_worker(
     stop: _StopEvent,
     schedules: tuple[FrameTiming, ...],
     context_frames: int,
+    profiles: tuple[PreparedInferenceProfile, ...],
 ) -> None:
     # The supervisor owns terminal signals. A SIGINT in Event.wait() can kill
     # a spawned worker while it holds the event lock and deadlock shutdown.
@@ -747,21 +1060,24 @@ def _slot_worker(
     with (
         connection,
         _SlotHealthReporter(config.slot, config.status_path) as health,
+        closing(
+            InferenceClient(spec, context_frames, connection, stop, {p.fixed_prefix_frames: p for p in profiles})
+        ) as policy,
     ):
-        policy = InferenceClient(spec, context_frames, connection, stop)
         while not stop.is_set():
             health.idle()
-            next_upload_attempt = _retry_pending_uploads(
-                config.replay_dir / f"slot-{config.slot}",
-                store,
-                next_upload_attempt,
-            )
+            if config.publish_replays:
+                next_upload_attempt = _retry_pending_uploads(
+                    config.replay_dir / f"slot-{config.slot}",
+                    store,
+                    next_upload_attempt,
+                )
             job = store.claim_next(config.worker_id, lease_seconds=20.0)
             if job is None:
                 stop.wait(0.25)
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
-            timing = next(s for s in schedules if s.input_delay_frames == job.choices.online_delay)
+            timing = next(s for s in schedules if s.physical_delay_frames == job.choices.online_delay)
             _handle_reservation(config, store, policy, runtime, job, stop, health, timing)
 
 
@@ -782,11 +1098,17 @@ def _handle_reservation(
         logger.error("reservation {}: {}", job.id, error)
         with suppress(InvalidTransitionError):
             store.forfeit_service_failure(job.id, config.worker_id)
+    except NoUsableActionPlan as error:
+        health.recovering("no_usable_action_plan")
+        logger.error("reservation {}: {}", job.id, error)
+        with suppress(InvalidTransitionError):
+            store.forfeit_service_failure(job.id, config.worker_id)
     except InferenceUnavailable as error:
         health.recovering("inference_engine_lost")
         logger.error("reservation {}: {}", job.id, error)
         with suppress(InvalidTransitionError):
             store.forfeit_service_failure(job.id, config.worker_id)
+        raise
     except _RecoverableRuntimeError as error:
         logger.error(
             "reservation {} degraded on slot {}: {}; retrying with a fresh Dolphin",
@@ -817,106 +1139,167 @@ def _start_slot_process(process: BaseProcess, child_connection: Connection) -> N
         signal.signal(signal.SIGINT, previous)
 
 
-def run(config: RunnerConfig) -> None:
-    """Load and prepare one policy, then supervise fixed Dolphin slots."""
-    config.status_path.unlink(missing_ok=True)
-    bot_connect_codes = _bot_connect_codes(config.user_jsons)
-    started = time.perf_counter()
-    policy = load_policy(
-        config.policy,
-        device=config.device,
-        seed=config.seed,
-        compiled=config.compiled,
-        history_mode=config.history_mode,
-        kv_update_frames=config.kv_update_frames,
-    )
-    history_mode = resolve_history_mode(policy.spec.backend, config.history_mode)
-    runtime = RuntimeConfig(
-        max_batch_size=len(config.user_jsons),
-        replan_interval_frames=config.replan_interval_frames,
-        transport_delays=(2,) if policy.spec.backend == "o59-history-decoder" else (2, 3),
-    )
-    logger.info(
-        "loading netplay policy {} on {} mode={} history={} slots={} delays={} display={}",
-        config.policy,
-        config.device,
-        "compiled" if config.compiled else "eager",
-        history_mode,
-        len(config.user_jsons),
-        runtime.transport_delays,
-        os.environ.get("DISPLAY", "unset"),
-    )
-    if not isinstance(policy, PredictionPolicy):
-        raise ValueError("netplay serving requires a prediction backend")
-    budget_check = check_realtime_budget(policy, runtime, config.batch_wait_seconds, shape=config.prediction_shape)
-    config.status_path.parent.mkdir(parents=True, exist_ok=True)
+def _await_engine_ready(
+    status: Connection,
+    process: BaseProcess,
+    shutdown: _ShutdownFlag,
+    *,
+    deadline: float,
+) -> _EngineReady:
+    while time.monotonic() < deadline:
+        if shutdown.requested:
+            raise _ShutdownRequested("runner shutdown requested during inference preparation")
+        if status.poll(min(0.25, max(0.0, deadline - time.monotonic()))):
+            try:
+                message = status.recv()
+            except EOFError as error:
+                raise RuntimeError("inference process closed during preparation") from error
+            if isinstance(message, _EngineReady):
+                return message
+            if isinstance(message, _EngineFailure):
+                raise RuntimeError(f"inference preparation failed: {message.reason}")
+            raise RuntimeError("inference preparation returned an unknown status")
+        if not process.is_alive():
+            raise RuntimeError(f"inference process exited during preparation: {process.exitcode}")
+    raise TimeoutError("inference preparation did not finish within 120 seconds")
+
+
+def _write_budget_record(config: RunnerConfig, ready: _EngineReady, policy_sha256: str) -> None:
+    payload = {
+        "schema_version": 4,
+        "git_sha": config.git_sha,
+        "bundle_sha256": policy_sha256,
+        "checkpoint_sha256": ready.checkpoint_sha256,
+        "capability_version": ready.capability_version,
+        "qualified_capacity": len(config.user_jsons),
+        "profile_checks": [asdict(check) for check in ready.budgets],
+        "python": sys.version,
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "hardware": ready.hardware,
+        "platform": platform.platform(),
+        "batch_wait_seconds": config.batch_wait_seconds,
+        "compiled": config.compiled,
+        "history_mode": "kv_cache",
+        "sampling_seeds": ready.sampling_seeds,
+        "libmelee": melee.version.__version__,
+    }
     budget_path = config.status_path.with_suffix(".budget.json")
-    budget_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 3,
-                "budget_check": asdict(budget_check),
-                "git_sha": config.git_sha,
-                "model_sha256": _sha256(config.policy),
-                "python": sys.version,
-                "torch": torch.__version__,
-                "cuda": torch.version.cuda,
-                "hardware": torch.cuda.get_device_name() if config.device.startswith("cuda") else platform.processor(),
-                "platform": platform.platform(),
-                "runtime": asdict(runtime),
-                "batch_wait_seconds": config.batch_wait_seconds,
-                "compiled": config.compiled,
-                "history_mode": history_mode,
-                "seed": policy.sampling_seed,
-                "libmelee": melee.version.__version__,
-            },
-            allow_nan=False,
-            indent=2,
-        )
-    )
-    logger.info("netplay policy ready after {:.2f}s", time.perf_counter() - started)
-    stop = mp.get_context("spawn").Event()
-    thread_stop = threading.Event()
-    shutdown_requested = False
+    budget_path.write_text(json.dumps(payload, allow_nan=False, indent=2))
 
-    def request_stop(_signum: int, _frame: object) -> None:
-        nonlocal shutdown_requested
-        shutdown_requested = True
 
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
+def _terminate_processes(processes: Sequence[BaseProcess], stop: _StopEvent) -> None:
+    stop.set()
+    started = tuple(process for process in processes if process.pid is not None)
+    deadline = time.monotonic() + 2.0
+    grace = min(deadline, time.monotonic() + 0.25)
+    for process in started:
+        process.join(timeout=max(0.0, grace - time.monotonic()))
+    for process in started:
+        if process.is_alive():
+            with suppress(ProcessLookupError):
+                process.terminate()
+    term = min(deadline, time.monotonic() + 0.75)
+    for process in started:
+        process.join(timeout=max(0.0, term - time.monotonic()))
+    for process in started:
+        if process.is_alive():
+            with suppress(ProcessLookupError):
+                process.kill()
+    for process in started:
+        process.join(timeout=max(0.0, deadline - time.monotonic()))
+    survivors = tuple(process.name for process in started if process.is_alive())
+    if survivors:
+        raise RuntimeError(f"netplay process termination exceeded two seconds: {survivors}")
+
+
+def _open_generation_pipes(
+    context: _PipeContext, slots: int
+) -> tuple[Connection, Connection, dict[int, Connection], dict[int, Connection]]:
+    status_receive: Connection | None = None
+    status_send: Connection | None = None
+    parents: dict[int, Connection] = {}
+    children: dict[int, Connection] = {}
+    try:
+        status_receive, status_send = context.Pipe(duplex=False)
+        for slot in range(slots):
+            parents[slot], children[slot] = context.Pipe()
+    except BaseException:
+        for connection in (*parents.values(), *children.values()):
+            connection.close()
+        if status_receive is not None:
+            status_receive.close()
+        if status_send is not None:
+            status_send.close()
+        raise
+    return status_receive, status_send, parents, children
+
+
+def _run_generation(
+    config: RunnerConfig,
+    bot_connect_codes: tuple[str, ...],
+    policy_sha256: str,
+    shutdown: _ShutdownFlag,
+    *,
+    recovery_deadline: float | None,
+) -> None:
     context = mp.get_context("spawn")
-    parent_connections: dict[int, Connection] = {}
-    child_connections: dict[int, Connection] = {}
-    for slot in range(len(config.user_jsons)):
-        parent, child = context.Pipe()
-        parent_connections[slot] = parent
-        child_connections[slot] = child
-
-    policy_sha256 = _sha256(config.policy)
+    generation_id = secrets.token_hex(8)
+    worker_ids = tuple(f"generation-{generation_id}-slot-{slot}" for slot in range(len(config.user_jsons)))
+    stop = context.Event()
+    status_receive, status_send, parent_connections, child_connections = _open_generation_pipes(
+        context, len(config.user_jsons)
+    )
     processes: list[BaseProcess] = []
     slot_status_paths = tuple(_slot_status_path(config.status_path, slot) for slot in range(len(config.user_jsons)))
-    config.status_path.unlink(missing_ok=True)
-    for status_path in slot_status_paths:
-        status_path.unlink(missing_ok=True)
-    status_started_at = time.time()
-    _write_status(
-        config.status_path,
-        policy_sha256=policy_sha256,
-        slot_paths=slot_status_paths,
-        started_at=status_started_at,
-        model_inference_p95_ms=None,
-        batch_wait_p95_ms=None,
-    )
-    engine: threading.Thread | None = None
-    engine_error: list[BaseException] = []
     try:
+        config.status_path.unlink(missing_ok=True)
+        for path in slot_status_paths:
+            path.unlink(missing_ok=True)
+        engine_config = _InferenceProcessConfig(
+            config.policy,
+            config.device,
+            config.seed,
+            config.compiled,
+            len(config.user_jsons),
+            config.batch_wait_seconds,
+        )
+        gpu_process = context.Process(
+            target=_gpu_inference_process,
+            args=(engine_config, parent_connections, status_send, stop),
+            name="hal-netplay-inference",
+        )
+        processes.append(gpu_process)
+        gpu_process.start()
+        status_send.close()
+        for connection in parent_connections.values():
+            connection.close()
+        startup_deadline = time.monotonic() + _ENGINE_STARTUP_TIMEOUT_SECONDS
+        if recovery_deadline is not None:
+            startup_deadline = min(startup_deadline, recovery_deadline)
+        ready = _await_engine_ready(status_receive, gpu_process, shutdown, deadline=startup_deadline)
+        if (
+            len(ready.budgets) != len(_NETPLAY_TIMINGS)
+            or tuple(check.timings[0] for check in ready.budgets) != _NETPLAY_TIMINGS
+        ):
+            raise RuntimeError("inference process did not qualify both declared netplay profiles")
+        _write_budget_record(config, ready, policy_sha256)
+        runtime = RuntimeConfig(1, (2, 3), replan_interval_frames=4)
+        status_started_at = time.time()
+        _write_status(
+            config.status_path,
+            policy_sha256=policy_sha256,
+            slot_paths=slot_status_paths,
+            started_at=status_started_at,
+            model_inference_p95_ms=None,
+            batch_wait_p95_ms=None,
+        )
         for slot, (user_json, bot_connect_code, slippi_port) in enumerate(
             zip(config.user_jsons, bot_connect_codes, config.slippi_ports, strict=True)
         ):
             slot_config = SlotConfig(
                 slot=slot,
-                worker_id=f"slot-{slot}",
+                worker_id=worker_ids[slot],
                 stream_id=slot,
                 database=config.database,
                 user_json=user_json,
@@ -927,58 +1310,61 @@ def run(config: RunnerConfig) -> None:
                 replay_dir=config.replay_dir,
                 status_path=slot_status_paths[slot],
                 policy_sha256=policy_sha256,
+                checkpoint_sha256=ready.checkpoint_sha256,
                 git_sha=config.git_sha,
                 max_frames=config.max_frames,
+                measurement_dir=config.measurement_dir,
+                publish_replays=config.publish_replays,
             )
             process = context.Process(
                 target=_slot_worker,
                 args=(
                     slot_config,
-                    policy.spec,
+                    ready.spec,
                     runtime,
                     child_connections[slot],
                     stop,
-                    budget_check.timings,
-                    policy.context_frames,
+                    _NETPLAY_TIMINGS,
+                    ready.context_frames,
+                    ready.profiles,
                 ),
                 name=f"hal-netplay-slot-{slot}",
             )
-            _start_slot_process(process, child_connections[slot])
             processes.append(process)
-
-        status_lock = threading.Lock()
-        batcher = InferenceWorker(
-            policy,
-            budget_check.timings[0].prediction_horizon_frames,
-            parent_connections,
-            batch_wait_seconds=config.batch_wait_seconds,
+            _start_slot_process(process, child_connections[slot])
+        logger.info(
+            "netplay runner ready generation={} slots={} checkpoint={} capacity={}",
+            generation_id,
+            len(config.user_jsons),
+            ready.checkpoint_sha256,
+            len(config.user_jsons),
         )
-
-        def serve() -> None:
-            try:
-                with torch.compiler.set_stance("fail_on_recompile"):
-                    batcher.serve(thread_stop)
-            except BaseException as error:
-                with status_lock:
-                    engine_error.append(error)
-                    config.status_path.unlink(missing_ok=True)
-                    stop.set()
-
-        engine = threading.Thread(target=serve, name="hal-netplay-inference", daemon=True)
-        engine.start()
-        logger.info("netplay runner ready slots={} policy_sha256={}", len(processes), policy_sha256)
+        last_pulse = time.monotonic()
+        next_status = 0.0
+        model_p95_ms: float | None = None
+        batch_wait_p95_ms: float | None = None
         previous_state: RunnerState | None = None
-        while not shutdown_requested:
-            if engine_error:
-                raise RuntimeError("netplay inference engine failed") from engine_error[0]
-            failed = [process for process in processes if not process.is_alive()]
+        while not shutdown.requested:
+            if status_receive.poll(0.25):
+                try:
+                    message = status_receive.recv()
+                except EOFError as error:
+                    raise _EngineLost("inference process closed its health connection") from error
+                if isinstance(message, _EngineFailure):
+                    raise _EngineLost(message.reason)
+                if not isinstance(message, _EnginePulse):
+                    raise _EngineLost("inference process returned an unknown health message")
+                last_pulse = time.monotonic()
+                model_p95_ms = message.model_inference_p95_ms
+                batch_wait_p95_ms = message.batch_wait_p95_ms
+            if not gpu_process.is_alive():
+                raise _EngineLost(f"inference process exited with code {gpu_process.exitcode}")
+            if time.monotonic() - last_pulse >= _ENGINE_PROGRESS_TIMEOUT_SECONDS:
+                raise _EngineLost("inference process made no progress for one second")
+            failed = [process for process in processes[1:] if not process.is_alive()]
             if failed:
-                config.status_path.unlink(missing_ok=True)
                 raise RuntimeError(f"netplay slot process exited with code {failed[0].exitcode}")
-            model_p95_ms, batch_wait_p95_ms = batcher.timing_p95_ms()
-            with status_lock:
-                if engine_error:
-                    raise RuntimeError("netplay inference engine failed") from engine_error[0]
+            if time.monotonic() >= next_status:
                 status = _write_status(
                     config.status_path,
                     policy_sha256=policy_sha256,
@@ -987,41 +1373,71 @@ def run(config: RunnerConfig) -> None:
                     model_inference_p95_ms=model_p95_ms,
                     batch_wait_p95_ms=batch_wait_p95_ms,
                 )
-            if status.state is not previous_state:
-                logger.info(
-                    "netplay service state={} healthy_slots={}/{} game_fps={} "
-                    "frame_p95_ms={} dolphin_p95_ms={} policy_p95_ms={} "
-                    "model_p95_ms={} batch_wait_p95_ms={} recoveries={}",
-                    status.state.value,
-                    status.healthy_slots,
-                    status.slots,
-                    status.game_fps,
-                    status.frame_interval_p95_ms,
-                    status.dolphin_step_p95_ms,
-                    status.policy_round_trip_p95_ms,
-                    status.model_inference_p95_ms,
-                    status.batch_wait_p95_ms,
-                    status.recoveries,
-                )
-                previous_state = status.state
-            time.sleep(0.5)
+                if status.state is not previous_state:
+                    logger.info(
+                        "netplay service state={} healthy_slots={}/{} game_fps={} model_p95_ms={} batch_wait_p95_ms={}",
+                        status.state.value,
+                        status.healthy_slots,
+                        status.slots,
+                        status.game_fps,
+                        status.model_inference_p95_ms,
+                        status.batch_wait_p95_ms,
+                    )
+                    previous_state = status.state
+                next_status = time.monotonic() + 0.5
     finally:
-        stop.set()
-        thread_stop.set()
-        for process in processes:
-            process.join(timeout=10.0)
-            if process.is_alive():
-                process.terminate()
-        if engine is not None:
-            engine.join(timeout=2.0)
-        for connection in (*parent_connections.values(), *child_connections.values()):
-            connection.close()
+        try:
+            _terminate_processes(processes, stop)
+        finally:
+            try:
+                failed_leases = QueueStore(config.database).fail_worker_generation(worker_ids)
+                if failed_leases:
+                    logger.warning("netplay generation {} aborted {} active leases", generation_id, failed_leases)
+            finally:
+                for connection in (
+                    *parent_connections.values(),
+                    *child_connections.values(),
+                    status_receive,
+                    status_send,
+                ):
+                    connection.close()
+                config.status_path.unlink(missing_ok=True)
+                for path in slot_status_paths:
+                    path.unlink(missing_ok=True)
+
+
+def run(config: RunnerConfig) -> None:
+    """Admit matches only after a separate GPU process qualifies each profile."""
+    config.status_path.parent.mkdir(parents=True, exist_ok=True)
+    config.status_path.unlink(missing_ok=True)
+    bot_connect_codes = _bot_connect_codes(config.user_jsons)
+    policy_sha256 = _sha256(config.policy)
+    shutdown = _ShutdownFlag()
+    previous_int = signal.signal(signal.SIGINT, shutdown)
+    previous_term = signal.signal(signal.SIGTERM, shutdown)
+    recovery_deadline: float | None = None
+    try:
+        for attempt in range(2):
+            try:
+                _run_generation(
+                    config,
+                    bot_connect_codes,
+                    policy_sha256,
+                    shutdown,
+                    recovery_deadline=recovery_deadline,
+                )
+                return
+            except _ShutdownRequested:
+                return
+            except _EngineLost as error:
+                if attempt == 1 or shutdown.requested:
+                    raise RuntimeError("netplay inference recovery failed; service remains unavailable") from error
+                recovery_deadline = time.monotonic() + 120.0
+                logger.error("netplay inference lost: {}; preparing one replacement process", error)
+    finally:
+        signal.signal(signal.SIGINT, previous_int)
+        signal.signal(signal.SIGTERM, previous_term)
         config.status_path.unlink(missing_ok=True)
-        for status_path in slot_status_paths:
-            status_path.unlink(missing_ok=True)
-        logger.info("netplay runner stopped")
-    if engine_error:
-        raise RuntimeError("netplay inference engine failed") from engine_error[0]
 
 
 def _paths(value: str) -> tuple[Path, ...]:
@@ -1045,10 +1461,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--history-mode", choices=("auto", "window", "kv_cache"), default="auto")
-    parser.add_argument("--kv-update-frames", type=int, choices=(1, 2, 4), default=2)
-    parser.add_argument("--replan-interval", type=int)
-    parser.add_argument("--prediction-shape", nargs=2, type=int, metavar=("HORIZON", "PREFIX"))
+    parser.add_argument("--batch-wait-ms", type=float, default=0.5)
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
     if args.user_jsons is None:
@@ -1073,12 +1486,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             device=args.device,
             seed=args.seed,
             compiled=args.compiled,
-            history_mode=args.history_mode,
-            kv_update_frames=args.kv_update_frames,
-            prediction_shape=(args.prediction_shape[0], args.prediction_shape[1])
-            if args.prediction_shape is not None
-            else None,
-            replan_interval_frames=args.replan_interval,
+            batch_wait_seconds=args.batch_wait_ms / 1000,
             max_frames=args.max_frames,
         )
     )

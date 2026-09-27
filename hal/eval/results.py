@@ -3,9 +3,39 @@
 import math
 from collections.abc import Collection
 from dataclasses import dataclass
+from typing import Literal
 from typing import Protocol
 
 from hal.sim.trajectory import Trajectory
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleEvent:
+    choice_frame: int
+    target_frame: int
+    phase: Literal["countdown", "gameplay"]
+    deadline_misses: int
+    prefix_mismatches: int
+    exhausted_chunks: int
+    neutral_fallback_frames: int
+    submission_gaps: int
+    transport_corrections: int
+    inference_failed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NetplayProgress:
+    stream_id: int
+    generation: int
+    pending_sequence: int | None
+    last_consumed_source_frame: int | None
+    last_accepted_source_frame: int | None
+    observed_frame_ids: tuple[int, ...]
+    inference_source_frames: tuple[int, ...]
+    inference_seconds: tuple[float, ...]
+    frame_interval_seconds: tuple[float, ...]
+    dolphin_step_seconds: tuple[float, ...]
+    schedule_events: tuple[ScheduleEvent, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +49,10 @@ class PlayResult:
     frame_interval_seconds: tuple[float, ...]
     dolphin_step_seconds: tuple[float, ...]
     transport_correction_frames: int
+    inference_source_frames: tuple[int, ...] = ()
+    schedule_events: tuple[ScheduleEvent, ...] = ()
+    connection_countdown_seconds: float = 0.0
+    match_end_seconds: float = 0.0
 
     @property
     def inference_p95_ms(self) -> float:

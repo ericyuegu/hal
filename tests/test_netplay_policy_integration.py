@@ -15,17 +15,16 @@ import torch
 
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.netplay import run_netplay_match
-from hal.eval.qualification import check_realtime_budget
 from hal.eval.replays import require_completed_replay
 from hal.eval.results import PlayResult
 from hal.eval.scheduling import FrameTiming
-from hal.inference.api import PredictionPolicy
 from hal.inference.api import RuntimeConfig
-from hal.inference.bundle import read_policy_manifest
-from hal.inference.loader import load_policy
-from hal.inference.worker import InferenceClient
-from hal.inference.worker import InferenceWorker
+from hal.inference.client import InferenceClient
+from hal.inference.engine import InferenceEngine
+from hal.inference.engine import configure_inference_process
 from hal.netplay_service.replays import soak_replay_directory
+from hal.netplay_service.runner import _InferenceProcessConfig
+from hal.netplay_service.runner import _prepare_netplay_engine
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
@@ -37,7 +36,7 @@ class _Harness:
     runtime: RuntimeConfig
     timings: tuple[FrameTiming, ...]
     clients: tuple[InferenceClient, InferenceClient]
-    batcher: InferenceWorker
+    batcher: InferenceEngine
     stop: threading.Event
     engine: threading.Thread
     errors: list[BaseException]
@@ -66,21 +65,25 @@ def policy_harness() -> _Harness:
         pytest.skip("set HAL_REQUIRE_NETPLAY_POLICY_INTEGRATION=1 with two Slippi accounts")
     policy_path = _required_path("HAL_NETPLAY_POLICY")
     compiled = os.environ.get("HAL_NETPLAY_COMPILED", "0") == "1"
-    manifest = read_policy_manifest(policy_path)
-    runtime = RuntimeConfig(2, tuple(delay for delay in manifest.supported_transport_delays if delay in (2, 3)))
-    policy = load_policy(policy_path, device="cuda", seed=0, compiled=compiled)
-    assert isinstance(policy, PredictionPolicy)
-    calibration = check_realtime_budget(policy, runtime, 0.0005)
     parent_0, child_0 = Pipe()
     parent_1, child_1 = Pipe()
+    try:
+        configure_inference_process()
+        batcher, ready = _prepare_netplay_engine(
+            _InferenceProcessConfig(policy_path, "cuda", 0, compiled, 2, 0.0005),
+            {0: parent_0, 1: parent_1},
+        )
+    except BaseException:
+        for connection in (parent_0, child_0, parent_1, child_1):
+            connection.close()
+        raise
+    runtime = RuntimeConfig(2, (2, 3), replan_interval_frames=4)
     stop = threading.Event()
     lost = threading.Event()
+    prepared = {profile.fixed_prefix_frames: profile for profile in ready.profiles}
     clients = (
-        InferenceClient(policy.spec, policy.context_frames, child_0, lost),
-        InferenceClient(policy.spec, policy.context_frames, child_1, lost),
-    )
-    batcher = InferenceWorker(
-        policy, calibration.timings[0].prediction_horizon_frames, {0: parent_0, 1: parent_1}, batch_wait_seconds=0.0005
+        InferenceClient(ready.spec, ready.context_frames, child_0, lost, prepared),
+        InferenceClient(ready.spec, ready.context_frames, child_1, lost, prepared),
     )
     errors: list[BaseException] = []
 
@@ -94,11 +97,15 @@ def policy_harness() -> _Harness:
 
     engine = threading.Thread(target=serve, daemon=True)
     engine.start()
-    harness = _Harness(runtime, calibration.timings, clients, batcher, stop, engine, errors)
+    harness = _Harness(
+        runtime, tuple(check.timings[0] for check in ready.budgets), clients, batcher, stop, engine, errors
+    )
     try:
         yield harness
     finally:
         stop.set()
+        for client in clients:
+            client.close()
         engine.join(timeout=2)
         for connection in (parent_0, child_0, parent_1, child_1):
             connection.close()

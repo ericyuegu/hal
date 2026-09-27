@@ -19,6 +19,14 @@ class RealtimeBudgetCheck:
     measurements: tuple[LatencyMeasurement, ...]
 
 
+def _timing_order(timing: FrameTiming) -> tuple[int, int]:
+    return timing.inference_allowance_frames, -timing.prediction_horizon_frames
+
+
+def _candidate_order(candidate: tuple[int, int]) -> tuple[int, int]:
+    return candidate[0], -candidate[1]
+
+
 def latency_frames(seconds: float) -> int:
     if not math.isfinite(seconds) or seconds < 0:
         raise ValueError("latency must be finite and non-negative")
@@ -39,6 +47,7 @@ def select_frame_timing(
                 timing = FrameTiming(
                     input_delay_frames,
                     thinking_allowance,
+                    measurement.fixed_prefix_frames,
                     replan,
                     measurement.prediction_horizon_frames,
                 )
@@ -47,7 +56,7 @@ def select_frame_timing(
             candidates.append(timing)
     if not candidates:
         raise RuntimeError("server unavailable: no trained horizon can cover measured inference and transport")
-    return min(candidates, key=lambda timing: (timing.thinking_allowance_frames, -timing.prediction_horizon_frames))
+    return min(candidates, key=_timing_order)
 
 
 def check_realtime_budget(
@@ -68,7 +77,7 @@ def check_realtime_budget(
             replan = thinking_allowance if runtime.replan_interval_frames is None else runtime.replan_interval_frames
             if horizon >= input_delay + thinking_allowance + replan:
                 candidates.append((thinking_allowance, horizon))
-    candidates.sort(key=lambda candidate: (candidate[0], -candidate[1]))
+    candidates.sort(key=_candidate_order)
     measurements = []
     if shape is not None:
         horizon, prefix = shape
@@ -76,7 +85,7 @@ def check_realtime_budget(
             raise ValueError("prediction horizon is not supported by this policy")
         thinking_allowance = prefix - input_delay
         replan = thinking_allowance if runtime.replan_interval_frames is None else runtime.replan_interval_frames
-        selected = FrameTiming(input_delay, thinking_allowance, replan, horizon)
+        selected = FrameTiming(input_delay, thinking_allowance, prefix, replan, horizon)
     else:
         for thinking_allowance, horizon in candidates:
             logger.info("measuring prediction horizon={} fixed_prefix={}", horizon, input_delay + thinking_allowance)
@@ -91,6 +100,7 @@ def check_realtime_budget(
                 selected = FrameTiming(
                     input_delay,
                     thinking_allowance,
+                    input_delay + thinking_allowance,
                     thinking_allowance if runtime.replan_interval_frames is None else runtime.replan_interval_frames,
                     horizon,
                 )
@@ -115,16 +125,37 @@ def check_realtime_budget(
     ):
         raise ValueError("latency measurement shape differs from the requested prediction shape")
     measurements.append(result)
-    if latency_frames(result.p99_seconds) > selected.thinking_allowance_frames:
+    if latency_frames(result.p99_seconds) > selected.inference_allowance_frames:
         raise RuntimeError("server unavailable: selected schedule failed final qualification")
-    policy.reset_prediction()
     timings = tuple(
         FrameTiming(
             delay,
-            selected.thinking_allowance_frames,
+            selected.inference_allowance_frames,
+            delay + selected.inference_allowance_frames,
             selected.replan_interval_frames,
             selected.prediction_horizon_frames,
         )
         for delay in runtime.transport_delays
     )
+    for timing in timings:
+        if timing.physical_delay_frames == selected.physical_delay_frames:
+            continue
+        result = measure(
+            policy,
+            runtime,
+            timing.prediction_horizon_frames,
+            timing.fixed_prefix_frames,
+            batch_wait_seconds,
+        )
+        if (result.prediction_horizon_frames, result.fixed_prefix_frames) != (
+            timing.prediction_horizon_frames,
+            timing.fixed_prefix_frames,
+        ):
+            raise ValueError("latency measurement shape differs from the requested prediction shape")
+        measurements.append(result)
+        if latency_frames(result.p99_seconds) > timing.inference_allowance_frames:
+            raise RuntimeError(
+                f"server unavailable: delay {timing.physical_delay_frames} failed independent qualification"
+            )
+    policy.reset_prediction()
     return RealtimeBudgetCheck(timings, tuple(measurements))

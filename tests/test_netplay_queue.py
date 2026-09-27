@@ -278,3 +278,46 @@ def test_service_failure_records_bot_forfeit_without_requeue(tmp_path: Path) -> 
     assert failed.last_result == "win"
     assert failed.error_code == "service_failure_bot_forfeit"
     assert store.claim_next("slot-0") is None
+
+
+def test_stopped_generation_closes_only_its_leases_without_rewriting_completed_game(tmp_path: Path) -> None:
+    store = _store(tmp_path, Clock())
+    credentials = [store.create_job(f"HAL{i}#1", _choices()) for i in range(5)]
+    owners = ("generation-a-slot-0", "generation-a-slot-1", "generation-a-slot-2", "other-slot")
+    claimed = [store.claim_next(owner) for owner in owners]
+    assert all(job is not None for job in claimed)
+    assert [job.id for job in claimed] == [item.job.id for item in credentials[:4]]
+
+    store.mark_connecting(credentials[0].job.id, owners[0], "BOT#1")
+    store.mark_playing(credentials[0].job.id, owners[0])
+    store.mark_connecting(credentials[2].job.id, owners[2], "BOT#1")
+    store.mark_playing(credentials[2].job.id, owners[2])
+    store.finish_game(credentials[2].job.id, owners[2], actual_stage="BATTLEFIELD", result="loss")
+
+    changed = store.fail_worker_generation(owners[:3])
+
+    assert changed == 3
+    playing = store.get_job(credentials[0].job.id, credentials[0].token)
+    leased = store.get_job(credentials[1].job.id, credentials[1].token)
+    rematch = store.get_job(credentials[2].job.id, credentials[2].token)
+    other = store.get_job(credentials[3].job.id, credentials[3].token)
+    queued = store.get_job(credentials[4].job.id, credentials[4].token)
+    assert (playing.status, playing.last_result, playing.error_code) == (
+        JobStatus.FAILED,
+        "win",
+        "service_failure_bot_forfeit",
+    )
+    assert (leased.status, leased.last_result, leased.error_code) == (
+        JobStatus.FAILED,
+        None,
+        "service_generation_aborted",
+    )
+    assert (rematch.status, rematch.game_count, rematch.last_result, rematch.error_code) == (
+        JobStatus.FAILED,
+        1,
+        "loss",
+        "service_generation_aborted",
+    )
+    assert other.status is JobStatus.LEASED and other.lease_owner == owners[3]
+    assert queued.status is JobStatus.QUEUED
+    assert store.fail_worker_generation(owners[:3]) == 0

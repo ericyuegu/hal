@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable
+from collections.abc import Sequence
 from contextlib import closing
 from contextlib import contextmanager
 from pathlib import Path
@@ -483,6 +484,25 @@ class QueueStore:
                     updated_at = ? WHERE id = ?""",
                 (self._now(), job_id),
             )
+
+    def fail_worker_generation(self, worker_ids: Sequence[str]) -> int:
+        """Close leases from a stopped runner generation without touching other owners."""
+        if isinstance(worker_ids, (str, bytes)) or not worker_ids or any(not worker_id for worker_id in worker_ids):
+            raise ValueError("worker generation must contain non-empty worker IDs")
+        placeholders = ",".join("?" for _ in worker_ids)
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                f"""UPDATE jobs SET status = 'failed',
+                    last_result = CASE WHEN status IN ('connecting', 'playing') THEN 'win' ELSE last_result END,
+                    error_code = CASE WHEN status IN ('connecting', 'playing')
+                        THEN 'service_failure_bot_forfeit' ELSE 'service_generation_aborted' END,
+                    lease_owner = NULL, lease_expires_at = NULL, connect_deadline = NULL,
+                    rematch_deadline = NULL, updated_at = ?
+                WHERE lease_owner IN ({placeholders})
+                    AND status IN ('leased', 'connecting', 'playing', 'rematch_wait', 'rematch_ready')""",
+                (self._now(), *worker_ids),
+            )
+            return cursor.rowcount
 
     def reap_expired(self) -> int:
         timestamp = self._now()

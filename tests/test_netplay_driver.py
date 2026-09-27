@@ -2,6 +2,7 @@
 
 import time
 from collections import deque
+from unittest.mock import Mock
 
 import melee
 import pytest
@@ -10,6 +11,7 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.eval import netplay
 from hal.eval import observations
+from hal.eval.results import NetplayProgress
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicyInput
@@ -17,6 +19,7 @@ from hal.inference.api import PolicySpec
 from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.api import action_plan
+from hal.inference.client import InferenceUnavailable
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import FrameTimeout
 
@@ -89,16 +92,24 @@ class _Client:
         self.requests: list[PredictionRequest] = []
         self.pending: PredictionRequest | None = None
         self.generation = 0
+        self.active = False
 
     @property
     def busy(self) -> bool:
         return self.pending is not None
 
-    def start_match(self) -> int:
+    def start_match(self, stream_id: int, prefix_frames: int) -> int:
+        assert stream_id == 0 and prefix_frames in (3, 4)
+        assert not self.active
         self.generation += 1
+        self.active = True
         return self.generation
 
+    def close_match(self) -> None:
+        self.active = False
+
     def submit(self, request: PredictionRequest) -> None:
+        assert self.active
         self.requests.append(request)
         self.pending = request
 
@@ -128,7 +139,7 @@ def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pyt
         NetplaySetup(melee.Character.FOX, "TEST#1"),
         client,
         RuntimeConfig(1, (2,)),
-        FrameTiming(2, 2, 2, 8),
+        FrameTiming(2, 2, 4, 2, 8),
         max_frames=10,
     )
 
@@ -139,14 +150,23 @@ def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pyt
     assert any(action.main_x == 0.5 for _, action in session.submitted)
     assert result.ego_port == 1
     assert result.stage == 31
+    assert result.connection_countdown_seconds >= 0
+    assert result.match_end_seconds >= 0
+    assert len(result.inference_source_frames) == len(result.inference_seconds)
+    assert set(result.inference_source_frames) <= {request.source_frame for request in client.requests}
+    assert result.schedule_events[0].phase == "countdown"
+    assert all(
+        event.phase == ("countdown" if event.choice_frame < 0 else "gameplay") for event in result.schedule_events
+    )
+    assert result.schedule_events[-1].submission_gaps == 0
 
 
 def test_countdown_input_mask_ends_at_negative_45() -> None:
-    scheduler = ActionScheduler(FrameTiming(2, 2, 2, 8), 8, 1)
+    scheduler = ActionScheduler(FrameTiming(2, 2, 4, 2, 8), 8, 1)
     moved = ControllerAction(0.5, 0, 0, 0, 0, 0, 0)
     for frame_id in (-46, -45):
         scheduler.submitted[frame_id] = moved
-        scheduler.observe(PolicyInput(0, frame_id, 1, {}, NEUTRAL_CONTROLLER_ACTION, (NEUTRAL_CONTROLLER_ACTION,) * 2))
+        scheduler.observe(PolicyInput(0, frame_id, 1, {}, NEUTRAL_CONTROLLER_ACTION))
     assert scheduler.transport_corrections == 1
 
 
@@ -168,7 +188,7 @@ def test_one_frame_handoff_submits_first_tail_at_next_observation(monkeypatch: p
         NetplaySetup(melee.Character.FOX, "TEST#1"),
         client,
         RuntimeConfig(1, (2,)),
-        FrameTiming(2, 1, 4, 8),
+        FrameTiming(2, 1, 3, 4, 8),
         max_frames=10,
     )
 
@@ -191,7 +211,7 @@ def test_rematch_rejects_previous_generation_plan(monkeypatch: pytest.MonkeyPatc
     client = _Client()
     setup = NetplaySetup(melee.Character.FOX, "TEST#1")
     runtime = RuntimeConfig(1, (2,))
-    timing = FrameTiming(2, 2, 2, 8)
+    timing = FrameTiming(2, 2, 4, 2, 8)
 
     netplay.run_netplay_match(session, setup, client, runtime, timing, max_frames=10)
     second = netplay.run_netplay_match(session, setup, client, runtime, timing, rematch=True, max_frames=10)
@@ -223,7 +243,7 @@ def test_netplay_rejects_missing_observation(monkeypatch: pytest.MonkeyPatch) ->
             NetplaySetup(melee.Character.FOX, "TEST#1"),
             _Client(),
             RuntimeConfig(1, (2,)),
-            FrameTiming(2, 2, 2, 8),
+            FrameTiming(2, 2, 4, 2, 8),
             max_frames=10,
         )
 
@@ -243,13 +263,129 @@ def test_dolphin_timeout_has_separate_failure_reason(monkeypatch: pytest.MonkeyP
             raise FrameTimeout("no frames")
 
     session = TimedOutSession()
+    client = _Client()
+    failures: list[tuple[NetplayProgress, BaseException]] = []
+
+    def capture(progress: NetplayProgress, error: BaseException) -> None:
+        failures.append((progress, error))
+
     with pytest.raises(netplay.DolphinConnectionLost, match="Dolphin connection lost"):
         netplay.run_netplay_match(
             session,
             NetplaySetup(melee.Character.FOX, "TEST#1"),
-            _Client(),
+            client,
             RuntimeConfig(1, (2,)),
-            FrameTiming(2, 2, 2, 8),
+            FrameTiming(2, 2, 4, 2, 8),
             max_frames=10,
+            on_failure=capture,
         )
     assert session.submitted[-1][1] == NEUTRAL_CONTROLLER_ACTION
+    assert not client.active
+    progress, error = failures[0]
+    assert isinstance(error, netplay.DolphinConnectionLost)
+    assert progress.observed_frame_ids == (-2, -1, 0)
+    assert progress.stream_id == 0 and progress.generation == 1
+    assert progress.schedule_events[0].phase == "countdown"
+
+
+def test_valid_late_plans_without_an_initial_plan_end_neutral_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        observations,
+        "flatten_canonical_frame",
+        lambda frame: {
+            "stage": frame["_matchup"]["stage"],
+            "p1_character": frame["_matchup"]["character"][1],
+        },
+    )
+    clock = [0.0]
+    monkeypatch.setattr(netplay.time, "monotonic", lambda: clock[0])
+
+    class LateClient(_Client):
+        ready = False
+
+        def poll(self):
+            if not self.ready:
+                return None
+            self.ready = False
+            return super().poll()
+
+    client = LateClient()
+    generation = client.start_match(0, 3)
+    schedule = ActionScheduler(FrameTiming(2, 1, 3, 4, 8), client.context_frames, generation)
+    lifecycle = netplay._NetplayLifecycle(
+        _Session(),
+        client,
+        schedule,
+        player_identity=None,
+        policy_settings=None,
+        observer=None,
+        schedule_observer=None,
+        stream_id=0,
+    )
+
+    for frame_id in range(-2, 11):
+        clock[0] = max(0.0, (frame_id - 4) * 0.3)
+        lifecycle.advance(_frame(frame_id, NEUTRAL_CONTROLLER_ACTION))
+        client.ready = frame_id in (4, 10)
+        lifecycle.choose(frame_id)
+    assert schedule.last_accepted_source_frame is None
+    assert schedule.last_consumed_source_frame == 4
+    assert schedule.deadline_misses >= 2
+    assert schedule.exhausted_chunks == 0
+
+    clock[0] = 2.1
+    lifecycle.advance(_frame(11, NEUTRAL_CONTROLLER_ACTION))
+    with pytest.raises(netplay.NoUsableActionPlan, match="no usable action plan for two seconds"):
+        lifecycle.choose(11)
+
+
+def test_no_usable_plan_releases_stream_and_release_failure_stops_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        netplay._NetplayLifecycle,
+        "run",
+        Mock(side_effect=netplay.NoUsableActionPlan("no usable plan")),
+    )
+    setup = NetplaySetup(melee.Character.FOX, "TEST#1")
+    runtime = RuntimeConfig(1, (2,))
+    timing = FrameTiming(2, 1, 3, 4, 8)
+    client = _Client()
+    with pytest.raises(netplay.NoUsableActionPlan, match="no usable plan"):
+        netplay.run_netplay_match(_Session(), setup, client, runtime, timing)
+    assert not client.active
+
+    class FailedReleaseClient(_Client):
+        def close_match(self) -> None:
+            self.active = False
+            raise InferenceUnavailable("stream release failed")
+
+    failed_client = FailedReleaseClient()
+    with pytest.raises(InferenceUnavailable, match="stream release failed"):
+        netplay.run_netplay_match(_Session(), setup, failed_client, runtime, timing)
+    assert not failed_client.active
+
+
+def test_failed_countdown_keeps_primary_error_when_stream_release_fails() -> None:
+    class FailedSession(_Session):
+        def start_match(self, *_args: object, **_kwargs: object) -> dict:
+            raise RuntimeError("countdown failed")
+
+    class FailedReleaseClient(_Client):
+        def close_match(self) -> None:
+            self.active = False
+            raise InferenceUnavailable("release timed out")
+
+    def failed_capture(_progress: NetplayProgress, _error: BaseException) -> None:
+        raise OSError("diagnostic write failed")
+
+    client = FailedReleaseClient()
+    with pytest.raises(RuntimeError, match="countdown failed") as raised:
+        netplay.run_netplay_match(
+            FailedSession(),
+            NetplaySetup(melee.Character.FOX, "TEST#1"),
+            client,
+            RuntimeConfig(1, (2,)),
+            FrameTiming(2, 1, 3, 4, 8),
+            on_failure=failed_capture,
+        )
+    assert not client.active
+    assert any("diagnostic write failed" in note for note in raised.value.__notes__)

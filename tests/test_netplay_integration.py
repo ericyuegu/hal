@@ -8,15 +8,15 @@ import melee
 import peppi_py
 import pytest
 
+from hal.controller import ControllerAction
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
-from hal.sim.inputs import ControllerInputsValue
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.wire import peppi_port_to_libmelee
 
-_NEUTRAL = ControllerInputsValue(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
-_RIGHT = ControllerInputsValue(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+_NEUTRAL = ControllerAction(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+_RIGHT = ControllerAction(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
 
 
 def _account(name: str) -> tuple[Path, str]:
@@ -33,7 +33,7 @@ def _account(name: str) -> tuple[Path, str]:
 def _step_both(
     pool: ThreadPoolExecutor,
     sessions: tuple[NetplaySession, NetplaySession],
-    inputs: tuple[ControllerInputsValue, ControllerInputsValue],
+    inputs: tuple[ControllerAction, ControllerAction],
 ) -> tuple[dict, dict]:
     futures = [pool.submit(session.step, value) for session, value in zip(sessions, inputs, strict=True)]
     results = [future.result(timeout=30) for future in futures]
@@ -182,15 +182,15 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
     import time
     from multiprocessing import Pipe
 
-    from hal.controller import NEUTRAL_CONTROLLER_ACTION
     from hal.controller import ControllerAction
     from hal.eval.scheduling import ActionScheduler
     from hal.eval.scheduling import FrameTiming
     from hal.inference.api import PolicyInput
     from hal.inference.api import PolicySpec
+    from hal.inference.api import PreparedInferenceProfile
     from hal.inference.api import action_plan
-    from hal.inference.worker import InferenceClient
-    from hal.inference.worker import InferenceWorker
+    from hal.inference.client import InferenceClient
+    from hal.inference.engine import InferenceEngine
     from hal.sim.inputs import canonical_pre_to_action
     from hal.sim.inputs import controller_actions_match
 
@@ -199,7 +199,7 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
     account_1, code_1 = _account("1")
     account_2, code_2 = _account("2")
     assert not account_1.samefile(account_2) and code_1 != code_2
-    timing = FrameTiming(delay, 4, 4, 12)
+    timing = FrameTiming(delay, 4, delay + 4, 4, 12)
     stop = threading.Event()
     lost = threading.Event()
     errors = []
@@ -226,6 +226,12 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
                 for request in requests
             )
 
+        def release_stream(self, _stream_id: int) -> None:
+            pass
+
+        def validate_prepared_profile(self, profile: PreparedInferenceProfile) -> None:
+            assert profile.prediction_horizon_frames == 12
+
     class DeliveryConnection:
         def __init__(self, connection):
             self.connection = connection
@@ -241,10 +247,17 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
             return self.connection.fileno()
 
     policy = DelayedPolicy()
-    batcher = InferenceWorker(
-        policy, 12, {slot: DeliveryConnection(pair[0]) for slot, pair in enumerate(pairs)}, batch_wait_seconds=0.0005
+    profile = PreparedInferenceProfile(
+        "integration", "a" * 64, "kv_cache", 12, timing.fixed_prefix_frames, (1, 2, 4), 2
     )
-    clients = [InferenceClient(policy.spec, 16, pair[1], lost) for pair in pairs]
+    batcher = InferenceEngine(
+        {profile: policy},
+        {slot: DeliveryConnection(pair[0]) for slot, pair in enumerate(pairs)},
+        batch_wait_seconds=0.0005,
+    )
+    clients = [
+        InferenceClient(policy.spec, 16, pair[1], lost, {timing.fixed_prefix_frames: profile}) for pair in pairs
+    ]
 
     def serve():
         try:
@@ -276,7 +289,7 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
     def play(slot, first):
         session, client = sessions[slot], clients[slot]
         assert session.ego_port is not None
-        schedule = ActionScheduler(timing, 16, client.start_match())
+        schedule = ActionScheduler(timing, 16, client.start_match(slot, timing.fixed_prefix_frames))
         frames = [first]
         observed = {}
         submitted = {}
@@ -287,16 +300,13 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
             for frame in frames:
                 applied = canonical_pre_to_action(frame["ports"][session.ego_port]["leader"]["pre"])
                 observed[frame["id"]] = applied.main_x
-                schedule.observe(
-                    PolicyInput(slot, frame["id"], session.ego_port, {}, applied, (NEUTRAL_CONTROLLER_ACTION,) * delay)
-                )
+                schedule.observe(PolicyInput(slot, frame["id"], session.ego_port, {}, applied))
                 advanced_while_waiting += client.busy
             frame_id = frames[-1]["id"]
             response = client.poll()
             if response is not None:
-                schedule.accept_plan(response)
+                schedule.accept_plan(response, frame_id)
                 latencies.append(client.last_latency)
-            schedule.apply_ready_plan(frame_id)
             if not client.busy:
                 request = schedule.request_plan()
                 if request is not None:
@@ -330,6 +340,7 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
         assert metrics["fps"] >= 59
         assert any(abs(value) > 0.5 for value in observed.values())
         assert matches / targets > 0.9
+        client.close_match()
         return session.ego_port, observed
 
     try:
@@ -347,6 +358,8 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
         assert not errors
     finally:
         stop.set()
+        for client in clients:
+            client.close()
         engine.join(2)
         for pair in pairs:
             for connection in pair:
