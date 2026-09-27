@@ -13,10 +13,43 @@ slots come from ``wire.canonical_item_columns``, which applies the same
 spawn-id ordering the offline extractor does.
 """
 
+import math
+from collections.abc import Mapping
+from collections.abc import Sequence
+
+import numpy as np
+
+from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.wire import MASK_FLOAT
+from hal.wire import MASK_INT32
 from hal.wire import POST_FIELD_SUFFIXES
 from hal.wire import canonical_item_columns
 from hal.wire import canonical_post_field
+
+_INTEGER_COLUMNS = frozenset(name for name, dtype in MDS_PER_FRAME_DTYPES.items() if np.dtype(dtype).kind == "i")
+
+
+def project_observation_columns(flat: Mapping[str, float | int], columns: Sequence[str]) -> dict[str, float | int]:
+    """Use the stored column types and masks at the inference request boundary.
+
+    Direct live frames carry NaNs even in categorical columns; the local shared
+    memory transport already replaces them with the schema's integer sentinel.
+    """
+    observation: dict[str, float | int] = {}
+    for name in columns:
+        value = flat[name]
+        if name not in MDS_PER_FRAME_DTYPES:
+            raise ValueError(f"unknown observation column {name!r}")
+        if name not in _INTEGER_COLUMNS:
+            observation[name] = float(value)
+            continue
+        if math.isnan(value):
+            observation[name] = MASK_INT32
+            continue
+        if not math.isfinite(value) or value != int(value) or not -(1 << 31) <= value <= MASK_INT32:
+            raise ValueError(f"observation column {name!r} is not an int32 value: {value!r}")
+        observation[name] = int(value)
+    return observation
 
 
 def flatten_canonical_frame(frame: dict) -> dict[str, float]:

@@ -4,12 +4,16 @@ import os
 from dataclasses import replace
 from typing import Literal
 
+import melee.gamestate
+import numpy as np
 import pytest
 import torch
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import consolidate_key
+from hal.eval.observations import flatten_live_frame
+from hal.eval.observations import policy_input_from_frame
 from hal.inference.action_sequence_artifact import REQUIRED_OBSERVATION_FIELDS
 from hal.inference.action_sequence_policy import ActionSequencePolicy
 from hal.inference.api import PolicySpec
@@ -17,13 +21,17 @@ from hal.inference.api import PredictionRequest
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
 from hal.inference.kv_cache import KVCache
+from hal.inference.observation_history import ObservationHistory
 from hal.inference.warmup import make_warmup_observations
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.attention import KVMemory
 from hal.models.controller_codec import DiscreteControllerCodec
+from hal.representation.features import BASE_ITEMS_PROJECTION
 from hal.representation.features import ITEM_COLUMNS
 from hal.representation.features import feature_kind
+from hal.sim.session import canonical_frame
+from hal.wire import ACTION_DIM
 
 
 def _policy(
@@ -317,6 +325,57 @@ def test_prepared_observation_layout_rejects_changed_scalar_dtypes() -> None:
         policy.predict((replace(request, observations=(changed,)),))
     assert policy._free_rows == {0}
     assert policy.predict((request,))[0].stream_id == 42
+
+
+@pytest.mark.parametrize("port", [1, 2])
+@pytest.mark.parametrize(
+    "is_compiled",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"))],
+)
+def test_cached_preparation_matches_live_frames_with_missing_categories(port: int, is_compiled: bool) -> None:
+    device = torch.device("cuda" if is_compiled else "cpu")
+    policy = _policy(1, device=device, compiled=is_compiled, cuda_graphs=is_compiled)
+    game = melee.gamestate.GameState()
+    game._canonical.ports = {
+        player_port: melee.gamestate.PortData(
+            leader=melee.gamestate.Data(post=melee.gamestate.Post(character=1, stock=4, action=14))
+        )
+        for player_port in (1, 2)
+    }
+    reference = None
+    for frame_id in range(12):
+        game._canonical.id = frame_id
+        game._canonical.items = [melee.gamestate.Item(type=1, state=3, id=9, owner=0)] if frame_id % 3 == 1 else []
+        frame = canonical_frame(game)
+        item = policy_input_from_frame(
+            frame,
+            spec=policy.spec,
+            stream_id=42,
+            controlled_port=port,
+            reset=frame_id == 0,
+            matchup_characters={1: 1, 2: 1},
+        )
+        if reference is None:
+            reference = ObservationHistory.from_frame(
+                flatten_live_frame(frame, {1: 1, 2: 1}),
+                f"p{port}",
+                policy.stats,
+                policy.context_frames,
+                ITEM_COLUMNS,
+                BASE_ITEMS_PROJECTION,
+            )
+            warmup = make_warmup_observations(policy.spec, 1, 42, 0, 0)[0]
+            assert {name: type(value) for name, value in item.observation.items()} == {
+                name: type(value) for name, value in warmup.observation.items()
+            }
+        reference.gather(flatten_live_frame(frame, {1: 1, 2: 1}), np.zeros(ACTION_DIM, dtype=np.float32))
+        reference.push()
+        with torch.compiler.set_stance("fail_on_recompile"):
+            plan = policy.predict((PredictionRequest(42, 1, frame_id, frame_id, (item,), ()),))[0]
+        assert len(plan.actions) == 4
+        actual = policy._prediction_streams[42].history
+        for name in ("values", "cats", "masks"):
+            np.testing.assert_array_equal(getattr(actual, name), getattr(reference, name))
 
 
 def test_cached_stream_reset_and_conditioning_keep_prepared_storage() -> None:

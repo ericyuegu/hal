@@ -7,6 +7,7 @@ from hal.controller import ControllerAction
 from hal.inference.api import PolicyInput
 from hal.inference.api import PolicySpec
 from hal.representation.observations import flatten_canonical_frame
+from hal.representation.observations import project_observation_columns
 from hal.sim.inputs import canonical_pre_to_action
 
 
@@ -65,7 +66,7 @@ def policy_input_from_frame(
         stream_id=stream_id,
         frame_id=int(frame["id"]),
         controlled_port=controlled_port,
-        observation={name: values[name] for name in spec.required_observation_fields},
+        observation=project_observation_columns(values, spec.required_observation_fields),
         applied_action=applied_action_from_frame(frame, controlled_port),
         player_identity=player_identity,
         desired_return=desired_return,

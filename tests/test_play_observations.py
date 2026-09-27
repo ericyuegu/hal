@@ -1,10 +1,16 @@
 """Shared live observation construction for both play drivers."""
 
+import numpy as np
 import pytest
 
 from hal.controller import ControllerAction
 from hal.eval import observations
+from hal.inference.action_sequence_artifact import REQUIRED_OBSERVATION_FIELDS
 from hal.inference.api import PolicySpec
+from hal.representation.observations import project_observation_columns
+from hal.sim.ipc import ArenaSpec
+from hal.sim.ipc import RolloutArena
+from hal.wire import ACTION_DIM
 from hal.wire import BUTTON_BITS
 
 
@@ -74,3 +80,26 @@ def test_live_observation_rejects_missing_required_field(monkeypatch: pytest.Mon
             controlled_port=1,
             matchup_characters={1: 1, 2: 22},
         )
+
+
+def test_direct_policy_observations_match_local_shared_memory_types_and_masks() -> None:
+    frame = _frame(0, stage=31, character=1)
+    frame["ports"][1]["leader"]["post"].update({"stock": 4, "action": 14, "position": {"x": 1.25, "y": -2.5}})
+    frame["items"] = [{"id": 7, "type": 1, "state": 3, "owner": 0}]
+    flat = observations.flatten_live_frame(frame, {1: 1, 2: 22})
+    spec = PolicySpec("059", "hal.action_sequence.test", REQUIRED_OBSERVATION_FIELDS, (2,))
+    direct = observations.policy_input_from_frame(
+        frame, spec=spec, stream_id=7, controlled_port=1, flat=flat
+    ).observation
+    with RolloutArena.create(ArenaSpec(1, 8, 4, ACTION_DIM)) as arena:
+        arena.write_observation(0, 1, 0, flat, np.zeros(ACTION_DIM, dtype=np.float32), reset=True)
+        local, _, _ = arena.observation(0, 1)
+        for name, value in direct.items():
+            assert type(value) is type(local[name])
+            np.testing.assert_equal(value, local[name])
+
+
+@pytest.mark.parametrize("value", [0.5, float("inf"), float("-inf"), 1 << 31, -(1 << 31) - 1])
+def test_observation_projection_rejects_invalid_integer_categories(value: float | int) -> None:
+    with pytest.raises(ValueError, match="not an int32 value"):
+        project_observation_columns({"item0_state": value}, ("item0_state",))
