@@ -1,7 +1,21 @@
 {
+  "branch_and_graphics_evidence": {
+    "bytes": 3778546,
+    "files": 82,
+    "r2_key": "runs/refactor-059/qualification-branch-and-graphics/evidence-f49d7b581db6aa028850cf674f842bba176cfe3090bae8ea7621ecf058e57c27.tar.gz",
+    "sha256": "f49d7b581db6aa028850cf674f842bba176cfe3090bae8ea7621ecf058e57c27",
+    "upload_verified": true
+  },
   "dense_continuation": {
     "app_id": "ap-8UEh60S0Vp1tB6GiHtqeDr",
     "archive_sha256": "c35a596d0936a5ea6b46e056e325aad4c7ec7aec5799399222eda5e8e1850453",
+    "cancellation": {
+      "app_id": "ap-8UEh60S0Vp1tB6GiHtqeDr",
+      "requested_by": "user",
+      "stopped_at": "2026-09-27T22:18:36+00:00",
+      "verified_running_tasks": 0,
+      "verified_state": "stopped"
+    },
     "candidate_trial_1": {
       "compile_seconds": 38.99880501200005,
       "completed_boots": 96,
@@ -81,6 +95,31 @@
       "runtime_specs": 26,
       "sweep_seconds": 3632.104255649
     },
+    "control_trial_2": {
+      "completed_boots": 96.0,
+      "emulator_fps": 208.23005417208432,
+      "failed_workers": 0,
+      "frame_record_count": 96,
+      "frames_by_boot_values": [
+        7200
+      ],
+      "is_clean_crash_free_trial": true,
+      "log_sha256": "f9dff1cf0ac6c4fc9463fb2f7480f338d952e24022df6cca739b83ef09340d10",
+      "net_stock_per_min": 1.329346880918631,
+      "peak_gpu_allocated_bytes": 3021677056,
+      "remaining_dolphin_pids": [],
+      "report_sha256": "d19bedd4dac054941684b06bb590e6bab0b1c98e7de8530a57af5ea1fb481c21",
+      "retry_warnings": 0,
+      "role": "control",
+      "runtime_specs": 24,
+      "sampled_peak_tree_rss_bytes": 14955700224,
+      "source_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
+      "source_unchanged": true,
+      "sweep_seconds": 3319.405562026999,
+      "timed_out_workers": 0,
+      "trial": 2,
+      "unknown_instructions": 0
+    },
     "cpu": 8,
     "dense_command_timeout_seconds": 6000,
     "disk_gib": 512,
@@ -138,7 +177,7 @@
     "recovery_bound_seconds": 120,
     "retries": 0,
     "review_sha256": "4dd38cbc096930493e1a692e3010512396f08efd95ef35870ec914b1eb3a875f",
-    "status": "dense-control-2 running; control and candidate trial1 each finish all96 boots after2 mid-game crashes/retries. Neither is a clean crash-free qualification.",
+    "status": "Stopped at user request; control2 completed96 boots without crashes/retries; unfinished stages remain unqualified. No new Modal jobs authorized.",
     "supplemental_review": {
       "control_source_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
       "memory_observer_sha256": "106bba203c9fbe6cf900a88c0a7265dea9eb3c72507c2781ad074d4f7f448df0",
@@ -423,6 +462,128 @@
     "Memory observations are sampled cgroup maxima where kernel high-water counters are unavailable; end-of-run RSS is not a peak.",
     "First dense control retries two mid-game emulator crashes; final accepted boots alone do not establish crash-free or unchanged per-wave sampling."
   ],
+  "local_graphics_diagnostics": {
+    "opengl": {
+      "cleanup_errors": [],
+      "container_record_sha256": "a07ac41c4477ef655bf17c657c619e9ea7e25bf45a87f4fbf61be15cfc718300",
+      "container_removed": true,
+      "control_sha256": "bfad3ccfd5823221cf67f02806d216b5704ecbd6b08e790ed855acab777e7308",
+      "cpu_limit": 6,
+      "exit_code": 0,
+      "image_id": "sha256:5e9389dc6e30af672831c55f244bee2fc1227a61bb439fbe5515a2b4534d49dd",
+      "launcher_sha256": "b06f7f7805db744ca428cebcaed9ba54761d46cdbc256d89f89a5071976f4510",
+      "maximum_dolphin_processes": 1,
+      "measurement": {
+        "first_600_fps": 59.93673458895055,
+        "first_frame": 0,
+        "frame_count": 602,
+        "gap_over_100_ms_count": 0,
+        "last_frame": 601,
+        "median_gap_period_frames": null,
+        "median_gap_period_ms": null,
+        "raw_sha256": "7cc2589bd1000b927563b515974667b263f6c500a574c8338c1823e24fb75d00"
+      },
+      "memory_gib": 12,
+      "result_sha256": "08b3c5e7c83ad289affbe4ee992e48f038f2b8e7e14b2a082fe51ba54cb38f73",
+      "shutdown": {
+        "exit_codes": {
+          "offline-opengl": 0
+        },
+        "killed": [],
+        "live_workers": [],
+        "seconds": 0.13059491105377674,
+        "terminated": []
+      },
+      "source_archive_sha256": "98477439a6eb95bc7501778a77aef07e95d8f950b9d61d04d01f9d92b24c5b02",
+      "source_sha": "18dfb4b9a591fe3eb1c8fb5545ffa150fd93a414",
+      "transport_probe_sha256": "e0af8b739dc877a8d5c6e6b47e5da2114483dbeded28cad30918cdbcdba77c88"
+    },
+    "scope": "600-frame neutral local-VS graphics controls, not service or real-time qualification. VSync-on retains Vulkan pauses. OpenGL removes them in this short run; glxinfo reports Mesa llvmpipe for the display context, but Dolphin device selection is not independently observed.",
+    "single": {
+      "cleanup_errors": [],
+      "container_record_sha256": "4e60ab6e0b92ff7d48480e025bcc951c202233e778374bb26b0427b7193b0d57",
+      "container_removed": true,
+      "control_sha256": "11cb1454322db7078c953ba295c5271d1c506b0ec66781d1a65f2a2ea448280f",
+      "cpu_limit": 6,
+      "exit_code": 0,
+      "image_id": "sha256:5e9389dc6e30af672831c55f244bee2fc1227a61bb439fbe5515a2b4534d49dd",
+      "launcher_sha256": "6b6445eb85f62be0340bea29bf1df8271e398caeb2ce49a3a1a100496fa7a399",
+      "maximum_dolphin_processes": 1,
+      "measurement": {
+        "first_600_fps": 28.22857642582523,
+        "first_frame": 0,
+        "frame_count": 602,
+        "gap_over_100_ms_count": 39,
+        "last_frame": 601,
+        "median_gap_period_frames": 15.0,
+        "median_gap_period_ms": 536.350541,
+        "raw_sha256": "ccff016cedbd89a9521aca0181078437cf1c734855709db2f600fb44dfe29fca"
+      },
+      "memory_gib": 12,
+      "result_sha256": "64c6be1db3fb30fc8e5e4a6d684d023c53021448563062019d6b9e7ab313c2d8",
+      "shutdown": {
+        "exit_codes": {
+          "offline-single": 0
+        },
+        "killed": [],
+        "live_workers": [],
+        "seconds": 0.10876067588105798,
+        "terminated": []
+      },
+      "source_archive_sha256": "98477439a6eb95bc7501778a77aef07e95d8f950b9d61d04d01f9d92b24c5b02",
+      "source_sha": "18dfb4b9a591fe3eb1c8fb5545ffa150fd93a414",
+      "transport_probe_sha256": "e0af8b739dc877a8d5c6e6b47e5da2114483dbeded28cad30918cdbcdba77c88"
+    },
+    "vsync-on": {
+      "cleanup_errors": [],
+      "config_snapshot_hashes": {
+        "after_game": {
+          "Dolphin.ini": "b70c0a91c7c50e695747705a73c9db60ca5600b78f43b2d40b0941ec41f42ff1",
+          "GFX.ini": "20b15ab47a22c6127dc2afff1f0388902f4ab2f72b3934c134b5ccbf16d793d0"
+        },
+        "generated": {
+          "Dolphin.ini": "f698593e277d1c7a6b546d0dd336b9204d0df0c4bd803f816f1fb85bc0c3cee0",
+          "GFX.ini": "0f2dd39d9fb3da3793caf6e7d2bbac77b9c57027749dff5d9fc8539529203f79"
+        },
+        "vsync_on": {
+          "Dolphin.ini": "f698593e277d1c7a6b546d0dd336b9204d0df0c4bd803f816f1fb85bc0c3cee0",
+          "GFX.ini": "c18005eddf3a048e1b6e41c37d13b4a6fe259ca01c69fdc10553f403ab94e005"
+        }
+      },
+      "container_record_sha256": "126b9aa668d1d0505e5e81d0cfa65ef4a078e305c00a296ef1428e64be3c1fb3",
+      "container_removed": true,
+      "control_sha256": "5ecc1a5417613161e0ec1147a6da6765d7f86e9c0ebf31cbed3ea65afb80a176",
+      "cpu_limit": 6,
+      "exit_code": 0,
+      "image_id": "sha256:5e9389dc6e30af672831c55f244bee2fc1227a61bb439fbe5515a2b4534d49dd",
+      "launcher_sha256": "17bb139e215f0915b2eb270aa6979680f7bd286cef2016492df36d3d3ecc3c0c",
+      "maximum_dolphin_processes": 1,
+      "measurement": {
+        "first_600_fps": 28.06593540251718,
+        "first_frame": 0,
+        "frame_count": 602,
+        "gap_over_100_ms_count": 39,
+        "last_frame": 601,
+        "median_gap_period_frames": 15.0,
+        "median_gap_period_ms": 539.424872,
+        "raw_sha256": "8cc088024532b98b91815803f81609eef7b69615133ffe3602207a593892f86e"
+      },
+      "memory_gib": 12,
+      "result_sha256": "8f83f99f3ed6ed336e50a6d776f2fc48147d6280b2c1f92d683d7d539dd776ca",
+      "shutdown": {
+        "exit_codes": {
+          "offline-vsync": 0
+        },
+        "killed": [],
+        "live_workers": [],
+        "seconds": 0.11085658590309322,
+        "terminated": []
+      },
+      "source_archive_sha256": "98477439a6eb95bc7501778a77aef07e95d8f950b9d61d04d01f9d92b24c5b02",
+      "source_sha": "18dfb4b9a591fe3eb1c8fb5545ffa150fd93a414",
+      "transport_probe_sha256": "e0af8b739dc877a8d5c6e6b47e5da2114483dbeded28cad30918cdbcdba77c88"
+    }
+  },
   "local_service_audit": {
     "container_removed": true,
     "engine_audit": {
@@ -458,6 +619,24 @@
     "source_archive_sha256": "b47e1a685dee15f63e3dc1e5f6fbcc5ef1d2e86fdd39f0497b4e856f8a91b574",
     "source_sha": "c7399b191ff26a3012158f74c912d5d0aae4dd53",
     "startup_seconds": 34.82058699801564
+  },
+  "merge_review": {
+    "cpu_passed": 1338,
+    "cpu_seconds": 102.58,
+    "cpu_skipped": 24,
+    "cpu_warnings": 10,
+    "integration_deselected": 18,
+    "interrupted_logging_patch": "Removed only the agent-owned unfinished session.py edit; retained patch in local review records.",
+    "logs": "runs/refactor-059/merge-review/",
+    "recorded_at": "2026-09-27T23:05:11.774861+00:00",
+    "report": "docs/refactor-059-engineering-report.md",
+    "ruff_format": "passed",
+    "ruff_lint": "passed",
+    "runtime_changes_during_checks": false,
+    "runtime_source_sha": "4895c9d7b697048455f36d0f96483e028f5c300c",
+    "scope": "Static review of committed runtime plus CPU/static checks on the preserved working tree. No new GPU, emulator, or cloud run.",
+    "ty": "passed",
+    "uncommitted_frontend_and_cancellation": "Preserved; not part of the committed refactor snapshot."
   },
   "neutral_netplay_control": {
     "bot": {
@@ -568,7 +747,48 @@
     "source_sha": "f15a15ac",
     "ty": "pass"
   },
-  "recorded_at": "2026-09-27T21:18:13.774689+00:00",
+  "recorded_at": "2026-09-27T22:11:35.402915+00:00",
+  "resume_button_branch_diagnosis": {
+    "report_sha256": "8efd3be1a4e5b3945bb0ec95724b9dfe1ae03fb2f6aa1a1c6fdb7aa198c7d92c",
+    "scope": "All ten changed NLL-sum entries in the third production resume pair belong to buttons. Main-stick, C-stick, trigger output/conditioning and value-head gradients match exactly. Buttons and upstream gradients differ; aggregate button metrics match. Root cause and strict next-update gate remain unresolved.",
+    "snapshot_hashes_verified": true,
+    "source_sha256": "2e1df64908afdbe5fcf423fb23c0a651615eac2b689c6bfc3eeea8178ba91293"
+  },
+  "saved_batch_compute_diagnosis": {
+    "app_id": "ap-wxzamobXbCyv1e7sLPeWd7",
+    "control_first_stage_seconds": 230.12629519200001,
+    "cpu": 32,
+    "dashboard": "https://modal.com/id/ap-wxzamobXbCyv1e7sLPeWd7",
+    "disk_gib": 512,
+    "function_call_id": "fc-01M3JEDA7MFF4TQ74TBYQQX895",
+    "gpu": "B200",
+    "image_id": "im-Ov5TJJIbhwnvcBwVpmlSDe",
+    "input_file_hashes": {
+      "driver.py": "c3f3774cafdb8bb4d5cd04e8b7afab2d7d0f08fa3a3df624ca1f0e2a123d867c",
+      "input.json": "64661d61957f8ed270d8dd040cf2c3597c3fd9166c94df205c123c3b51b0c681",
+      "input.pt": "009eec5cd4f0e20224224532effa662d1775468d8da41fdeaee945c187b696f0",
+      "probe.py": "02444d0d664299c7465c1c54b348ad87efdabea3471cfb39e5c1e2b5cb52a1c1"
+    },
+    "interrupted_local_preflight": "An unbounded full suite was interrupted with exit130; output was retained only in the agent tool transcript. Eight focused probe tests and the combined12-test preflight passed. No maintained runtime changed in this diagnostic.",
+    "launcher_sha256": "e5bbdfdda76236ebbccaeb682786bae3e85f37b1ca1311b1cd4671e44ddeb674",
+    "memory_limit_gib": 64,
+    "name": "hal-o59-b200-compute-diagnosis-20260927-220505",
+    "parent_image": "im-FJFZHA7kVqjDidwfY4zcOt",
+    "preflight_focused_tests_passed": 12,
+    "previous_launch": {
+      "app_id": "ap-z3Kfv2PYAm35ZJAa6MeGNP",
+      "log_sha256": "fc22a8a380b856cfc1680ac69b59ac1a21dbf2ee86e6f3c83885923a5cb9e4c7",
+      "outcome": "FunctionCreate rejected the 128 GiB disk request before a GPU function was created. The retry requests the required 512 GiB; all reviewed computation inputs remain unchanged."
+    },
+    "qualification": "diagnosis only; source-owned forward/backward, no optimizer update, corpus download or tolerance change",
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-b200-compute-diagnosis-20260927-220505",
+    "retries": 0,
+    "review_sha256": "6868f06d0fafb1b29a7023e607333c46cb1d99d535434d59cf7eb3012dce4fe7",
+    "scope": "No source-specific forward difference found. No claim of bitwise next-update equivalence; numerical probing stopped per user steering.",
+    "status": "All8stages complete exit0; app stopped with zero tasks. Forward, loss, button outputs and RNG match between sources; gradient variation also occurs on repeated calls to the same source.",
+    "summary_local_path": "runs/refactor-059/modal-resume-compute-diagnosis-retry-1/results/offline-summary.json",
+    "timeout_seconds": 3600
+  },
   "schema_version": 1,
   "supplemental_sources": {
     "bytes": 20480,
@@ -1431,5 +1651,11 @@
       "throughput_ratio": 0.999634640189211,
       "warm_updates": 100
     }
+  },
+  "user_scope_updates": {
+    "cloud_gpu": "User explicitly accepts the available RTX PRO6000 Blackwell instead of requiring Ada.",
+    "modal": "User requested all Modal jobs stopped; do not launch more.",
+    "priority": "Training and local evaluation functional correctness, and latest-checkpoint human netplay readiness; exact bitwise training reproduction is not a deployment-readiness blocker.",
+    "recorded_at": "2026-09-27T22:22:07.432139+00:00"
   }
 }

@@ -1,8 +1,18 @@
 # HAL 059 refactor and qualification
 
-Status: implementation in progress. The registered goal remains active. A CPU
-suite, a synthetic parity check, or a direct inference benchmark does not satisfy
-the required production checkpoint, emulator, service, or hardware gates.
+Status: the main refactor is implemented. Training and local evaluation have
+passed functional checks. The user redirected the current work from netplay
+diagnosis to branch cleanup and merge review. See
+[the engineering report](refactor-059-engineering-report.md) for the current
+summary and review findings. The original qualification goal is not complete.
+
+On September 27 the user accepted Blackwell in place of the Ada hardware target,
+directed us to prioritize a working latest-checkpoint service over numerical
+reproduction details, and then requested that all Modal jobs stop. All apps are
+stopped with zero running containers. No further Modal jobs will be launched.
+Earlier failures and unfinished measurements below remain evidence; they are not
+converted into passes. The local service was configured to use explicit OpenGL after the Vulkan
+pause diagnosis. This is not a completed human-play qualification.
 
 ## Scope
 
@@ -80,6 +90,8 @@ source tree. No repository or global hook configuration was changed.
 | `5dca3f75` | Keep failed evaluation replays separate from accepted attempts and correct retry diagnostics |
 | `6c3d372c` | Record production resume, performance, and neutral-control evidence |
 | `f15a15ac` | Keep cumulative FPS timing separate from per-request nanosecond timestamps |
+| `8c3d0825` | Record completed production trials and unresolved qualification results |
+| `4895c9d7` | Allow explicit OpenGL selection for netplay workers |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -328,11 +340,13 @@ contracts and lineage, without a fixed W&B run identifier.
 
 ## Acceptance ledger
 
-Every unchecked row remains required. Missing inputs are failures, not skips that
-satisfy a gate. Raw large results belong in the existing run/artifact store.
+The table retains the qualification targets and the user's scope changes.
+Unfinished checks are not passes. A merge review is separate from completion of
+all original qualification targets. Raw large results belong in the existing
+run/artifact store.
 
 The [cloud qualification record](../tests/fixtures/o59/modal_qualification.json)
-pins completed results and active job identities. On the RTX PRO 6000 Blackwell,
+pins completed results and stopped job identities. On the RTX PRO 6000 Blackwell,
 all seven emulator cases pass and production BF16 conditional KL passes before
 and after eviction (overall mean 3.423e-5 nats, p99 5.114e-4). Prepared capacity-2
 delay-2/3 profiles measure 8.078/7.579 ms p95 over 200 requests each. The first
@@ -493,6 +507,29 @@ strict next-update qualification remain unresolved. No tolerance is relaxed. The
 verified diagnostic archive and source are recorded in `modal_qualification.json`
 (`c455a3731facfd9da6149d6249ca819ffeff9377de3c49e662530bb2b8eb51d0`).
 
+A further check of the verified third-trial captures localizes all ten NLL-sum
+differences to the button group. The main-stick, C-stick, and trigger output,
+trunk-output, and group-conditioning gradients match exactly, as do the value
+head gradients. The button head and upstream gradients differ. The three
+aggregate button stability metrics match, but those aggregates do not prove
+that every logit matches. The next diagnostic therefore reuses the captured
+production batch and prefix positions to inspect the button computation and
+compiled execution, without fetching the corpus or running an optimizer update.
+No numerical limit changes. The source and report are under
+`runs/refactor-059/resume-branch-diagnosis-20260927/`.
+
+The saved-batch diagnostic completed all eight stages on B200 in the original
+pinned image: three compiled control/candidate pairs and one eager pair, with
+two repeated forward/backward calls per process. Recorded forward outputs,
+losses, button outputs, and RNG match between sources. Gradient differences also
+occur on repeated calls to the same source. No source-specific forward difference
+was found. This diagnostic does not perform an optimizer update and does not make
+the strict next-update comparison pass. Numerical probing stopped at the user's
+direction. The app stopped with zero running tasks. The offline summary is
+`runs/refactor-059/modal-resume-compute-diagnosis-retry-1/results/offline-summary.json`.
+Both launch attempts and completed results are recorded in
+`modal_qualification.json`.
+
 The source helpers, comparison reports, packet traces, and current test logs are
 also preserved in the verified R2 diagnostic archive recorded in
 `modal_qualification.json` (`35463810b1429a6e9c18b8ff5013b47f6a29de62ed5b38bfcbbd49a1fbc92e75`).
@@ -590,6 +627,42 @@ recorded in the manifest. The next diagnosis concerns the shared emulator,
 graphics, and host configuration. Both workers exit normally; cleanup takes
 0.37 seconds and leaves no worker or container behind.
 
+One offline Dolphin with the same Vulkan setup also pauses: 28.23 FPS and
+39 gaps above 100 ms over 600 frames, with a median gap interval of 15 frames.
+It exits normally in 0.11 seconds. A matched OpenGL control reaches 59.94 FPS
+with no gaps above 100 ms and normal 0.13-second cleanup. The diagnostic changes
+the supported Console backend to `OGL`; its copied boot method and worker are
+checked against the pinned source. Both use the same image, six-CPU/12-GiB
+limits, Slippi build, Xvfb, neutral matchup, and emulation speed.
+`glxinfo` reports Mesa llvmpipe software rendering on that OpenGL display; the
+Dolphin device choice is not independently recorded. The renderer selection is
+enough to remove the pauses in this short control. This does not establish a
+specific Vulkan or driver defect, or qualify a production graphics profile.
+The raw runs are `docker-3060/results/offline-neutral-single-18df/` and
+`docker-3060/results/offline-neutral-opengl-18df/` under `runs/refactor-059/`.
+
+Enabling VSync in the same single-Dolphin Vulkan profile does not remove the
+pauses: 28.07 FPS and 39 gaps above 100 ms over 600 frames. Copies of the actual
+generated, edited, and post-game INI files confirm the setting. Cleanup takes
+0.11 seconds, with no remaining worker or container. The helper passes eleven
+focused tests, Ruff, and Ty. This rules out that setting as a sufficient fix;
+the broader graphics-path diagnosis remains open. No maintained runtime or
+live-service configuration changes in these three controls.
+
+The second dense control completes all 96 boots at 7,200 frames each without
+crashes, timeouts, or retries. Its 24 execution groups match the protocol. It
+measures 208.23 aggregate emulator FPS and 1.32935 net stocks per minute; the
+matching candidate run was stopped at the user's request before completion.
+The first pair's failed attempts remain
+recorded separately and are not reclassified as clean qualification.
+
+The verified R2 archive
+`f49d7b581db6aa028850cf674f842bba176cfe3090bae8ea7621ecf058e57c27`
+preserves 82 files: these three graphics controls and raw traces, the button
+branch analysis, saved batch, reviewed diagnostic scripts and both launch
+attempts, and the clean second dense control. Its key and byte count are in
+`modal_qualification.json`.
+
 Source snapshots, raw audit and neutral traces, the first dense control, and
 completed performance records are preserved in the verified R2 follow-up archive
 listed in `modal_qualification.json`
@@ -643,18 +716,18 @@ tests: 27 passed in 2.15 seconds. Logs: `runs/refactor-059/memory-counter-*`.
 
 | Gate | Required evidence | Current status |
 |---|---|---|
-| A Ownership | Final tree, one model/loader/scheduler/process driver, import boundaries, typed code, protected edits | Runtime retirement and import-boundary tests pass; final inventory/checks in progress. |
+| A Ownership | Final tree, one model/loader/scheduler/process driver, import boundaries, typed code, protected edits | Committed runtime retirement and import-boundary tests pass. The merge report records the final inventory and separately identifies pending user changes. |
 | B Data | `.slp` full path/parity, 44-source metadata and representative row audits, hashes, 2048 validation identities/tensors, sampler/resume geometry | Pass for the revised scope: cohort and statistics match exactly; synthetic loader resume and `.slp`→MDS→R2 publication pass; 33 v8 row audits reproduce the publication records. The user waived the remaining 11 row scans on 2026-09-27. |
-| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy, synthetic resume, and default count pass. All production update-8193 captures run with non-unit AWR. Trial 1 has small embedding-related differences, also observed in a repeated control; trial 3 has a one-FP32-step loss difference and updated-parameter differences up to 0.00120654, still under diagnosis. Strict next-update qualification remains unresolved. |
+| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy, synthetic resume, and default count pass. All production update-8193 captures run with non-unit AWR. Trial 1 has small embedding-related differences, also observed in a repeated control; trial 3 has a one-FP32-step loss difference and updated-parameter differences up to 0.00120654. The completed saved-batch check finds no source-specific forward difference. Strict next-update equality is unproven; further numerical probing stopped at the user's direction. |
 | D Artifacts | Old artifacts, descendants, new profiles, identity rejection | Actual update-131072 checkpoint validates without changing caller RNG, and re-exports as capability v2 with its checkpoint hash preserved. Artifact contract suite passes on CPU; qualified new profiles remain open. |
 | E Cache | B1/2/4/8/16/32, Q1/2/4/decomposition, wraps, sparse/permutation/reset/identity/temp/prefix0/2/3/4, dummy rows, one weights copy | Focused CPU/CUDA independence tests and real-checkpoint B2 BF16 conditional KL pass. Complete capacity/profile matrix remains open. |
 | F Scheduling | Exact deadlines, wire prefix, whole-plan rejection, consumed cursor, malformed replies, fallback counters | Focused scheduler/client/engine tests pass. Official intended-action chunk trace matches control. Live qualification remains open. |
 | G Recovery | Exit/hang/brokenIPC/malformed/late/stalls/disconnect/rematch/partial-init; bounded detection, cleanup, restart | Focused lifecycle tests and real idle-process hang/exit recovery pass. The stopped GPU child terminates in 1.957 s, replacement readiness takes 31.081 s, and a second failure leaves the service unavailable. Live-match failure injection remains open. |
 | H Mechanical speed | Three alternating trials; loader warm200/measure500, training warm100/measure200, matched local concurrency/stride; throughput≥95%, memory≤105% | Final direct cached 3060 and reduced loader comparisons pass. Three production loader/training pairs meet throughput and sampled-memory limits; the recorded peak-counter limitation and dense-local qualification remain open. |
-| I Batching | Ada B2 delivery≥5% faster than two serial B1 calls; 32-admitted/2-ready p95≤105% of2/2; capacity sweep | Real spawned-process 3060 B2 and sparse-load measurements pass these numerical limits. Required Ada measurement remains open. |
-| J Real time | 3060 p95≤12ms,p99<16.67ms, matched p95≤105%; Ada≥2 sessions; three2400-frame trials minus300; both30min and10matches/rematches | Direct calls and short process benchmarks are evidence only. Complete-path trials, hardware capacity, and both soaks remain open. |
+| I Batching | Accepted cloud GPU B2 delivery≥5% faster than two serial B1 calls; 32-admitted/2-ready p95≤105% of2/2; capacity sweep | 3060 measurements and three Blackwell serial/batched/sparse pairs pass these numerical limits. The user accepts Blackwell instead of Ada. Higher simultaneously active capacity remains unqualified. |
+| J Real time | 3060 p95≤12ms,p99<16.67ms, matched p95≤105%; accepted cloud GPU≥2 sessions; three2400-frame trials minus300; both30min and10matches/rematches | Direct calls and short process benchmarks are evidence only. Complete-path trials, hardware capacity, and both soaks remain open. |
 | K Gameplay | 96×7200-frame CPU protocol,p90,allboots complete,NSM regression≤.2,paired uncertainty; shared/separate weights H2H; separate new-profile results | Shared-checkpoint and distinct-checkpoint H2H each complete eight boots. Full gameplay comparison remains open; the first dense pair completes after two emulator crashes/retries per run. |
-| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,325 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
+| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, and 1,335 CPU tests pass at runtime commit 4895c9d7. Seven required emulator cases and the committed frontend checks pass at their recorded revisions. Fresh merge-review checks pass 1,338 CPU tests on the working tree; pending frontend changes are separate. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
 
 Cache FP32 tolerances remain trunk/history `atol=2e-6,rtol=2e-5` and decoder
 `atol=2e-5,rtol=2e-4`. CUDA BF16 conditional KL limits are mean ≤5e-4 nats and
