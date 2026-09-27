@@ -23,10 +23,10 @@ from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics
 from hal.eval.match_summary import MatchSummary
 from hal.eval.match_summary import last_finite_stock
+from hal.sim.rollout import VecMatch
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import VecMatch
 
 _LEGACY_METRIC_KEYS = {
     "stocks_taken_per_min",

@@ -6,8 +6,8 @@ from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.inference.api import PolicyInput
 from hal.inference.api import PolicySpec
+from hal.representation.observations import flatten_canonical_frame
 from hal.sim.inputs import canonical_pre_to_action
-from hal.training.canonical import flatten_canonical_frame
 
 
 def applied_action_from_frame(frame: dict, port: int) -> ControllerAction:
@@ -47,7 +47,6 @@ def policy_input_from_frame(
     spec: PolicySpec,
     stream_id: int,
     controlled_port: int,
-    pending_actions: tuple[ControllerAction, ...],
     player_identity: str | None = None,
     desired_return: float | None = 20.0,
     temperature: float = 1.0,
@@ -68,7 +67,6 @@ def policy_input_from_frame(
         controlled_port=controlled_port,
         observation={name: values[name] for name in spec.required_observation_fields},
         applied_action=applied_action_from_frame(frame, controlled_port),
-        pending_actions=pending_actions,
         player_identity=player_identity,
         desired_return=desired_return,
         temperature=temperature,

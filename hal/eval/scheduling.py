@@ -1,10 +1,12 @@
 """Schedule predicted controller actions against observed game frames."""
 
+import time
 from collections import deque
 from dataclasses import dataclass
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
+from hal.controller import controller_actions_equal_at_wire_precision
 from hal.inference.api import ActionPlan
 from hal.inference.api import PolicyInput
 from hal.inference.api import PredictionRequest
@@ -14,17 +16,19 @@ from hal.sim.inputs import controller_actions_match
 
 @dataclass(frozen=True, slots=True)
 class FrameTiming:
-    """Frame offsets measured from the latest observation in a plan request."""
+    """Physical controller delay and the separately prepared prediction shape."""
 
-    input_delay_frames: int
-    thinking_allowance_frames: int
+    physical_delay_frames: int
+    inference_allowance_frames: int
+    fixed_prefix_frames: int
     replan_interval_frames: int
     prediction_horizon_frames: int
 
     def __post_init__(self) -> None:
         values = (
-            self.input_delay_frames,
-            self.thinking_allowance_frames,
+            self.physical_delay_frames,
+            self.inference_allowance_frames,
+            self.fixed_prefix_frames,
             self.replan_interval_frames,
             self.prediction_horizon_frames,
         )
@@ -32,23 +36,25 @@ class FrameTiming:
             raise ValueError("frame timing values must be non-negative integers")
         if self.replan_interval_frames < 1:
             raise ValueError("replan interval must be positive")
+        if self.fixed_prefix_frames < self.physical_delay_frames + self.inference_allowance_frames:
+            raise ValueError("fixed prefix must cover physical delay and inference allowance")
         if self.prediction_horizon_frames < self.fixed_prefix_frames + self.replan_interval_frames:
             raise ValueError("prediction horizon must cover the fixed prefix and replan interval")
-
-    @property
-    def fixed_prefix_frames(self) -> int:
-        return self.input_delay_frames + self.thinking_allowance_frames
 
     @property
     def reserve_frames(self) -> int:
         return self.prediction_horizon_frames - self.fixed_prefix_frames - self.replan_interval_frames
 
 
+class PlanProtocolError(ValueError):
+    """An active inference response violated its request contract."""
+
+
 class ActionScheduler:
     """Own one controlled port's future actions and inference deadlines."""
 
     def __init__(self, timing: FrameTiming, context_frames: int, generation: int) -> None:
-        if context_frames < timing.replan_interval_frames or generation < 0:
+        if context_frames < timing.replan_interval_frames or generation < 1:
             raise ValueError("invalid history capacity or match generation")
         self.timing = timing
         self.generation = generation
@@ -59,16 +65,18 @@ class ActionScheduler:
         self._has_plan = False
         self._exhausted = False
         self.request: PredictionRequest | None = None
-        self.ready: ActionPlan | None = None
         self.sequence = 0
+        self.last_consumed_source_frame: int | None = None
         self.last_accepted_source_frame: int | None = None
         self.next_request_frame: int | None = None
         self.last_submission_frame: int | None = None
+        self.last_submission_used_fallback = False
         self.deadline_misses = 0
         self.prefix_mismatches = 0
         self.transport_corrections = 0
         self.exhausted_chunks = 0
         self.neutral_fallback_frames = 0
+        self.submission_gaps = 0
         self.inference_failed = False
 
     def observe(self, item: PolicyInput) -> bool:
@@ -96,13 +104,15 @@ class ActionScheduler:
         item = self.history[-1]
         if self.next_request_frame is not None and item.frame_id < self.next_request_frame:
             return None
-        if self.last_accepted_source_frame is None:
+        if self.last_consumed_source_frame is None:
             observations = tuple(self.history)
         else:
             observations = tuple(
-                observed for observed in self.history if observed.frame_id > self.last_accepted_source_frame
+                observed for observed in self.history if observed.frame_id > self.last_consumed_source_frame
             )
-            if not observations or observations[0].frame_id != self.last_accepted_source_frame + 1:
+            if not observations:
+                return None
+            if observations[0].frame_id != self.last_consumed_source_frame + 1:
                 raise RuntimeError("unreported observations exceed the history capacity")
         fixed_actions = []
         for frame in range(item.frame_id + 1, item.frame_id + self.timing.fixed_prefix_frames + 1):
@@ -119,67 +129,75 @@ class ActionScheduler:
             item.frame_id,
             observations,
             tuple(fixed_actions),
+            None
+            if self.timing.inference_allowance_frames == 0
+            else time.monotonic() + self.timing.inference_allowance_frames / 60,
         )
         self.sequence += 1
         return self.request
 
-    def accept_plan(self, plan: ActionPlan) -> bool:
+    def accept_plan(self, plan: ActionPlan, choice_frame: int) -> bool:
+        """Acknowledge valid inference; commit its entire tail only while submit-able."""
         request = self.request
-        if request is None or (plan.generation, plan.sequence) != (self.generation, request.sequence):
+        if request is None:
             return False
-        validate_action_plan(request, plan, self.timing.prediction_horizon_frames)
+        try:
+            validate_action_plan(request, plan, self.timing.prediction_horizon_frames)
+        except ValueError as error:
+            self.fail_inference()
+            raise PlanProtocolError("active inference response is malformed") from error
+
+        self.last_consumed_source_frame = request.source_frame
+        self._discard_consumed_history(request.source_frame)
+        self.request = None
+        self.next_request_frame = max(request.source_frame + self.timing.replan_interval_frames, choice_frame)
+
+        mismatches = 0
+        for offset, expected in enumerate(request.fixed_actions, 1):
+            target = request.source_frame + offset
+            pinned = self.submitted.get(target, self.planned.get(target))
+            if pinned is None or not controller_actions_equal_at_wire_precision(pinned, expected):
+                mismatches += 1
+        if mismatches:
+            self.prefix_mismatches += mismatches
+            self.next_request_frame = choice_frame
+            return False
+
+        first_submit_frame = choice_frame + self.timing.physical_delay_frames + 1
+        missed = sum(item.target_frame < first_submit_frame for item in plan.actions)
+        if missed:
+            self.deadline_misses += missed
+            self.next_request_frame = choice_frame
+            return False
+
+        for item in plan.actions:
+            self.planned[item.target_frame] = item.action
+            self._fallback_targets.discard(item.target_frame)
         self.last_accepted_source_frame = request.source_frame
-        self.ready = plan
+        self._has_plan = True
+        self._exhausted = False
         return True
 
-    def apply_ready_plan(self, frame: int) -> None:
-        request, plan = self.request, self.ready
-        if request is None or plan is None or frame < request.source_frame + self.timing.thinking_allowance_frames:
-            return
-        tail_start = request.source_frame + self.timing.fixed_prefix_frames + 1
-        first = max(tail_start, frame + self.timing.input_delay_frames + 1)
-        skipped = max(0, first - tail_start)
-        self.deadline_misses += min(skipped, len(plan.actions))
-        actual = {item.frame_id: item.applied_action for item in self.history}
-        for offset, action in enumerate(request.fixed_actions, 1):
-            target = request.source_frame + offset
-            executed = actual.get(target, self.submitted.get(target))
-            if executed is not None and not controller_actions_match(executed, action):
-                self.prefix_mismatches += 1
-        for item in plan.actions:
-            if item.target_frame < first:
-                executed = actual.get(item.target_frame, self.submitted.get(item.target_frame))
-                if executed is not None and not controller_actions_match(executed, item.action):
-                    self.prefix_mismatches += 1
-            else:
-                self.planned[item.target_frame] = item.action
-                self._fallback_targets.discard(item.target_frame)
-        if first > request.source_frame + self.timing.prediction_horizon_frames:
-            self.exhausted_chunks += 1
-        else:
-            self._has_plan = True
-            self._exhausted = False
-        self.next_request_frame = max(request.source_frame + self.timing.replan_interval_frames, frame)
-        self.request = None
-        self.ready = None
-        while len(self.history) > 1 and self.history[0].frame_id <= request.source_frame:
+    def _discard_consumed_history(self, source_frame: int) -> None:
+        while len(self.history) > 1 and self.history[0].frame_id <= source_frame:
             self.history.popleft()
 
     def action_to_submit(self, frame: int) -> ControllerAction:
         if self.last_submission_frame is not None and frame <= self.last_submission_frame:
             raise ValueError("controller submission must advance the game frame")
-        target = frame + self.timing.input_delay_frames + 1
+        target = frame + self.timing.physical_delay_frames + 1
         action = self.planned.get(target)
         if action is None:
             action = NEUTRAL_CONTROLLER_ACTION
             self._fallback_targets.add(target)
-        if target in self._fallback_targets:
+        self.last_submission_used_fallback = target in self._fallback_targets
+        if self.last_submission_used_fallback:
             self.neutral_fallback_frames += 1
             if self._has_plan and not self._exhausted:
                 self.exhausted_chunks += 1
                 self._exhausted = True
         if self.last_submission_frame is not None:
-            self.deadline_misses += frame - self.last_submission_frame - 1
+            self.submission_gaps += frame - self.last_submission_frame - 1
         self.submitted[target] = action
         self.last_submission_frame = frame
         return action
@@ -187,7 +205,6 @@ class ActionScheduler:
     def fail_inference(self) -> None:
         self.inference_failed = True
         self.request = None
-        self.ready = None
 
     def drained(self, frame: int) -> bool:
         return self.inference_failed and frame >= max(self.planned, default=frame)

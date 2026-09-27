@@ -23,8 +23,16 @@ filtered to ``hal.policy.INCLUDED_CHARACTERS``, dropping matchups seen < 10 time
 """
 
 import heapq
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from melee import Character
+from melee import Stage
+
+from hal.policy import INCLUDED_STAGES
+from hal.sim.rollout import VecMatch
+from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
 
 # (char_a, char_b, train_replay_count); a <= b by libmelee Character value, descending count.
 # Generated offline from the ranked-anonymized-1 v5 train manifest (112,409 1v1 replays);
@@ -337,3 +345,61 @@ def matchups_for_vs_cpu(n: int) -> list[tuple[Character, Character]]:
         out = [(ego, opp) for ego, opp in matchups_for(requested) if opp is not Character.SHEIK]
         requested *= 2
     return out[:n]
+
+
+def startable_matchups(n: int) -> list[tuple[Character, Character]]:
+    """Keep prior matchups that can boot with Sheik on the second port."""
+    if n < 0:
+        raise ValueError(f"n must be >= 0, got {n}")
+    out: list[tuple[Character, Character]] = []
+    requested = max(1, n)
+    while len(out) < n:
+        out = [
+            (b, a) if a is Character.SHEIK else (a, b)
+            for a, b in matchups_for(requested)
+            if not (a is Character.SHEIK and b is Character.SHEIK)
+        ]
+        requested *= 2
+    return out[:n]
+
+
+@dataclass(frozen=True, slots=True)
+class MatchConfig:
+    """Characters stay on ports while two head-to-head models exchange ports."""
+
+    config_id: int
+    stage: Stage
+    character_port_1: Character
+    character_port_2: Character
+
+
+def mirrored_configs(n_configs: int, *, stages: Sequence[Stage] = INCLUDED_STAGES) -> list[MatchConfig]:
+    """Prefix-stable character and stage schedule for paired matches."""
+    if not stages:
+        raise ValueError("stages must not be empty")
+    return [
+        MatchConfig(
+            config_id=i,
+            stage=stages[i % len(stages)],
+            character_port_1=character_port_1,
+            character_port_2=character_port_2,
+        )
+        for i, (character_port_1, character_port_2) in enumerate(startable_matchups(n_configs))
+    ]
+
+
+def self_play_matches(n_matches: int) -> list[VecMatch]:
+    """Drive both model ports for each matchup in the paired prior schedule."""
+    return [
+        VecMatch(
+            matchup=Matchup(
+                stage=config.stage,
+                players=(
+                    PlayerSetup(port=1, character=config.character_port_1, cpu_level=0),
+                    PlayerSetup(port=2, character=config.character_port_2, cpu_level=0),
+                ),
+            ),
+            model_ports=(1, 2),
+        )
+        for config in mirrored_configs(n_matches)
+    ]

@@ -11,8 +11,8 @@ import torch
 
 from hal.eval.action_trace import ACTION_TRACE_SCHEMA_VERSION
 from hal.eval.action_trace import ActionTraceWriter
-from hal.training.controller_codec import CONTROLLER_GROUP_NAMES
-from hal.training.controller_codec import CONTROLLER_GROUP_VOCABS
+from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.controller_codec import CONTROLLER_GROUP_VOCABS
 
 
 def _read_parts(root: Path) -> pa.Table:

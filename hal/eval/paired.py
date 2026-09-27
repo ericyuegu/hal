@@ -232,11 +232,15 @@ def config_stock_diffs(records: Sequence[MatchRecord], focal_model: str) -> dict
     return out
 
 
+def _group_order(item: tuple[str, list[float]]) -> tuple[int, str]:
+    return -len(item[1]), item[0]
+
+
 def _group_deltas(values_by_label: Mapping[str, list[float]]) -> tuple[GroupDelta, ...]:
     """Mean per group, ordered by sample count then label so the table is stable."""
     return tuple(
         GroupDelta(label=label, matches=len(values), mean_stock_diff=sum(values) / len(values))
-        for label, values in sorted(values_by_label.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        for label, values in sorted(values_by_label.items(), key=_group_order)
     )
 
 

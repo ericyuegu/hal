@@ -1,23 +1,10 @@
-"""Sim-aware, model-agnostic eval primitives.
-
-The harness only knows about ``ControllerSource`` (single match) and
-``BatchPolicy`` (N matches batched): experiments pass in their own
-model-specific impl, which owns the model + preprocessing + rolling-history
-state. None of this layer imports torch.
-
-Note: ``run_match`` returns ``None`` on Session failure (e.g. Dolphin
-startup race, peppi parse error) rather than raising — eval sweeps want
-to log-and-continue across many stages, not abort on the first crash.
-``run_matches_vec`` carries the same contract per match.
-"""
+"""Run batched policies through independent Dolphin worker processes."""
 
 import os
 from collections.abc import Callable
-from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 from loguru import logger
 
@@ -25,20 +12,14 @@ from hal.fixtures import DOLPHIN_EXIAI
 from hal.fixtures import ISO
 from hal.fixtures import ensure
 from hal.paths import EMULATOR_PATH
-from hal.sim.loop import drive
 from hal.sim.process_vec import PolicyExecutionError
 from hal.sim.process_vec import ProcessVecTelemetry
-from hal.sim.process_vec import SharedChunkPolicy
 from hal.sim.process_vec import drive_process_vec
+from hal.sim.rollout import ChunkPolicy
+from hal.sim.rollout import VecMatch
 from hal.sim.rollout import nearest_power_of_two
-from hal.sim.session import Matchup
-from hal.sim.session import Session
 from hal.sim.session import SessionOptions
-from hal.sim.sources import ControllerSource
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import BatchPolicy
-from hal.sim.vec import VecMatch
-from hal.sim.vec import drive_vec
 
 DEFAULT_START_RETRIES = 2
 
@@ -124,13 +105,6 @@ def default_session_cfg(replay_dir: Path | None = None, *, instant_match_restart
     )
 
 
-def _build_session(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None) -> Session:
-    """Construct (don't enter) a Session from a SessionConfig, overriding the
-    two fields that must differ per concurrent instance: ``slippi_port`` and
-    ``replay_dir``."""
-    return Session(**_session_kwargs(session_cfg, slippi_port=slippi_port, replay_dir=replay_dir))
-
-
 def _session_kwargs(session_cfg: SessionConfig, *, slippi_port: int, replay_dir: str | Path | None) -> SessionOptions:
     """Spawn-safe Session constructor values for one worker."""
     return dict(
@@ -151,28 +125,11 @@ def _session_kwargs(session_cfg: SessionConfig, *, slippi_port: int, replay_dir:
     )
 
 
-def run_match(
-    session_cfg: SessionConfig,
-    matchup: Matchup,
-    sources: Mapping[int, ControllerSource],
-    *,
-    max_frames: int,
-) -> Trajectory | None:
-    """Drive one match end-to-end. Returns the trajectory, or None if the
-    Session raised (logged at WARNING)."""
-    try:
-        with _build_session(session_cfg, slippi_port=51441, replay_dir=session_cfg.replay_dir) as s:
-            return drive(s, matchup, sources, max_frames=max_frames)
-    except Exception as e:
-        logger.warning(f"run_match: Session crashed: {e!r}")
-        return None
-
-
 def _drive_wave(
     session_cfg: SessionConfig,
     indices: Sequence[int],
     matches: Sequence[VecMatch],
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     max_frames: int,
     base_replay: Path | None,
@@ -181,7 +138,7 @@ def _drive_wave(
     process_cohorts: int = 1,
 ) -> dict[int, list[Trajectory]]:
     """Build fresh Sessions for the given global boot ``indices`` and drive them
-    once through ``drive_vec``. Returns ``{global_index: [Trajectory, ...]}`` — the
+    through the process harness. Returns ``{global_index: [Trajectory, ...]}`` — the
     matches each boot played (empty if it failed to start or crashed first).
 
     A wave-wide failure (Session build or the shared batched-policy call, e.g. CUDA
@@ -197,40 +154,22 @@ def _drive_wave(
             replay_dirs.append(replay_dir)
         wave_matches = [matches[gi] for gi in indices]
         policy = policy_factory()
-        process_capable = (
-            hasattr(policy, "runtime_spec")
-            and callable(getattr(policy, "plan_rows", None))
-            and all(match.model_ports for match in wave_matches)
+        if not all(match.model_ports for match in wave_matches):
+            raise ValueError("process evaluation requires at least one controlled port per match")
+        kwargs = [
+            _session_kwargs(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir)
+            for offset, replay_dir in enumerate(replay_dirs)
+        ]
+        boots = drive_process_vec(
+            kwargs,
+            wave_matches,
+            policy,
+            max_frames=max_frames,
+            instant_restart=session_cfg.instant_match_restart,
+            telemetry=process_telemetry,
+            failure_dir=base_replay,
+            cohort_count=min(process_cohorts, len(wave_matches)),
         )
-        if process_capable:
-            kwargs = [
-                _session_kwargs(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir)
-                for offset, replay_dir in enumerate(replay_dirs)
-            ]
-            boots = drive_process_vec(
-                kwargs,
-                wave_matches,
-                cast(SharedChunkPolicy, policy),
-                max_frames=max_frames,
-                instant_restart=session_cfg.instant_match_restart,
-                telemetry=process_telemetry,
-                failure_dir=base_replay,
-                cohort_count=min(process_cohorts, len(wave_matches)),
-            )
-        else:
-            if process_cohorts != 1:
-                raise ValueError("process_cohorts requires a spawned-driver policy with runtime_spec and plan_rows")
-            sessions = [
-                _build_session(session_cfg, slippi_port=slippi_port_base + offset, replay_dir=replay_dir)
-                for offset, replay_dir in enumerate(replay_dirs)
-            ]
-            boots = drive_vec(
-                sessions,
-                wave_matches,
-                policy,
-                max_frames=max_frames,
-                instant_restart=session_cfg.instant_match_restart,
-            )
     except PolicyExecutionError:
         raise
     except Exception as e:
@@ -242,7 +181,7 @@ def _drive_wave(
 def run_matches_vec(
     session_cfg: SessionConfig,
     matches: Sequence[VecMatch],
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     max_frames: int,
     max_parallel: int | None,
@@ -252,8 +191,7 @@ def run_matches_vec(
     process_cohorts: int = 1,
 ) -> list[list[Trajectory]]:
     """Run ``matches`` (boots) concurrently in waves of up to ``max_parallel``
-    Sessions, each frame batched through a single ``BatchPolicy`` call (see
-    ``drive_vec``). With instant-restart each boot plays many matches; the returned
+    Sessions, each request batched through one ``ChunkPolicy`` call. With instant-restart each boot plays many matches; the returned
     inner list is that boot's matches.
 
     Each wave's Sessions get distinct slippi_ports (``base_slippi_port + offset``)

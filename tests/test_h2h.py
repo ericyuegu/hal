@@ -16,15 +16,16 @@ from hal.eval.h2h import check_input_stats
 from hal.eval.h2h import load_records
 from hal.eval.h2h import match_record
 from hal.eval.h2h import match_specs
-from hal.eval.h2h import mirrored_configs
 from hal.eval.h2h import replay_display_names
 from hal.eval.h2h import run_h2h
 from hal.eval.h2h import stamp_replay_identity
-from hal.eval.h2h import startable_matchups
 from hal.eval.harness import SessionConfig
+from hal.eval.matchups import mirrored_configs
+from hal.eval.matchups import startable_matchups
 from hal.policy import INCLUDED_STAGES
+from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.rollout import Slot
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import Slot
 
 # ---------------------------------------------------------------------------
 # Config schedule
@@ -111,56 +112,59 @@ def test_match_specs_fixed_character_follows_model_across_orientations():
 
 
 class _RecordingPolicy:
-    """Fake ``BatchPolicy`` that returns its own label and logs each batched call."""
-
     def __init__(self, label: str) -> None:
         self.label = label
-        self.calls: list[list[Slot]] = []
+        self.calls = []
+        self.runtime_spec = PolicyRuntimeSpec(8, 4, 2, 0, 14)
 
-    def __call__(self, frame_index, obs):
-        self.calls.append(sorted(obs, key=lambda s: (s.match, s.port)))
-        return {slot: f"{self.label}@{frame_index}" for slot in obs}
-
-
-def test_h2h_policy_calls_each_model_once_per_frame():
-    port_1, port_2 = _RecordingPolicy("alpha"), _RecordingPolicy("beta")
-    policy = H2HPolicy({1: port_1, 2: port_2})
-    obs = {Slot(match=m, port=p): {"id": 7} for m in (0, 1) for p in (1, 2)}
-
-    out = policy(7, obs)
-
-    assert set(out) == set(obs)
-    assert all(out[s] == "alpha@7" for s in obs if s.port == 1)
-    assert all(out[s] == "beta@7" for s in obs if s.port == 2)
-    assert len(port_1.calls) == 1 and len(port_2.calls) == 1
-    assert port_1.calls[0] == [Slot(0, 1), Slot(1, 1)]
-    assert port_2.calls[0] == [Slot(0, 2), Slot(1, 2)]
-    assert policy.frames == 1
+    def plan_rows(self, rows):
+        self.calls.append(tuple(rows))
+        return {slot: self.label for slot in rows}
 
 
-def test_h2h_policy_skips_a_model_with_no_live_slot():
-    port_1, port_2 = _RecordingPolicy("alpha"), _RecordingPolicy("beta")
-    policy = H2HPolicy({1: port_1, 2: port_2})
+def test_h2h_policy_batches_each_model_once():
+    first, second = _RecordingPolicy("alpha"), _RecordingPolicy("beta")
+    policy = H2HPolicy({1: first, 2: second})
+    rows = {Slot(match, port): [] for match in (0, 1) for port in (1, 2)}
+    actions = policy.plan_rows(rows)
+    assert set(actions) == set(rows)
+    assert all(actions[slot] == "alpha" for slot in rows if slot.port == 1)
+    assert all(actions[slot] == "beta" for slot in rows if slot.port == 2)
+    assert first.calls == [(Slot(0, 1), Slot(1, 1))]
+    assert second.calls == [(Slot(0, 2), Slot(1, 2))]
 
-    policy(0, {Slot(match=0, port=1): {}})
 
-    assert len(port_1.calls) == 1
-    assert port_2.calls == []
+def test_h2h_policy_collects_both_ports_for_shared_checkpoint():
+    shared = _RecordingPolicy("shared")
+    policy = H2HPolicy({1: shared, 2: shared})
+    rows = {Slot(match, port): [] for match in (0, 1) for port in (1, 2)}
+    assert set(policy.plan_rows(rows)) == set(rows)
+    assert shared.calls == [tuple(rows)]
 
 
-def test_h2h_policy_fails_loud_on_a_dropped_slot():
-    class _Dropping:
-        def __call__(self, frame_index, obs):
+def test_h2h_policy_skips_idle_models():
+    first, second = _RecordingPolicy("alpha"), _RecordingPolicy("beta")
+    H2HPolicy({1: first, 2: second}).plan_rows({Slot(0, 1): []})
+    assert len(first.calls) == 1
+    assert second.calls == []
+
+
+def test_h2h_policy_rejects_wrong_response_slots():
+    class Dropping(_RecordingPolicy):
+        def plan_rows(self, rows):
             return {}
 
-    policy = H2HPolicy({1: _Dropping(), 2: _RecordingPolicy("beta")})
-    with pytest.raises(RuntimeError, match="no inputs"):
-        policy(0, {Slot(match=0, port=1): {}, Slot(match=0, port=2): {}})
+    with pytest.raises(RuntimeError, match="wrong slots"):
+        H2HPolicy({1: Dropping("alpha")}).plan_rows({Slot(0, 1): []})
 
 
-def test_h2h_policy_rejects_an_empty_routing_table():
+def test_h2h_policy_rejects_empty_or_incompatible_routing():
     with pytest.raises(ValueError, match="port"):
         H2HPolicy({})
+    first, second = _RecordingPolicy("alpha"), _RecordingPolicy("beta")
+    second.runtime_spec = PolicyRuntimeSpec(8, 4, 1, 0, 14)
+    with pytest.raises(ValueError, match="timing"):
+        H2HPolicy({1: first, 2: second})
 
 
 # ---------------------------------------------------------------------------
@@ -488,14 +492,18 @@ def test_run_h2h_writes_records_replays_and_meta(tmp_path, monkeypatch):
         def __init__(self, seed: int) -> None:
             self.seed = seed
 
-        def __call__(self, frame_index, obs):
-            return dict.fromkeys(obs, "input")
+        runtime_spec = PolicyRuntimeSpec(8, 4, 2, 0, 14)
+
+        def plan_rows(self, rows):
+            return dict.fromkeys(rows, "input")
 
     monkeypatch.setattr("hal.eval.h2h.run_matches_vec", fake_run_matches_vec)
 
+    def build_policies(by_port, seed):
+        return H2HPolicy({port: _SeededPolicy(seed + index) for index, port in enumerate(by_port)})
+
     records = run_h2h(
-        _SeededPolicy,
-        _SeededPolicy,
+        build_policies,
         name_a="alpha",
         name_b="beta",
         n_configs=3,

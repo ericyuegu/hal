@@ -1,42 +1,4 @@
-"""Model-vs-model closed-loop head-to-head between two policies.
-
-Two policies drive opposite ports of the SAME Dolphin match. The eval harness already
-supports this: ``VecMatch.model_ports=(1, 2)`` gives both ports to one ``BatchPolicy``
-call per frame, so this module only adds a router (``H2HPolicy``) that splits the frame's
-slots by port and sends each half to the policy that owns it — one batched forward per
-model per frame.
-
-Mirrored paired design
-----------------------
-A *config* is ``(character_port_1, character_port_2, stage)``. The characters come from
-``hal.eval.matchups.matchups_for`` (the frozen training prior, deterministic and
-prefix-stable in ``n``); the stage cycles ``hal.policy.INCLUDED_STAGES``. By default,
-characters are pinned to PORTS. A caller can instead fix a character to one model for a
-behavioral evaluation. The two orientations of a config swap which MODEL sits on which port.
-The sum of a config's two orientations therefore gives each model the same set of
-``(port, character)`` assignments, which cancels the port advantage and the
-character-matchup advantage.
-
-Each orientation is its own ``run_matches_vec`` sweep, so the port -> model map stays
-constant inside a sweep. This is deliberate: ``drive_vec`` numbers ``Slot.match`` per
-WAVE (and a start retry renumbers a subset), so a global match index is not available
-inside the policy. A per-match routing table would silently give a match to the wrong
-model after a retried wave; per-port routing cannot.
-
-One match per boot (``instant_match_restart=False``): the config pins the stage, so the
-Gecko random-stage restart flow is not usable here. Boot index == config id, so
-``replays/<model>-on-port1/boot_NNN/`` maps back to a match by construction.
-
-Dependency injection keeps this layer torch-free. The caller supplies one
-``PolicyBuilder`` per model — a callable that takes a decode seed and returns a fresh
-``BatchPolicy``. A builder (not an instance) is necessary because ``run_matches_vec``
-must get a new policy for each wave: per-slot rolling state must not leak across waves.
-
-``run_h2h`` writes ``matches.jsonl``, ``meta.json`` and the replays below ``out_dir``,
-then returns the records. It does no uploads — the caller owns transfer to R2. This lets
-an experiment call it in-process directly after the final checkpoint save, which matters
-on a cloud box that destroys itself when training ends.
-"""
+"""Mirrored model matches, replay identity, and paired outcome records."""
 
 import json
 import struct
@@ -50,9 +12,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Literal
 
 import melee
 import numpy as np
+import torch
 from loguru import logger
 
 from hal.data.extract import extract_replay
@@ -63,20 +27,144 @@ from hal.eval.harness import default_session_cfg
 from hal.eval.harness import run_matches_vec
 from hal.eval.harness import usable_cpus
 from hal.eval.match_summary import summarize_trajectory
-from hal.eval.matchups import matchups_for
+from hal.eval.matchups import MatchConfig
+from hal.eval.matchups import mirrored_configs
+from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.policy import PolicySettings
+from hal.eval.scheduling import FrameTiming
+from hal.inference.action_sequence_artifact import read_action_sequence_artifact
+from hal.inference.action_sequence_policy import ActionSequencePolicy
+from hal.inference.api import RuntimeConfig
+from hal.inference.checkpoints import resolve_checkpoint
+from hal.inference.engine import ModelRegistry
 from hal.policy import INCLUDED_STAGES
-from hal.sim.inputs import ControllerInputs
+from hal.sim.rollout import ChunkPolicy
+from hal.sim.rollout import ObservationRow
+from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.rollout import Slot
+from hal.sim.rollout import VecMatch
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import BatchPolicy
-from hal.sim.vec import Slot
-from hal.sim.vec import VecMatch
 from hal.wire import BUTTON_BITS
 
-# A model's policy for one eval wave, built from a decode seed. ``run_matches_vec``
-# requires a fresh policy per wave, so the injected object is a builder, not a policy.
-PolicyBuilder = Callable[[int], BatchPolicy]
+PolicyBuilder = Callable[[Mapping[int, str], int], ChunkPolicy]
+
+
+@dataclass(frozen=True, slots=True)
+class H2HModel:
+    name: str
+    artifact: str
+    player_identity: str | None = "IBDW#0"
+    desired_return: float | None = None
+    temperature: float = 1.0
+
+
+class H2HPolicyFactory:
+    def __init__(
+        self,
+        policies_by_name: Mapping[str, ActionSequencePolicy],
+        settings_by_name: Mapping[str, PolicySettings],
+        runtime_by_checkpoint: Mapping[str, RuntimeConfig],
+        timing: FrameTiming,
+        *,
+        observed_actions: bool,
+    ) -> None:
+        self.policies_by_name = dict(policies_by_name)
+        self.settings_by_name = dict(settings_by_name)
+        self.runtime_by_checkpoint = dict(runtime_by_checkpoint)
+        self.timing = timing
+        self.observed_actions = observed_actions
+
+    def __call__(self, model_by_port: Mapping[int, str], seed: int) -> H2HPolicy:
+        settings_by_checkpoint: dict[str, dict[int, PolicySettings]] = {}
+        policies_by_checkpoint: dict[str, ActionSequencePolicy] = {}
+        for port, name in model_by_port.items():
+            policy = self.policies_by_name[name]
+            checkpoint = policy.checkpoint_sha256
+            policies_by_checkpoint[checkpoint] = policy
+            settings_by_checkpoint.setdefault(checkpoint, {})[port] = self.settings_by_name[name]
+        adapters_by_checkpoint = {}
+        for index, (checkpoint, policy) in enumerate(policies_by_checkpoint.items()):
+            policy.reset_prediction(seed=seed + index)
+            adapters_by_checkpoint[checkpoint] = PolicyBatchAdapter(
+                policy,
+                self.runtime_by_checkpoint[checkpoint],
+                self.timing,
+                settings_by_port=settings_by_checkpoint[checkpoint],
+                observed_actions=self.observed_actions,
+            )
+        return H2HPolicy(
+            {
+                port: adapters_by_checkpoint[self.policies_by_name[name].checkpoint_sha256]
+                for port, name in model_by_port.items()
+            }
+        )
+
+
+def prepare_h2h_policies(
+    models: Sequence[H2HModel],
+    *,
+    max_parallel: int,
+    profile: Literal["local", "official-059"],
+    device: str,
+    compiled: bool,
+) -> H2HPolicyFactory:
+    if len(models) != 2 or models[0].name == models[1].name:
+        raise ValueError("head-to-head needs two distinct model names")
+    if max_parallel < 1:
+        raise ValueError("max_parallel must be positive")
+    is_official = profile == "official-059"
+    timing = FrameTiming(0, 0, 2 if is_official else 0, 2, 4)
+    artifacts_by_name = {
+        model.name: read_action_sequence_artifact(resolve_checkpoint(model.artifact)) for model in models
+    }
+    registry = ModelRegistry()
+    policies_by_checkpoint: dict[str, ActionSequencePolicy] = {}
+    policies_by_name: dict[str, ActionSequencePolicy] = {}
+    settings_by_name: dict[str, PolicySettings] = {}
+    runtime_by_checkpoint: dict[str, RuntimeConfig] = {}
+    target = torch.device(device)
+    for model in models:
+        artifact = artifacts_by_name[model.name]
+        if 0 not in artifact.spec.supported_transport_delays:
+            raise ValueError("local H2H requires an artifact that declares the zero-delay profile")
+        checkpoint = artifact.checkpoint_sha256
+        if checkpoint not in policies_by_checkpoint:
+            weights = registry.register_artifact(
+                artifact,
+                device=target,
+                inference_dtype=torch.bfloat16 if target.type == "cuda" else torch.float32,
+            )
+            policy = ActionSequencePolicy(
+                weights,
+                artifact.statistics,
+                artifact.vocabulary.codes,
+                spec=artifact.spec,
+                checkpoint_sha256=checkpoint,
+                return_p90=artifact.return_p90,
+                capability_version=artifact.capability_version,
+                device=target,
+                seed=0,
+                compiled=compiled,
+                history_mode="window" if is_official else "kv_cache",
+                kv_update_frames=2,
+            )
+            port_count = sum(other.checkpoint_sha256 == checkpoint for other in artifacts_by_name.values())
+            runtime = RuntimeConfig(max_parallel * port_count, (0,), replan_interval_frames=2)
+            policy.prepare_prediction(runtime, 4, timing.fixed_prefix_frames)
+            policies_by_checkpoint[checkpoint] = policy
+            runtime_by_checkpoint[checkpoint] = runtime
+        policies_by_name[model.name] = policies_by_checkpoint[checkpoint]
+        settings_by_name[model.name] = PolicySettings(
+            model.player_identity,
+            artifact.return_p90 if model.desired_return is None else model.desired_return,
+            model.temperature,
+        )
+    return H2HPolicyFactory(
+        policies_by_name, settings_by_name, runtime_by_checkpoint, timing, observed_actions=not is_official
+    )
+
 
 # Per match. 7200 frames = 2 minutes, the training-time closed-loop eval budget.
 DEFAULT_MAX_FRAMES: Final[int] = 7200
@@ -89,72 +177,6 @@ MATCH_RECORD_SCHEMA_VERSION: Final[int] = 3
 _STICK_ACTIVE_MAGNITUDE: Final[float] = 0.3
 # Buttons the action space can press. START is excluded by policy (it pauses the match).
 _ACTION_BUTTONS: Final[tuple[str, ...]] = tuple(name for name in BUTTON_BITS if name != "start")
-
-
-# ---------------------------------------------------------------------------
-# Mirrored config schedule
-# ---------------------------------------------------------------------------
-
-
-def startable_matchups(n: int) -> list[tuple[melee.Character, melee.Character]]:
-    """``n`` prior matchups the menu automation can start, prefix-stable in ``n``.
-
-    A player picks Sheik through Zelda plus an A hold that must survive stage loading.
-    libmelee's autostart port (the lowest one, port 1) must press START instead, so a
-    port-1 Sheik boots as Zelda and ``Session._validate_live_characters`` rejects the
-    match — on a model port exactly as on a CPU port. Sheik on port 2 is fine, so a
-    port-1 Sheik draw is flipped instead of dropped. This keeps Sheik in the evaluated
-    distribution, and because the two orientations swap only the models, both models
-    still get equal time on it. The Sheik mirror has no such escape and is skipped; a
-    replacement comes from further down the same prior schedule.
-    """
-    if n < 0:
-        raise ValueError(f"n must be >= 0, got {n}")
-    out: list[tuple[melee.Character, melee.Character]] = []
-    requested = max(1, n)
-    while len(out) < n:
-        out = [
-            (b, a) if a is melee.Character.SHEIK else (a, b)
-            for a, b in matchups_for(requested)
-            if not (a is melee.Character.SHEIK and b is melee.Character.SHEIK)
-        ]
-        requested *= 2
-    return out[:n]
-
-
-@dataclass(frozen=True, slots=True)
-class MatchConfig:
-    """One mirrored config: characters pinned to ports, plus the stage.
-
-    Both orientations of the config keep these characters on these ports. Only the
-    models move.
-    """
-
-    config_id: int
-    stage: melee.Stage
-    character_port_1: melee.Character
-    character_port_2: melee.Character
-
-
-def mirrored_configs(n_configs: int, *, stages: Sequence[melee.Stage] = INCLUDED_STAGES) -> list[MatchConfig]:
-    """``n_configs`` configs drawn from the training prior, prefix-stable in ``n_configs``.
-
-    The characters follow ``startable_matchups``; the stage cycles ``stages`` so the
-    coverage is even and equally prefix-stable. Config ``i`` is therefore the same
-    ``(characters, stage)`` at every ``n_configs``, and two head-to-head runs at
-    different sizes stay comparable on their shared prefix.
-    """
-    if not stages:
-        raise ValueError("stages must not be empty")
-    return [
-        MatchConfig(
-            config_id=i,
-            stage=stages[i % len(stages)],
-            character_port_1=character_port_1,
-            character_port_2=character_port_2,
-        )
-        for i, (character_port_1, character_port_2) in enumerate(startable_matchups(n_configs))
-    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,34 +257,54 @@ def path_safe(name: str) -> str:
 
 
 class H2HPolicy:
-    """``BatchPolicy`` that splits each frame's slots by port across two policies.
+    """Route complete observation chunks, collecting ports that share a policy."""
 
-    ``by_port`` maps a libmelee port to the policy that drives it, and stays constant for
-    the whole sweep. Each sub-policy sees only its own slots, so its per-slot rolling
-    buffers stay keyed by ``Slot`` without collision, and its ego prefix (which it derives
-    from ``Slot.port``) is already correct on either port. The iteration order is fixed,
-    so the two forwards happen in the same order on every frame.
-    """
-
-    def __init__(self, by_port: Mapping[int, BatchPolicy]) -> None:
+    def __init__(self, by_port: Mapping[int, ChunkPolicy]) -> None:
         if not by_port:
             raise ValueError("H2HPolicy needs at least one port -> policy entry")
-        self.by_port: dict[int, BatchPolicy] = dict(by_port)
-        self.frames = 0
-
-    def __call__(self, frame_index: int, obs: Mapping[Slot, dict]) -> Mapping[Slot, ControllerInputs]:
-        self.frames += 1
-        out: dict[Slot, ControllerInputs] = {}
+        self.by_port = dict(by_port)
+        self._groups: list[tuple[ChunkPolicy, set[int]]] = []
         for port, policy in self.by_port.items():
-            slots = {slot: frame for slot, frame in obs.items() if slot.port == port}
-            if slots:
-                out.update(policy(frame_index, slots))
-        # Each sub-policy returns inputs for a subset of the slots it was given, so a
-        # length match proves full coverage without building per-frame sets.
-        if len(out) != len(obs):
-            missing = sorted(set(obs) - set(out))
-            raise RuntimeError(f"H2HPolicy produced no inputs for {missing}")
-        return out
+            for candidate, ports in self._groups:
+                if candidate is policy:
+                    ports.add(port)
+                    break
+            else:
+                self._groups.append((policy, {port}))
+        self._runtime_spec = self._groups[0][0].runtime_spec
+        if any(policy.runtime_spec != self._runtime_spec for policy, _ in self._groups):
+            raise ValueError("head-to-head policies must use the same rollout timing profile")
+
+    @property
+    def runtime_spec(self) -> PolicyRuntimeSpec:
+        return self._runtime_spec
+
+    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]:
+        actions_by_slot: dict[Slot, np.ndarray] = {}
+        for policy, ports in self._groups:
+            selected = {slot: values for slot, values in rows.items() if slot.port in ports}
+            if not selected:
+                continue
+            actions = policy.plan_rows(selected)
+            if actions.keys() != selected.keys():
+                raise RuntimeError("H2HPolicy returned actions for the wrong slots")
+            actions_by_slot.update(actions)
+        if actions_by_slot.keys() != rows.keys():
+            raise RuntimeError("H2HPolicy has no policy for an observed port")
+        return actions_by_slot
+
+
+@dataclass(slots=True)
+class _OrientationPolicyFactory:
+    builder: PolicyBuilder
+    model_by_port: Mapping[int, str]
+    seed: int
+    wave: int = 0
+
+    def __call__(self) -> ChunkPolicy:
+        policy = self.builder(self.model_by_port, self.seed + 2 * self.wave)
+        self.wave += 1
+        return policy
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +683,10 @@ def check_input_stats(records: Sequence[MatchRecord]) -> None:
         raise ValueError("head-to-head input tripwire tripped:\n  " + "\n  ".join(problems))
 
 
+def _modification_time(path: Path) -> float:
+    return path.stat().st_mtime
+
+
 def _claim_replay(boot_dir: Path, match_id: str) -> tuple[Path | None, str]:
     """Rename the match's .slp to ``<match_id>.slp``, and report ``"ok"`` or ``"missing"``.
 
@@ -656,7 +702,7 @@ def _claim_replay(boot_dir: Path, match_id: str) -> tuple[Path | None, str]:
         candidates = sorted(boot_dir.glob("*.slp"))
         if not candidates:
             return None, "missing"
-        max(candidates, key=lambda p: p.stat().st_mtime).rename(target)
+        max(candidates, key=_modification_time).rename(target)
     return target, "ok"
 
 
@@ -746,7 +792,7 @@ def match_record(
 
 def run_orientation(
     specs: Sequence[MatchSpec],
-    builders: Mapping[str, PolicyBuilder],
+    builder: PolicyBuilder,
     *,
     session_cfg: SessionConfig,
     max_frames: int,
@@ -765,18 +811,10 @@ def run_orientation(
     by_port = {1: specs[0].model_port_1, 2: specs[0].model_port_2}
     if any((s.model_port_1, s.model_port_2) != (by_port[1], by_port[2]) for s in specs):
         raise ValueError("run_orientation needs a constant port -> model map across its specs")
-    wave = 0
-
-    def policy_factory() -> BatchPolicy:
-        nonlocal wave
-        base = seed + 2 * wave
-        wave += 1
-        return H2HPolicy({port: builders[name](base + i) for i, (port, name) in enumerate(by_port.items())})
-
     boots = run_matches_vec(
         session_cfg,
         [s.vec_match() for s in specs],
-        policy_factory,
+        _OrientationPolicyFactory(builder, by_port, seed),
         max_frames=max_frames,
         max_parallel=max_parallel,
         start_retries=start_retries,
@@ -791,8 +829,7 @@ def orientation_replay_dir(out_dir: Path, name_a: str, orientation: int) -> Path
 
 
 def run_h2h(
-    build_policy_a: PolicyBuilder,
-    build_policy_b: PolicyBuilder,
+    build_policy: PolicyBuilder,
     *,
     name_a: str,
     name_b: str,
@@ -842,7 +879,6 @@ def run_h2h(
         name_b=name_b,
         fixed_characters=fixed_characters,
     )
-    builders = {name_a: build_policy_a, name_b: build_policy_b}
     parallel = max_parallel or usable_cpus()
 
     run_meta: dict[str, Any] = {
@@ -882,7 +918,7 @@ def run_h2h(
         started = time.monotonic()
         trajectories = run_orientation(
             subset,
-            builders,
+            build_policy,
             session_cfg=cfg,
             max_frames=max_frames,
             max_parallel=parallel,

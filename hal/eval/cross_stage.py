@@ -44,11 +44,11 @@ from hal.eval.match_summary import MatchSummary
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.sim.process_vec import ProcessVecTelemetry
+from hal.sim.rollout import ChunkPolicy
+from hal.sim.rollout import VecMatch
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import BatchPolicy
-from hal.sim.vec import VecMatch
 
 # (stage, replica index, summary-or-None-if-crashed) per match in the grid.
 SweepResult = list[tuple[melee.Stage, int, MatchSummary | None]]
@@ -410,7 +410,7 @@ def match_rows(
 
 
 def sweep_vs_cpu(
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     session_cfg: SessionConfig,
     stages: Sequence[melee.Stage],
@@ -447,7 +447,7 @@ def sweep_vs_cpu(
 
 
 def sweep_self_play(
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     session_cfg: SessionConfig,
     stages: Sequence[melee.Stage],
@@ -514,7 +514,7 @@ def _prior_vec_matches(
 
 
 def _drive_prior(
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     session_cfg: SessionConfig,
     n_matchups: int,
@@ -550,7 +550,7 @@ def _drive_prior(
 
 
 def sweep_vs_cpu_prior(
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     session_cfg: SessionConfig,
     n_matchups: int,
@@ -601,7 +601,7 @@ def _prior_sweep_result(boots: Sequence[Sequence[Trajectory]], seed_stage: melee
 
 
 def sweep_vs_cpu_prior_with_rows(
-    policy_factory: Callable[[], BatchPolicy],
+    policy_factory: Callable[[], ChunkPolicy],
     *,
     session_cfg: SessionConfig,
     n_matchups: int,
@@ -636,6 +636,10 @@ def sweep_vs_cpu_prior_with_rows(
     return _prior_sweep_result(boots, seed_stage), match_rows(boots, matches, ego_port=ego_port)
 
 
+def _match_ordinal(row: MatchRow) -> int:
+    return row.match_ordinal
+
+
 def _rows_by_boot(rows: Sequence[MatchRow]) -> dict[int, list[MatchRow]]:
     """Group rows by boot, ordinal-sorted, asserting one matchup per boot (all of a
     boot's back-to-back matches share the ego/opp characters — instant-restart varies
@@ -644,7 +648,7 @@ def _rows_by_boot(rows: Sequence[MatchRow]) -> dict[int, list[MatchRow]]:
     for row in rows:
         by_boot.setdefault(row.boot_index, []).append(row)
     for boot_index, boot_rows in by_boot.items():
-        boot_rows.sort(key=lambda r: r.match_ordinal)
+        boot_rows.sort(key=_match_ordinal)
         pairs = {(r.ego_character, r.opp_character) for r in boot_rows}
         if len(pairs) != 1:
             raise ValueError(f"boot {boot_index} has inconsistent matchups across its matches: {sorted(pairs)}")

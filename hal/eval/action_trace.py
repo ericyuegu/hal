@@ -13,9 +13,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from hal.training.controller_codec import CONTROLLER_DECODE_ORDER
-from hal.training.controller_codec import CONTROLLER_GROUP_NAMES
-from hal.training.controller_codec import CONTROLLER_GROUP_VOCABS
+from hal.models.controller_codec import CONTROLLER_DECODE_ORDER
+from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.controller_codec import CONTROLLER_GROUP_VOCABS
 
 ACTION_TRACE_SCHEMA_VERSION: Final[int] = 1
 
