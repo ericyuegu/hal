@@ -67,9 +67,9 @@ DEV_ARCHIVE: Final[Fixture] = Fixture(
 )
 DEV_MDS: Final[Fixture] = Fixture(
     name="dev-mds",
-    r2_key="fixtures/dev-mds.tar.zst",
-    sha256="eee07a043fef3223e58579d9ba7908a09c644b8124df92d6078cd764b4392676",
-    size_bytes=20_889_790,
+    r2_key="fixtures/dev-mds-v7-1896d841a0e43bc24b69ea2798e42904f7538ac73b2faa4b3c45e23a47afccd6.tar.zst",
+    sha256="1896d841a0e43bc24b69ea2798e42904f7538ac73b2faa4b3c45e23a47afccd6",
+    size_bytes=20_402_842,
     dest=Path("data/processed/dev/mds"),
     extract="tar_zst",
 )

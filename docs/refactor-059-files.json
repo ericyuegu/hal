@@ -787,6 +787,7 @@
     "tests/fixtures/o59/conditioning_protocol.json",
     "tests/fixtures/o59/cuda_functional_3060.md",
     "tests/fixtures/o59/data_validation.json",
+    "tests/fixtures/o59/dev_mds_fixture.json",
     "tests/fixtures/o59/fd_trace.py",
     "tests/fixtures/o59/final_direct_cached_3060.md",
     "tests/fixtures/o59/idle_runner_faults.py",

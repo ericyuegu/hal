@@ -29,6 +29,7 @@ if mp.get_start_method(allow_none=True) != "fork":
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Never
 
 import melee
 import numpy as np
@@ -38,8 +39,10 @@ from streaming import StreamingDataset
 
 from hal.controller import ControllerAction
 from hal.data.extract import extract_replay
+from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
 from hal.data.index import resolve_replay_path
+from hal.data.schema import check_schema_version
 from hal.data.slippi import CHARACTERS_BY_NAME
 from hal.data.streaming_compat import patch_streaming
 from hal.paths import DEV_MDS_DIR as _DEV_MDS_DIR
@@ -86,7 +89,7 @@ _EXCLUDED_FIXTURE_CHARACTERS = {
 }
 
 
-def _missing_prerequisite(message: str) -> None:
+def _missing_prerequisite(message: str) -> Never:
     if os.environ.get("HAL_REQUIRE_INTEGRATION") == "1":
         pytest.fail(message)
     pytest.skip(message)
@@ -115,8 +118,8 @@ def test_missing_integration_fixture_fails_when_required(monkeypatch: pytest.Mon
         _missing_prerequisite("fixture is missing")
 
 
-def _pick_safe_entry():
-    for entry in read_jsonl(DEV_MDS_DIR / "manifest.jsonl", verify_schema_version=False):
+def _pick_safe_entry(manifest: Path) -> ReplayIndexEntry:
+    for entry in read_jsonl(manifest):
         if (
             entry.stage in _RNG_STABLE_STAGES
             and not any(p.character in _EXCLUDED_FIXTURE_CHARACTERS for p in entry.players)
@@ -125,6 +128,45 @@ def _pick_safe_entry():
         ):
             return entry
     _missing_prerequisite("no RNG-stable replay in dev MDS")
+
+
+@pytest.mark.parametrize("schema_version", (0, 4, 5, 6))
+def test_roundtrip_rejects_stale_fixture_before_starting_dolphin(tmp_path: Path, schema_version: int) -> None:
+    import json
+
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "path": "fixture.slp",
+                "slp_version": [3, 7, 0],
+                "stage": 31,
+                "players": [
+                    {
+                        "port": port,
+                        "character": character,
+                        "costume": 0,
+                        "player_type": "HUMAN",
+                        "code": None,
+                        "name": None,
+                    }
+                    for port, character in ((1, 1), (2, 22))
+                ],
+                "frame_count": 123,
+                "schema_version": schema_version,
+                "annotation": {
+                    "replay_uuid": 1,
+                    "split": "train",
+                    "mds_row_idx": 0,
+                    "frame_count_actual": 123,
+                    "schema_version": 4,
+                },
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="Rebuild the index"):
+        _pick_safe_entry(manifest)
 
 
 @pytest.mark.integration
@@ -137,7 +179,7 @@ def test_controller_wire_format_faithful() -> None:
     gamestate capture are all correct.
     """
     _check_prereqs()
-    entry = _pick_safe_entry()
+    entry = _pick_safe_entry(DEV_MDS_DIR / "manifest.jsonl")
 
     patch_streaming()
     ds = StreamingDataset(
@@ -148,6 +190,7 @@ def test_controller_wire_format_faithful() -> None:
         allow_unsafe_types=False,
     )
     row = ds[entry.annotation.mds_row_idx]
+    check_schema_version(row)
     matchup = ReplayMatchup.from_replay(entry)
 
     sources: dict[int, ControllerSource] = {}
