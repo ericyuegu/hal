@@ -139,7 +139,7 @@ def _drive_wave(
 ) -> dict[int, list[Trajectory]]:
     """Build fresh Sessions for the given global boot ``indices`` and drive them
     through the process harness. Returns ``{global_index: [Trajectory, ...]}`` — the
-    matches each boot played (empty if it failed to start or crashed first).
+    matches each boot played (empty if it stopped before publishing a result).
 
     A wave-wide failure (Session build or the shared batched-policy call, e.g. CUDA
     OOM) can't be attributed to one boot, so every index is left empty and logged —
@@ -178,6 +178,20 @@ def _drive_wave(
     return dict(zip(indices, boots, strict=True))
 
 
+def _preserve_failed_replays(base_replay: Path, boot_indices: Sequence[int], attempt_number: int) -> None:
+    """Keep rejected .slps outside the accepted replay tree without overwriting evidence."""
+    failed_root = base_replay.with_name(f"{base_replay.name}_failed_attempts")
+    for boot_index in boot_indices:
+        boot_dir = base_replay / f"boot_{boot_index:03d}"
+        for replay in boot_dir.glob("*.slp"):
+            failed_dir = failed_root / boot_dir.name / f"attempt_{attempt_number}"
+            failed_dir.mkdir(parents=True, exist_ok=True)
+            destination = failed_dir / replay.name
+            if destination.exists():
+                raise FileExistsError(f"failed-attempt replay already exists: {destination}")
+            replay.rename(destination)
+
+
 def run_matches_vec(
     session_cfg: SessionConfig,
     matches: Sequence[VecMatch],
@@ -199,7 +213,8 @@ def run_matches_vec(
     .slps don't collide. ``policy_factory`` builds a fresh policy per wave — per-slot
     rolling state must not leak across waves, and ``Slot.match`` indices restart at 0
     each wave. Returns one list per boot, aligned to ``matches``; empty where that
-    Session produced no match after all retries.
+    Session produced no match after all retries. Replays from rejected attempts
+    are kept in a sibling ``<replay_dir>_failed_attempts`` directory.
 
     ``process_cohorts`` partitions spawned Session workers into independently
     dispatched inference groups. Its default of one preserves all-slot lockstep.
@@ -207,10 +222,12 @@ def run_matches_vec(
     libmelee's stage-select cursor navigation flakily fails to settle under
     concurrent FFW load (frame-delivery jitter starves its bang-bang controller),
     so a boot's first match intermittently never reaches IN_GAME and ``start_match``
-    trips its wall-clock cap. ``start_retries`` re-drives the still-empty boots of a
-    wave on fresh Sessions (new Dolphin + slippi_port) to absorb that flake; a wholly-
-    dead boot still ends up empty and is logged. (Instant-restart navigates the menu
-    only once per boot, so this flake now scales with boots, not matches.)
+    trips its wall-clock cap. ``start_retries`` re-drives boots without a complete
+    result on fresh Sessions (new Dolphin + slippi_port), whether they failed during
+    startup or play. A boot without a complete result remains empty after the
+    final attempt.
+    (Instant-restart navigates the menu only once per boot, so the stage-select
+    flake now scales with boots, not matches.)
     """
     if not matches:
         return []
@@ -222,11 +239,6 @@ def run_matches_vec(
     for wave_start in range(0, len(matches), max_parallel):
         pending = list(range(wave_start, min(wave_start + max_parallel, len(matches))))
         for attempt in range(start_retries + 1):
-            if attempt > 0 and base_replay is not None:
-                # Rejected attempts can leave replays with no matching trajectory row.
-                for gi in pending:
-                    for replay in (base_replay / f"boot_{gi:03d}").glob("*.slp"):
-                        replay.unlink()
             # Fresh ports per attempt so a stuck-but-not-yet-reaped Dolphin from the
             # previous try can't collide with the retry's slippstream server.
             slippi_port_base = base_slippi_port + (attempt % 8) * max_parallel
@@ -245,11 +257,13 @@ def run_matches_vec(
                 if boot:
                     out[gi] = boot
             pending = [gi for gi in pending if not out[gi]]
+            if base_replay is not None:
+                _preserve_failed_replays(base_replay, pending, attempt + 1)
             if not pending:
                 break
             if attempt < start_retries:
                 logger.warning(
-                    f"run_matches_vec: {len(pending)} boot(s) failed to reach IN_GAME; "
+                    f"run_matches_vec: {len(pending)} boot(s) produced no complete trajectory; "
                     f"retrying on fresh Sessions (attempt {attempt + 2}/{start_retries + 1})"
                 )
     return out
