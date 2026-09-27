@@ -8,6 +8,7 @@ import platform
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -32,21 +33,15 @@ from hal.sim.ipc import discard_result_shm
 from hal.sim.ipc import receive_control
 from hal.sim.ipc import result_shm_name
 from hal.sim.ipc import send_control
+from hal.sim.rollout import ChunkPolicy
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.rollout import Slot
+from hal.sim.rollout import VecMatch
 from hal.sim.session import SessionOptions
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import Slot
-from hal.sim.vec import VecMatch
 from hal.sim.worker import session_worker
 from hal.wire import POST_FIELD_SUFFIXES
-
-
-class SharedChunkPolicy(Protocol):
-    @property
-    def runtime_spec(self) -> PolicyRuntimeSpec: ...
-
-    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]: ...
 
 
 class PolicyExecutionError(RuntimeError):
@@ -59,7 +54,7 @@ class PolicyExecutionError(RuntimeError):
 
 def _write_policy_fault_capsule(
     failure_dir: Path | None,
-    policy: SharedChunkPolicy,
+    policy: ChunkPolicy,
     requests: Mapping[Slot, Sequence[ObservationRow]],
     *,
     plan_call: int,
@@ -198,8 +193,12 @@ def _next_ready_cohort(
     for cohort in active_cohorts:
         slots = {slot for slot in active_slots if cohort_of_worker[slot.match] == cohort}
         if slots and pending_slots >= slots:
-            return sorted(slots, key=lambda slot: (slot.match, slot.port))
+            return sorted(slots, key=_slot_order)
     return []
+
+
+def _slot_order(slot: Slot) -> tuple[int, int]:
+    return slot.match, slot.port
 
 
 def _cohort_latency_start_ns(acknowledged: Sequence[tuple[int, int, int, int]]) -> int:
@@ -215,10 +214,146 @@ def _cohort_latency_start_ns(acknowledged: Sequence[tuple[int, int, int, int]]) 
     return min(started for _, _, _, started in acknowledged)
 
 
+class _ProcessContext(Protocol):
+    """Spawn and fork contexts both provide these process primitives."""
+
+    def Pipe(self, duplex: bool = True) -> tuple[Connection, Connection]: ...
+
+    def Process(self, *, target: Callable[..., None], args: tuple[object, ...], name: str) -> BaseProcess: ...
+
+
+class _WorkerBroker:
+    """Own child processes and their control-pipe state for one rollout wave."""
+
+    def __init__(
+        self,
+        context: _ProcessContext,
+        arena: RolloutArena,
+        session_kwargs: Sequence[SessionOptions],
+        matches: Sequence[VecMatch],
+        arena_slots_of: Sequence[tuple[int, ...]],
+        runtime: PolicyRuntimeSpec,
+        max_frames: int,
+        instant_restart: bool,
+        errors: dict[int, str],
+    ) -> None:
+        self.context = context
+        self.arena = arena
+        self.session_kwargs = session_kwargs
+        self.matches = matches
+        self.arena_slots_of = arena_slots_of
+        self.runtime = runtime
+        self.max_frames = max_frames
+        self.instant_restart = instant_restart
+        self.errors = errors
+        self.parents: dict[int, Connection] = {}
+        self.processes: dict[int, BaseProcess] = {}
+        self.receive_buffers: dict[int, bytearray] = {}
+        self.send_buffers: dict[int, bytearray] = {}
+        self.active_workers: set[int] = set()
+        self.active_slots: set[Slot] = set()
+        self.slots_by_worker = {
+            worker: {Slot(worker, port) for port in match.model_ports} for worker, match in enumerate(matches)
+        }
+        self.arena_slot_of = {
+            Slot(worker, port): slot_index
+            for worker, match in enumerate(matches)
+            for port, slot_index in zip(match.model_ports, arena_slots_of[worker], strict=True)
+        }
+        self.pending: dict[Slot, ControlMessage] = {}
+        self.pending_acks: dict[tuple[int, int, int], tuple[int | None, int]] = {}
+        self.connection_to_worker: dict[Connection, int] = {}
+        self.launched_at: dict[int, float] = {}
+
+    def launch_worker(self, worker: int) -> None:
+        kwargs = self.session_kwargs[worker]
+        match = self.matches[worker]
+        parent, child = self.context.Pipe(duplex=True)
+        try:
+            process = self.context.Process(
+                target=session_worker,
+                args=(
+                    worker,
+                    child,
+                    self.arena.descriptor,
+                    kwargs,
+                    match.matchup,
+                    match.model_ports,
+                    self.arena_slots_of[worker],
+                    self.runtime,
+                    self.max_frames,
+                    self.instant_restart,
+                ),
+                name=f"hal-session-{worker}",
+            )
+            process.start()
+        except BaseException:
+            parent.close()
+            child.close()
+            raise
+        child.close()
+        self.parents[worker] = parent
+        self.processes[worker] = process
+        self.receive_buffers[worker] = bytearray(64)
+        self.send_buffers[worker] = bytearray(64)
+        self.connection_to_worker[parent] = worker
+        self.launched_at[worker] = time.monotonic()
+        self.active_workers.add(worker)
+        self.active_slots.update(self.slots_by_worker[worker])
+
+    def retire_worker(self, worker: int, reason: str | None = None, *, kill: bool = False) -> None:
+        if worker not in self.active_workers:
+            return
+        self.active_workers.remove(worker)
+        retired_slots = {slot for slot in self.active_slots if slot.match == worker}
+        self.active_slots.difference_update(retired_slots)
+        for slot in retired_slots:
+            self.pending.pop(slot, None)
+        for key in tuple(self.pending_acks):
+            if key[0] == worker:
+                self.pending_acks.pop(key)
+        process = self.processes[worker]
+        if reason is not None:
+            self.errors[worker] = reason
+        if kill and process.is_alive():
+            process.kill()
+            process.join(timeout=2.0)
+        else:
+            process.join(timeout=0.2)
+        self.parents[worker].close()
+
+    def record_plan_request(self, worker: int, message: ControlMessage) -> None:
+        slot = Slot(worker, message.port_or_slot)
+        if slot not in self.active_slots:
+            raise RuntimeError(f"worker {worker} requested an inactive or unknown slot {slot}")
+        if message.task_id != self.arena_slot_of[slot]:
+            raise RuntimeError(
+                f"worker {worker} published slot {slot} in arena row {message.task_id}; "
+                f"expected {self.arena_slot_of[slot]}"
+            )
+        if slot in self.pending:
+            raise RuntimeError(f"slot {slot} sent two plan requests without a reply")
+        self.pending[slot] = message
+
+    def worker_is_ready(self, worker: int) -> bool:
+        return all(slot in self.pending for slot in self.slots_by_worker[worker])
+
+    def reap_exited_workers(self, workers: Sequence[int]) -> None:
+        for worker in workers:
+            if worker not in self.active_workers:
+                continue
+            process = self.processes[worker]
+            if process.exitcode is not None and not self.parents[worker].poll():
+                self.retire_worker(
+                    worker,
+                    f"exited without a result; pid={process.pid}, exitcode={process.exitcode}",
+                )
+
+
 def drive_process_vec(
     session_kwargs: Sequence[SessionOptions],
     matches: Sequence[VecMatch],
-    policy: SharedChunkPolicy,
+    policy: ChunkPolicy,
     *,
     max_frames: int,
     instant_restart: bool = False,
@@ -256,10 +391,8 @@ def drive_process_vec(
         if not match.model_ports:
             raise ValueError(f"spawned driver needs at least one model port; match {index} has none")
     runtime = policy.runtime_spec
-    if runtime.action_token_groups:
-        raise ValueError("spawned driver does not yet support tokenized controller plans")
 
-    context = mp.get_context("spawn")
+    context = cast(_ProcessContext, mp.get_context("spawn"))
     arena_slots_of: list[tuple[int, ...]] = []
     arena_slot = 0
     for match in matches:
@@ -271,122 +404,28 @@ def drive_process_vec(
         ring_capacity=runtime.raw_ring_capacity,
         prediction_frames=runtime.prediction_frames,
         action_dim=runtime.action_dim,
-        action_token_groups=runtime.action_token_groups,
     )
     out: list[list[Trajectory]] = [[] for _ in matches]
     errors: dict[int, str] = {}
     timed_out_workers = 0
     with RolloutArena.create(spec) as arena:
-        parents: dict[int, Connection] = {}
-        processes: dict[int, BaseProcess] = {}
-        receive_buffers: dict[int, bytearray] = {}
-        send_buffers: dict[int, bytearray] = {}
-        active_workers: set[int] = set()
-        active_slots: set[Slot] = set()
-        slots_by_worker = {
-            worker: {Slot(worker, port) for port in match.model_ports} for worker, match in enumerate(matches)
-        }
-        arena_slot_of = {
-            Slot(worker, port): slot_index
-            for worker, match in enumerate(matches)
-            for port, slot_index in zip(match.model_ports, arena_slots_of[worker], strict=True)
-        }
-        pending: dict[Slot, ControlMessage] = {}
-        pending_acks: dict[tuple[int, int, int], tuple[int | None, int]] = {}
+        broker = _WorkerBroker(
+            context, arena, session_kwargs, matches, arena_slots_of, runtime, max_frames, instant_restart, errors
+        )
+        parents = broker.parents
+        processes = broker.processes
+        receive_buffers = broker.receive_buffers
+        send_buffers = broker.send_buffers
+        active_workers = broker.active_workers
+        active_slots = broker.active_slots
+        arena_slot_of = broker.arena_slot_of
+        pending = broker.pending
+        pending_acks = broker.pending_acks
+        connection_to_worker = broker.connection_to_worker
+        launched_at = broker.launched_at
         latency_groups: dict[int, list[int]] = {}
-        connection_to_worker: dict[Connection, int] = {}
-        launched_at: dict[int, float] = {}
         plan_calls = 0
         startup_recorded = False
-
-        def launch_worker(worker: int) -> None:
-            """Start one Session worker and register its broker state."""
-            kwargs = session_kwargs[worker]
-            match = matches[worker]
-            parent, child = context.Pipe(duplex=True)
-            process = context.Process(
-                target=session_worker,
-                args=(
-                    worker,
-                    child,
-                    arena.descriptor,
-                    kwargs,
-                    match.matchup,
-                    match.model_ports,
-                    arena_slots_of[worker],
-                    runtime,
-                    max_frames,
-                    instant_restart,
-                ),
-                name=f"hal-session-{worker}",
-            )
-            try:
-                process.start()
-            except Exception:
-                parent.close()
-                child.close()
-                raise
-            child.close()
-            parents[worker] = parent
-            processes[worker] = process
-            receive_buffers[worker] = bytearray(64)
-            send_buffers[worker] = bytearray(64)
-            connection_to_worker[parent] = worker
-            launched_at[worker] = time.monotonic()
-            active_workers.add(worker)
-            active_slots.update(slots_by_worker[worker])
-
-        def retire_worker(worker: int, reason: str | None = None, *, kill: bool = False) -> None:
-            """Remove one worker without discarding the rest of the wave."""
-            if worker not in active_workers:
-                return
-            active_workers.remove(worker)
-            retired_slots = {slot for slot in active_slots if slot.match == worker}
-            active_slots.difference_update(retired_slots)
-            for slot in retired_slots:
-                pending.pop(slot, None)
-            for key in tuple(pending_acks):
-                if key[0] == worker:
-                    pending_acks.pop(key)
-            process = processes[worker]
-            if reason is not None:
-                errors[worker] = reason
-            if kill and process.is_alive():
-                process.kill()
-                process.join(timeout=2.0)
-            else:
-                process.join(timeout=0.2)
-            parents[worker].close()
-
-        def record_plan_request(worker: int, message: ControlMessage) -> None:
-            """Validate and retain one worker plan request."""
-            slot = Slot(worker, message.port_or_slot)
-            if slot not in active_slots:
-                raise RuntimeError(f"worker {worker} requested an inactive or unknown slot {slot}")
-            if message.task_id != arena_slot_of[slot]:
-                raise RuntimeError(
-                    f"worker {worker} published slot {slot} in arena row {message.task_id}; "
-                    f"expected {arena_slot_of[slot]}"
-                )
-            if slot in pending:
-                raise RuntimeError(f"slot {slot} sent two plan requests without a reply")
-            pending[slot] = message
-
-        def worker_is_ready(worker: int) -> bool:
-            """Return whether all ports published their first plan request."""
-            return all(slot in pending for slot in slots_by_worker[worker])
-
-        def reap_exited_workers(workers: Sequence[int]) -> None:
-            """Retire workers whose descendants kept their control pipe open."""
-            for worker in workers:
-                if worker not in active_workers:
-                    continue
-                process = processes[worker]
-                if process.exitcode is not None and not parents[worker].poll():
-                    retire_worker(
-                        worker,
-                        f"exited without a result; pid={process.pid}, exitcode={process.exitcode}",
-                    )
 
         try:
             startup_started = time.monotonic()
@@ -396,10 +435,10 @@ def drive_process_vec(
                 f"startup timeout {startup_timeout_seconds:.1f}s"
             )
             next_worker = 0
-            while next_worker < len(matches) or any(not worker_is_ready(worker) for worker in active_workers):
-                booting = {worker for worker in active_workers if not worker_is_ready(worker)}
+            while next_worker < len(matches) or any(not broker.worker_is_ready(worker) for worker in active_workers):
+                booting = {worker for worker in active_workers if not broker.worker_is_ready(worker)}
                 while next_worker < len(matches) and len(booting) < startup_parallelism:
-                    launch_worker(next_worker)
+                    broker.launch_worker(next_worker)
                     booting.add(next_worker)
                     next_worker += 1
                 if not booting:
@@ -423,7 +462,7 @@ def drive_process_vec(
                         message, receive_buffers[worker] = receive_control(connection, receive_buffers[worker])
                     except EOFError:
                         process = processes[worker]
-                        retire_worker(
+                        broker.retire_worker(
                             worker,
                             f"closed its control pipe during startup; pid={process.pid}, exitcode={process.exitcode}",
                             kill=process.is_alive(),
@@ -432,18 +471,18 @@ def drive_process_vec(
                     if message.worker_id != worker:
                         raise RuntimeError(f"connection {worker} received a message for worker {message.worker_id}")
                     if message.message_type is MessageType.PLAN_REQUEST:
-                        record_plan_request(worker, message)
+                        broker.record_plan_request(worker, message)
                     elif message.message_type is MessageType.ERROR:
-                        retire_worker(worker, f"reported error status {message.status_code} during startup")
+                        broker.retire_worker(worker, f"reported error status {message.status_code} during startup")
                     else:
                         raise RuntimeError(
                             f"broker received unexpected {message.message_type.name} during worker {worker} startup"
                         )
 
-                reap_exited_workers(tuple(booting))
+                broker.reap_exited_workers(tuple(booting))
                 now = time.monotonic()
                 for worker in sorted(booting):
-                    if worker not in active_workers or worker_is_ready(worker):
+                    if worker not in active_workers or broker.worker_is_ready(worker):
                         continue
                     if now < launched_at[worker] + startup_timeout_seconds:
                         continue
@@ -453,7 +492,7 @@ def drive_process_vec(
                         f"pid={process.pid}, exitcode={process.exitcode}"
                     )
                     logger.warning(f"drive_process_vec: worker {worker} {reason}")
-                    retire_worker(worker, reason, kill=True)
+                    broker.retire_worker(worker, reason, kill=True)
                     timed_out_workers += 1
 
             logger.info(
@@ -488,7 +527,7 @@ def drive_process_vec(
                         message, receive_buffers[worker] = receive_control(connection, receive_buffers[worker])
                     except EOFError:
                         process = processes[worker]
-                        retire_worker(
+                        broker.retire_worker(
                             worker,
                             f"closed its control pipe without a result; pid={process.pid}, "
                             f"exitcode={process.exitcode}",
@@ -498,7 +537,7 @@ def drive_process_vec(
                     if message.worker_id != worker:
                         raise RuntimeError(f"connection {worker} received a message for worker {message.worker_id}")
                     if message.message_type is MessageType.PLAN_REQUEST:
-                        record_plan_request(worker, message)
+                        broker.record_plan_request(worker, message)
                     elif message.message_type is MessageType.PLAN_APPLIED:
                         key = (worker, int(message.auxiliary_sequence), int(message.port_or_slot))
                         if key not in pending_acks:
@@ -564,11 +603,11 @@ def drive_process_vec(
                                 f"drive_process_vec: worker {worker} published a valid result but closed "
                                 f"before release acknowledgement ({type(exc).__name__}: {exc})"
                             )
-                        retire_worker(worker)
+                        broker.retire_worker(worker)
                         if telemetry is not None:
                             telemetry.result_read_seconds += time.monotonic() - result_started
                     elif message.message_type is MessageType.ERROR:
-                        retire_worker(worker, f"reported error status {message.status_code}")
+                        broker.retire_worker(worker, f"reported error status {message.status_code}")
                     else:
                         raise RuntimeError(
                             f"broker received unexpected {message.message_type.name} from worker {worker}"
@@ -576,7 +615,7 @@ def drive_process_vec(
 
                 # A dead worker's pipe may remain open in a descendant. Reap it from
                 # process state rather than waiting for EOF on an inherited handle.
-                reap_exited_workers(tuple(active_workers))
+                broker.reap_exited_workers(tuple(active_workers))
 
                 if waited_for_control and not ready and active_workers:
                     blockers = []
@@ -591,7 +630,7 @@ def drive_process_vec(
                             f"pid={process.pid}, exitcode={process.exitcode}"
                         )
                         logger.warning(f"drive_process_vec: worker {worker} {reason}")
-                        retire_worker(worker, reason, kill=True)
+                        broker.retire_worker(worker, reason, kill=True)
                         timed_out_workers += 1
 
                 # One cohort per GPU call. With cohort_count=1 a fast worker waits
@@ -678,7 +717,7 @@ def drive_process_vec(
                                 )
                             )
                         except (BrokenPipeError, EOFError, OSError) as exc:
-                            retire_worker(
+                            broker.retire_worker(
                                 worker,
                                 f"closed while receiving a plan ({type(exc).__name__}: {exc})",
                                 kill=processes[worker].is_alive(),

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import melee
 import numpy as np
@@ -16,6 +17,7 @@ import pytest
 import hal.sim.process_vec as process_vec
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import _session_kwargs
+from hal.eval.harness import run_matches_vec
 from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH
 from hal.sim.ipc import LIVE_FLOAT_COLUMNS
@@ -27,10 +29,10 @@ from hal.sim.ipc import send_control
 from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.rollout import Slot
+from hal.sim.rollout import VecMatch
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
-from hal.sim.vec import Slot
-from hal.sim.vec import VecMatch
 
 
 class _UnusedPolicy:
@@ -125,6 +127,23 @@ def _use_forked_fake_worker(monkeypatch: pytest.MonkeyPatch, target) -> None:
     context = mp.get_context("fork")
     monkeypatch.setattr(process_vec.mp, "get_context", lambda _method: context)
     monkeypatch.setattr(process_vec, "session_worker", target)
+
+
+@pytest.mark.parametrize("phase", ("construct", "start"))
+@pytest.mark.parametrize("error_type", (OSError, KeyboardInterrupt))
+def test_worker_initialization_failure_closes_both_pipe_ends(
+    monkeypatch: pytest.MonkeyPatch, phase: str, error_type: type[BaseException]
+) -> None:
+    parent, child = Mock(spec=Connection), Mock(spec=Connection)
+    context = Mock()
+    context.Pipe.return_value = parent, child
+    operation = context.Process if phase == "construct" else context.Process.return_value.start
+    operation.side_effect = error_type("injected worker initialization failure")
+    monkeypatch.setattr(process_vec.mp, "get_context", lambda _method: context)
+    with pytest.raises(error_type, match="injected"):
+        process_vec.drive_process_vec([{}], [_match()], _UnusedPolicy(), max_frames=8)
+    parent.close.assert_called_once_with()
+    child.close.assert_called_once_with()
 
 
 def test_silent_worker_is_named_killed_and_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,6 +274,43 @@ def test_bounded_startup_with_real_dolphins() -> None:
 
     assert all(len(boots) == 1 for boots in results)
     assert all(len(boots[0]) == 120 for boots in results)
+
+
+@pytest.mark.integration
+def test_repeated_level_nine_process_waves_release_workers_and_resources() -> None:
+    iso_path = Path(ISO_PATH)
+    dolphin_path = Path(EMULATOR_PATH)
+    if not iso_path.is_file() or not dolphin_path.is_file():
+        pytest.fail("process stress test requires the ISO and Dolphin fixtures")
+    cfg = SessionConfig(
+        iso_path=iso_path,
+        dolphin_path=dolphin_path,
+        use_exi_inputs=True,
+        enable_ffw=True,
+        emulation_speed=0.0,
+        blocking_input=True,
+        step_timeout_seconds=30.0,
+        tmp_home_directory=True,
+    )
+    children_before = {child.pid for child in mp.active_children()}
+    file_descriptors: list[int] = []
+    resident_bytes: list[int] = []
+    for round_index in range(3):
+        boots = run_matches_vec(
+            cfg,
+            [_match(), _match()],
+            _NeutralPolicy,
+            max_frames=120,
+            max_parallel=2,
+            base_slippi_port=52100 + 16 * round_index,
+            start_retries=0,
+        )
+        assert all(len(boot) == 1 and len(boot[0]) == 120 for boot in boots)
+        assert {child.pid for child in mp.active_children()} == children_before
+        file_descriptors.append(len(os.listdir("/proc/self/fd")))
+        resident_bytes.append(int(Path("/proc/self/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE"))
+    assert max(file_descriptors) - min(file_descriptors) <= 2
+    assert resident_bytes[-1] <= resident_bytes[0] + 32 * 1024 * 1024
 
 
 def test_policy_fault_capsule_round_trips_host_snapshot(tmp_path) -> None:

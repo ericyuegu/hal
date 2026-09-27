@@ -10,6 +10,7 @@ yet.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from operator import attrgetter
 
 import numpy as np
 
@@ -117,7 +118,7 @@ def diff(
         if mismatches.size > 0:
             seed_diverged_at = int(mismatches[0])
 
-    divergences.sort(key=lambda d: (d.first_diff_frame, d.port, d.field))
+    divergences.sort(key=attrgetter("first_diff_frame", "port", "field"))
     return DiffReport(
         passed=not divergences,
         n_frames=n,

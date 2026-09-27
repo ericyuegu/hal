@@ -1,9 +1,12 @@
 import dataclasses
+import uuid
+from multiprocessing.shared_memory import SharedMemory
 
 import numpy as np
 import pytest
 
 from hal.eval.harness import resolve_parallelism
+from hal.sim import ipc
 from hal.sim.ipc import CONTROL_SIZE
 from hal.sim.ipc import LIVE_COLUMN_DTYPES
 from hal.sim.ipc import LIVE_FLOAT_COLUMNS
@@ -55,7 +58,6 @@ def test_policy_runtime_spec_validates_generic_schedule() -> None:
         execution_stride=6,
         committed_frames=3,
         action_dim=14,
-        action_token_groups=4,
     )
     assert spec.raw_ring_capacity == 128
     with pytest.raises(ValueError, match="committed_frames"):
@@ -97,8 +99,99 @@ def test_live_layout_is_numeric_and_stable() -> None:
     assert len(live_layout_hash()) == 64
 
 
+@pytest.mark.parametrize(
+    ("shape", "expected_bytes"),
+    (((1, 256, 4, 14), 156352), ((2, 8, 6, 3), 9408), ((3, 257, 8, 14), 472448)),
+)
+def test_controller_arena_retains_existing_byte_layout(shape: tuple[int, int, int, int], expected_bytes: int) -> None:
+    assert RolloutArena.required_bytes(ArenaSpec(*shape)) == expected_bytes
+
+
+@pytest.mark.parametrize("arena_type", (RolloutArena, ResultArena))
+def test_partial_arena_creation_closes_and_unlinks(
+    monkeypatch: pytest.MonkeyPatch, arena_type: type[RolloutArena] | type[ResultArena]
+) -> None:
+    opened: list[SharedMemory] = []
+    view_count = 0
+    original_view = arena_type._view
+
+    def record_memory(
+        name: str | None = None, create: bool = False, size: int = 0, *, track: bool = True
+    ) -> SharedMemory:
+        shm = SharedMemory(name=name, create=create, size=size, track=track)
+        opened.append(shm)
+        return shm
+
+    def fail_second_view(
+        self: RolloutArena | ResultArena, at: int, shape: tuple[int, ...], dtype: np.dtype
+    ) -> tuple[np.ndarray, int]:
+        nonlocal view_count
+        view_count += 1
+        if view_count == 2:
+            raise MemoryError("injected view allocation failure")
+        return original_view(self, at, shape, dtype)
+
+    monkeypatch.setattr(ipc, "SharedMemory", record_memory)
+    monkeypatch.setattr(arena_type, "_view", fail_second_view)
+    with pytest.raises(MemoryError, match="injected"):
+        if arena_type is RolloutArena:
+            RolloutArena.create(ArenaSpec(1, 8, 4, 14))
+        else:
+            ResultArena.create(f"hal-test-{uuid.uuid4().hex}", ResultSpec(8, 1, 2))
+    assert len(opened) == 1
+    assert opened[0].buf is None
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=opened[0].name, create=False, track=False)
+
+
+@pytest.mark.parametrize("arena_type", (RolloutArena, ResultArena))
+def test_partial_arena_attachment_closes_handle_and_preserves_owner(
+    monkeypatch: pytest.MonkeyPatch, arena_type: type[RolloutArena] | type[ResultArena]
+) -> None:
+    if arena_type is RolloutArena:
+        owner = RolloutArena.create(ArenaSpec(1, 8, 4, 14))
+    else:
+        owner = ResultArena.create(f"hal-test-{uuid.uuid4().hex}", ResultSpec(8, 1, 2))
+    opened: list[SharedMemory] = []
+    original_view = arena_type._view
+    view_count = 0
+
+    def record_memory(
+        name: str | None = None, create: bool = False, size: int = 0, *, track: bool = True
+    ) -> SharedMemory:
+        shm = SharedMemory(name=name, create=create, size=size, track=track)
+        opened.append(shm)
+        return shm
+
+    def fail_second_view(
+        self: RolloutArena | ResultArena, at: int, shape: tuple[int, ...], dtype: np.dtype
+    ) -> tuple[np.ndarray, int]:
+        nonlocal view_count
+        view_count += 1
+        if view_count == 2:
+            raise MemoryError("injected view allocation failure")
+        return original_view(self, at, shape, dtype)
+
+    monkeypatch.setattr(ipc, "SharedMemory", record_memory)
+    monkeypatch.setattr(arena_type, "_view", fail_second_view)
+    try:
+        with pytest.raises(MemoryError, match="injected"):
+            if isinstance(owner, RolloutArena):
+                RolloutArena.attach(owner.descriptor)
+            else:
+                ResultArena.attach(owner._shm.name, owner.spec)
+        assert len(opened) == 1
+        assert opened[0].buf is None
+        assert owner._shm.buf is not None
+        attached = SharedMemory(name=owner._shm.name, create=False, track=False)
+        attached.close()
+    finally:
+        owner.close()
+        owner._shm.unlink()
+
+
 def test_shared_arena_round_trips_observation_and_plan_without_pickle() -> None:
-    spec = ArenaSpec(workers=2, ring_capacity=8, prediction_frames=6, action_dim=3, action_token_groups=2)
+    spec = ArenaSpec(workers=2, ring_capacity=8, prediction_frames=6, action_dim=3)
     arena = RolloutArena.create(spec)
     attached = RolloutArena.attach(arena.descriptor)
     try:
@@ -106,14 +199,12 @@ def test_shared_arena_round_trips_observation_and_plan_without_pickle() -> None:
             name: float(i) if dtype.kind == "f" else i for i, (name, dtype) in enumerate(LIVE_COLUMN_DTYPES.items())
         }
         action = np.array([0.25, -0.5, 1.0], dtype=np.float32)
-        tokens = np.array([7, 9], dtype=np.int32)
-        attached.write_observation(1, 10, 123, flat, action, reset=True, tokens=tokens)
+        attached.write_observation(1, 10, 123, flat, action, reset=True)
 
         view, got_action, reset = arena.observation(1, 10)
         assert reset
         assert int(arena.obs_frame_id[1, 10 % spec.ring_capacity]) == 123
         np.testing.assert_array_equal(got_action, action)
-        np.testing.assert_array_equal(arena.obs_tokens[1, 2], tokens)
         for name, expected in flat.items():
             assert view[name] == expected
 
@@ -122,7 +213,7 @@ def test_shared_arena_round_trips_observation_and_plan_without_pickle() -> None:
         np.testing.assert_array_equal(attached.plan_actions[1, 1], plan)
 
         # A later sequence at the same physical index makes the old row invalid.
-        attached.write_observation(1, 18, 124, flat, action, reset=False, tokens=tokens)
+        attached.write_observation(1, 18, 124, flat, action, reset=False)
         with pytest.raises(ValueError, match="overwritten or torn"):
             arena.observation(1, 10)
     finally:

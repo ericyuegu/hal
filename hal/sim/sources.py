@@ -20,8 +20,8 @@ from typing import runtime_checkable
 
 import numpy as np
 
+from hal.controller import ControllerAction
 from hal.sim.inputs import ControllerInputs
-from hal.sim.inputs import ControllerInputsValue
 from hal.wire import BUTTON_BITS
 
 
@@ -145,7 +145,7 @@ class InternalControllerSource:
         return None
 
 
-_NEUTRAL_INPUTS: ControllerInputs = ControllerInputsValue(
+_NEUTRAL_INPUTS: ControllerInputs = ControllerAction(
     main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0
 )
 
@@ -209,7 +209,7 @@ def demo_sequence(n_frames: int, *, port: Literal["p1", "p2"]) -> list[Controlle
             if (t - 150) % 10 < 5:
                 buttons = BUTTON_BITS["z"] | BUTTON_BITS["l"]
         out.append(
-            ControllerInputsValue(
+            ControllerAction(
                 main_x=main_x,
                 main_y=main_y,
                 c_x=c_x,

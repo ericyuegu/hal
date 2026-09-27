@@ -220,15 +220,12 @@ class ArenaSpec:
     ring_capacity: int
     prediction_frames: int
     action_dim: int
-    action_token_groups: int = 0
 
     def __post_init__(self) -> None:
         for name in ("workers", "ring_capacity", "prediction_frames", "action_dim"):
             value = getattr(self, name)
             if value < 1:
                 raise ValueError(f"{name} must be >= 1, got {value}")
-        if self.action_token_groups < 0:
-            raise ValueError(f"action_token_groups must be >= 0, got {self.action_token_groups}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +271,14 @@ class ResultArena:
         self._shm = shm
         self.spec = spec
         self.unlink_on_close = unlink_on_close
+        try:
+            self._build_views()
+        except BaseException:
+            self._close_views()
+            raise
+
+    def _build_views(self) -> None:
+        spec = self.spec
         at = 0
         self.frame_id, at = self._view(at, (spec.frames,), np.dtype("<i4"))
         self.random_seed, at = self._view(at, (spec.frames,), np.dtype("<u4"))
@@ -284,8 +289,8 @@ class ResultArena:
             (spec.ports, len(POST_FIELD_SUFFIXES), spec.frames),
             np.dtype("<f8"),
         )
-        if _aligned(at) != shm.size:
-            raise AssertionError(f"result layout used {_aligned(at)} bytes, allocation has {shm.size}")
+        if _aligned(at) != self._shm.size:
+            raise AssertionError(f"result layout used {_aligned(at)} bytes, allocation has {self._shm.size}")
 
     @staticmethod
     def required_bytes(spec: ResultSpec) -> int:
@@ -304,23 +309,35 @@ class ResultArena:
     @classmethod
     def create(cls, name: str, spec: ResultSpec) -> ResultArena:
         shm = SharedMemory(name=name, create=True, size=cls.required_bytes(spec), track=False)
-        return cls(shm, spec, unlink_on_close=False)
+        try:
+            return cls(shm, spec, unlink_on_close=False)
+        except BaseException:
+            shm.close()
+            shm.unlink()
+            raise
 
     @classmethod
     def attach(cls, name: str, spec: ResultSpec) -> ResultArena:
         shm = SharedMemory(name=name, create=False, track=False)
-        return cls(shm, spec, unlink_on_close=True)
+        try:
+            return cls(shm, spec, unlink_on_close=True)
+        except BaseException:
+            shm.close()
+            raise
 
     def _view(self, at: int, shape: tuple[int, ...], dtype: np.dtype) -> tuple[np.ndarray, int]:
         at = _aligned(at)
         width = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
         return np.ndarray(shape, dtype=dtype, buffer=self._shm.buf, offset=at), at + width
 
-    def close(self) -> None:
+    def _close_views(self) -> None:
         for name in ("frame_id", "random_seed", "segment_start", "segment_length", "post"):
             if hasattr(self, name):
                 delattr(self, name)
         self._shm.close()
+
+    def close(self) -> None:
+        self._close_views()
         if self.unlink_on_close:
             self._shm.unlink()
 
@@ -336,27 +353,40 @@ class RolloutArena:
         self._shm = shm
         self.descriptor = descriptor
         self.owner = owner
-        if descriptor.layout_hash != live_layout_hash():
-            raise ValueError(
-                f"live layout hash mismatch: arena {descriptor.layout_hash}, process {live_layout_hash()}"
-            )
-        if shm.size < descriptor.size:
-            raise ValueError(f"shared memory has {shm.size} bytes, expected at least {descriptor.size}")
-        self._build_views()
+        try:
+            if descriptor.layout_hash != live_layout_hash():
+                raise ValueError(
+                    f"live layout hash mismatch: arena {descriptor.layout_hash}, process {live_layout_hash()}"
+                )
+            if shm.size < descriptor.size:
+                raise ValueError(f"shared memory has {shm.size} bytes, expected at least {descriptor.size}")
+            self._build_views()
+            if owner:
+                self.obs_sequence.fill(np.iinfo(np.uint64).max)
+        except BaseException:
+            self.close()
+            raise
 
     @classmethod
     def create(cls, spec: ArenaSpec) -> RolloutArena:
         size = cls.required_bytes(spec)
         shm = SharedMemory(create=True, size=size)
-        descriptor = ArenaDescriptor(name=shm.name, size=size, spec=spec, layout_hash=live_layout_hash())
-        arena = cls(shm, descriptor, owner=True)
-        arena.obs_sequence.fill(np.iinfo(np.uint64).max)
-        return arena
+        try:
+            descriptor = ArenaDescriptor(name=shm.name, size=size, spec=spec, layout_hash=live_layout_hash())
+            return cls(shm, descriptor, owner=True)
+        except BaseException:
+            shm.close()
+            shm.unlink()
+            raise
 
     @classmethod
     def attach(cls, descriptor: ArenaDescriptor) -> RolloutArena:
         shm = SharedMemory(name=descriptor.name, create=False, track=False)
-        return cls(shm, descriptor, owner=False)
+        try:
+            return cls(shm, descriptor, owner=False)
+        except BaseException:
+            shm.close()
+            raise
 
     @staticmethod
     def required_bytes(spec: ArenaSpec) -> int:
@@ -368,9 +398,7 @@ class RolloutArena:
             ((spec.workers, spec.ring_capacity, len(LIVE_FLOAT_COLUMNS)), np.dtype("<f4")),
             ((spec.workers, spec.ring_capacity, len(LIVE_INT_COLUMNS)), np.dtype("<i4")),
             ((spec.workers, spec.ring_capacity, spec.action_dim), np.dtype("<f4")),
-            ((spec.workers, spec.ring_capacity, spec.action_token_groups), np.dtype("<i4")),
             ((spec.workers, 2, spec.prediction_frames, spec.action_dim), np.dtype("<f4")),
-            ((spec.workers, 2, spec.prediction_frames, spec.action_token_groups), np.dtype("<i4")),
         )
         for shape, dtype in shapes:
             total = _aligned(total)
@@ -395,14 +423,8 @@ class RolloutArena:
         )
         self.obs_ints, at = self._view(at, (spec.workers, spec.ring_capacity, len(LIVE_INT_COLUMNS)), np.dtype("<i4"))
         self.obs_actions, at = self._view(at, (spec.workers, spec.ring_capacity, spec.action_dim), np.dtype("<f4"))
-        self.obs_tokens, at = self._view(
-            at, (spec.workers, spec.ring_capacity, spec.action_token_groups), np.dtype("<i4")
-        )
         self.plan_actions, at = self._view(
             at, (spec.workers, 2, spec.prediction_frames, spec.action_dim), np.dtype("<f4")
-        )
-        self.plan_tokens, at = self._view(
-            at, (spec.workers, 2, spec.prediction_frames, spec.action_token_groups), np.dtype("<i4")
         )
         if _aligned(at) != self.descriptor.size:
             raise AssertionError(f"arena layout used {_aligned(at)} bytes, descriptor has {self.descriptor.size}")
@@ -416,7 +438,6 @@ class RolloutArena:
         action: np.ndarray,
         *,
         reset: bool,
-        tokens: np.ndarray | None = None,
     ) -> None:
         """Write one complete row, then publish its absolute sequence last."""
         spec = self.descriptor.spec
@@ -432,14 +453,6 @@ class RolloutArena:
         if action_row.shape != (spec.action_dim,):
             raise ValueError(f"action has shape {action_row.shape}, expected {(spec.action_dim,)}")
         self.obs_actions[worker, at] = action_row
-        if spec.action_token_groups:
-            if tokens is None:
-                self.obs_tokens[worker, at].fill(-1)
-            else:
-                token_row = np.asarray(tokens, dtype=np.int32)
-                if token_row.shape != (spec.action_token_groups,):
-                    raise ValueError(f"tokens have shape {token_row.shape}, expected {(spec.action_token_groups,)}")
-                self.obs_tokens[worker, at] = token_row
         self.obs_frame_id[worker, at] = frame_id
         self.obs_reset[worker, at] = reset
         self.obs_sequence[worker, at] = sequence
@@ -466,9 +479,7 @@ class RolloutArena:
             "obs_floats",
             "obs_ints",
             "obs_actions",
-            "obs_tokens",
             "plan_actions",
-            "plan_tokens",
         ):
             if hasattr(self, name):
                 delattr(self, name)

@@ -95,7 +95,6 @@ def test_worker_keeps_terminal_frame_without_publishing_it(monkeypatch: pytest.M
         ring_capacity=runtime.raw_ring_capacity,
         prediction_frames=runtime.prediction_frames,
         action_dim=runtime.action_dim,
-        action_token_groups=0,
     )
     matchup = Matchup(
         stage=melee.Stage.FINAL_DESTINATION,

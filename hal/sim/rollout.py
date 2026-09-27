@@ -12,6 +12,24 @@ from typing import Protocol
 
 import numpy as np
 
+from hal.sim.session import Matchup
+
+
+@dataclass(frozen=True, slots=True)
+class Slot:
+    """One controlled port within one rollout boot."""
+
+    match: int
+    port: int
+
+
+@dataclass(frozen=True, slots=True)
+class VecMatch:
+    """One match and the ports controlled by a shared inference policy."""
+
+    matchup: Matchup
+    model_ports: tuple[int, ...]
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyRuntimeSpec:
@@ -28,9 +46,8 @@ class PolicyRuntimeSpec:
     execution_stride: int
     committed_frames: int
     action_dim: int
-    action_token_groups: int = 0
     # Public live policies require the recorded input, including wire rounding.
-    # Historical chunk policies retain the originally submitted action.
+    # Official 059 evaluation retains the originally submitted action.
     observed_actions: bool = False
 
     def __post_init__(self) -> None:
@@ -48,8 +65,6 @@ class PolicyRuntimeSpec:
             raise ValueError(f"committed_frames must be between 0 and {available}, got {self.committed_frames}")
         if self.action_dim < 1:
             raise ValueError(f"action_dim must be >= 1, got {self.action_dim}")
-        if self.action_token_groups < 0:
-            raise ValueError(f"action_token_groups must be >= 0, got {self.action_token_groups}")
 
     @property
     def raw_ring_capacity(self) -> int:
@@ -77,7 +92,7 @@ class ChunkPolicy(Protocol):
     @property
     def runtime_spec(self) -> PolicyRuntimeSpec: ...
 
-    def plan_rows(self, rows: Mapping[object, Sequence[ObservationRow]]) -> Mapping[object, np.ndarray]: ...
+    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]: ...
 
 
 def nearest_power_of_two(value: int) -> int:

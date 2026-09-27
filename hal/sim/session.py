@@ -32,11 +32,12 @@ from typing import TypedDict
 import melee
 from loguru import logger
 
+from hal.data.index import PlayerEntry
 from hal.data.index import ReplayIndexEntry
+from hal.data.slippi import slp_stage_to_libmelee
 from hal.data.slp_finalize import finalize_replay_dir
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
-from hal.wire import slp_stage_to_libmelee
 
 # Linux-only PR_SET_PDEATHSIG makes the kernel kill Dolphin if
 # this Python process dies before _teardown can run (e.g. parent SIGKILL'd,
@@ -49,6 +50,33 @@ from hal.wire import slp_stage_to_libmelee
 _DOLPHIN_TERM_GRACE_SECONDS = 0.25
 _NATIVE_EFB_SCALE = 2
 _DOLPHIN_VERSION_PATCH_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True, slots=True)
+class _KnownDolphinVersion:
+    version: melee.console.DolphinVersion
+
+    def __call__(self, _path: str) -> melee.console.DolphinVersion:
+        return self.version
+
+
+@dataclass(slots=True)
+class _ControllerFlushInstrument:
+    session: Session
+    port: int
+    flush: Callable[[], None]
+
+    def __call__(self) -> None:
+        self.flush()
+        self.session._pending_flush_ports.discard(self.port)
+        if not self.session._pending_flush_ports and self.session._inputs_flushed_callback is not None:
+            callback = self.session._inputs_flushed_callback
+            self.session._inputs_flushed_callback = None
+            callback()
+
+
+def _player_port(player: PlayerEntry) -> int:
+    return player.port
 
 
 class FrameTimeout(TimeoutError):
@@ -75,7 +103,7 @@ class SessionOptions(TypedDict):
 
 
 # The patch swaps a process-global (``subprocess.Popen``), so concurrent boots
-# (drive_vec starts N Sessions on a thread pool) must not interleave their
+# (the process harness can start several Sessions) must not interleave their
 # patch/restore — otherwise one thread's restore clobbers another's, leaking the
 # wrapper or dropping the pdeathsig. The window guarded is just ``Console.run``'s
 # launch, which only spawns (it doesn't wait), so serializing it is cheap.
@@ -227,10 +255,7 @@ def known_dolphin_version(version: melee.console.DolphinVersion | None) -> Itera
     with _DOLPHIN_VERSION_PATCH_LOCK:
         original = melee.console.get_dolphin_version
 
-        def known_version(_path: str) -> melee.console.DolphinVersion:
-            return version
-
-        melee.console.__dict__["get_dolphin_version"] = known_version
+        melee.console.__dict__["get_dolphin_version"] = _KnownDolphinVersion(version)
         try:
             yield
         finally:
@@ -324,7 +349,7 @@ class ReplayMatchup(Matchup):
         STANDARD-controller PlayerSetup on its original port; the two
         lowest-port players are tagged with MDS prefixes p1 / p2.
         """
-        sorted_entries = sorted(entry.players, key=lambda p: p.port)
+        sorted_entries = sorted(entry.players, key=_player_port)
         if len(sorted_entries) < 2:
             raise ValueError(f"replay {entry.path} has fewer than 2 players")
         port_to_mds_prefix: dict[int, Literal["p1", "p2"]] = {
@@ -568,15 +593,7 @@ class Session:
         """Deliver the latency callback at the real Dolphin pipe boundary."""
         original_flush = controller.flush
 
-        def instrumented_flush() -> None:
-            original_flush()
-            self._pending_flush_ports.discard(port)
-            if not self._pending_flush_ports and self._inputs_flushed_callback is not None:
-                callback = self._inputs_flushed_callback
-                self._inputs_flushed_callback = None
-                callback()
-
-        controller.__dict__["flush"] = instrumented_flush
+        controller.__dict__["flush"] = _ControllerFlushInstrument(self, port, original_flush)
 
     def _navigate_to_live(self) -> dict:
         """Drive the menus until the match goes live, returning the first
@@ -659,7 +676,7 @@ class Session:
         SUDDEN_DEATH). The caller — typically ``drive`` — uses this to stop
         the playback loop early. Under instant-restart the match restarts in-place
         (``in_game`` stays True); the canonical ``id`` resetting to the pre-game
-        countdown is the match boundary (see ``hal.sim.vec.drive_vec``).
+        countdown is the match boundary for the process rollout driver.
         """
         if self._console is None:
             raise RuntimeError("Session must be used as a context manager")

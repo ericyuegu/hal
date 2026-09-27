@@ -14,7 +14,7 @@ import melee
 import pytest
 
 import hal.sim.session as session_module
-from hal.sim.inputs import ControllerInputsValue
+from hal.controller import ControllerAction
 from hal.sim.session import Matchup
 from hal.sim.session import Session
 
@@ -134,7 +134,7 @@ def test_step_reports_latency_only_after_controller_pipe_flush(monkeypatch: pyte
         return _FakeGameState(melee.Menu.IN_GAME)
 
     session._step_blocking = advance  # type: ignore[method-assign]
-    inputs = ControllerInputsValue(
+    inputs = ControllerAction(
         main_x=0.0,
         main_y=0.0,
         c_x=0.0,

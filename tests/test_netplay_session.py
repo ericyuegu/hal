@@ -13,7 +13,6 @@ import pytest
 import hal.sim.netplay as netplay
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
-from hal.sim.inputs import ControllerInputsValue
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import fix_dolphin_ini_case
@@ -297,7 +296,7 @@ def test_step_requires_an_explicit_input_even_when_neutral(tmp_path: Path) -> No
     with pytest.raises(TypeError, match="requires controller inputs"):
         session.step(None)
 
-    neutral = ControllerInputsValue(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+    neutral = ControllerAction(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
     assert neutral.main_x == 0.0
 
 
@@ -359,7 +358,7 @@ def test_step_rejects_a_nonconsecutive_live_frame(
     monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda value: {"id": value.frame})
 
     with pytest.raises(RuntimeError, match="rollback filtering did not preserve call alignment"):
-        session.step(ControllerInputsValue(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0))
+        session.step(ControllerAction(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0))
 
 
 def test_teardown_uses_shared_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
