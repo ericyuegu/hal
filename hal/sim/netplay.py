@@ -18,6 +18,7 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
 from hal.sim.session import LIVE_MENU_STATES
+from hal.sim.session import DolphinGraphicsBackend
 from hal.sim.session import FrameTimeout
 from hal.sim.session import canonical_frame
 from hal.sim.session import fix_dolphin_ini_case
@@ -76,9 +77,12 @@ class NetplaySession:
         step_timeout_seconds: float = 30.0,
         connect_timeout_seconds: float = 600.0,
         realtime: bool = False,
+        graphics_backend: DolphinGraphicsBackend = "Vulkan",
     ) -> None:
         if online_delay not in (2, 3):
             raise ValueError(f"online_delay must be 2 or 3, got {online_delay}")
+        if graphics_backend not in ("Vulkan", "OGL"):
+            raise ValueError(f"unsupported Dolphin graphics backend {graphics_backend!r}")
         self.frame_times: list[float] = []
         self.realtime = realtime
         self.iso_path = str(iso_path)
@@ -89,6 +93,7 @@ class NetplaySession:
         self.slippi_port = slippi_port
         self.step_timeout_seconds = step_timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.graphics_backend = graphics_backend
         self.ego_port: int | None = None
         self.opponent_port: int | None = None
         self._console: melee.Console | None = None
@@ -113,10 +118,7 @@ class NetplaySession:
                 polling_timeout=0.0 if self.realtime else self.step_timeout_seconds,
                 skip_rollback_frames=True,
                 rollback_resolution="first",
-                # Slippi 3.6.4 defaults to OpenGL, which stalls CUDA policy
-                # work on NVIDIA. Vulkan keeps the tested D3 path below one
-                # frame; revisit this with the executable fingerprint above.
-                gfx_backend="Vulkan",
+                gfx_backend=self.graphics_backend,
                 disable_audio=True,
                 tmp_home_directory=True,
                 save_replays=True,

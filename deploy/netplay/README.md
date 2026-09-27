@@ -13,6 +13,11 @@ deploy/netplay/run-local.sh
 
 The local page is at `http://127.0.0.1:3000`. The host launcher uses `HAL_NETPLAY_USER_JSON_A` and, when set, `HAL_NETPLAY_USER_JSON_B`. It assigns distinct default Slippi ports 51441 and 51442 and sets API queue capacity to the worker count. Override ports with `HAL_NETPLAY_SLIPPI_PORT_A` and `HAL_NETPLAY_SLIPPI_PORT_B`. The runner rejects duplicate credentials or ports.
 
+Set `HAL_NETPLAY_GRAPHICS_BACKEND=OGL` to select OpenGL explicitly. The default is
+`Vulkan`. The runner also accepts `--graphics-backend OGL`. The local 3060 host
+has periodic pauses with Vulkan; OpenGL passed a short neutral-player control,
+and the complete model service still needs a game on that setting.
+
 Export a validated 059 checkpoint with `uv run hal-policy export /path/to/checkpoint.pt /path/to/policy.halpolicy`. The runner requires a capability-v2 artifact for the declared netplay profiles; an older bundle keeps its original delay meaning and does not gain new capabilities when loaded.
 
 ## Hosted run
@@ -37,8 +42,9 @@ expected GPU:
 docker compose run --rm --no-deps --entrypoint vulkaninfo runner --summary
 ```
 
-The command must list the NVIDIA device. A missing driver is a deployment failure;
-do not switch to software rendering or another Dolphin backend to hide it.
+For the Vulkan profile, the command must list the NVIDIA device. Record the
+selected graphics backend and its actual driver when checking another profile;
+a working CUDA inference device does not establish the renderer's behavior.
 
 ## Health and timing
 

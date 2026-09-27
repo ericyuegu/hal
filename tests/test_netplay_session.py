@@ -89,6 +89,25 @@ def test_console_uses_blocking_uncapped_non_exi_settings(tmp_path: Path, monkeyp
     assert kwargs["replay_monthly_folders"] is False
 
 
+def test_console_uses_explicit_opengl_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    console = Mock()
+    console._get_dolphin_config_path.return_value = str(tmp_path / "missing")
+    console_type = Mock(return_value=console)
+    monkeypatch.setattr("hal.sim.netplay.tested_dolphin_version", lambda _path: _dolphin_version())
+    monkeypatch.setattr("hal.sim.netplay.melee.Console", console_type)
+    monkeypatch.setattr("hal.sim.netplay.teardown_console", Mock())
+
+    with _session(tmp_path, graphics_backend="OGL"):
+        pass
+
+    assert console_type.call_args.kwargs["gfx_backend"] == "OGL"
+
+
+def test_netplay_session_rejects_unsupported_graphics_backend(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unsupported Dolphin graphics backend"):
+        _session(tmp_path, graphics_backend="Null")
+
+
 def test_console_sets_native_internal_resolution(tmp_path: Path) -> None:
     config_path = tmp_path / "Config"
     config_path.mkdir()

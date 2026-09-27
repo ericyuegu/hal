@@ -49,6 +49,7 @@ from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
+from hal.sim.session import DolphinGraphicsBackend
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,11 @@ class QualificationConfig:
     smoke_frames: int | None
     bot_slippi_port: int
     peer_slippi_port: int
+    graphics_backend: DolphinGraphicsBackend = "Vulkan"
+
+    def __post_init__(self) -> None:
+        if self.graphics_backend not in ("Vulkan", "OGL"):
+            raise ValueError(f"unsupported Dolphin graphics backend {self.graphics_backend!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,15 +393,17 @@ def _assess_match(
     desired_return: float,
     bundle_sha256: str,
     source_git_sha: str,
+    graphics_backend: DolphinGraphicsBackend,
 ) -> MatchAssessment:
     payload = _mapping(json.loads(path.read_text()), "match measurement")
     timing = FrameTiming(delay, 1, delay + 1, 4, 8)
     expected = {
-        "schema_version": 2,
+        "schema_version": 3,
         "reservation_id": reservation_id,
         "game_number": game_number,
         "policy_bundle_sha256": bundle_sha256,
         "source_git_sha": source_git_sha,
+        "graphics_backend": graphics_backend,
         "desired_return": desired_return,
         "observation_mode": "first_seen_speculative",
         "timing": asdict(timing),
@@ -778,7 +786,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
     ).stdout.strip()
     source_hashes = _source_hashes()
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "workload": f"netplay-059-delay-{config.delay}-neutral-peer",
         "topology": "two local Slippi accounts; separate runner GPU and Dolphin workers; local neutral-input peer",
         "interpretation": "functional and real-time transport qualification only; no gameplay-strength claim",
@@ -798,6 +806,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
         "iso_sha256": _sha256(Path(ISO_PATH)),
         "dolphin_sha256": _sha256(Path(NETPLAY_EMULATOR_PATH)),
         "delay": config.delay,
+        "graphics_backend": config.graphics_backend,
         "desired_return": config.desired_return,
         "minimum_games": config.minimum_games,
         "minimum_gameplay_seconds": config.minimum_gameplay_seconds,
@@ -818,6 +827,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
         slippi_ports=(config.bot_slippi_port,),
         iso_path=Path(ISO_PATH),
         dolphin_path=Path(NETPLAY_EMULATOR_PATH),
+        graphics_backend=config.graphics_backend,
         replay_dir=config.output / "runner-replays",
         status_path=status_path,
         git_sha=source_sha,
@@ -858,6 +868,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                     replay_dir=replay_dir,
                     slippi_port=config.peer_slippi_port,
                     realtime=True,
+                    graphics_backend=config.graphics_backend,
                 ) as peer:
                     setup = NetplaySetup(melee.Character.FOX, bot_code, costume=1)
                     first = peer.start_match(setup)
@@ -882,6 +893,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                             desired_return=config.desired_return,
                             bundle_sha256=bundle_sha256,
                             source_git_sha=source_sha,
+                            graphics_backend=config.graphics_backend,
                         )
                         assessments.append(assessment)
                         gameplay_seconds += assessment.gameplay_seconds
@@ -952,7 +964,8 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
         if not has_soak_duration:
             unmeasured_gates.append("At least ten completed matches and 1800 gameplay seconds")
         report: dict[str, object] = {
-            "schema_version": 3,
+            "schema_version": 4,
+            "graphics_backend": config.graphics_backend,
             "qualification_status": "failed" if failure is not None else "incomplete",
             "smoke": config.smoke_frames is not None,
             "measured_checks_passed": failure is None and config.smoke_frames is None and has_soak_duration,
@@ -988,6 +1001,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--smoke-frames", type=int)
     parser.add_argument("--bot-slippi-port", type=int, default=51451)
     parser.add_argument("--peer-slippi-port", type=int, default=51452)
+    parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
     args = parser.parse_args(argv)
     if args.minimum_games < 1 or args.minimum_gameplay_seconds < 0:
         parser.error("minimum games and gameplay time must be non-negative")
@@ -1006,6 +1020,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.smoke_frames,
             args.bot_slippi_port,
             args.peer_slippi_port,
+            args.graphics_backend,
         )
     )
     print(json.dumps(result, allow_nan=False, sort_keys=True))

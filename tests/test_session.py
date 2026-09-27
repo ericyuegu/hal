@@ -8,6 +8,7 @@ menu hang surfaces as a clean ``TimeoutError`` instead of spinning forever
 """
 
 import time
+from pathlib import Path
 from unittest.mock import Mock
 
 import melee
@@ -15,6 +16,7 @@ import pytest
 
 import hal.sim.session as session_module
 from hal.controller import ControllerAction
+from hal.sim.session import DolphinGraphicsBackend
 from hal.sim.session import Matchup
 from hal.sim.session import Session
 
@@ -55,7 +57,10 @@ def test_polling_waits_for_one_frame_before_flushing_again(monkeypatch: pytest.M
     assert kwargs["polling_timeout"] == 7.5
 
 
-def test_session_configures_vulkan_native_resolution(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("gfx_backend", ["Vulkan", "OGL"])
+def test_session_configures_graphics_backend_native_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gfx_backend: DolphinGraphicsBackend
+) -> None:
     kwargs: dict[str, object] = {}
     version = melee.console.DolphinVersion(False, "3.6.4", melee.console.DolphinBuild.NETPLAY)
     original_get_version = melee.console.get_dolphin_version
@@ -73,16 +78,21 @@ def test_session_configures_vulkan_native_resolution(tmp_path, monkeypatch: pyte
     session = Session(
         iso_path="unused.iso",
         dolphin_path="unused",
-        gfx_backend="Vulkan",
+        gfx_backend=gfx_backend,
         internal_resolution_scale=2,
         dolphin_version=version,
     )
 
     session._boot()
 
-    assert kwargs["gfx_backend"] == "Vulkan"
+    assert kwargs["gfx_backend"] == gfx_backend
     assert "EFBScale = 2" in (tmp_path / "GFX.ini").read_text()
     assert melee.console.get_dolphin_version is original_get_version
+
+
+def test_session_rejects_unsupported_graphics_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported Dolphin graphics backend"):
+        Session(iso_path="unused.iso", dolphin_path="unused", gfx_backend="Null")  # type: ignore[arg-type]
 
 
 def test_navigate_to_live_times_out_when_menu_never_goes_live() -> None:

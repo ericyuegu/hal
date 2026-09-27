@@ -124,6 +124,7 @@ xvfb-run -a uv run hal-netplay-runner "$HAL_NETPLAY_POLICY" \
   --slippi-ports "$slippi_ports_csv" \
   --iso-path "$HAL_ISO_PATH" \
   --dolphin-path "$HAL_NETPLAY_EMULATOR_PATH" \
+  --graphics-backend "${HAL_NETPLAY_GRAPHICS_BACKEND:-Vulkan}" \
   --replay-dir "$state_dir/replays" \
   --status-path "$state_dir/runner-status.json" \
   --git-sha "$HAL_GIT_SHA" </dev/null &

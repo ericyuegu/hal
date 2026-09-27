@@ -70,7 +70,10 @@ def test_host_launcher_skips_cloudflare_for_local_mode(tmp_path: Path) -> None:
     assert "cloudflared" not in command_log
 
 
-def test_host_launcher_uses_two_distinct_workers_when_second_account_is_set(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", [None, "OGL"])
+def test_host_launcher_uses_two_distinct_workers_when_second_account_is_set(
+    tmp_path: Path, backend: str | None
+) -> None:
     command_dir = tmp_path / "bin"
     command_dir.mkdir()
     log_path = tmp_path / "commands.log"
@@ -90,6 +93,7 @@ def test_host_launcher_uses_two_distinct_workers_when_second_account_is_set(tmp_
                 "HAL_NETPLAY_USER_JSON_B=/user-b.json",
                 "HAL_ISO_PATH=/ssbm.ciso",
                 "HAL_NETPLAY_EMULATOR_PATH=/Slippi.AppImage",
+                *((f"HAL_NETPLAY_GRAPHICS_BACKEND={backend}",) if backend is not None else ()),
                 "AWS_ENDPOINT_URL=https://example.invalid",
                 "AWS_ACCESS_KEY_ID=test",
                 "AWS_SECRET_ACCESS_KEY=test",
@@ -107,6 +111,7 @@ def test_host_launcher_uses_two_distinct_workers_when_second_account_is_set(tmp_
     commands = log_path.read_text()
     assert "uv|2|run hal-netplay-api" in commands
     assert "--user-jsons /user-a.json,/user-b.json --slippi-ports 51441,51442" in commands
+    assert f"--graphics-backend {backend or 'Vulkan'}" in commands
 
 
 def test_host_launcher_stops_runner_when_api_fails(tmp_path: Path) -> None:

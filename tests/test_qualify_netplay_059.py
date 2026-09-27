@@ -13,6 +13,8 @@ from dataclasses import asdict
 from dataclasses import replace
 from multiprocessing.connection import Connection
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 from unittest.mock import Mock
 
 import pytest
@@ -82,6 +84,114 @@ def test_qualifier_requires_a_display_before_creating_run_files(
     with pytest.raises(RuntimeError, match="xvfb-run"):
         qualify_netplay_059.qualify(config)
     assert not output.exists()
+
+
+def test_qualification_graphics_backend_defaults_and_validation(tmp_path: Path) -> None:
+    config = qualify_netplay_059.QualificationConfig(
+        output=tmp_path / "qualification",
+        bundle=tmp_path / "bundle.hal",
+        bot_account=tmp_path / "bot.json",
+        peer_account=tmp_path / "peer.json",
+        delay=2,
+        desired_return=19.976,
+        minimum_games=10,
+        minimum_gameplay_seconds=1800,
+        smoke_frames=300,
+        bot_slippi_port=51451,
+        peer_slippi_port=51452,
+    )
+    assert config.graphics_backend == "Vulkan"
+    assert replace(config, graphics_backend="OGL").graphics_backend == "OGL"
+    with pytest.raises(ValueError, match="unsupported Dolphin graphics backend"):
+        replace(config, graphics_backend="Null")
+
+
+def test_qualification_routes_opengl_to_bot_peer_and_run_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot = tmp_path / "bot.json"
+    peer = tmp_path / "peer.json"
+    bot.write_text('{"connectCode":"BOT#1"}')
+    peer.write_text('{"connectCode":"PEER#1"}')
+    output = tmp_path / "qualification"
+    peer_backends: list[str] = []
+
+    class PeerSession:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            peer_backends.append(str(kwargs["graphics_backend"]))
+
+        def __enter__(self) -> PeerSession:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def start_match(self, _setup: object) -> None:
+            raise RuntimeError("stop after peer construction")
+
+    process = Mock(pid=123, exitcode=0)
+    make_process = Mock(return_value=process)
+    sampler = MagicMock()
+    sampler.owned_processes = {}
+    sampler.samples = []
+    sampler.__enter__.return_value = sampler
+    monkeypatch.setenv("DISPLAY", ":test")
+    monkeypatch.setattr(qualify_netplay_059, "_sha256", lambda _path: "a" * 64)
+    monkeypatch.setattr(qualify_netplay_059, "_source_hashes", lambda: {})
+    monkeypatch.setattr(
+        qualify_netplay_059.subprocess,
+        "run",
+        Mock(return_value=subprocess.CompletedProcess([], 0, "source-sha\n", "")),
+    )
+    monkeypatch.setattr(qualify_netplay_059.mp, "get_context", lambda _method: SimpleNamespace(Process=make_process))
+    monkeypatch.setattr(qualify_netplay_059, "_ResourceSampler", lambda *_args: sampler)
+    monkeypatch.setattr(qualify_netplay_059, "_wait_ready", lambda *_args: 0.0)
+    monkeypatch.setattr(qualify_netplay_059, "NetplaySession", PeerSession)
+    monkeypatch.setattr(
+        qualify_netplay_059, "_terminate", lambda *_args: qualify_netplay_059.ShutdownResult(0, False, (), ())
+    )
+    monkeypatch.setattr(qualify_netplay_059, "_assess_engine_audit", lambda *_args, **_kwargs: None)
+
+    config = qualify_netplay_059.QualificationConfig(
+        output=output,
+        bundle=tmp_path / "bundle.hal",
+        bot_account=bot,
+        peer_account=peer,
+        delay=2,
+        desired_return=19.976,
+        minimum_games=10,
+        minimum_gameplay_seconds=1800,
+        smoke_frames=300,
+        bot_slippi_port=51451,
+        peer_slippi_port=51452,
+        graphics_backend="OGL",
+    )
+    with pytest.raises(RuntimeError, match="stop after peer construction"):
+        qualify_netplay_059.qualify(config)
+
+    runner_config = make_process.call_args.kwargs["args"][0]
+    assert runner_config.graphics_backend == "OGL"
+    assert peer_backends == ["OGL"]
+    assert json.loads((output / "manifest.json").read_text())["graphics_backend"] == "OGL"
+    assert json.loads((output / "run-result.json").read_text())["graphics_backend"] == "OGL"
+
+
+def test_qualification_cli_accepts_explicit_graphics_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    qualified = Mock(return_value={})
+    monkeypatch.setattr(qualify_netplay_059, "qualify", qualified)
+    args = [
+        str(tmp_path / "bundle.hal"),
+        "--bot-account",
+        str(tmp_path / "bot.json"),
+        "--peer-account",
+        str(tmp_path / "peer.json"),
+        "--output",
+        str(tmp_path / "qualification"),
+    ]
+    qualify_netplay_059.main(args)
+    assert qualified.call_args.args[0].graphics_backend == "Vulkan"
+    qualify_netplay_059.main([*args, "--graphics-backend", "OGL"])
+    assert qualified.call_args.args[0].graphics_backend == "OGL"
 
 
 def test_source_manifest_covers_all_maintained_runtime_modules() -> None:
@@ -332,13 +442,14 @@ def match_measurement(tmp_path: Path) -> Path:
     }
     inference_frames = list(range(-120, 600, 4))
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "reservation_id": "reservation",
         "game_number": 1,
         "stream_id": 0,
         "generation": 1,
         "policy_bundle_sha256": "b" * 64,
         "source_git_sha": "c" * 40,
+        "graphics_backend": "Vulkan",
         "desired_return": 19.976,
         "observation_mode": "first_seen_speculative",
         "timing": asdict(timing),
@@ -366,6 +477,7 @@ def _assess(path: Path) -> qualify_netplay_059.MatchAssessment:
         desired_return=19.976,
         bundle_sha256="b" * 64,
         source_git_sha="c" * 40,
+        graphics_backend="Vulkan",
     )
 
 
@@ -487,6 +599,7 @@ def test_match_assessment_checks_scheduling_without_mislabeling_rejected_plans(
         ("schedule", None, "chunk health"),
         ("policy_bundle_sha256", "other-bundle", "identity"),
         ("source_git_sha", "other-source", "identity"),
+        ("graphics_backend", "OGL", "identity"),
         ("game_number", 2, "identity"),
         ("frame_ids", [0, 2, 0], "consecutive"),
     ],

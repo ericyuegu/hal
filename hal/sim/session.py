@@ -39,6 +39,8 @@ from hal.data.slp_finalize import finalize_replay_dir
 from hal.sim.inputs import ControllerInputs
 from hal.sim.inputs import apply_inputs
 
+DolphinGraphicsBackend = Literal["Vulkan", "OGL"]
+
 # Linux-only PR_SET_PDEATHSIG makes the kernel kill Dolphin if
 # this Python process dies before _teardown can run (e.g. parent SIGKILL'd,
 # OOM, segfault). Belt-and-suspenders on top of __exit__/atexit cleanup —
@@ -401,7 +403,7 @@ class Session:
         disable_audio: bool = False,
         polling_mode: bool = False,
         instant_match_restart: bool = False,
-        gfx_backend: Literal["Vulkan"] | None = None,
+        gfx_backend: DolphinGraphicsBackend | None = None,
         internal_resolution_scale: int | None = None,
         dolphin_version: melee.console.DolphinVersion | None = None,
     ) -> None:
@@ -461,7 +463,7 @@ class Session:
         # stage-select menu. The eval driver navigates the menu once per boot and
         # then plays many matches; see hal/sim/vec.drive_vec.
         self.instant_match_restart = instant_match_restart
-        if gfx_backend not in (None, "Vulkan"):
+        if gfx_backend not in (None, "Vulkan", "OGL"):
             raise ValueError(f"unsupported Dolphin graphics backend {gfx_backend!r}")
         if internal_resolution_scale is not None and (
             not isinstance(internal_resolution_scale, int)

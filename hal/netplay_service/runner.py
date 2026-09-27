@@ -82,6 +82,7 @@ from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
+from hal.sim.session import DolphinGraphicsBackend
 from hal.sim.session import FrameTimeout
 
 _PENDING_UPLOAD_RETRY_SECONDS = 60.0
@@ -118,12 +119,15 @@ class SlotConfig:
     policy_sha256: str
     checkpoint_sha256: str
     git_sha: str
+    graphics_backend: DolphinGraphicsBackend = "Vulkan"
     max_frames: int = 54_000
     recovery_cooldown_seconds: float = 2.0
     measurement_dir: Path | None = None
     publish_replays: bool = True
 
     def __post_init__(self) -> None:
+        if self.graphics_backend not in ("Vulkan", "OGL"):
+            raise ValueError(f"unsupported Dolphin graphics backend {self.graphics_backend!r}")
         if (
             type(self.recovery_cooldown_seconds) not in (int, float)
             or not math.isfinite(self.recovery_cooldown_seconds)
@@ -147,6 +151,7 @@ class RunnerConfig:
     replay_dir: Path
     status_path: Path
     git_sha: str
+    graphics_backend: DolphinGraphicsBackend = "Vulkan"
     device: str = "cuda"
     seed: int | None = None
     compiled: bool = False
@@ -157,6 +162,8 @@ class RunnerConfig:
     publish_replays: bool = True
 
     def __post_init__(self) -> None:
+        if self.graphics_backend not in ("Vulkan", "OGL"):
+            raise ValueError(f"unsupported Dolphin graphics backend {self.graphics_backend!r}")
         if not self.user_jsons:
             raise ValueError("runner needs at least one Slippi account")
         if len(self.user_jsons) != len(self.slippi_ports):
@@ -874,7 +881,7 @@ def _write_match_measurement(
     elapsed = (ended_at - started_at).total_seconds()
     counters = health.status().chunk_health
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "reservation_id": job.id,
         "game_number": job.game_count + 1,
         "slot": config.slot,
@@ -882,6 +889,7 @@ def _write_match_measurement(
         "stream_id": config.stream_id,
         "generation": result.generation,
         "source_git_sha": config.git_sha,
+        "graphics_backend": config.graphics_backend,
         "policy_bundle_sha256": config.policy_sha256,
         "checkpoint_sha256": config.checkpoint_sha256,
         "character": job.choices.character,
@@ -932,12 +940,13 @@ def _write_match_failure(
     directory.mkdir(parents=True, exist_ok=True)
     counters = health.status().chunk_health
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "reservation_id": job.id,
         "game_number": job.game_count + 1,
         "slot": config.slot,
         "worker_id": config.worker_id,
         "source_git_sha": config.git_sha,
+        "graphics_backend": config.graphics_backend,
         "policy_bundle_sha256": config.policy_sha256,
         "checkpoint_sha256": config.checkpoint_sha256,
         "character": job.choices.character,
@@ -1009,6 +1018,7 @@ def _run_reservation(
                 step_timeout_seconds=FRAME_STALL_SECONDS,
                 connect_timeout_seconds=60.0,
                 realtime=True,
+                graphics_backend=config.graphics_backend,
             ) as session,
         ):
             rematch = False
@@ -1417,6 +1427,7 @@ def _run_generation(
                 policy_sha256=policy_sha256,
                 checkpoint_sha256=ready.checkpoint_sha256,
                 git_sha=config.git_sha,
+                graphics_backend=config.graphics_backend,
                 max_frames=config.max_frames,
                 measurement_dir=config.measurement_dir,
                 publish_replays=config.publish_replays,
@@ -1560,6 +1571,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--slippi-ports", default="51441,51442")
     parser.add_argument("--iso-path", type=Path, default=Path(ISO_PATH))
     parser.add_argument("--dolphin-path", type=Path, default=Path(NETPLAY_EMULATOR_PATH))
+    parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
     parser.add_argument("--replay-dir", type=Path, default=Path("runs/netplay/replays"))
     parser.add_argument("--status-path", type=Path)
     parser.add_argument("--git-sha", default=os.environ.get("HAL_GIT_SHA"))
@@ -1586,6 +1598,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             slippi_ports=ports,
             iso_path=args.iso_path.resolve(),
             dolphin_path=args.dolphin_path.resolve(),
+            graphics_backend=args.graphics_backend,
             replay_dir=args.replay_dir.resolve(),
             status_path=(args.status_path or database.parent / "runner-status.json").resolve(),
             git_sha=args.git_sha,

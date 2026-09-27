@@ -106,6 +106,15 @@ def test_runner_rejects_invalid_preparation_timeout(tmp_path: Path, value: float
         replace(_runner_config(tmp_path), preparation_timeout_seconds=value)
 
 
+def test_runner_graphics_backend_defaults_and_validation(tmp_path: Path) -> None:
+    assert _runner_config(tmp_path).graphics_backend == "Vulkan"
+    assert _slot_config(tmp_path).graphics_backend == "Vulkan"
+    with pytest.raises(ValueError, match="unsupported Dolphin graphics backend"):
+        replace(_runner_config(tmp_path), graphics_backend="Null")
+    with pytest.raises(ValueError, match="unsupported Dolphin graphics backend"):
+        replace(_slot_config(tmp_path), graphics_backend="Null")
+
+
 @pytest.mark.parametrize("recovery_deadline,expected", [(None, 1900.0), (220.0, 220.0), (99.0, 99.0)])
 def test_generation_uses_cold_preparation_budget_and_preserves_recovery_deadline(
     tmp_path: Path,
@@ -512,8 +521,24 @@ def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch:
         ]
     )
     assert captured[0].compiled is False
+    assert captured[0].graphics_backend == "Vulkan"
     assert captured[0].batch_wait_seconds == 0.0005
     assert captured[0].preparation_timeout_seconds == 1800.0
+
+    runner.main(
+        [
+            str(policy),
+            "--user-jsons",
+            str(account),
+            "--slippi-ports",
+            "51441",
+            "--git-sha",
+            "test-sha",
+            "--graphics-backend",
+            "OGL",
+        ]
+    )
+    assert captured[1].graphics_backend == "OGL"
 
 
 def test_runner_cli_accepts_explicit_cold_preparation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -744,9 +769,11 @@ def test_no_contest_ends_reservation_without_a_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    graphics_backends: list[str] = []
+
     class Session:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            graphics_backends.append(str(kwargs["graphics_backend"]))
 
         def __enter__(self) -> Session:
             return self
@@ -774,7 +801,7 @@ def test_no_contest_ends_reservation_without_a_result(
     health = Mock()
 
     runner._run_reservation(
-        _slot_config(tmp_path),
+        replace(_slot_config(tmp_path), graphics_backend="OGL"),
         store,
         Mock(),
         RuntimeConfig(1, (2, 3)),
@@ -785,6 +812,7 @@ def test_no_contest_ends_reservation_without_a_result(
     )
 
     store.mark_no_contest.assert_called_once_with("reservation", "slot-0")
+    assert graphics_backends == ["OGL"]
     store.finish_game.assert_not_called()
     health.playing.assert_called_once_with()
     health.configure_schedule.assert_called_once_with(FrameTiming(2, 2, 4, 2, 8))
@@ -1037,7 +1065,8 @@ def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path
     assert path is not None
     payload = json.loads(path.read_text())
     assert payload["worker_id"] == "slot-0"
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
+    assert payload["graphics_backend"] == "Vulkan"
     assert payload["generation"] == 1
     assert payload["checkpoint_sha256"] == "c" * 64
     assert payload["inference_source_frames"] == [0]
@@ -1066,7 +1095,8 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
 
     path = config.measurement_dir / "reservation-game-1-failure.json"
     payload = json.loads(path.read_text())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
+    assert payload["graphics_backend"] == "Vulkan"
     assert payload["worker_id"] == "slot-0"
     assert payload["failure"] == "RuntimeError: lost"
     assert payload["progress"]["observed_frame_ids"] == [-2, -1, 0, 1]
