@@ -27,16 +27,38 @@ def _read_capture(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return snapshot, report
 
 
+def _equal_tensor_with_paired_nans(expected: torch.Tensor, actual: torch.Tensor) -> bool:
+    if torch.equal(expected, actual):
+        return True
+    if not expected.is_floating_point():
+        return False
+    missing = torch.isnan(expected)
+    if not bool(missing.any()) or not torch.equal(missing, torch.isnan(actual)):
+        return False
+    return torch.equal(expected[~missing], actual[~missing])
+
+
 def _compare(expected: Any, actual: Any, path: str, mismatches: list[str]) -> int:
     if type(expected) is not type(actual):
         mismatches.append(f"{path}: type changed")
         return 1
     if isinstance(expected, torch.Tensor):
-        if expected.dtype != actual.dtype or expected.shape != actual.shape or not torch.equal(expected, actual):
+        if (
+            expected.dtype != actual.dtype
+            or expected.shape != actual.shape
+            or not _equal_tensor_with_paired_nans(expected, actual)
+        ):
             mismatches.append(f"{path}: tensor changed")
         return 1
     if isinstance(expected, np.ndarray):
-        if expected.dtype != actual.dtype or expected.shape != actual.shape or not np.array_equal(expected, actual):
+        if (
+            expected.dtype != actual.dtype
+            or expected.shape != actual.shape
+            or not (
+                np.array_equal(expected, actual)
+                or (np.issubdtype(expected.dtype, np.floating) and np.array_equal(expected, actual, equal_nan=True))
+            )
+        ):
             mismatches.append(f"{path}: array changed")
         return 1
     if isinstance(expected, Mapping):
@@ -78,7 +100,7 @@ def main() -> None:
     leaves = _compare(expected, actual, "snapshot", mismatches)
     report = {
         "status": "passed" if not mismatches else "failed",
-        "comparison": "exact tensor/array values, dtypes, shapes, and recursive saved records",
+        "comparison": "exact non-NaN tensor/array values, paired NaNs, dtypes, shapes, and recursive saved records",
         "leaf_count": leaves,
         "mismatch_count": len(mismatches),
         "mismatches": mismatches,

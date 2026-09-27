@@ -68,6 +68,46 @@ def test_resume_capture_comparison_rejects_structure_changes(expected: object, a
     assert mismatches
 
 
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32, torch.float64))
+def test_resume_capture_comparison_accepts_only_paired_tensor_nans(dtype: torch.dtype) -> None:
+    expected = torch.tensor([float("nan"), 1.0, float("inf"), float("-inf")], dtype=dtype)
+    mismatches: list[str] = []
+    comparison._compare(expected, expected.clone(), "snapshot", mismatches)
+    assert not mismatches
+
+    moved_nan = expected.clone()
+    moved_nan[0] = 0
+    moved_nan[1] = float("nan")
+    changed_finite = expected.clone()
+    changed_finite[1] = torch.nextafter(changed_finite[1], torch.tensor(2.0, dtype=dtype))
+    changed_infinity = expected.clone()
+    changed_infinity[2] = float("-inf")
+    for actual in (moved_nan, changed_finite, changed_infinity):
+        mismatches = []
+        comparison._compare(expected, actual, "snapshot", mismatches)
+        assert mismatches == ["snapshot: tensor changed"]
+
+
+@pytest.mark.parametrize("dtype", (np.float32, np.float64))
+def test_resume_capture_comparison_accepts_only_paired_array_nans(dtype: type[np.floating]) -> None:
+    expected = np.array([np.nan, 1.0, np.inf, -np.inf], dtype=dtype)
+    mismatches: list[str] = []
+    comparison._compare(expected, expected.copy(), "snapshot", mismatches)
+    assert not mismatches
+
+    moved_nan = expected.copy()
+    moved_nan[0] = 0
+    moved_nan[1] = np.nan
+    changed_finite = expected.copy()
+    changed_finite[1] = np.nextafter(dtype(1.0), dtype(2.0))
+    changed_infinity = expected.copy()
+    changed_infinity[2] = -np.inf
+    for actual in (moved_nan, changed_finite, changed_infinity):
+        mismatches = []
+        comparison._compare(expected, actual, "snapshot", mismatches)
+        assert mismatches == ["snapshot: array changed"]
+
+
 def test_resume_capture_rejects_modified_snapshot(tmp_path: Path) -> None:
     snapshot = tmp_path / "next-update.pt"
     torch.save({"model": torch.tensor([1.0])}, snapshot)
