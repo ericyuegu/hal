@@ -357,12 +357,20 @@ def _gpu_memory(pids: tuple[int, ...]) -> int | None:
         ).stdout
     except OSError, ValueError, subprocess.SubprocessError:
         return None
+    if not output.strip():
+        return 0
     total = 0
+    matched = False
     for line in output.splitlines():
         parts = line.split(",", 1)
-        if len(parts) == 2 and parts[0].strip().isdigit() and int(parts[0]) in pids:
-            total += int(parts[1].strip())
-    return total
+        if len(parts) != 2 or not all(part.strip().isdigit() for part in parts):
+            return None
+        pid, memory_mib = (int(part.strip()) for part in parts)
+        if pid in pids:
+            total += memory_mib
+            matched = True
+    # nvidia-smi can report host PIDs while /proc exposes container PIDs.
+    return total if matched else None
 
 
 class _ResourceSampler:

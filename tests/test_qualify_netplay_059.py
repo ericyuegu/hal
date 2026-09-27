@@ -91,6 +91,27 @@ def test_source_manifest_covers_all_maintained_runtime_modules() -> None:
     assert "scripts/qualify_netplay_059.py" in hashes
 
 
+@pytest.mark.parametrize(
+    ("output", "owned", "expected"),
+    [
+        ("", (12,), 0),
+        ("12, 111\n34, 222\n", (12,), 111),
+        ("12, 0\n", (12,), 0),
+        ("34, 222\n", (12,), None),
+        ("12, N/A\n", (12,), None),
+        ("12, 111\n34, N/A\n", (12,), None),
+        ("12, 111\ninvalid\n", (12,), None),
+        ("No running processes found\n", (12,), None),
+    ],
+)
+def test_gpu_memory_requires_valid_matching_processes(
+    output: str, owned: tuple[int, ...], expected: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    completed = subprocess.CompletedProcess(args=("nvidia-smi",), returncode=0, stdout=output, stderr="")
+    monkeypatch.setattr(qualify_netplay_059.subprocess, "run", Mock(return_value=completed))
+    assert qualify_netplay_059._gpu_memory(owned) == expected
+
+
 @pytest.mark.parametrize("status", [JobStatus.PLAYING, JobStatus.FAILED, JobStatus.QUEUED])
 def test_smoke_requires_a_healthy_bot_reservation(tmp_path: Path, status: JobStatus) -> None:
     store = QueueStore(tmp_path / "queue.sqlite3")
