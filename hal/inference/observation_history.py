@@ -6,24 +6,19 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from operator import itemgetter
-from typing import Literal
 
 import numpy as np
 import torch
 
 from hal.data.feature_stats import FeatureStats
-from hal.training.ego_stats import consolidate_key
-from hal.training.features import ACTION_CHANNELS
-from hal.training.features import NO_EXTRA_COLUMNS
-from hal.training.features import SPATIAL_COLUMNS
-from hal.training.features import SPATIAL_GATE_COLUMN
-from hal.training.features import SPATIAL_INPUT_COLUMNS
-from hal.training.features import ExtraColumns
-from hal.training.features import FeatureProjection
-from hal.training.features import derive_spatial
-from hal.training.features import feature_kind
-from hal.training.features import float_feature_transform
-from hal.training.features import mask_sentinel_positions
+from hal.data.feature_stats import consolidate_key
+from hal.representation.features import ACTION_CHANNELS
+from hal.representation.features import NO_EXTRA_COLUMNS
+from hal.representation.features import ExtraColumns
+from hal.representation.features import FeatureProjection
+from hal.representation.features import feature_kind
+from hal.representation.features import float_feature_transform
+from hal.representation.features import mask_sentinel_positions
 
 # A frame lands in two raw scratch rows, one per dtype. Which row a column takes is
 # decided by the Python type of its value on the slot's first frame (int -> int32,
@@ -34,14 +29,6 @@ _RAW_DTYPES: tuple[np.dtype, ...] = (np.dtype(np.float32), np.dtype(np.int32))
 # stick/trigger/button channels, then the categoricals. Grouping by transform is what
 # makes every run a contiguous slice, hence ONE vectorized op per run.
 _TRANSFORM_ORDER: tuple[str, ...] = ("standardize", "minmax", "zero", "raw", "cat")
-
-# Derived spatial columns that are a finite difference. The window's FIRST position has
-# no predecessor inside the window, so ``derive_spatial`` zeroes and flags it there. The
-# ring stores the true delta against the real previous frame; the window read re-applies
-# that rule, which is what keeps a cold start, an instant-restart seam and a saturated
-# context on the same alignment.
-_DPOS_COLUMNS: tuple[str, ...] = tuple(c for c in SPATIAL_COLUMNS if c.endswith(("_dpos_x", "_dpos_y")))
-_DPOS_MASK: Literal["spatial_dpos_mask"] = "spatial_dpos_mask"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,13 +44,11 @@ class _Run:
 
 
 @dataclass(frozen=True, slots=True)
-class _Layout:
+class ObservationLayout:
     """One slot's resolution of ``preprocess``'s routing into vectorized column runs.
 
     ``value_runs`` and ``cat_runs`` produce the model's float32 and int64 columns;
-    ``mask_runs`` produces the per-float validity sidecars. ``spatial_at`` is where
-    the derived block lands inside a value row, or ``None`` when the observation
-    carries no ``stage`` column (i.e. predates matchup conditioning).
+    ``mask_runs`` produces the per-float validity sidecars.
 
     Column ORDER is a function of the routed names only, never of which port is the
     ego, so two slots on opposite ports of one match share every index here and one
@@ -82,17 +67,9 @@ class _Layout:
     value_names: tuple[str, ...]
     cat_names: tuple[str, ...]
     mask_names: tuple[str, ...]
-    spatial_at: slice | None
-    spatial_sources: tuple[tuple[int, int], ...]  # (raw row, index in it) per SPATIAL_INPUT_COLUMNS entry
-    dpos_rows: np.ndarray  # value rows the window read zeroes at position 0
-    dpos_mask_row: int  # value row the window read flags at position 0; -1 = no spatial block
     zero_value: np.ndarray
     zero_cat: np.ndarray
     zero_mask: np.ndarray
-
-
-# %%
-# --- layout resolution --------------------------------------------------------
 
 
 def _column_transform(name: str, kind: str, stats: dict[str, FeatureStats], extra: ExtraColumns) -> str:
@@ -183,14 +160,25 @@ def _model_name(key: str, ego_prefix: str) -> str:
     return key
 
 
+@dataclass(frozen=True, slots=True)
+class _SingleValueGetter:
+    name: str
+
+    def __call__(self, frame: Mapping[str, float | int]) -> tuple[float | int]:
+        return (frame[self.name],)
+
+
+def _gamestate_column_order(column: tuple[str, int, str]) -> tuple[int, str]:
+    return (_TRANSFORM_ORDER.index(column[2]), column[0])
+
+
 def _getter(names: list[str]) -> Callable[[Mapping[str, float | int]], tuple] | None:
     """``itemgetter`` over ``names`` that always answers with a tuple. A key that
     disappears mid-match raises ``KeyError`` here, as reading the column did before."""
     if not names:
         return None
     if len(names) == 1:
-        single = itemgetter(names[0])
-        return lambda frame: (single(frame),)
+        return _SingleValueGetter(names[0])
     return itemgetter(*names)
 
 
@@ -200,7 +188,7 @@ def _build_layout(
     stats: dict[str, FeatureStats],
     extra: ExtraColumns | None,
     projection: FeatureProjection | None = None,
-) -> _Layout:
+) -> ObservationLayout:
     """Resolve one slot's routing from its first observed frame.
 
     Column dtypes and the surviving key set come from that frame, the same rule the
@@ -216,11 +204,6 @@ def _build_layout(
         if projection is not None and name not in projection.columns:
             continue
         kind = feature_kind(name, routing)
-        if kind == "derived":
-            raise ValueError(
-                f"{name!r} arrived as an input column, but the spatial block is derived on the fly by "
-                "derive_spatial; materializing it into the MDS needs a schema bump and this derivation removed"
-            )
         if kind == "drop":
             continue
         raw_key[name] = key
@@ -240,8 +223,7 @@ def _build_layout(
         raise ValueError(f"observation columns {shadowed} collide with the ego action channels of the same name")
 
     # Sorting by (transform, name) keeps the order independent of which port is the ego.
-    rank = {transform: i for i, transform in enumerate(_TRANSFORM_ORDER)}
-    ordered = sorted(gamestate, key=lambda c: (rank[c[2]], c[0])) + sorted(action, key=lambda c: rank[c[2]])
+    ordered = sorted(gamestate, key=_gamestate_column_order) + action
 
     getters: list[Callable[[Mapping[str, float | int]], tuple] | None] = []
     gamestate_at: list[slice] = []
@@ -263,23 +245,7 @@ def _build_layout(
     cat_runs, cat_names = _runs(ordered, stats, ("cat",))
     mask_runs, float_names = _runs(ordered, stats, ("standardize", "minmax", "zero"))
 
-    spatial_at: slice | None = None
-    spatial_sources: tuple[tuple[int, int], ...] = ()
-    dpos_rows = np.empty(0, dtype=np.intp)
-    dpos_mask_row = -1
-    if SPATIAL_GATE_COLUMN in flat and (projection is None or projection.derive_spatial):
-        row_index = _row_indices(ordered)
-        located = {name: (src, row_index[at]) for at, (name, src, _) in enumerate(ordered)}
-        missing = [name for name in SPATIAL_INPUT_COLUMNS if name not in located]
-        if missing:
-            raise ValueError(f"derive_spatial needs raw columns {missing}, which the observation does not carry")
-        spatial_sources = tuple(located[name] for name in SPATIAL_INPUT_COLUMNS)
-        spatial_at = slice(len(value_names), len(value_names) + len(SPATIAL_COLUMNS))
-        value_names = value_names + SPATIAL_COLUMNS
-        dpos_rows = np.array([value_names.index(name) for name in _DPOS_COLUMNS], dtype=np.intp)
-        dpos_mask_row = value_names.index(_DPOS_MASK)
-
-    layout = _Layout(
+    layout = ObservationLayout(
         gamestate_getters=tuple(getters),
         gamestate_at=tuple(gamestate_at),
         action_at=tuple(action_at),
@@ -292,18 +258,15 @@ def _build_layout(
         value_names=value_names,
         cat_names=cat_names,
         mask_names=tuple(f"{name}_mask" for name in float_names),
-        spatial_at=spatial_at,
-        spatial_sources=spatial_sources,
-        dpos_rows=dpos_rows,
-        dpos_mask_row=dpos_mask_row,
         zero_value=np.zeros(len(value_names), dtype=np.float32),
         zero_cat=np.zeros(len(cat_names), dtype=np.int64),
         zero_mask=np.zeros(len(float_names), dtype=np.float32),
     )
-    return replace(layout, **_zero_rows(layout))
+    zero_value, zero_cat, zero_mask = _zero_rows(layout)
+    return replace(layout, zero_value=zero_value, zero_cat=zero_cat, zero_mask=zero_mask)
 
 
-def _zero_rows(layout: _Layout) -> dict[str, np.ndarray]:
+def _zero_rows(layout: ObservationLayout) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The preprocessed all-zero row — what a not-yet-observed context position holds.
 
     It is NOT zeros: a standardized column maps raw 0 to ``-mean/std``, which is
@@ -317,21 +280,15 @@ def _zero_rows(layout: _Layout) -> dict[str, np.ndarray]:
     _write_value_row(layout, raw, masks, value)
     _write_cat_row(layout, raw, masks, cat)
     _write_mask_row(layout, masks, mask)
-    if layout.spatial_at is not None:
-        value[layout.spatial_at] = _spatial_block(layout, [(raw, raw)])[:, 0]
-    return {"zero_value": value, "zero_cat": cat, "zero_mask": mask}
+    return value, cat, mask
 
 
-def _empty_raw(layout: _Layout) -> tuple[np.ndarray, ...]:
+def _empty_raw(layout: ObservationLayout) -> tuple[np.ndarray, ...]:
     return tuple(np.zeros(w, dtype=d) for w, d in zip(layout.raw_widths, _RAW_DTYPES, strict=True))
 
 
-# %%
-# --- per-frame row writers ----------------------------------------------------
-
-
 def _write_value_row(
-    layout: _Layout, raw: tuple[np.ndarray, ...], masks: tuple[np.ndarray, ...], out: np.ndarray
+    layout: ObservationLayout, raw: tuple[np.ndarray, ...], masks: tuple[np.ndarray, ...], out: np.ndarray
 ) -> None:
     for run in layout.value_runs:
         src = raw[run.src][run.src_at]
@@ -347,41 +304,18 @@ def _write_value_row(
 
 
 def _write_cat_row(
-    layout: _Layout, raw: tuple[np.ndarray, ...], masks: tuple[np.ndarray, ...], out: np.ndarray
+    layout: ObservationLayout, raw: tuple[np.ndarray, ...], masks: tuple[np.ndarray, ...], out: np.ndarray
 ) -> None:
     for run in layout.cat_runs:
         out[run.dst_at] = np.where(masks[run.src][run.src_at], 0, raw[run.src][run.src_at]).astype(np.int64)
 
 
-def _write_mask_row(layout: _Layout, masks: tuple[np.ndarray, ...], out: np.ndarray) -> None:
+def _write_mask_row(layout: ObservationLayout, masks: tuple[np.ndarray, ...], out: np.ndarray) -> None:
     for run in layout.mask_runs:
         out[run.dst_at] = masks[run.src][run.src_at].astype(np.float32)
 
 
-def _spatial_block(layout: _Layout, pairs: list[tuple[tuple[np.ndarray, ...], ...]]) -> np.ndarray:
-    """The derived block for this frame of every slot → ``[len(SPATIAL_COLUMNS), n]``.
-
-    ``pairs`` gives each slot's ``(previous raw rows, current raw rows)``. The
-    derivation runs on that two-frame batch so a finite difference reads its true
-    predecessor. A slot with no predecessor — cold start, or the frame right after an
-    instant restart — pairs against the all-zero row, whose ``Stage.NO_STAGE`` marks
-    the delta invalid: the same rule the zero-filled window pad relied on.
-
-    Batched over slots because ``derive_spatial``'s cost is per call, not per element.
-    """
-    batch: dict[str, np.ndarray] = {}
-    for name, (src, index) in zip(SPATIAL_INPUT_COLUMNS, layout.spatial_sources, strict=True):
-        column = np.empty((len(pairs), 2), dtype=_RAW_DTYPES[src])
-        for j, (prev, cur) in enumerate(pairs):
-            column[j, 0] = prev[src][index]
-            column[j, 1] = cur[src][index]
-        batch[name] = column
-    derived = derive_spatial(batch)
-    return np.stack([derived[name][:, 1] for name in SPATIAL_COLUMNS])
-
-
-# %%
-class ContextHistory:
+class ObservationHistory:
     """One slot's preprocessed context rows, in 2x-capacity mirror ring buffers.
 
     Every row is written at ``head`` and at ``head + L``, so the window of the last
@@ -391,16 +325,15 @@ class ContextHistory:
     then hides through ``ctx_pad``.
     """
 
-    __slots__ = ("layout", "L", "values", "cats", "masks", "raw", "prev", "written", "_value", "_cat", "_mask")
+    __slots__ = ("layout", "L", "values", "cats", "masks", "raw", "written", "_value", "_cat", "_mask")
 
-    def __init__(self, layout: _Layout, L: int) -> None:
+    def __init__(self, layout: ObservationLayout, L: int) -> None:
         self.layout = layout
         self.L = L
         self.values = np.repeat(layout.zero_value[:, None], 2 * L, axis=1)
         self.cats = np.repeat(layout.zero_cat[:, None], 2 * L, axis=1)
         self.masks = np.repeat(layout.zero_mask[:, None], 2 * L, axis=1)
         self.raw = _empty_raw(layout)
-        self.prev = _empty_raw(layout)
         self.written = 0
         self._value = np.empty(len(layout.value_names), dtype=np.float32)
         self._cat = np.empty(len(layout.cat_names), dtype=np.int64)
@@ -415,7 +348,7 @@ class ContextHistory:
         length: int,
         extra: ExtraColumns | None = None,
         projection: FeatureProjection | None = None,
-    ) -> ContextHistory:
+    ) -> ObservationHistory:
         return cls(_build_layout(flat, ego_prefix, stats, extra, projection), length)
 
     @property
@@ -423,9 +356,17 @@ class ContextHistory:
         """Real frames currently in context; caps at ``L``."""
         return min(self.written, self.L)
 
+    def reset(self) -> None:
+        """Clear one prepared row without changing its layout or ring storage."""
+        np.copyto(self.values, self.layout.zero_value[:, None])
+        np.copyto(self.cats, self.layout.zero_cat[:, None])
+        np.copyto(self.masks, self.layout.zero_mask[:, None])
+        for row in self.raw:
+            row.fill(0)
+        self.written = 0
+
     def gather(self, flat: Mapping[str, float | int], action: np.ndarray) -> None:
         """Read one frame plus the ego action that produced it into the raw scratch row."""
-        self.prev, self.raw = self.raw, self.prev
         layout = self.layout
         for src, row in enumerate(self.raw):
             getter = layout.gamestate_getters[src]
@@ -436,17 +377,13 @@ class ContextHistory:
                 values = action[channels]
                 row[layout.action_at[src]] = values > 0.5 if layout.action_is_button[src] else values
 
-    def push(self, spatial: np.ndarray | None) -> None:
+    def push(self) -> None:
         """Preprocess the gathered raw row and write it into every ring, twice."""
         layout = self.layout
         masks = tuple(mask_sentinel_positions(row) for row in self.raw)
         _write_value_row(layout, self.raw, masks, self._value)
         _write_cat_row(layout, self.raw, masks, self._cat)
         _write_mask_row(layout, masks, self._mask)
-        if layout.spatial_at is not None:
-            if spatial is None:
-                raise RuntimeError("this slot's layout carries a derived spatial block, but none was supplied")
-            self._value[layout.spatial_at] = spatial
         at = self.written % self.L
         for ring, row in ((self.values, self._value), (self.cats, self._cat), (self.masks, self._mask)):
             ring[:, at] = row
@@ -460,7 +397,7 @@ class ContextHistory:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextWindows:
+class ObservationWindows:
     """One replan's stacked context, packed by dtype for a single host→device copy.
 
     ``floats`` is ``[n_value + n_mask, B, L]``: the model's float columns, then every
@@ -469,7 +406,7 @@ class ContextWindows:
     absent sidecar as zeros, so the two must agree on which fired.
     """
 
-    layout: _Layout
+    layout: ObservationLayout
     floats: np.ndarray
     cats: np.ndarray
     emitted: np.ndarray
@@ -493,19 +430,12 @@ class ContextWindows:
         return feats
 
 
-def push_context_rows(rings: Sequence[ContextHistory]) -> None:
-    if rings and rings[0].layout.spatial_at is not None:
-        spatial = _spatial_block(rings[0].layout, [(ring.prev, ring.raw) for ring in rings])
-        for j, ring in enumerate(rings):
-            ring.push(spatial[:, j])
-    else:
-        for ring in rings:
-            ring.push(None)
+def push_observation_rows(rings: Sequence[ObservationHistory]) -> None:
+    for ring in rings:
+        ring.push()
 
 
-def stack_context_windows(
-    rings: Sequence[ContextHistory], length: int, *, truncate_left_edge: bool = True
-) -> ContextWindows:
+def stack_observation_windows(rings: Sequence[ObservationHistory], length: int) -> ObservationWindows:
     layout = rings[0].layout
     n_value, n_mask = len(layout.value_names), len(layout.mask_names)
     floats = np.empty((n_value + n_mask, len(rings), length), dtype=np.float32)
@@ -515,8 +445,4 @@ def stack_context_windows(
         floats[:n_value, j] = ring.values[:, at]
         floats[n_value:, j] = ring.masks[:, at]
         cats[:, j] = ring.cats[:, at]
-    # A full window has lost the first row's predecessor.
-    if truncate_left_edge and layout.dpos_mask_row >= 0:
-        floats[layout.dpos_rows, :, 0] = 0.0
-        floats[layout.dpos_mask_row, :, 0] = 1.0
-    return ContextWindows(layout=layout, floats=floats, cats=cats, emitted=floats[n_value:].any(axis=(1, 2)))
+    return ObservationWindows(layout=layout, floats=floats, cats=cats, emitted=floats[n_value:].any(axis=(1, 2)))

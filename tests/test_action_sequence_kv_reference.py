@@ -1,20 +1,16 @@
 """Streaming KV cache against uncached full-sequence banded attention."""
 
-from dataclasses import replace
-
 import pytest
 import torch
 
-from hal.inference.backends.history_decoder.kv_cache import KVCache
-from hal.inference.backends.history_decoder.kv_cache import forward_tokens_with_kv_cache
-from hal.inference.backends.history_decoder.model import GPT
-from hal.inference.backends.history_decoder.model import Architecture
-from hal.inference.backends.history_decoder.model import TrainConfig
+from hal.inference.kv_cache import KVCache
+from hal.inference.kv_cache import forward_tokens_with_kv_cache
+from hal.models.action_sequence import ActionSequenceConfig
+from hal.models.action_sequence import ActionSequenceTransformer
 
 
-def _model(attention_window: int) -> GPT:
-    arch = replace(
-        Architecture(),
+def _model(attention_window: int) -> ActionSequenceTransformer:
+    config = ActionSequenceConfig(
         d_model=32,
         n_layers=3,
         n_heads=4,
@@ -29,7 +25,7 @@ def _model(attention_window: int) -> GPT:
         item_hidden_dim=8,
         item_dim=5,
     )
-    return GPT(TrainConfig(arch=arch)).eval()
+    return ActionSequenceTransformer(config).eval()
 
 
 @pytest.mark.parametrize("update_frames", [1, 2, 4])
@@ -46,7 +42,7 @@ def test_streaming_cache_matches_uncached_banded_trunk_after_wrap_and_reset(
     storage = tuple(value.data_ptr() for value in cache.buffers())
 
     for length in (23, 19):
-        tokens = torch.randn(1, length, model.cfg.arch.d_model)
+        tokens = torch.randn(1, length, model.cfg.d_model)
         expected = model.trunk.forward_dense(tokens, torch.zeros(1, dtype=torch.long))
         actual = []
         for start in range(0, length, update_frames):
@@ -54,7 +50,7 @@ def test_streaming_cache_matches_uncached_banded_trunk_after_wrap_and_reset(
 
         torch.testing.assert_close(torch.cat(actual, dim=1), expected, atol=2e-6, rtol=2e-5)
         history = model.temporal.history_attention
-        query = torch.randn(1, 1, model.cfg.arch.temporal_d_model)
+        query = torch.randn(1, 1, model.cfg.temporal_d_model)
         projected_key, projected_value = history.project_memory(expected[:, -cache.window :])
         projected = history.forward_projected(
             query,
@@ -82,4 +78,4 @@ def test_unsupported_policy_update_is_rejected() -> None:
         KVCache(model, 8, torch.device("cpu"))
     cache = KVCache(model, 4, torch.device("cpu"))
     with pytest.raises(ValueError, match="prepared batch or update size"):
-        forward_tokens_with_kv_cache(model, torch.randn(1, 5, model.cfg.arch.d_model), cache)
+        forward_tokens_with_kv_cache(model, torch.randn(1, 5, model.cfg.d_model), cache)

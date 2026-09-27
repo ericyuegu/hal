@@ -1,22 +1,18 @@
 """Known-prefix temporal prefill against the stepwise live decoder."""
 
-from dataclasses import replace
-
 import pytest
 import torch
 
-from hal.inference.backends.history_decoder.kv_cache import KVMemory
-from hal.inference.backends.history_decoder.model import GPT
-from hal.inference.backends.history_decoder.model import Architecture
-from hal.inference.backends.history_decoder.model import TrainConfig
-from hal.inference.backends.history_decoder.model import decoder_rmsnorm
-from hal.training.controller_codec import CONTROLLER_GROUP_COUNT
-from hal.training.features import ACTION_CHANNELS
+from hal.models.action_sequence import ActionSequenceConfig
+from hal.models.action_sequence import ActionSequenceTransformer
+from hal.models.action_sequence import decoder_rmsnorm
+from hal.models.attention import KVMemory
+from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
+from hal.representation.features import ACTION_CHANNELS
 
 
-def _model() -> GPT:
-    arch = replace(
-        Architecture(),
+def _model() -> ActionSequenceTransformer:
+    config = ActionSequenceConfig(
         d_model=32,
         n_layers=2,
         n_heads=4,
@@ -30,7 +26,7 @@ def _model() -> GPT:
         item_hidden_dim=8,
         item_dim=5,
     )
-    model = GPT(TrainConfig(arch=arch)).eval()
+    model = ActionSequenceTransformer(config).eval()
     model.temporal.configure_live_horizons((8,))
     return model
 
@@ -43,7 +39,7 @@ def test_parallel_prefix_matches_stepwise_states_and_sampling(history_kind: str,
     model = _model()
     decoder = model.temporal
     batch = 2 if history_kind == "projected" else 1
-    hidden = torch.randn(batch, 8, model.cfg.arch.d_model)
+    hidden = torch.randn(batch, 8, model.cfg.d_model)
     actions = model.codec.quantize(torch.rand(batch, prefix_count + 1, len(ACTION_CHANNELS)))
     observed = actions[:, 0]
     forced = actions[:, 1:]
@@ -56,7 +52,7 @@ def test_parallel_prefix_matches_stepwise_states_and_sampling(history_kind: str,
         history = decoder._live_history(hidden)
         cached_history = None
     else:
-        kv = torch.randn(2, 1, model.cfg.arch.temporal_heads, 8, model.cfg.arch.temporal_d_model // 4)
+        kv = torch.randn(2, 1, model.cfg.temporal_heads, 8, model.cfg.temporal_d_model // 4)
         cached_history = KVMemory(kv, torch.tensor([17, 18, 11, 12, 13, 14, 15, 16]), torch.tensor([18]), 8)
         history = cached_history
 
@@ -95,7 +91,7 @@ def test_parallel_prefix_preserves_stochastic_draw_count() -> None:
     torch.manual_seed(37)
     model = _model()
     decoder = model.temporal
-    hidden = torch.randn(1, 8, model.cfg.arch.d_model)
+    hidden = torch.randn(1, 8, model.cfg.d_model)
     actions = model.codec.quantize(torch.rand(1, 4, len(ACTION_CHANNELS)))
     observed, forced = actions[:, 0], actions[:, 1:]
     returns = torch.tensor([20.0])
@@ -117,7 +113,7 @@ def test_parallel_prefix_uses_absolute_uniform_depth_with_runtime_temperature() 
     torch.manual_seed(41)
     model = _model()
     decoder = model.temporal
-    hidden = torch.randn(1, 8, model.cfg.arch.d_model)
+    hidden = torch.randn(1, 8, model.cfg.d_model)
     actions = model.codec.quantize(torch.rand(1, 4, len(ACTION_CHANNELS)))
     observed, forced = actions[:, 0], actions[:, 1:]
     uniforms = torch.rand(8, CONTROLLER_GROUP_COUNT, 1)
