@@ -27,6 +27,7 @@ from hal.inference.api import RuntimeConfig
 from hal.inference.api import action_plan
 from hal.inference.api import contiguous_horizons
 from hal.inference.api import validate_prediction_request
+from hal.inference.cuda_graph import CaptureCounter
 from hal.inference.cuda_graph import CapturedCall
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.gpu_observations import GpuObservationBatch
@@ -120,6 +121,7 @@ class ActionSequencePolicy:
         self.history_mode = history_mode
         self.kv_update_frames = kv_update_frames
         self.kv_cuda_graphs = kv_cuda_graphs and compiled and device.type == "cuda"
+        self.capture_counter = CaptureCounter()
         self.cfg = model.cfg
         self.checkpoint_sha256 = checkpoint_sha256
         self.return_p90 = return_p90
@@ -319,7 +321,7 @@ class ActionSequencePolicy:
                     operation = partial(self._kv_trunk, batch.features(), batch.actions, cache)
                     if self.kv_cuda_graphs:
                         self._update_calls[(bucket, count)] = CapturedCall(
-                            operation, (), cache.buffers(), device=self.device
+                            operation, (), cache.buffers(), device=self.device, counter=self.capture_counter
                         )
                     else:
                         operation()
@@ -340,7 +342,9 @@ class ActionSequencePolicy:
                 self._decode_inputs[bucket] = inputs
                 operation = partial(_decode_cached, self, cache, inputs)
                 if self.kv_cuda_graphs:
-                    self._decoder_calls[bucket] = CapturedCall(operation, (), cache.buffers(), device=self.device)
+                    self._decoder_calls[bucket] = CapturedCall(
+                        operation, (), cache.buffers(), device=self.device, counter=self.capture_counter
+                    )
                     sampled = self._decoder_calls[bucket](())
                 else:
                     sampled = operation()
