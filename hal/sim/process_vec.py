@@ -499,9 +499,9 @@ def drive_process_vec(
                 f"drive_process_vec: {len(active_workers)}/{len(matches)} worker(s) ready "
                 f"after {time.monotonic() - startup_started:.1f}s"
             )
-            started = time.monotonic()
+            gameplay_started = time.monotonic()
             progress_frames = 0
-            progress_time = started
+            progress_time = gameplay_started
             while active_workers:
                 # If a complete cohort remained pending after the previous dispatch,
                 # serve it immediately instead of sleeping in wait(). With one cohort
@@ -743,12 +743,12 @@ def drive_process_vec(
                             batch_rows,
                             len(acknowledged),
                         ]
-                    for worker, generation, port, started in acknowledged:
-                        pending_acks[(worker, generation, port)] = (latency_group, started)
+                    for worker, generation, port, request_started_ns in acknowledged:
+                        pending_acks[(worker, generation, port)] = (latency_group, request_started_ns)
                     plan_calls += 1
                     if progress_every and plan_calls % max(1, progress_every // runtime.execution_stride) == 0:
                         now = time.monotonic()
-                        elapsed = now - started
+                        elapsed = now - gameplay_started
                         frames = plan_calls * runtime.execution_stride
                         interval_fps = (frames - progress_frames) / max(now - progress_time, 1e-12)
                         progress_frames = frames

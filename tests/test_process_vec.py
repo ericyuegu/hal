@@ -111,6 +111,7 @@ def _ready_worker(
                 ControlMessage(
                     message_type=MessageType.PLAN_REQUEST,
                     worker_id=worker_id,
+                    task_generation=time.perf_counter_ns(),
                     task_id=arena_slot,
                     sequence=1,
                     count=1,
@@ -181,6 +182,31 @@ def test_abrupt_worker_exit_is_local_to_that_boot(monkeypatch: pytest.MonkeyPatc
     assert telemetry.failed_workers == 2
     assert telemetry.timed_out_workers == 0
     assert telemetry.total_seconds > 0
+
+
+def test_progress_clock_is_independent_of_request_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = mp.get_context("fork")
+    _use_forked_fake_worker(monkeypatch, _ready_worker)
+    starts = context.Queue()
+    messages: list[str] = []
+    monkeypatch.setattr(process_vec.logger, "info", messages.append)
+    try:
+        process_vec.drive_process_vec(
+            [{"starts": starts, "ready_delay": 0.0}],
+            [_match()],
+            _NeutralPolicy(),
+            max_frames=4,
+            progress_every=4,
+            worker_timeout_seconds=0.1,
+        )
+    finally:
+        starts.close()
+        starts.join_thread()
+
+    progress = [message for message in messages if "cumulative fps" in message]
+    assert len(progress) == 1
+    cumulative_fps = float(progress[0].rsplit("|", 1)[1].split()[0])
+    assert np.isfinite(cumulative_fps) and cumulative_fps > 0
 
 
 def test_worker_timeout_must_be_positive_and_finite() -> None:
