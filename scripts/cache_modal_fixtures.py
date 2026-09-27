@@ -67,7 +67,7 @@ class Fixture:
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(_CHUNK_SIZE), b""):
+        while chunk := source.read(_CHUNK_SIZE):
             digest.update(chunk)
     return digest.hexdigest()
 

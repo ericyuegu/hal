@@ -125,7 +125,7 @@ def _stream(fout: IO[bytes], reader, total: int, label: str) -> str:  # type: ig
 def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(_CHUNK), b""):
+        while chunk := f.read(_CHUNK):
             h.update(chunk)
     return h.hexdigest()
 

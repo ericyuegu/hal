@@ -16,9 +16,9 @@ One-time setup (an administrator may need to do the IAM steps)::
 Launch examples::
 
     uv run scripts/launch_gce.py --dry-run --zone us-central1-a -- \
-        uv run experiments/001_flow_matching_baseline.py
+        uv run experiments/059_muon_action_sequence.py
     uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@MY_PROJECT.iam.gserviceaccount.com -- \
-        uv run experiments/001_flow_matching_baseline.py --cfg.max-steps 100000
+        uv run experiments/059_muon_action_sequence.py --cfg.max-steps 100000
 
 The startup log is available with ``gcloud compute instances get-serial-port-output``.
 On completion the VM shuts down, stopping compute charges but retaining its boot
@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import tyro
@@ -183,7 +184,7 @@ class Args:
     """Training container image."""
     service_account: str | None = None
     """Keyless VM identity. It needs Secret Accessor on every --secret; defaults to the project's Compute SA."""
-    secret: list[str] = field(default_factory=lambda: list(DEFAULT_SECRETS))
+    secret: list[str] = field(default_factory=partial(list, DEFAULT_SECRETS))
     """Secret mapping ENV_NAME=secret-id. Repeat to replace the defaults."""
     spot: bool = True
     """Use a cheaper interruptible Spot VM; preemption deletes the instance and boot disk."""

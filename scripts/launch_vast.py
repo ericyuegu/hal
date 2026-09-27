@@ -7,8 +7,8 @@ for an offer that clears the hardware bar, rents it, and injects the SHA + the
 stop on failure (for inspection). See docker/on-start.sh.
 
     python scripts/launch_vast.py                         # search-only: print offers, rent nothing
-    python scripts/launch_vast.py --dry-run -- uv run experiments/001_flow_matching_baseline.py
-    python scripts/launch_vast.py --max-price 0.80 -- uv run experiments/001_flow_matching_baseline.py --cfg.max-steps 100000
+    python scripts/launch_vast.py --dry-run -- uv run experiments/059_muon_action_sequence.py
+    python scripts/launch_vast.py --max-price 0.80 -- uv run experiments/059_muon_action_sequence.py --cfg.max-steps 100000
 
 Secrets (R2 + W&B) are NOT passed by this launcher — they live as vast *account*
 env-vars (Console → Account → Environment Vars) and inject into the box out-of-band,
@@ -24,6 +24,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from dataclasses import field
+from functools import partial
 from pathlib import Path
 
 import tyro
@@ -177,9 +178,7 @@ def search(
         limit=limit,
     )
     qualifying = [o for o in offers if effective_dph(o, disk) <= max_price]
-    qualifying.sort(
-        key=lambda o: value_metric(o, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours)
-    )
+    qualifying.sort(key=partial(value_metric, disk=disk, data_gb=data_gb, upload_gb=upload_gb, run_hours=run_hours))
     return qualifying
 
 
@@ -389,6 +388,21 @@ def classify(status: dict) -> Readiness:
     )
 
 
+def _handle_launch_failure(
+    vast: VastAI, instance_id: int, reason: str, *, is_dead: bool, keep_alive: bool
+) -> int | None:
+    # A dead instance has nothing to inspect and can still incur disk charges.
+    if keep_alive and not is_dead:
+        logger.warning(
+            f"{reason}; left up (--keep-alive). Monitor: vastai logs {instance_id} ; "
+            f"destroy: vastai destroy instance {instance_id}"
+        )
+        return instance_id
+    logger.error(f"{reason}; tearing down instance {instance_id}, failing over to next offer")
+    vast.destroy_instance(id=instance_id)
+    return None
+
+
 def launch(
     vast: VastAI,
     offer: dict,
@@ -419,19 +433,6 @@ def launch(
     )
     iid = inst["new_contract"]
     logger.info(f"created instance {iid} on offer {offer['id']} ({offer['gpu_name']}); polling to running")
-
-    def give_up(why: str, *, dead: bool) -> int | None:
-        # --keep-alive leaves a *booting/stuck* box up for inspection, but a `dead` box (vast is
-        # already driving it to stopped — e.g. it lost the GPU to a concurrent rent) has nothing
-        # left to inspect and would idle-bill its disk, so tear it down regardless and fail over.
-        if keep_alive and not dead:
-            logger.warning(
-                f"{why}; left up (--keep-alive). Monitor: vastai logs {iid} ; destroy: vastai destroy instance {iid}"
-            )
-            return iid
-        logger.error(f"{why}; tearing down instance {iid}, failing over to next offer")
-        vast.destroy_instance(id=iid)
-        return None
 
     deadline = time.time() + timeout_s
     dead_reads = 0  # consecutive polls showing an unrecoverable verdict
@@ -464,7 +465,9 @@ def launch(
         if verdict.dead:
             dead_reads += 1
             if dead_reads >= 2:
-                return give_up(f"instance {iid} will not run: {verdict.reason}", dead=True)
+                return _handle_launch_failure(
+                    vast, iid, f"instance {iid} will not run: {verdict.reason}", is_dead=True, keep_alive=keep_alive
+                )
         else:
             dead_reads = 0
         if time.time() > deadline:
@@ -476,14 +479,20 @@ def launch(
                     f"Monitor: vastai logs {iid} ; destroy deliberately: vastai destroy instance {iid}"
                 )
                 return iid
-            return give_up(f"instance {iid} not ready after {timeout_s}s (last: {last})", dead=False)
+            return _handle_launch_failure(
+                vast,
+                iid,
+                f"instance {iid} not ready after {timeout_s}s (last: {last})",
+                is_dead=False,
+                keep_alive=keep_alive,
+            )
         time.sleep(10)
 
 
 @dataclass(frozen=True)
 class Args:
     cmd: tyro.conf.Positional[list[str]] = field(default_factory=list)
-    """Training command to run on the box, after `--` (e.g. `-- uv run experiments/001_...py`). Empty ⇒ search-only."""
+    """Training command to run on the box, after `--` (e.g. `-- uv run experiments/059_muon_action_sequencepy`). Empty ⇒ search-only."""
     max_price: float = 1.10
     """Hard *effective* $/hr ceiling — GPU base PLUS the provisioned --disk's storage cost
     (vast bills disk separately; it's not in the search-time dph_total and can exceed the
@@ -512,20 +521,8 @@ class Args:
     min_compute_cap: int = 0
     """Minimum CUDA compute capability as Vast's integer, such as 1200 for sm_120. Zero disables it."""
     max_compute_cap: int = 0
-    """Maximum CUDA compute capability as vast's `compute_cap` int (sm_89 -> 890); 0 = no
-    ceiling. Use to exclude architectures the training stack is not validated on.
-
-    On sm_120 (Blackwell, RTX 5090) the FlexAttention + torch.compile stack is NOT the fault.
-    ``docker/probe_sm120.py`` walks the block-mask build, the compiled flex forward and
-    backward, and a compiled bf16 trunk step at the 022 geometry; all stages pass on a 5090 in
-    34 s, with the compile-thread count, an eager mask build and the aot_eager backend giving
-    the same result. A full training start stalls instead, just after "[val] cached", at 0% GPU.
-    On a box that failed loudly rather than stalling, the cause was inductor's subprocess
-    compile pool: ``InductorError: SubprocException: OSError [Errno 28] No space left on
-    device`` writing /tmp/torchinductor_root. A compile subprocess that dies without reporting
-    leaves ``async_compile._wait_futures`` blocked forever, which is the silent stall. That
-    probe box ran --disk 40, so the disk pressure was self-inflicted, and an sm_120 run with
-    production disk is still unmeasured. Lift the cap once one such run trains steps."""
+    """Maximum CUDA compute capability as Vast's integer (sm_89 -> 890); zero disables it.
+    Use to exclude architectures that have not passed the current training checks."""
     gpu_name: str | None = None
     """Exact Vast GPU model, such as B200. Spaces are converted to underscores for the query."""
     min_cpu_cores: int = 0

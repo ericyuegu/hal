@@ -11,7 +11,7 @@ Paired-replay design (controls for emulator build drift):
     recording (build/era drift), so we never compare against the source .slp. Instead we
     drive TWO same-build rollouts of the same human input stream and compare them:
       RAW    = inputs as stored in the MDS.
-      QUANT  = dequantize(quantize(RAW)) built from hal/training/scoring.py primitives
+      QUANT  = dequantize(quantize(RAW)) built from hal/models/controller_codec.py primitives
                (buttons pass through exactly; only the 6 analog stick/trigger channels snap).
     Both are fixed input sequences fed through the round-trip ControllerSource path
     (hal/sim: MDSControllerSource -> drive -> Trajectory), identical to tests/test_roundtrip.
@@ -54,6 +54,15 @@ from streaming import StreamingDataset
 
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
+from hal.data.slippi import CHARACTERS_BY_NAME
+from hal.data.streaming_compat import patch_streaming
+from hal.models.controller_codec import STICK_CLUSTER_CENTERS_C
+from hal.models.controller_codec import STICK_CLUSTER_CENTERS_MAIN
+from hal.models.controller_codec import TRIGGER_CENTERS
+from hal.models.controller_codec import center_to_value
+from hal.models.controller_codec import cluster_to_xy
+from hal.models.controller_codec import nearest_center
+from hal.models.controller_codec import nearest_cluster
 from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH
 from hal.sim.diff import diff
@@ -63,14 +72,6 @@ from hal.sim.session import Session
 from hal.sim.sources import ControllerSource
 from hal.sim.sources import MDSControllerSource
 from hal.sim.trajectory import Trajectory
-from hal.training.scoring import STICK_CLUSTER_CENTERS_C
-from hal.training.scoring import STICK_CLUSTER_CENTERS_MAIN
-from hal.training.scoring import TRIGGER_CENTERS
-from hal.training.scoring import center_to_value
-from hal.training.scoring import cluster_to_xy
-from hal.training.scoring import nearest_center
-from hal.training.scoring import nearest_cluster
-from hal.wire import CHARACTERS_BY_NAME
 
 # %%
 MDS_DIR = Path("/home/ericgu/src/hal/data/processed/ranked-anonymized-1/mds")
@@ -106,7 +107,7 @@ TRIGGER_CHANNELS = ("trigger_l", "trigger_r")
 
 
 # %%
-# --- quantize / dequantize (thin wrappers over hal/training/scoring primitives) ----------
+# --- quantize / dequantize (thin wrappers over hal/models/controller_codec primitives) ----------
 def quantize_prefix(row: dict[str, np.ndarray], prefix: str) -> dict[str, np.ndarray]:
     """dequantize(quantize(raw)) for one port's 6 analog channels, exactly as the policy's
     decode would render its own predictions. Buttons are lossless and pass through, so they
@@ -231,6 +232,7 @@ def pick_safe_entries(n: int) -> list[ReplayIndexEntry]:
 N_SAFE = max(K_ROLLOUT, N_OFFLINE)
 safe_entries = pick_safe_entries(N_SAFE)
 logger.info(f"selected {len(safe_entries)} round-trip-safe train replays")
+patch_streaming()
 dataset = StreamingDataset(local=str(TRAIN_SPLIT), remote=None, shuffle=False, batch_size=1, allow_unsafe_types=False)
 
 
@@ -252,6 +254,7 @@ main_moved = main_move_erased = 0  # sub-cell erasure: raw main-stick moved but 
 n_offline_frames = 0
 
 for e in safe_entries[:N_OFFLINE]:
+    assert e.annotation is not None
     row = dataset[e.annotation.mds_row_idx]
     for prefix in ("p1", "p2"):
         mx = np.asarray(row[f"{prefix}_main_stick_x"], np.float32)
@@ -349,6 +352,7 @@ results: list[ReplayResult] = []
 port_base = 51470
 t_start = time.monotonic()
 for i, e in enumerate(safe_entries[:K_ROLLOUT]):
+    assert e.annotation is not None
     row = dataset[e.annotation.mds_row_idx]
     n = min(N_FRAMES, len(row["p1_main_stick_x"]) - 2)
     matchup = ReplayMatchup.from_replay(e)

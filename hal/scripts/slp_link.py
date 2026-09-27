@@ -22,6 +22,7 @@ import fnmatch
 import hashlib
 import urllib.parse
 from dataclasses import dataclass
+from operator import attrgetter
 from pathlib import Path
 from typing import Annotated
 
@@ -186,7 +187,7 @@ def _collect_r2(locator: R2Object, client) -> list[R2Object]:  # type: ignore[no
                 for item in page.get("Contents", [])
                 if item["Key"].endswith(".slp")
             )
-        return sorted(objects, key=lambda obj: obj.key)
+        return sorted(objects, key=attrgetter("key"))
     except (BotoCoreError, ClientError) as exc:
         raise SystemExit(f"failed to inspect {locator}: {exc}") from exc
 

@@ -1,7 +1,6 @@
 """Replay fixed observations to measure O59 batch-size-one inference on CUDA."""
 
 import argparse
-import gc
 import hashlib
 import json
 import subprocess
@@ -13,23 +12,22 @@ import numpy as np
 import torch
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
-from hal.controller import POLICY_BUTTON_MASK
-from hal.controller import ControllerAction
+from hal.controller import action_vec_to_controller
 from hal.data.extract import extract_replay
+from hal.inference.action_sequence_artifact import REQUIRED_OBSERVATION_FIELDS
+from hal.inference.action_sequence_artifact import load_action_sequence_policy
 from hal.inference.api import PolicyInput
 from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
-from hal.inference.backends.history_decoder.policy import load_o59_policy
+from hal.inference.benchmark import measure_process_ready_pair
+from hal.inference.engine import configure_inference_process
+from hal.inference.engine import freeze_inference_runtime
 from hal.wire import ACTION_CHANNELS
-from hal.wire import BUTTON_BITS
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def percentiles(values: list[float]) -> dict[str, float]:
@@ -45,24 +43,99 @@ def main() -> None:
     parser.add_argument("--update-frames", type=int, choices=(1, 2, 4), default=2)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cuda-graphs", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--bf16-window-linears", action="store_true")
     parser.add_argument("--frames", type=int, default=1600)
     parser.add_argument("--seed", type=int, default=1001)
     parser.add_argument("--prediction-horizon", type=int, default=4)
     parser.add_argument("--fixed-prefix", type=int, default=2)
     parser.add_argument("--replan-interval", type=int, default=2)
+    parser.add_argument("--physical-delay", type=int, choices=(0, 2, 3), default=2)
+    parser.add_argument("--process-batching", action="store_true")
+    parser.add_argument("--capacity", type=int, default=2)
+    parser.add_argument("--serial-requests", action="store_true")
+    parser.add_argument("--warmup-calls", type=int, default=20)
+    parser.add_argument("--measured-calls", type=int, default=200)
     args = parser.parse_args()
-    if args.replan_interval < 1 or args.fixed_prefix < 2 or args.prediction_horizon <= args.fixed_prefix:
+    if (
+        args.replan_interval < 1
+        or args.fixed_prefix < args.physical_delay
+        or args.prediction_horizon <= args.fixed_prefix
+    ):
         raise ValueError("invalid prediction workload")
-    if args.frames < 600:
+    if not args.process_batching and args.frames < 600:
         raise ValueError("benchmark requires at least 600 frames, including 300 warmup frames")
-    torch.set_num_threads(1)
+    if args.process_batching and (
+        args.history_mode != "kv_cache"
+        or args.update_frames != 4
+        or args.prediction_horizon != 8
+        or args.fixed_prefix != 3
+        or args.replan_interval != 4
+        or args.physical_delay != 2
+        or not args.compiled
+        or not args.cuda_graphs
+        or args.seed != 1001
+    ):
+        raise ValueError("process batching measures the declared H8/prefix3/delay2/Q4 CUDA-graph profile")
+    configure_inference_process()
     rows = extract_replay(str(args.replay))
-    if rows is None or len(rows["stage"]) < args.frames:
+    needed_frames = 4 * (args.warmup_calls + args.measured_calls) if args.process_batching else args.frames
+    if rows is None or len(rows["stage"]) < needed_frames:
         raise ValueError("replay does not contain enough usable frames")
     args.output.mkdir(parents=True, exist_ok=False)
+    if args.process_batching:
+        inputs = []
+        for index in range(needed_frames):
+            action = action_vec_to_controller(
+                np.asarray([rows["p1_" + name][index] for name in ACTION_CHANNELS], dtype=np.float32)
+            )
+            observation = {name: rows[name][index].item() for name in REQUIRED_OBSERVATION_FIELDS}
+            inputs.append(PolicyInput(0, index, 1, observation, action, player_identity="IBDW#0"))
+        measurement = measure_process_ready_pair(
+            args.bundle,
+            inputs,
+            capacity=args.capacity,
+            concurrent=not args.serial_requests,
+            warmup_calls=args.warmup_calls,
+            measured_calls=args.measured_calls,
+        )
+        result = {
+            **measurement,
+            "config": vars(args),
+            "bundle_sha256": sha256(args.bundle),
+            "replay_sha256": sha256(args.replay),
+            "torch": torch.__version__,
+            "gpu": torch.cuda.get_device_name(),
+            "source_sha256": {
+                str(path): sha256(path)
+                for path in (
+                    Path(__file__),
+                    *sorted(Path("hal/inference").rglob("*.py")),
+                )
+            },
+        }
+        (args.output / "results.json").write_text(json.dumps(result, indent=2, default=str))
+        print(
+            json.dumps(
+                {
+                    key: result[key]
+                    for key in (
+                        "capacity",
+                        "concurrent",
+                        "preparation_seconds",
+                        "startup_seconds",
+                        "peak_allocated_mib",
+                        "complete_pair_ms",
+                        "engine_batch_calls",
+                        "engine_batch_items",
+                        "engine_max_batch_items",
+                    )
+                },
+                indent=2,
+            ),
+            flush=True,
+        )
+        return
     started = time.perf_counter()
-    policy = load_o59_policy(
+    policy = load_action_sequence_policy(
         args.bundle,
         device="cuda",
         seed=args.seed,
@@ -71,22 +144,16 @@ def main() -> None:
         kv_update_frames=args.update_frames,
         kv_cuda_graphs=args.cuda_graphs,
     )
-    if args.bf16_window_linears:
-        for module in policy.model.modules():
-            if isinstance(module, torch.nn.Linear):
-                module.to(dtype=torch.bfloat16)
-    policy.prepare_prediction(RuntimeConfig(1, (2,)), args.prediction_horizon, args.fixed_prefix)
+    policy.prepare_prediction(
+        RuntimeConfig(1, (args.physical_delay,), replan_interval_frames=args.replan_interval),
+        args.prediction_horizon,
+        args.fixed_prefix,
+    )
     prepare_seconds = time.perf_counter() - started
     inputs = []
     for index in range(args.frames):
-        action = ControllerAction(
-            *(float(rows["p1_" + name][index]) for name in ACTION_CHANNELS[:6]),
-            sum(
-                BUTTON_BITS[name.removeprefix("button_")]
-                for name in ACTION_CHANNELS[6:]
-                if rows["p1_" + name][index] > 0.5
-            )
-            & POLICY_BUTTON_MASK,
+        action = action_vec_to_controller(
+            np.asarray([rows["p1_" + name][index] for name in ACTION_CHANNELS], dtype=np.float32)
         )
         observation = {name: rows[name][index].item() for name in policy.spec.required_observation_fields}
         inputs.append(
@@ -96,13 +163,11 @@ def main() -> None:
                 1,
                 observation,
                 action,
-                (NEUTRAL_CONTROLLER_ACTION,) * 2,
                 player_identity="IBDW#0",
                 reset=index == 0,
             )
         )
-    gc.collect()
-    gc.freeze()
+    freeze_inference_runtime()
     times = []
     source_frames = []
     sequence = 0
@@ -155,7 +220,7 @@ def main() -> None:
         "config": {
             **vars(args),
             "batch_size": 1,
-            "input_delay_frames": 2,
+            "physical_delay_frames": args.physical_delay,
             "request_observations": "incremental",
             "temperature": 1.0,
             "desired_return": 20.0,
@@ -183,7 +248,13 @@ def main() -> None:
         },
     }
     (args.output / "results.json").write_text(json.dumps(result, indent=2, default=str))
-    print(json.dumps(result, indent=2, default=str), flush=True)
+    print(
+        json.dumps(
+            {key: result[key] for key in ("prepare_seconds", "cold_ms", "prediction_ms", "peak_allocated_mib", "gpu")},
+            indent=2,
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

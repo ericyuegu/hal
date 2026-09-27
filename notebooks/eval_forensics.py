@@ -41,8 +41,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from hal.data.extract import extract_replay  # noqa: E402
-from hal.wire import peppi_port_to_libmelee  # noqa: E402
-from hal.wire import slp_stage_to_libmelee  # noqa: E402
+from hal.data.slippi import peppi_port_to_libmelee  # noqa: E402
+from hal.data.slippi import slp_stage_to_libmelee  # noqa: E402
 
 # %%
 # Config + reference constants.

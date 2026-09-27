@@ -39,29 +39,12 @@ retry_policy = _MODULE.retry_policy
 validate_args = _MODULE.validate_args
 write_state = _MODULE.write_state
 
-EXPERIMENT = "experiments/028_onehot_controller.py"
+EXPERIMENT = "experiments/059_muon_action_sequence.py"
 
 
-def test_evaluation_experiment_allows_the_same_experiment_for_both_players() -> None:
-    experiment = "experiments/050_scaled_temporal_awr.py"
-
-    assert evaluation_experiment((experiment, "--opponent-experiment", experiment)) == experiment
-
-
-def test_evaluation_experiment_recognizes_o56() -> None:
-    experiment = "experiments/056_decoder_capacity_reallocation.py"
-
-    assert evaluation_experiment(("uv", "run", experiment, "train", "--proxy")) == experiment
-
-
-def test_evaluation_experiment_rejects_distinct_experiments() -> None:
-    with pytest.raises(ValueError, match="multiple evaluation experiments"):
-        evaluation_experiment(
-            (
-                "experiments/050_scaled_temporal_awr.py",
-                "experiments/054_bc_capacity_latency.py",
-            )
-        )
+def test_evaluation_experiment_recognizes_only_maintained_program() -> None:
+    assert evaluation_experiment(("uv", "run", EXPERIMENT, "train")) == EXPERIMENT
+    assert evaluation_experiment(("uv", "run", "archive/experiments/059_muon_action_sequence.py")) is None
 
 
 def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
@@ -81,7 +64,7 @@ def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:
 
 
 def test_resources_are_controlled_by_explicit_arguments() -> None:
-    experiment = "experiments/051_muon_parameterization.py"
+    experiment = "experiments/059_muon_action_sequence.py"
     args = Args(cmd=["uv", "run", experiment], memory_gib=192, memory_limit_gib=384)
 
     assert requested_disk_gib(args) == 2048
@@ -520,59 +503,18 @@ def test_retry_policy_uses_requested_attempt_count_without_delay() -> None:
     assert eval_retries.initial_delay.total_seconds() == 1
 
 
-@pytest.mark.parametrize(
-    "experiment",
-    ["experiments/050_scaled_temporal_awr.py", "experiments/057_scaled_endpoint_flow.py"],
-)
-def test_closed_loop_evaluator_runs_verified_protocol(
-    monkeypatch: pytest.MonkeyPatch,
-    experiment: str,
-) -> None:
+@pytest.mark.parametrize("return_target", ("p90", "unconditioned"))
+def test_closed_loop_evaluator_runs_verified_protocol(monkeypatch, return_target) -> None:
     calls = []
     monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {"TEST": "1"})
-    monkeypatch.setattr(
-        _MODULE.subprocess,
-        "run",
-        lambda command, **kwargs: calls.append((command, kwargs)),
-    )
-
-    _MODULE._run_closed_loop_eval(
-        experiment,
-        "run-1",
-        8192,
-        "a" * 64,
-        96,
-    )
-
+    monkeypatch.setattr(_MODULE.subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    _MODULE._run_closed_loop_eval(EXPERIMENT, "run-1", 8192, "a" * 64, 96, return_target)
     command, kwargs = calls[0]
-    assert command[:4] == ["uv", "run", experiment, "eval"]
+    assert command[:4] == ["uv", "run", EXPERIMENT, "eval"]
+    assert command[command.index("--checkpoint") + 1] == "checkpoints/step-0008192.pt"
+    assert command[command.index("--expected-checkpoint-sha256") + 1] == "a" * 64
+    assert command[command.index("--return-target") + 1] == return_target
     assert "--shared-wandb" in command
-    assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
-    assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
-
-
-def test_closed_loop_evaluator_runs_verified_o54_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = []
-    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **_kwargs: {"TEST": "1"})
-    monkeypatch.setattr(
-        _MODULE.subprocess,
-        "run",
-        lambda command, **kwargs: calls.append((command, kwargs)),
-    )
-
-    _MODULE._run_closed_loop_eval(
-        "experiments/054_bc_capacity_latency.py",
-        "run-1",
-        4_096,
-        "a" * 64,
-        96,
-    )
-
-    command, kwargs = calls[0]
-    assert command[:4] == ["uv", "run", "experiments/054_bc_capacity_latency.py", "eval"]
-    assert command[command.index("--checkpoint") + 1] == "checkpoints/step-0004096.pt"
-    assert "--shared-wandb" in command
-    assert command[-2:] == ["--expected-checkpoint-sha256", "a" * 64]
     assert kwargs == {"cwd": _MODULE.REMOTE_ROOT, "env": {"TEST": "1"}, "check": True}
 
 
@@ -593,7 +535,6 @@ def test_remote_environment_records_launch_git_sha(monkeypatch: pytest.MonkeyPat
         state_volume="state",
         auto_resume=True,
         stall_s=60,
-        skip_sm120_probe=False,
     )
 
     assert _MODULE._remote_environment(spec) == {"TEST": "1", "HAL_GIT_SHA": "a" * 40}
@@ -757,7 +698,7 @@ def test_training_brokers_evaluation_through_same_app_handle(tmp_path: Path, mon
 
     assert (
         _MODULE._run_training(
-            (sys.executable, "-c", script, "experiments/050_scaled_temporal_awr.py"),
+            (sys.executable, "-c", script, "experiments/059_muon_action_sequence.py"),
             RunState(status="running"),
             env=dict(_MODULE.os.environ),
             state_path=tmp_path / "state.json",
@@ -768,7 +709,7 @@ def test_training_brokers_evaluation_through_same_app_handle(tmp_path: Path, mon
         == 0
     )
 
-    assert calls == [("experiments/050_scaled_temporal_awr.py", "run-1", 8192, "a" * 64, 96)]
+    assert calls == [("experiments/059_muon_action_sequence.py", "run-1", 8192, "a" * 64, 96, "p90")]
     assert states[-1] == RunState(status="succeeded", run_name="run-1")
 
 
@@ -830,7 +771,7 @@ def test_o59_broker_and_evaluator_separate_unconditioned_evidence(monkeypatch: p
         "n_matchups": 96,
         "return_target": "unconditioned",
     }
-    experiment = "experiments/059_muon_history_decoder.py"
+    experiment = "experiments/059_muon_action_sequence.py"
     response = _MODULE._broker_response(json.dumps(request).encode(), Evaluator(), experiment)
     assert json.loads(response) == {"function_call_id": "fc-eval"}
     assert calls == [(experiment, "run-1", 98304, "a" * 64, 96, "unconditioned")]

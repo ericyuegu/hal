@@ -4,6 +4,7 @@ import argparse
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
+from functools import partial
 
 import melee
 import numpy as np
@@ -14,11 +15,11 @@ from hal.eval.harness import default_session_cfg
 from hal.eval.harness import run_matches_vec
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.rollout import Slot
+from hal.sim.rollout import VecMatch
 from hal.sim.rollout import covering_power_of_two
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
-from hal.sim.vec import Slot
-from hal.sim.vec import VecMatch
 from hal.wire import ACTION_DIM
 
 
@@ -67,7 +68,8 @@ def benchmark(
     trajectories = run_matches_vec(
         session_cfg,
         [_match(self_play=self_play) for _ in range(workers)],
-        lambda: NeutralChunkPolicy(
+        partial(
+            NeutralChunkPolicy,
             prediction_frames=prediction_frames,
             execution_stride=execution_stride,
         ),

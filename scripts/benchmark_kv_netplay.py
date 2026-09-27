@@ -1,7 +1,6 @@
 """One peer of a nonblocking netplay comparison with an explicit prediction shape."""
 
 import argparse
-import gc
 import hashlib
 import json
 import subprocess
@@ -16,9 +15,12 @@ from hal.eval.qualification import check_realtime_budget
 from hal.eval.replays import require_completed_replay
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
+from hal.inference.action_sequence_artifact import load_action_sequence_policy
+from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
-from hal.inference.backends.history_decoder.policy import load_o59_policy
-from hal.inference.worker import start_inference_worker
+from hal.inference.engine import configure_inference_process
+from hal.inference.engine import freeze_inference_runtime
+from hal.inference.engine import start_inference_worker
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import NetplaySession
@@ -27,11 +29,8 @@ from hal.sim.trajectory import Trajectory
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 class ScheduleMeasurements:
@@ -54,7 +53,8 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--user-json", type=Path, required=True)
     parser.add_argument("--history-mode", choices=("window", "kv_cache"), required=True)
-    parser.add_argument("--update-frames", type=int, choices=(1, 2, 4), default=2)
+    parser.add_argument("--update-frames", type=int, choices=(1, 2, 4), default=4)
+    parser.add_argument("--online-delay", type=int, choices=(2, 3), default=2)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--slippi-port", type=int, required=True)
     parser.add_argument("--prediction-horizon", type=int, default=8)
@@ -62,8 +62,8 @@ def main() -> None:
     parser.add_argument("--replan-interval-frames", type=int, default=4)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
-    torch.set_num_threads(1)
-    policy = load_o59_policy(
+    configure_inference_process()
+    policy = load_action_sequence_policy(
         args.bundle,
         device="cuda",
         seed=args.seed,
@@ -71,23 +71,37 @@ def main() -> None:
         history_mode=args.history_mode,
         kv_update_frames=args.update_frames,
     )
-    runtime = RuntimeConfig(1, (2,), replan_interval_frames=args.replan_interval_frames)
-    timing = FrameTiming(2, args.thinking_allowance_frames, args.replan_interval_frames, args.prediction_horizon)
+    runtime = RuntimeConfig(1, (args.online_delay,), replan_interval_frames=args.replan_interval_frames)
+    timing = FrameTiming(
+        args.online_delay,
+        args.thinking_allowance_frames,
+        args.online_delay + args.thinking_allowance_frames,
+        args.replan_interval_frames,
+        args.prediction_horizon,
+    )
     check_realtime_budget(
         policy, runtime, 0.0005, shape=(timing.prediction_horizon_frames, timing.fixed_prefix_frames)
     )
-    gc.collect()
-    gc.freeze()
+    profile = PreparedInferenceProfile(
+        f"netplay-delay-{args.online_delay}",
+        policy.checkpoint_sha256,
+        args.history_mode,
+        timing.prediction_horizon_frames,
+        timing.fixed_prefix_frames,
+        tuple(count for count in (1, 2, 4) if count <= args.update_frames),
+        1,
+    )
+    freeze_inference_runtime()
     measurements = ScheduleMeasurements()
     replay_dir = args.output / "replays"
     replay_dir.mkdir()
     with (
-        start_inference_worker(policy, timing.prediction_horizon_frames, 0.0005) as client,
+        start_inference_worker(policy, profile, 0.0005) as client,
         NetplaySession(
             ISO_PATH,
             dolphin_path=NETPLAY_EMULATOR_PATH,
             user_json_path=args.user_json,
-            online_delay=2,
+            online_delay=args.online_delay,
             replay_dir=replay_dir,
             slippi_port=args.slippi_port,
             realtime=True,

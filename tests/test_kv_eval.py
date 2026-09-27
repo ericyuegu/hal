@@ -1,15 +1,17 @@
-"""Pin the published comparison row used by the KV cache evaluation."""
+"""Pin the published comparison row and named 059 evaluation profiles."""
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
 
 _SPEC = importlib.util.spec_from_file_location(
-    "eval_kv_cache", Path(__file__).resolve().parents[1] / "experiments" / "eval_kv_cache.py"
+    "eval_kv_cache", Path(__file__).resolve().parents[1] / "scripts" / "eval_kv_cache.py"
 )
 assert _SPEC is not None and _SPEC.loader is not None
 eval_kv_cache = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = eval_kv_cache
 _SPEC.loader.exec_module(eval_kv_cache)
 
 
@@ -53,3 +55,23 @@ def test_baseline_rejects_changed_protocol(monkeypatch: pytest.MonkeyPatch, chan
     _stub_wandb(monkeypatch, row)
     with pytest.raises(ValueError):
         eval_kv_cache._baseline()
+
+
+@pytest.mark.parametrize(
+    ("name", "history", "prefix"),
+    (
+        ("official-059", "window", 2),
+        ("cached-prefix-two", "kv_cache", 2),
+        ("local", "kv_cache", 0),
+    ),
+)
+def test_named_profiles_keep_physical_delay_separate_from_fixed_prefix(name: str, history: str, prefix: int) -> None:
+    profile = eval_kv_cache.profile_for(name)
+    timing = profile.timing
+    assert profile.history_mode == history
+    assert (timing.physical_delay_frames, timing.inference_allowance_frames) == (0, 0)
+    assert (timing.fixed_prefix_frames, timing.replan_interval_frames, timing.prediction_horizon_frames) == (
+        prefix,
+        2,
+        4,
+    )

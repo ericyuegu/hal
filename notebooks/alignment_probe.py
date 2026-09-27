@@ -44,11 +44,11 @@ from pathlib import Path
 import melee
 import numpy as np
 
+from hal.controller import ControllerAction
 from hal.data.extract import extract_replay
 from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH
 from hal.sim.inputs import ControllerInputs
-from hal.sim.inputs import ControllerInputsValue
 from hal.sim.loop import drive
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
@@ -59,7 +59,7 @@ from hal.wire import BUTTON_BITS
 
 KNEE_BEND: int = int(melee.Action.KNEE_BEND.value)  # 24: Fox 3-frame jumpsquat
 Y_BIT: int = BUTTON_BITS["y"]
-_NEUTRAL: ControllerInputs = ControllerInputsValue(
+_NEUTRAL: ControllerInputs = ControllerAction(
     main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0
 )
 
@@ -83,7 +83,7 @@ class JumpProbeSource:
         if frame_index in self.inject_at:
             observed_id = -10_000 if last_gamestate is None else int(last_gamestate["id"])
             self.observed.append((frame_index, observed_id))
-            return ControllerInputsValue(
+            return ControllerAction(
                 main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=Y_BIT
             )
         return _NEUTRAL

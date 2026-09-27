@@ -26,6 +26,8 @@ import os
 if mp.get_start_method(allow_none=True) != "fork":
     mp.set_start_method("fork", force=True)
 
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 
 import melee
@@ -34,16 +36,23 @@ import peppi_py
 import pytest
 from streaming import StreamingDataset
 
+from hal.controller import ControllerAction
 from hal.data.extract import extract_replay
 from hal.data.index import read_jsonl
 from hal.data.index import resolve_replay_path
+from hal.data.slippi import CHARACTERS_BY_NAME
+from hal.data.streaming_compat import patch_streaming
 from hal.paths import DEV_MDS_DIR as _DEV_MDS_DIR
 from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH as _ISO_PATH
 from hal.sim.diff import diff
 from hal.sim.inputs import ControllerInputs
-from hal.sim.inputs import ControllerInputsValue
 from hal.sim.loop import drive
+from hal.sim.process_vec import drive_process_vec
+from hal.sim.rollout import ObservationRow
+from hal.sim.rollout import PolicyRuntimeSpec
+from hal.sim.rollout import Slot
+from hal.sim.rollout import VecMatch
 from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 from hal.sim.session import ReplayMatchup
@@ -54,9 +63,7 @@ from hal.sim.sources import MDSControllerSource
 from hal.sim.sources import ScriptedControllerSource
 from hal.sim.sources import demo_sequence
 from hal.sim.trajectory import Trajectory
-from hal.sim.vec import VecMatch
-from hal.sim.vec import drive_vec
-from hal.wire import CHARACTERS_BY_NAME
+from hal.wire import ACTION_DIM
 from hal.wire import GAME_START_FRAME
 from hal.wire import TRIGGER_DEADZONE
 
@@ -132,6 +139,7 @@ def test_controller_wire_format_faithful() -> None:
     _check_prereqs()
     entry = _pick_safe_entry()
 
+    patch_streaming()
     ds = StreamingDataset(
         local=str(DEV_MDS_DIR / entry.annotation.split),
         remote=None,
@@ -228,10 +236,10 @@ _SWEEP_STICK_BYTES = (-80, -79, -40, -24, -23, -22, -21, 0, 21, 22, 23, 24, 40, 
 def _sweep_program() -> tuple[list[ControllerInputs], list[tuple[str, float, int]]]:
     """Build (per-frame inputs, [(channel, fed_value, punch_idx), ...])."""
 
-    def value(**kw: float) -> ControllerInputsValue:
+    def value(**kw: float) -> ControllerAction:
         base = dict(main_x=0.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0)
         base.update(kw)
-        return ControllerInputsValue(**base)  # type: ignore[arg-type]
+        return ControllerAction(**base)  # type: ignore[arg-type]
 
     punches: list[ControllerInputs] = [value()] * _SWEEP_LEAD
     reads: list[tuple[str, float, int]] = []
@@ -310,18 +318,17 @@ def test_instant_restart_enabled_match_is_bit_exact(tmp_path: Path) -> None:
     )
 
 
-class _WalkOffBatchPolicy:
-    """Torch-free BatchPolicy: hold full-right on every model slot. The model Fox
+class _WalkOffChunkPolicy:
+    """Torch-free process policy: hold full-right on every model slot. The model Fox
     runs off the stage and self-destructs repeatedly, ending each match quickly so
     instant-restart fires — a deterministic way to exercise the restart boundary."""
 
-    def __call__(self, frame_index: int, obs):  # noqa: ANN001
-        from hal.sim.inputs import ControllerInputsValue
+    runtime_spec = PolicyRuntimeSpec(1, 1, 1, 0, ACTION_DIM)
 
-        right = ControllerInputsValue(
-            main_x=1.0, main_y=0.0, c_x=0.0, c_y=0.0, trigger_l=0.0, trigger_r=0.0, buttons=0
-        )
-        return {slot: right for slot in obs}
+    def plan_rows(self, rows: Mapping[Slot, Sequence[ObservationRow]]) -> Mapping[Slot, np.ndarray]:
+        right = np.zeros((1, ACTION_DIM), dtype=np.float32)
+        right[0, 0] = 1.0
+        return {slot: right.copy() for slot in rows}
 
 
 @pytest.mark.integration
@@ -329,7 +336,7 @@ def test_instant_restart_plays_clean_independent_matches(tmp_path: Path) -> None
     """Instant-restart yields several segmented matches per boot with no state
     carryover. The model walks off and self-destructs; each match end triggers a
     seamless Gecko restart (``in_game`` never drops — the frame ``id`` reset is the
-    boundary). We assert drive_vec segments them (>=2 trajectories from one boot)
+    boundary). We assert the process driver segments them (>=2 trajectories from one boot)
     and that every match opens from a CLEAN reset — the model at 4 stocks and ~0% —
     so no stocks/damage bleed across the restart boundary."""
     _check_prereqs()
@@ -340,23 +347,24 @@ def test_instant_restart_plays_clean_independent_matches(tmp_path: Path) -> None
             PlayerSetup(port=2, character=melee.Character.FOX, cpu_level=1),
         ),
     )
-    session = Session(
-        iso_path=ISO_PATH,
-        dolphin_path=DOLPHIN_PATH,
-        slippi_port=51449,
-        blocking_input=True,
-        tmp_home_directory=False,
-        replay_dir=str(tmp_path),
-        use_exi_inputs=True,
-        enable_ffw=True,
-        emulation_speed=0.0,
-        polling_mode=True,
-        instant_match_restart=True,
-    )
-    boots = drive_vec(
-        [session],
+    boots = drive_process_vec(
+        [
+            {
+                "iso_path": str(ISO_PATH),
+                "dolphin_path": str(DOLPHIN_PATH),
+                "slippi_port": 51449,
+                "blocking_input": True,
+                "tmp_home_directory": False,
+                "replay_dir": str(tmp_path),
+                "use_exi_inputs": True,
+                "enable_ffw": True,
+                "emulation_speed": 0.0,
+                "polling_mode": True,
+                "instant_match_restart": True,
+            }
+        ],
         [VecMatch(matchup=matchup, model_ports=(1,))],
-        _WalkOffBatchPolicy(),
+        _WalkOffChunkPolicy(),
         max_frames=12_000,
         instant_restart=True,
     )

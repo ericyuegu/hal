@@ -23,6 +23,7 @@ from hal.data.index import ReplayIndexEntry
 from hal.data.index import read_jsonl
 from hal.data.index import resolve_replay_path
 from hal.data.schema import check_schema_version
+from hal.data.streaming_compat import patch_streaming
 from hal.sim.diff import diff
 from hal.sim.loop import drive
 from hal.sim.session import ReplayMatchup
@@ -50,6 +51,7 @@ def _load_manifest_entry(manifest_path: Path, replay_uuid: int | None) -> Replay
 def _read_mds_row(mds_dir: Path, split: str, row_idx: int) -> dict:
     """Single-row read out of an MDS shard. StreamingDataset indexes over the
     union of shards in a split; row_idx is the position within that split."""
+    patch_streaming()
     ds = StreamingDataset(
         local=str(mds_dir / split),
         remote=None,

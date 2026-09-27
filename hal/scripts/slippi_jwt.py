@@ -86,6 +86,10 @@ def leveldb_dir() -> Path:
     return store
 
 
+def _file_modified_at(path: Path) -> float:
+    return path.stat().st_mtime
+
+
 def read_credentials(store: Path) -> Credentials:
     """Scrape the newest stored session out of the leveldb files.
 
@@ -94,8 +98,8 @@ def read_credentials(store: Path) -> Credentials:
     oldest-first and taking the last match in each therefore lands on the newest
     session; an older, revoked token would be rejected by the endpoint.
     """
-    files = sorted(store.glob("*.log"), key=lambda p: p.stat().st_mtime)
-    files += sorted(store.glob("*.ldb"), key=lambda p: p.stat().st_mtime)
+    files = sorted(store.glob("*.log"), key=_file_modified_at)
+    files += sorted(store.glob("*.ldb"), key=_file_modified_at)
     if not files:
         raise SystemExit(f"no leveldb files under {store}")
 

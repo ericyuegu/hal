@@ -5,8 +5,8 @@ starts one detached Modal Function call. Modal may preempt or time out a Functio
 attempt. A small Modal Volume records the W&B/checkpoint run name so the next
 attempt can add ``--resume <run>`` after the checkpoint reaches R2.
 
-    uv run scripts/launch_modal.py --dry-run -- uv run experiments/028_onehot_controller.py
-    uv run scripts/launch_modal.py --wait -- uv run experiments/028_onehot_controller.py
+    uv run scripts/launch_modal.py --dry-run -- uv run experiments/059_muon_action_sequence.py
+    uv run scripts/launch_modal.py --wait -- uv run experiments/059_muon_action_sequence.py
 
 The default ``hal`` Modal Secret must contain the R2 ``AWS_*`` variables and
 ``WANDB_API_KEY``. Immutable integration fixtures are fetched into a cached
@@ -84,13 +84,7 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
 )
 STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
-CLOSED_LOOP_EXPERIMENTS: Final[dict[str, frozenset[int] | None]] = {
-    "experiments/050_scaled_temporal_awr.py": None,
-    "experiments/054_bc_capacity_latency.py": frozenset({4_096, 8_192, 16_384, 32_768}),
-    "experiments/056_decoder_capacity_reallocation.py": None,
-    "experiments/057_scaled_endpoint_flow.py": None,
-    "experiments/059_muon_history_decoder.py": None,
-}
+CLOSED_LOOP_EXPERIMENT: Final[str] = "experiments/059_muon_action_sequence.py"
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
 CLOSED_LOOP_EVERY: Final[int] = 8192
@@ -140,8 +134,6 @@ class Args:
     """Fail the run if the training log stays silent this long."""
     auto_resume: bool = True
     """Resume a preempted experiment from R2. Disable for arbitrary commands."""
-    skip_sm120_probe: bool = False
-    """Skip the compile smoke probe when a selected GPU has compute capability sm_120."""
     wait: bool = False
     """Stream output and wait for completion. The default detaches after submission."""
     dry_run: bool = False
@@ -167,7 +159,6 @@ class LaunchSpec:
     state_volume: str
     auto_resume: bool
     stall_s: int
-    skip_sm120_probe: bool
     require_cuda: bool = True
     modal_app_url: str | None = None
 
@@ -233,7 +224,9 @@ def preflight_modal(secret_name: str) -> tuple[modal.Client, modal.Secret]:
 
 def validate_args(args: Args) -> None:
     if not args.cmd:
-        raise SystemExit("missing command — pass it after `--`, for example `-- uv run experiments/028_...py`.")
+        raise SystemExit(
+            "missing command — pass it after `--`, for example `-- uv run experiments/059_muon_action_sequencepy`."
+        )
     if args.cpu <= 0 or args.cpu_limit < args.cpu:
         raise SystemExit("--cpu must be positive and --cpu-limit must be at least --cpu.")
     if args.memory_gib <= 0 or args.disk_gib <= 0:
@@ -516,7 +509,7 @@ def _configure_tracking_context(
             env["WANDB_NOTES"] = f"{existing_notes}\n\n{modal_note}" if existing_notes else modal_note
 
 
-def _prepare_remote(*, skip_sm120_probe: bool, require_cuda: bool = True) -> dict[str, str]:
+def _prepare_remote(*, require_cuda: bool = True) -> dict[str, str]:
     """Prepare one remote job and check CUDA resources when it requested a GPU."""
     compute_capability: str | None = None
     if require_cuda:
@@ -574,9 +567,6 @@ def _prepare_remote(*, skip_sm120_probe: bool, require_cuda: bool = True) -> dic
         ],
         env=env,
     )
-    if compute_capability == "120" and not skip_sm120_probe:
-        _run_checked(["uv", "run", "docker/probe_sm120.py"], env=env, timeout=600)
-
     _run_checked(["uv", "run", "fetch"], env=env)
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
@@ -629,15 +619,11 @@ def _drain_run_names(
 
 
 def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
-    selected = list(dict.fromkeys(token for token in argv if token in CLOSED_LOOP_EXPERIMENTS))
-    if len(selected) > 1:
-        raise ValueError(f"training command names multiple evaluation experiments: {selected}")
-    return selected[0] if selected else None
+    return CLOSED_LOOP_EXPERIMENT if CLOSED_LOOP_EXPERIMENT in argv else None
 
 
 def _valid_evaluation_update(experiment: str, update: int) -> bool:
-    allowed = CLOSED_LOOP_EXPERIMENTS[experiment]
-    return update > 0 and (update % CLOSED_LOOP_EVERY == 0 if allowed is None else update in allowed)
+    return experiment == CLOSED_LOOP_EXPERIMENT and update > 0 and update % CLOSED_LOOP_EVERY == 0
 
 
 def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) -> bytes:
@@ -647,8 +633,7 @@ def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) ->
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         return json.dumps({"error": f"invalid evaluation request JSON: {e}"}).encode() + b"\n"
     fields = {"run_name", "update", "expected_checkpoint_sha256", "n_matchups"}
-    conditioned_experiment = experiment == "experiments/059_muon_history_decoder.py"
-    if conditioned_experiment and isinstance(value, dict) and "return_target" in value:
+    if isinstance(value, dict) and "return_target" in value:
         fields.add("return_target")
     if not isinstance(value, dict) or set(value) != fields:
         return json.dumps({"error": f"evaluation request must contain exactly {sorted(fields)}"}).encode() + b"\n"
@@ -669,10 +654,7 @@ def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) ->
         error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
     else:
         try:
-            if conditioned_experiment:
-                call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups, return_target)
-            else:
-                call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups)
+            call = evaluator.spawn(experiment, run_name, update, checkpoint_sha, n_matchups, return_target)
             call_id = call.object_id
         except Exception as e:
             # This boundary must return Modal failures to the waiting child process.
@@ -717,6 +699,18 @@ def _service_closed_loop_broker(
         _write_all(broker.fileno(), json.dumps(response).encode() + b"\n")
 
 
+@dataclass(slots=True)
+class _TrainingSignalHandler:
+    interrupted: threading.Event
+    process: subprocess.Popen[bytes] | None = None
+
+    def __call__(self, signum: int, _frame: object) -> None:
+        self.interrupted.set()
+        loguru.logger.warning(f"received signal {signum}; forwarding SIGINT to the training process group")
+        if self.process is not None:
+            _kill_group(self.process.pid, signal.SIGINT)
+
+
 def _run_training(
     argv: tuple[str, ...],
     state: RunState,
@@ -740,6 +734,7 @@ def _run_training(
     log_follower.start()
 
     interrupted = threading.Event()
+    signal_handler = _TrainingSignalHandler(interrupted)
     process: subprocess.Popen[bytes] | None = None
     failure: str | None = None
     code: int | None = None
@@ -755,17 +750,11 @@ def _run_training(
         child_env[CLOSED_LOOP_BROKER_FD] = str(child_broker.fileno())
         pass_fds = (child_broker.fileno(),)
 
-    def interrupt(signum: int, _frame: object) -> None:
-        interrupted.set()
-        loguru.logger.warning(f"received signal {signum}; forwarding SIGINT to the training process group")
-        if process is not None:
-            _kill_group(process.pid, signal.SIGINT)
-
-    old_handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    old_handlers = {sig: signal.signal(sig, signal_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         with log_path.open("ab", buffering=0) as train_log:
             try:
-                process = subprocess.Popen(
+                signal_handler.process = process = subprocess.Popen(
                     list(argv),
                     cwd=REMOTE_ROOT,
                     env=child_env,
@@ -846,7 +835,7 @@ def _run_training(
 
 
 def _remote_environment(spec: LaunchSpec) -> dict[str, str]:
-    env = _prepare_remote(skip_sm120_probe=spec.skip_sm120_probe, require_cuda=spec.require_cuda)
+    env = _prepare_remote(require_cuda=spec.require_cuda)
     env["HAL_GIT_SHA"] = spec.git_sha
     _configure_tracking_context(env, spec.modal_app_url)
     return env
@@ -893,7 +882,7 @@ def _run_closed_loop_eval(
     return_target: str = "p90",
 ) -> None:
     """Evaluate one uploaded training endpoint and publish its evidence."""
-    if experiment not in CLOSED_LOOP_EXPERIMENTS:
+    if experiment != CLOSED_LOOP_EXPERIMENT:
         raise ValueError(f"unsupported closed-loop experiment: {experiment!r}")
     if not RUN_NAME.fullmatch(run_name):
         raise ValueError(f"invalid training run name: {run_name!r}")
@@ -905,9 +894,7 @@ def _run_closed_loop_eval(
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
     if return_target not in ("p90", "unconditioned"):
         raise ValueError("unsupported return target")
-    if return_target != "p90" and experiment != "experiments/059_muon_history_decoder.py":
-        raise ValueError("return target overrides require O59")
-    env = _prepare_remote(skip_sm120_probe=False)
+    env = _prepare_remote()
     checkpoint = f"checkpoints/step-{update:07d}.pt"
     command = [
         "uv",
@@ -928,10 +915,9 @@ def _run_closed_loop_eval(
         "--expected-checkpoint-sha256",
         expected_checkpoint_sha256,
     ]
-    if experiment == "experiments/059_muon_history_decoder.py":
-        command.extend(["--return-target", return_target])
-        if return_target == "unconditioned":
-            command.extend(["--wandb-namespace", "eval_unconditioned"])
+    command.extend(["--return-target", return_target])
+    if return_target == "unconditioned":
+        command.extend(["--wandb-namespace", "eval_unconditioned"])
     subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
 
 
@@ -945,6 +931,8 @@ def _ignored_python_commands(
         if candidate.suffix != ".py" or not candidate.is_file() or not candidate.is_relative_to(ROOT):
             continue
         relative = candidate.relative_to(ROOT)
+        if relative.parts[0] in ("archive", "outputs"):
+            raise ValueError(f"research and generated files are excluded from uploads: {relative}")
         if ignore(relative):
             selected[candidate] = relative
     return tuple(selected.items())
@@ -1102,7 +1090,6 @@ def main(args: Args) -> None:
             state_volume=args.state_volume,
             auto_resume=args.auto_resume,
             stall_s=args.stall_minutes * 60,
-            skip_sm120_probe=args.skip_sm120_probe,
             require_cuda=resources["gpu"] is not None,
             modal_app_url=f"https://modal.com/apps/{app.app_id}",
         )
