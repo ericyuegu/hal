@@ -1,34 +1,6 @@
-"""The shared transformer trunk: rotary pre-norm blocks with causal attention.
+"""Rotary transformer attention shared by 059 training and inference."""
 
-Experiments 016, 019, 020 and 021 each carry a byte-identical copy of this stack, and 017 and 018
-carry a variant with the same parameter creation order. Those files stay frozen, because
-``hal.scripts.h2h`` rebuilds old checkpoints from them. New experiments import this module.
-
-The trunk adds sliding-window attention (SWA) to that stack. ``TrunkConfig.attn_window`` gives the
-number of frames a query can attend to, its own frame included, and ``0`` keeps the full context.
-Two implementations make the same mask:
-
-* The FlexAttention path builds a :class:`BlockMask` and runs a sparsity-aware kernel, so a window
-  skips the masked blocks instead of computing and then discarding them.
-* The dense path builds a ``[B, 1, L, L]`` bool mask for ``scaled_dot_product_attention``. It is the
-  correctness reference in the tests, and the fallback on a box where FlexAttention cannot compile.
-
-Both paths obey the same three rules: a key must not be in the future (``kv <= q``), must be inside
-the window (``q - kv < attn_window``), and must not be in the sample's left-padded cold-start prefix
-(``kv >= ctx_pad``). The diagonal stays open in all cases, because a fully masked query row makes
-the attention output NaN.
-
-Parameter creation order is the order in 016 to 021. A seeded build therefore draws the same
-initial weights as those files do. ``tests/test_trunk.py`` pins this.
-
-Shapes are annotated but not checked at runtime. Dynamo cannot trace the runtime type wrapper.
-The public forward method has one direct shape guard for the error that could otherwise broadcast.
-``tests/test_trunk.py`` checks all attention paths against a reference.
-"""
-
-import functools
 import math
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
@@ -40,12 +12,9 @@ from jaxtyping import Float
 from jaxtyping import Int
 from loguru import logger
 from torch import Tensor
-from torch.nn.attention.flex_attention import BlockMask
-from torch.nn.attention.flex_attention import create_block_mask
-from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.attention.varlen import varlen_attn
 
-AttnMask = Bool[Tensor, "B 1 L L"] | BlockMask
+AttnMask = Bool[Tensor, "B 1 L L"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,13 +26,10 @@ class TrunkConfig:
     n_heads: int
     L_ctx: int
     attn_window: int = 0  # frames of look-back; 0 = full context
-    # Fail instead of falling back to the dense path. A cloud run wants the fast kernel or an error,
-    # not a quiet 4x slowdown; a dev box without it still wants to run.
-    require_flex: bool = False
     # ``varlen_flash`` represents each row's ignored left prefix and real suffix as
     # separate causal sequences.  It therefore preserves the valid-token mask while
     # calling PyTorch's native FlashAttention kernel without a dense [B, L, L] mask.
-    attention_backend: str = "auto_flex"
+    attention_backend: str = "varlen_flash"
     # Experiments that study depth parameterization can supply explicit
     # residual-branch multipliers.  ``None`` retains the historical attention
     # rule exactly; the MLP branch historically used 1.0.
@@ -81,10 +47,8 @@ class TrunkConfig:
             raise ValueError(f"L_ctx must be > 0, got {self.L_ctx}")
         if self.attn_window < 0:
             raise ValueError(f"attn_window must be >= 0 (0 = full context), got {self.attn_window}")
-        if self.attention_backend not in ("auto_flex", "dense_sdpa", "varlen_flash"):
+        if self.attention_backend not in ("dense_sdpa", "varlen_flash"):
             raise ValueError(f"unknown attention_backend={self.attention_backend!r}")
-        if self.require_flex and self.attention_backend != "auto_flex":
-            raise ValueError("require_flex is compatible only with attention_backend='auto_flex'")
         if self.attention_scale is not None and (not math.isfinite(self.attention_scale) or self.attention_scale <= 0):
             raise ValueError(f"attention_scale must be finite and positive, got {self.attention_scale!r}")
         if not math.isfinite(self.mlp_scale) or self.mlp_scale <= 0:
@@ -163,6 +127,31 @@ def apply_rotary_emb(
     return torch.cat([x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos], 3)
 
 
+def rotate_positions(x: Tensor, positions: Tensor, rotary: Rotary) -> Tensor:
+    """Apply RoPE to absolute positions used by the bounded KV rings."""
+    if positions.ndim not in (1, 2):
+        raise ValueError("rotary positions must be [Q] or [B, Q]")
+    frequencies = 1.0 / (
+        rotary.base ** (torch.arange(0, rotary.dim, 2, device=x.device, dtype=torch.float32) / rotary.dim)
+    )
+    angles = positions.float()[..., None] * frequencies
+    cosine = angles.cos().to(x.dtype)
+    sine = angles.sin().to(x.dtype)
+    if positions.ndim == 1:
+        return apply_rotary_emb(x, cosine[None, :, None], sine[None, :, None])
+    return apply_rotary_emb(x, cosine[:, :, None], sine[:, :, None])
+
+
+@dataclass(frozen=True, slots=True)
+class KVMemory:
+    """Read view of a stream's bounded KV ring and its absolute positions."""
+
+    kv: Tensor
+    positions: Tensor
+    query_position: Tensor
+    window: int
+
+
 def rmsnorm(x0: Float[Tensor, "... d"], eps: float = 1e-6) -> Float[Tensor, "... d"]:
     x = x0.float()
     x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
@@ -180,78 +169,6 @@ def dense_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> Bool[Ten
     key_real = idx[None, :] >= ctx_pad[:, None]
     diag = torch.eye(L, dtype=torch.bool, device=ctx_pad.device)
     return (keep[None] & (key_real[:, None, :] | diag[None]))[:, None]
-
-
-def flex_mask_mod(ctx_pad: Int[Tensor, " B"], attn_window: int) -> Callable[..., Tensor]:
-    """:func:`dense_mask`'s rule, written the way FlexAttention wants it: one predicate over index
-    tensors. The tests compare it with the dense mask element by element."""
-
-    def mask_mod(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
-        keep = (kv <= q) & (kv >= ctx_pad[b])
-        if attn_window > 0:
-            keep = keep & (q - kv < attn_window)
-        return keep | (kv == q)
-
-    return mask_mod
-
-
-def block_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> BlockMask:
-    """Build the FlexAttention form of :func:`dense_mask`.
-
-    This function deliberately contains raw PyTorch operations. The execution entrypoint that
-    owns the complete model graph also owns ``torch.compile``; compiling mask construction here
-    would create a nested graph with a separate shape cache.
-    """
-    mask_mod = flex_mask_mod(ctx_pad, attn_window)
-    return create_block_mask(mask_mod, ctx_pad.shape[0], None, L, L, device=ctx_pad.device)
-
-
-@functools.cache
-def flex_is_usable(device_type: str) -> bool:
-    """Whether FlexAttention compiles on this box. Triton, the driver and the GPU all take part, so
-    the probe is one small call, not a version comparison. The call includes a backward, because the
-    forward alone runs on CPU but the backward does not.
-
-    ``enable_grad`` because the first caller is often an eval worker, whose first forward runs under
-    ``torch.no_grad()``. Without it the backward raises there, the probe reads that as "no flex", and
-    the answer is cached for the life of the process."""
-
-    def probe(q: Tensor, k: Tensor, v: Tensor, pad: Tensor) -> Tensor:
-        """Trace mask construction and attention together, as the training graph does."""
-        return cast(Tensor, flex_attention(q, k, v, block_mask=block_mask(pad, q.size(-2), 0)))
-
-    try:
-        with torch.enable_grad():
-            q, k, v = (torch.zeros(1, 1, 128, 16, device=device_type, requires_grad=True) for _ in range(3))
-            pad = torch.zeros(1, dtype=torch.long, device=device_type)
-            torch.compile(probe, dynamic=False, fullgraph=True)(q, k, v, pad).sum().backward()
-            if device_type == "cuda":
-                torch.cuda.synchronize()
-    except (RuntimeError, NotImplementedError) as e:
-        logger.warning(f"FlexAttention does not run on {device_type} ({type(e).__name__}: {e}); trunk uses SDPA")
-        return False
-    return True
-
-
-@functools.cache
-def varlen_flash_is_usable(device_type: str, L: int, n_heads: int, head_dim: int) -> bool:
-    """Probe the exact native FlashAttention forward/backward geometry once."""
-    if device_type != "cuda":
-        return False
-    try:
-        q = torch.zeros(L * 2, n_heads, head_dim, device=device_type, dtype=torch.bfloat16, requires_grad=True)
-        k = torch.zeros_like(q, requires_grad=True)
-        v = torch.zeros_like(q, requires_grad=True)
-        # Includes both a zero-length prefix and a one-token real suffix.
-        lengths = torch.tensor((0, L, L - 1, 1), device=device_type, dtype=torch.int32)
-        cumulative = lengths.cumsum(0, dtype=torch.int32)
-        cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
-        cast(Tensor, varlen_attn(q, k, v, cu_seqlens, cu_seqlens, L, L, window_size=(-1, 0))).sum().backward()
-        torch.cuda.synchronize()
-    except (RuntimeError, NotImplementedError) as exc:
-        logger.warning(f"native varlen FlashAttention probe failed ({type(exc).__name__}: {exc})")
-        return False
-    return True
 
 
 class CausalSelfAttention(nn.Module):
@@ -318,10 +235,7 @@ class CausalSelfAttention(nn.Module):
                 ),
             ).reshape(B, L, self.n_heads, self.head_dim)
             return self.c_proj(y.reshape(B, L, self.d_model))
-        if isinstance(mask, BlockMask):
-            y = cast(Tensor, flex_attention(q, k, v, block_mask=mask))
-        else:
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self._project(y, B, L)
 
     def forward_unpadded(self, x: Tensor) -> Tensor:
@@ -363,62 +277,36 @@ class Block(nn.Module):
 
 
 class Trunk(nn.Module):
-    """The block stack plus the final norm. Callers own the input projection and the heads.
+    """The 059 block stack with native varlen training and a dense reference."""
 
-    ``prefer_flex=False`` pins the dense reference path, which the tests compare against.
-    """
-
-    def __init__(self, cfg: TrunkConfig, *, prefer_flex: bool = True) -> None:
+    def __init__(self, cfg: TrunkConfig) -> None:
         super().__init__()
-        if cfg.require_flex and not prefer_flex:
-            raise ValueError("require_flex asks for the flex path and prefer_flex=False forbids it")
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
         self.attn_window = cfg.attn_window
         self.L_ctx = cfg.L_ctx
-        self.prefer_flex = prefer_flex
-        self.require_flex = cfg.require_flex
         self.attention_backend = cfg.attention_backend
-        self._use_flex: bool | None = None
+        self._attn_path: str | None = None
 
     @property
     def attn_path(self) -> str:
-        """The attention path in use. The probe needs a device, so the answer is ``"unresolved"``
-        until the first forward."""
-        if self._use_flex is None:
-            return "unresolved"
-        if self.attention_backend == "varlen_flash":
-            return "varlen_flash"
-        return "flex" if self._use_flex else "dense"
+        return "unresolved" if self._attn_path is None else self._attn_path
 
     @torch.compiler.disable
     def resolve_attention(self, device_type: str) -> None:
-        """Resolve and announce the attention path before compiling a model entrypoint.
-
-        The probe is cached with :func:`functools.cache`, whose wrapper Dynamo deliberately ignores,
-        and Loguru finds its caller with :func:`sys._getframe`, which Dynamo cannot trace. Compiled
-        callers should invoke this method eagerly before ``torch.compile`` so their graph contains
-        only model computation. Plain eager callers may rely on the lazy fallback in :meth:`forward`.
-        """
-        if self._use_flex is not None:
+        """Resolve the declared backend before compiling the complete model."""
+        if self._attn_path is not None:
             return
-        self._use_flex = self.attention_backend == "auto_flex" and self.prefer_flex and flex_is_usable(device_type)
-        if self.require_flex and not self._use_flex:
-            raise RuntimeError(f"require_flex is set, but FlexAttention does not run on {device_type}")
-        path = (
-            "varlen_flash"
-            if self.attention_backend == "varlen_flash" and device_type == "cuda"
-            else ("flex" if self._use_flex else "dense")
+        self._attn_path = (
+            "varlen_flash" if self.attention_backend == "varlen_flash" and device_type == "cuda" else "dense"
         )
-        logger.info(f"trunk attention: {path} path, window={self.attn_window}")
+        logger.info(f"trunk attention: {self._attn_path} path, window={self.attn_window}")
 
-    def _mask(self, ctx_pad: Int[Tensor, " B"], L: int) -> AttnMask | None:
-        if self._use_flex is None:
+    def _mask(self, ctx_pad: Int[Tensor, " B"], length: int) -> AttnMask | None:
+        if self._attn_path is None:
             self.resolve_attention(ctx_pad.device.type)
-        if self.attention_backend == "varlen_flash" and ctx_pad.device.type == "cuda":
+        if self._attn_path == "varlen_flash":
             return None
-        if self._use_flex:
-            return block_mask(ctx_pad, L, self.attn_window)
-        return dense_mask(ctx_pad, L, self.attn_window)
+        return dense_mask(ctx_pad, length, self.attn_window)
 
     @staticmethod
     def _check_shape(x: Tensor, ctx_pad: Tensor) -> None:
@@ -444,7 +332,7 @@ class Trunk(nn.Module):
     def forward_dense(
         self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]
     ) -> Float[Tensor, "B L d_model"]:
-        """Run the dense-SDPA correctness path without resolving FlexAttention."""
+        """Run the dense SDPA correctness path."""
         self._check_shape(x, ctx_pad)
         return self._forward_with_mask(x, ctx_pad, dense_mask(ctx_pad, x.size(1), self.attn_window))
 
