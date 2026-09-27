@@ -9,9 +9,11 @@ reads them, and the cache can be evicted under pressure.
 Usage:
 
     from streaming import StreamingDataset
+    from hal.data.streaming_compat import patch_streaming
     from hal.streams import RANKED_ANONYMIZED_1
 
     remote, local = RANKED_ANONYMIZED_1.for_split("train")
+    patch_streaming()
     ds = StreamingDataset(remote=remote, local=str(local), batch_size=...)
 
 Credentials come from the same env vars as `hal/fixtures.py`:

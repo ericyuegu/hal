@@ -1,4 +1,4 @@
-"""Focused tests for deterministic physical-shard replay loading."""
+"""Focused tests for deterministic buffered MDS replay loading."""
 
 from __future__ import annotations
 
@@ -20,32 +20,32 @@ import numpy as np
 import pytest
 import torch
 
-import hal.training.physical_shard_loader as physical_shard_loader
+import hal.training.buffered_mds_replay_loader as buffered_loader
 from hal import streams
-from hal.training.physical_shard_loader import MAX_DECODE_CHUNK_ROWS
-from hal.training.physical_shard_loader import DecodedChunk
-from hal.training.physical_shard_loader import MDSStorageAdapter
+from hal.training.buffered_mds_replay_loader import MAX_DECODE_CHUNK_ROWS
+from hal.training.buffered_mds_replay_loader import BufferedMDSReplayLoader
+from hal.training.buffered_mds_replay_loader import DecodedChunk
+from hal.training.buffered_mds_replay_loader import MDSStorageAdapter
+from hal.training.buffered_mds_replay_loader import PhysicalShardSelection
+from hal.training.buffered_mds_replay_loader import ShardTask
+from hal.training.buffered_mds_replay_loader import SourceManifest
+from hal.training.buffered_mds_replay_loader import SourceRowSelection
+from hal.training.buffered_mds_replay_loader import _ChunkSampler
+from hal.training.buffered_mds_replay_loader import _decode_generation
+from hal.training.buffered_mds_replay_loader import _DecodeChunkRequest
+from hal.training.buffered_mds_replay_loader import _materialization_task_order
+from hal.training.buffered_mds_replay_loader import _OrderedChunks
+from hal.training.buffered_mds_replay_loader import _ReplayRing
+from hal.training.buffered_mds_replay_loader import _ReplayRingSchedule
+from hal.training.buffered_mds_replay_loader import _shutdown_data_loader_workers
+from hal.training.buffered_mds_replay_loader import _stack_window_rows
+from hal.training.buffered_mds_replay_loader import build_shard_plan
+from hal.training.buffered_mds_replay_loader import choose_generation_window_starts
+from hal.training.buffered_mds_replay_loader import disk_requirement_bytes
+from hal.training.buffered_mds_replay_loader import estimate_host_memory
+from hal.training.buffered_mds_replay_loader import permute_shard_tasks
 from hal.training.physical_shard_loader import PhysicalRow
-from hal.training.physical_shard_loader import PhysicalShardReplayLoader
-from hal.training.physical_shard_loader import PhysicalShardSelection
 from hal.training.physical_shard_loader import RingSlotDescriptor
-from hal.training.physical_shard_loader import ShardTask
-from hal.training.physical_shard_loader import SourceManifest
-from hal.training.physical_shard_loader import SourceRowSelection
-from hal.training.physical_shard_loader import _ChunkSampler
-from hal.training.physical_shard_loader import _decode_generation
-from hal.training.physical_shard_loader import _DecodeChunkRequest
-from hal.training.physical_shard_loader import _materialization_task_order
-from hal.training.physical_shard_loader import _OrderedChunks
-from hal.training.physical_shard_loader import _ReplayRing
-from hal.training.physical_shard_loader import _ReplayRingSchedule
-from hal.training.physical_shard_loader import _shutdown_data_loader_workers
-from hal.training.physical_shard_loader import _stack_window_rows
-from hal.training.physical_shard_loader import build_shard_plan
-from hal.training.physical_shard_loader import choose_generation_window_starts
-from hal.training.physical_shard_loader import disk_requirement_bytes
-from hal.training.physical_shard_loader import estimate_host_memory
-from hal.training.physical_shard_loader import permute_shard_tasks
 from hal.wire import ACTION_CHANNELS
 
 
@@ -275,70 +275,6 @@ def test_window_start_selection_is_uniform() -> None:
     assert abs(z_score) < 5
 
 
-def test_four_generation_window_starts_are_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
-    observed_ranges: tuple[tuple[int, int], ...] = ()
-
-    def decode_slices(
-        _compact: Mapping[str, object], ranges: Sequence[tuple[int, int]]
-    ) -> tuple[dict[str, np.ndarray], ...]:
-        nonlocal observed_ranges
-        observed_ranges = tuple(ranges)
-        return tuple({"value": np.zeros(stop - start, dtype=np.float32)} for start, stop in ranges)
-
-    def make_test_window(
-        sample: dict[str, object],
-        *,
-        ego_prefix: str,
-        start: int,
-        pad: int,
-        length: int,
-        projection: object,
-    ) -> dict[str, np.ndarray]:
-        del ego_prefix, start, pad, length, projection
-        return {"value": np.asarray(sample["value"])}
-
-    monkeypatch.setattr(physical_shard_loader, "decode_policy_world_replay_slices", decode_slices)
-    monkeypatch.setattr(physical_shard_loader, "make_window", make_test_window)
-
-    _replay_id, windows = _decode_generation(
-        {"replay_id": "replay-1", "num_frames": 64, "source_schema_version": 7},
-        task=ShardTask("source", 0, 0, 1),
-        row=0,
-        epoch=0,
-        seed=1,
-        context_length=2,
-        chunk_length=1,
-        windows_per_generation=8,
-        generations_per_replay=4,
-        schema_version=7,
-        labels=_no_labels,
-        projection=None,
-    )
-
-    assert len(windows) == 32
-    assert len({start for start, _stop in observed_ranges}) == 32
-
-
-def test_four_generation_schedule_has_exact_exposure_and_gap() -> None:
-    schedule = _ReplayRingSchedule(65_536, 512, 8, 25, 54, generations_per_replay=4)
-    counts = np.zeros(schedule.capacity, dtype=np.int16)
-
-    for fifo_head in range(schedule.cohort_count):
-        slots = schedule.selected_slots(fifo_head)
-        assert len(np.unique(slots)) == 512
-        counts[slots] += 1
-
-    assert schedule.replay_lanes == 16
-    assert schedule.minimum_gap_batches == 104
-    assert schedule.maximum_gap_batches == 152
-    assert np.all(counts == 32)
-    assert all(
-        len(set(map(int, offsets[start : start + 8]))) == 8
-        for offsets in schedule.phase_offsets
-        for start in range(0, 32, 8)
-    )
-
-
 def test_short_replay_error_identifies_the_physical_row() -> None:
     task = ShardTask("source", 7, 0, 1)
 
@@ -437,11 +373,11 @@ def test_decoded_ctx_pad_remains_scalar(monkeypatch: pytest.MonkeyPatch) -> None
         return {"value": np.asarray(sample["value"])}
 
     monkeypatch.setattr(
-        physical_shard_loader,
+        buffered_loader,
         "decode_policy_world_replay_slices",
         decode_slices,
     )
-    monkeypatch.setattr(physical_shard_loader, "make_window", make_test_window)
+    monkeypatch.setattr(buffered_loader, "make_window", make_test_window)
     _replay_id, windows = _decode_generation(
         {
             "replay_id": "replay-1",
@@ -609,8 +545,7 @@ class _FakeAdapter:
         **kwargs: object,
     ) -> DecodedChunk:
         windows_per_generation = cast(int, kwargs.get("windows_per_generation", 4))
-        generations_per_replay = cast(int, kwargs.get("generations_per_replay", 1))
-        windows = windows_per_generation * generations_per_replay
+        windows = windows_per_generation
         generations = [self._generation(task, row, request.epoch, windows) for row in request.rows]
         names = tuple(generations[0][1][0])
         columns = {
@@ -624,15 +559,12 @@ class _FakeAdapter:
             locators=tuple(PhysicalRow(task.source, task.shard, row) for row in request.rows),
             columns=columns,
             windows_per_generation=windows_per_generation,
-            generations_per_replay=generations_per_replay,
         )
 
     def decode_generations(
         self, task: ShardTask, requests: Sequence[tuple[int, int]], **kwargs: object
     ) -> Mapping[tuple[int, int], tuple[str, tuple[dict[str, np.ndarray], ...]]]:
-        windows = cast(int, kwargs.get("windows_per_generation", 4)) * cast(
-            int, kwargs.get("generations_per_replay", 1)
-        )
+        windows = cast(int, kwargs.get("windows_per_generation", 4))
         return {request: self._generation(task, request[0], request[1], windows) for request in requests}
 
 
@@ -765,9 +697,8 @@ def _loader(
     batch_size: int = 4,
     replay_slots: int = 100,
     windows_per_generation: int = 4,
-    generations_per_replay: int = 1,
     phase_block_batches: int = 25,
-) -> PhysicalShardReplayLoader[_Batch]:
+) -> BufferedMDSReplayLoader[_Batch]:
     if adapter is not None:
         rows = adapter.rows
     selection = PhysicalShardSelection(
@@ -779,7 +710,7 @@ def _loader(
         adapter = adapter_type(rows, 5)
     sizes = adapter.manifests["source"].samples_per_shard
     tasks = tuple(ShardTask("source", shard, 0, size, global_shard=shard) for shard, size in enumerate(sizes))
-    return PhysicalShardReplayLoader[_Batch](
+    return BufferedMDSReplayLoader[_Batch](
         selection=selection,
         adapter=adapter,
         tasks=tasks,
@@ -795,7 +726,6 @@ def _loader(
         context_length=3,
         chunk_length=2,
         windows_per_generation=windows_per_generation,
-        generations_per_replay=generations_per_replay,
         replay_phase_block_batches=phase_block_batches,
         schema_version=7,
         reserved_disk_bytes=0,
@@ -807,7 +737,7 @@ def _loader(
 def test_background_materialization_is_ordered_unique_and_observable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(physical_shard_loader, "MATERIALIZATION_LOG_INTERVAL_S", 0.0)
+    monkeypatch.setattr(buffered_loader, "MATERIALIZATION_LOG_INTERVAL_S", 0.0)
     adapter = _MaterializingFakeAdapter(tmp_path, delay=0.001)
     loader = _loader(seed=7, adapter=adapter, materialization_threads=1)
     expected = [loader.tasks[index].shard for index in loader._task_order]
@@ -933,48 +863,6 @@ def test_exact_resume_reproduces_identity_sequences_and_tensors() -> None:
     for left, right in zip(expected, actual, strict=True):
         assert left.replay_ids == right.replay_ids
         torch.testing.assert_close(left.values, right.values)
-
-
-def test_four_generation_resume_preserves_progress_and_exact_next_batches() -> None:
-    original = _loader(
-        seed=54,
-        rows=113,
-        batch_size=8,
-        replay_slots=32,
-        windows_per_generation=2,
-        generations_per_replay=2,
-        phase_block_batches=2,
-    )
-    original_iterator = iter(original)
-    for _ in range(19):
-        batch = next(original_iterator)
-        assert len(set(batch.replay_ids)) == 8
-    state = original.state_dict()
-    expected = [next(original_iterator) for _ in range(24)]
-
-    assert state["schema"] == physical_shard_loader.MULTI_GENERATION_CHECKPOINT_SCHEMA
-    assert state["generation_rng"] == {"kind": "counter-based", "seed": 54}
-    slots = cast(Sequence[Any], state["slots"])
-    assert all(descriptor.windows_seen <= 4 for descriptor in slots)
-    assert original.unique_replays > 0
-
-    restored = _loader(
-        seed=54,
-        rows=113,
-        batch_size=8,
-        replay_slots=32,
-        windows_per_generation=2,
-        generations_per_replay=2,
-        phase_block_batches=2,
-    )
-    restored.load_state_dict(state)
-    restored_iterator = iter(restored)
-    actual = [next(restored_iterator) for _ in range(24)]
-
-    for left, right in zip(expected, actual, strict=True):
-        assert left.replay_ids == right.replay_ids
-        torch.testing.assert_close(left.values, right.values)
-    assert restored.unique_replays == original.unique_replays
 
 
 def test_resume_reproduces_the_next_optimizer_update() -> None:
@@ -1104,7 +992,7 @@ def test_context_manager_closes_once(monkeypatch: pytest.MonkeyPatch) -> None:
         calls.append(iterator)
 
     monkeypatch.setattr(
-        "hal.training.physical_shard_loader._shutdown_data_loader_workers",
+        "hal.training.buffered_mds_replay_loader._shutdown_data_loader_workers",
         record_shutdown,
     )
     loader = _loader(seed=5)

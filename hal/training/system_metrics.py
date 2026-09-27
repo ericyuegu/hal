@@ -333,19 +333,20 @@ def read_system_counters(
     return counters, gauges
 
 
+def _counter_rate(name: str, current: dict[str, int], previous: dict[str, int], elapsed_s: float) -> float | None:
+    if name not in current or name not in previous:
+        return None
+    return max(0, current[name] - previous[name]) / elapsed_s
+
+
 def system_counter_rates(current: dict[str, int], previous: dict[str, int], elapsed_s: float) -> dict[str, float]:
-    """Convert two host counter snapshots into O51 resource rates."""
+    """Convert two host counter snapshots into resource rates."""
     if elapsed_s <= 0:
         raise ValueError("counter interval must be positive")
 
-    def rate(name: str) -> float | None:
-        if name not in current or name not in previous:
-            return None
-        return max(0, current[name] - previous[name]) / elapsed_s
-
     metrics: dict[str, float] = {}
-    total_delta = rate("cpu_total")
-    busy_delta = rate("cpu_busy")
+    total_delta = _counter_rate("cpu_total", current, previous, elapsed_s)
+    busy_delta = _counter_rate("cpu_busy", current, previous, elapsed_s)
     if total_delta is not None and busy_delta is not None and total_delta > 0:
         metrics["system/cpu/utilization"] = min(busy_delta / total_delta, 1.0)
     mappings = {
@@ -359,7 +360,7 @@ def system_counter_rates(current: dict[str, int], previous: dict[str, int], elap
         "major_page_faults": ("system/major_page_faults/s", 1),
     }
     for counter, (metric, divisor) in mappings.items():
-        value = rate(counter)
+        value = _counter_rate(counter, current, previous, elapsed_s)
         if value is not None:
             metrics[metric] = value / divisor
     return metrics

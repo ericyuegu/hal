@@ -5,8 +5,7 @@ import pytest
 from hal import streams
 from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import dump_sufficient_stats
-from hal.training.ego_stats import load_consolidated_mixture_stats
-from hal.training.ego_stats import load_consolidated_stats
+from hal.data.feature_stats import load_consolidated_mixture_stats
 
 
 def test_policy_world_manifest_has_the_verified_natural_mix() -> None:
@@ -60,7 +59,9 @@ def test_stats_loader_pulls_only_selected_registered_stream(
 
     monkeypatch.setattr(streams, "pull_stats", fake_pull_stats)
 
-    result = load_consolidated_stats(tmp_path / selected.local / "stats.json")
+    result = load_consolidated_mixture_stats(
+        [tmp_path / selected.local / "stats.json"], [1.0], expected_mds_schema_version=7
+    )
 
     assert result["x"].mean == 1.0
     assert calls == [selected]
@@ -130,7 +131,7 @@ def test_consolidated_stats_add_packed_direction_bounds(tmp_path: Path) -> None:
         mds_schema_version=7,
     )
 
-    stats = load_consolidated_stats(stats_path)
+    stats = load_consolidated_mixture_stats([stats_path], [1.0], expected_mds_schema_version=7)
 
     for name in ("direction", "nana_direction"):
         assert stats[name].mean == 0.0

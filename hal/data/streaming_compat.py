@@ -2,7 +2,7 @@
 
 Mosaic 0.13.0 mishandles Python 3.14 shared-memory registration, retains file
 descriptors for non-owning prefix probes, and leaves failed shard downloads in
-``PREPARING``. The focused tests in ``tests/test_dataloader.py`` reproduce all
+``PREPARING``. The focused tests in ``tests/test_streaming_compat.py`` reproduce all
 three failures. Remove a patch only after those tests pass against an upgraded
 Mosaic release.
 
