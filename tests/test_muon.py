@@ -288,7 +288,7 @@ def test_loading_old_state_retains_the_configured_muon_scale_rule() -> None:
     assert target.param_groups[0]["logical_splits"] == 3
 
 
-def test_loading_o51_v5_state_translates_the_muon_scale_rule() -> None:
+def test_loading_historical_muon_scale_mode_rejects_state() -> None:
     parameters = [torch.nn.Parameter(torch.ones(2, 8))]
     source = muon.SingleDeviceMuonWithAuxAdam(
         [
@@ -317,10 +317,8 @@ def test_loading_o51_v5_state_translates_the_muon_scale_rule() -> None:
             }
         ]
     )
-    target.load_state_dict(state)
-
-    assert target.param_groups[0]["muon_scale_clamp_min_one"] is False
-    assert "muon_scale_mode" not in target.param_groups[0]
+    with pytest.raises(ValueError, match="historical muon_scale_mode optimizer state is unsupported"):
+        target.load_state_dict(state)
 
 
 def test_new_optimizer_groups_reject_the_experiment_named_muon_setting() -> None:

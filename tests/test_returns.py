@@ -1,10 +1,12 @@
 """Contracts for the shared reward and discounted-return formulas."""
 
 import numpy as np
+import pytest
+import torch
 
+from hal.data.player_identity import ReplayPlayerLookup
 from hal.data.policy_schema import pack_player_state
 from hal.training import returns
-from hal.training.player_identity import ReplayPlayerLookup
 from hal.wire import MASK_INT32
 
 # One six-frame replay, checked by hand below. Player 2's last stock empties on
@@ -122,17 +124,20 @@ def test_truncated_replay_gets_nan_returns_and_a_false_mask() -> None:
     assert returns.infer_terminal_replay(sample)
 
 
-def test_label_replay_keeps_every_source_column_and_adds_four() -> None:
-    sample = _sample()
-    labeled = returns.label_replay(sample, gamma=0.5, damage_shaping=0.1, win_reward=0.5, suffix="awr_return")
-    assert set(labeled) - set(sample) == {
-        "p1_awr_return",
-        "p1_awr_return_valid",
-        "p2_awr_return",
-        "p2_awr_return_valid",
-    }
-    for name, value in sample.items():
-        assert labeled[name] is value
+def test_invalid_calibration_restore_preserves_prior_state() -> None:
+    calibration = returns.ReturnCalibration(window_count=2)
+    calibration.observe(
+        future_returns_BL=torch.tensor([[0.0, 1.0], [0.0, 2.0]]),
+        available_BL=torch.ones((2, 2), dtype=torch.bool),
+        replay_ids=("replay-a", "replay-b"),
+    )
+    before = calibration.state_dict()
+    changed_values = {**before, "values": [1.0, 3.0]}
+
+    with pytest.raises(ValueError, match="identity or targets"):
+        calibration.load_state_dict(changed_values)
+
+    assert calibration.state_dict() == before
 
 
 def test_compact_policy_returns_match_decoded_replay_exactly() -> None:

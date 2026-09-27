@@ -1,48 +1,59 @@
 import hashlib
-import pickle
-import zipfile
 from pathlib import Path
 
 import pytest
 import torch
 
 from hal.training import checkpoints
-from hal.training.physical_shard_loader import GenerationDescriptor
 from hal.training.physical_shard_loader import PhysicalRow
+from hal.training.physical_shard_loader import RingSlotDescriptor
 
 
-def _legacy_physical_checkpoint(tmp_path: Path, *, unknown_class: bool = False) -> Path:
-    current = tmp_path / "current.pt"
-    legacy = tmp_path / "legacy.pt"
+def test_current_059_records_load_without_compatibility_unpickler(tmp_path: Path) -> None:
     row = PhysicalRow("source", 2, 3)
-    torch.save({"row": row, "generation": GenerationDescriptor(1, row, 4, 5, 6)}, current)
-    with zipfile.ZipFile(current) as source, zipfile.ZipFile(legacy, "w") as destination:
-        for member in source.infolist():
-            content = source.read(member.filename)
-            if member.filename.endswith("data.pkl"):
-                content = content.replace(b"hal.training.physical_shard_loader", b"hal.training.o51_replay_loader")
-                if unknown_class:
-                    content = content.replace(b"PhysicalRow", b"UnlistedRow")
-            destination.writestr(member, content)
-    return legacy
+    slot = RingSlotDescriptor(1, row, 4, "a" * 64)
+    path = tmp_path / "checkpoint.pt"
+    torch.save({"row": row, "slot": slot}, path)
+
+    loaded = checkpoints.load_for_resume("unused", tmp_path, device="cpu", name=path.name)
+
+    assert loaded == {"row": row, "slot": slot}
 
 
-def test_legacy_physical_shard_checkpoint_loads_without_module_shim(tmp_path: Path) -> None:
-    path = _legacy_physical_checkpoint(tmp_path)
+def test_resume_lineage_permits_only_the_declared_source_transition() -> None:
+    stored = {"git_sha": "1" * 40, "corpus": "unchanged", "optimizer": {"lr": 0.01}}
+    current = {**stored, "git_sha": "2" * 40}
+    lineage = checkpoints.ResumeLineage("a" * 64, "1" * 40, "2" * 40, "b" * 64)
 
-    loaded = checkpoints.load_legacy_physical_shard_checkpoint(path, device="cpu")
-    resumed = checkpoints.load_for_resume("unused", tmp_path, device="cpu", name=path.name, legacy_physical_rows=True)
+    with pytest.raises(ValueError, match="git_sha"):
+        checkpoints.validate_resume_provenance(stored, current)
+    checkpoints.validate_resume_provenance(stored, current, transition=lineage, parent_checkpoint_sha256="a" * 64)
+    assert checkpoints.ResumeLineage.from_record(lineage.to_record()) == lineage
 
-    assert loaded == resumed
-    assert loaded["row"] == PhysicalRow("source", 2, 3)
-    assert loaded["generation"] == GenerationDescriptor(1, loaded["row"], 4, 5, 6)
+    for changed in ({**current, "corpus": "different"}, {**current, "optimizer": {"lr": 0.02}}):
+        with pytest.raises(ValueError, match="provenance changed"):
+            checkpoints.validate_resume_provenance(
+                stored, changed, transition=lineage, parent_checkpoint_sha256="a" * 64
+            )
+    with pytest.raises(ValueError, match="does not identify"):
+        checkpoints.validate_resume_provenance(stored, current, transition=lineage, parent_checkpoint_sha256="c" * 64)
+    with pytest.raises(ValueError, match="does not identify"):
+        checkpoints.validate_resume_provenance(
+            stored, {**current, "git_sha": "3" * 40}, transition=lineage, parent_checkpoint_sha256="a" * 64
+        )
 
 
-def test_legacy_physical_shard_checkpoint_rejects_unknown_class(tmp_path: Path) -> None:
-    path = _legacy_physical_checkpoint(tmp_path, unknown_class=True)
-
-    with pytest.raises(pickle.UnpicklingError, match="unsupported legacy physical-shard class"):
-        checkpoints.load_legacy_physical_shard_checkpoint(path, device="cpu")
+def test_resume_lineage_rejects_invalid_or_disconnected_records() -> None:
+    with pytest.raises(ValueError, match="invalid resume lineage"):
+        checkpoints.ResumeLineage("not-a-hash", "1" * 40, "2" * 40, "b" * 64)
+    with pytest.raises(ValueError, match="declare a source change"):
+        checkpoints.ResumeLineage("a" * 64, "1" * 40, "1" * 40, "b" * 64)
+    first = checkpoints.ResumeLineage("a" * 64, "1" * 40, "2" * 40, "b" * 64)
+    disconnected = checkpoints.ResumeLineage("c" * 64, "3" * 40, "4" * 40, "d" * 64)
+    with pytest.raises(ValueError, match="not contiguous"):
+        checkpoints.checkpoint_resume_lineage([first.to_record(), disconnected.to_record()])
+    with pytest.raises(ValueError, match="fields changed"):
+        checkpoints.ResumeLineage.from_record({**first.to_record(), "ignore_environment": True})
 
 
 class _Client:

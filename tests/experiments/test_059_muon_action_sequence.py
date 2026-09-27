@@ -1,5 +1,6 @@
 """Focused contracts for O59's sampled wide history decoder."""
 
+import hashlib
 import importlib.util
 import random
 import sys
@@ -15,14 +16,26 @@ import numpy as np
 import pytest
 import torch
 
-import hal.training.physical_shard_loader as replay_loader
-from hal.inference.backends.history_decoder.model import GPT as ServingGPT
-from hal.training.features import NEUTRAL_ACTION
-from hal.training.features import stack_actions
+import hal.training.buffered_mds_replay_loader as replay_loader
+from hal.data.feature_stats import FeatureStats
+from hal.data.feature_stats import consolidate_key
+from hal.inference.sampling import StreamGroupRng
+from hal.models.action_sequence import ReturnConditioner
+from hal.models.controller_codec import CONTROLLER_DECODE_ORDER
+from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
+from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.controller_codec import TRIGGERS_GROUP
+from hal.representation.features import ACTION_CHANNELS
+from hal.representation.features import BASE_ITEMS_PROJECTION
+from hal.representation.features import ITEM_COLUMNS
+from hal.representation.features import NEUTRAL_ACTION
+from hal.representation.features import feature_kind
+from hal.representation.features import stack_actions
+from hal.wire import ACTION_DIM
 
 
 def _load():
-    path = Path(__file__).resolve().parents[2] / "experiments" / "059_muon_history_decoder.py"
+    path = Path(__file__).resolve().parents[2] / "experiments" / "059_muon_action_sequence.py"
     name = "test_exp059"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -46,7 +59,6 @@ def _step_snapshot(model, result, sampler) -> dict[str, object]:
         "metrics": {name: value.detach().cpu().clone() for name, value in result.metrics.items()},
         "gradient_norm": result.gradient_norm.detach().cpu().clone(),
         "sampler": sampler.generator.get_state().cpu(),
-        "conditioning": model.return_calibration.state_dict(),
     }
 
 
@@ -69,7 +81,6 @@ def _assert_nested_equal(expected: object, actual: object) -> None:
 
 def _assert_step_close(expected: dict[str, object], actual: dict[str, object]) -> None:
     _assert_nested_equal(expected["sampler"], actual["sampler"])
-    _assert_nested_equal(expected["conditioning"], actual["conditioning"])
     for field, (rtol, atol) in {"parameters": (2e-5, 2e-6), "gradients": (0.01, 2e-4)}.items():
         left = cast(Mapping[str, torch.Tensor], expected[field])
         right = cast(Mapping[str, torch.Tensor], actual[field])
@@ -148,6 +159,43 @@ def test_wsd_is_flat_when_stable_training_is_extended() -> None:
     assert schedule(131_071) == pytest.approx(1 / 170)
 
 
+def test_module_scope_lr_schedule_preserves_checkpoint_record_and_next_step() -> None:
+    cfg = exp.TrainConfig()
+
+    def control_scale(step: int) -> float:
+        update = step + 1
+        if update <= cfg.warmup_steps:
+            return update / cfg.warmup_steps
+        if cfg.decay_start_update is None or update <= cfg.decay_start_update:
+            return 1.0
+        assert cfg.decay_duration is not None
+        progress = min((update - cfg.decay_start_update) / cfg.decay_duration, 1.0)
+        return 1.0 + progress * (cfg.lr_floor_ratio - 1.0)
+
+    control_optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(()))], lr=0.7)
+    candidate_optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(()))], lr=0.7)
+    control = torch.optim.lr_scheduler.LambdaLR(control_optimizer, control_scale)
+    candidate = exp.LearningRateScheduler(candidate_optimizer, exp.lr_schedule(cfg))
+    for _ in range(4):
+        control_optimizer.step()
+        control.step()
+        candidate_optimizer.step()
+        candidate.step()
+    assert candidate.state_dict() == control.state_dict()
+    assert candidate.state_dict()["lr_lambdas"] == [None]
+
+    restored_optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(()))], lr=0.7)
+    restored = exp.LearningRateScheduler(restored_optimizer, exp.lr_schedule(cfg))
+    restored_optimizer.load_state_dict(control_optimizer.state_dict())
+    restored.load_state_dict(control.state_dict())
+    control_optimizer.step()
+    control.step()
+    restored_optimizer.step()
+    restored.step()
+    assert restored.state_dict() == control.state_dict()
+    assert restored_optimizer.state_dict() == control_optimizer.state_dict()
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_prefix_sampling_is_distinct_uniform_and_exactly_resumable(device: str) -> None:
     if device == "cuda" and not torch.cuda.is_available():
@@ -212,12 +260,12 @@ def test_exact_offset_coefficients_and_dense_awr_gather() -> None:
 def test_history_attention_is_causal_and_has_backward_parity() -> None:
     torch.manual_seed(3)
     cfg = _tiny_cfg()
-    decoder = exp.GPT(cfg).temporal
+    decoder = exp.make_model(cfg).temporal
     hidden = torch.randn(2, 8, 32, requires_grad=True)
     ctx_pad = torch.tensor([0, 2])
     prefixes = torch.tensor([[4, 7], [4, 7]])
-    observed = torch.zeros(2, 2, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
-    targets = torch.zeros(2, 2, 16, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    observed = torch.zeros(2, 2, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    targets = torch.zeros(2, 2, 16, CONTROLLER_GROUP_COUNT, dtype=torch.long)
 
     output = decoder.teacher_forced_states(
         hidden, ctx_pad, prefixes, observed, targets, torch.zeros(2, 2), torch.ones(2, 2, dtype=torch.bool)
@@ -254,13 +302,13 @@ def test_action_head_forward_and_diagnostics_have_gradient_parity(norm_eps: floa
 def test_action_group_conditioning_uses_adaptive_rmsnorm_and_cumulative_prefix() -> None:
     torch.manual_seed(17)
     cfg = _tiny_cfg(batch_size=2)
-    decoder = exp.GPT(cfg).temporal.eval()
-    assert exp.CONTROLLER_DECODE_ORDER == ("c_stick", "main_stick", "triggers", "buttons")
+    decoder = exp.make_model(cfg).temporal.eval()
+    assert CONTROLLER_DECODE_ORDER == ("c_stick", "main_stick", "triggers", "buttons")
     states = torch.randn(2, 3, cfg.arch.temporal_d_model, requires_grad=True)
     embedded = {
-        name: torch.randn(2, 3, cfg.arch.action_embed_dim, requires_grad=True) for name in exp.CONTROLLER_DECODE_ORDER
+        name: torch.randn(2, 3, cfg.arch.action_embed_dim, requires_grad=True) for name in CONTROLLER_DECODE_ORDER
     }
-    for position, name in enumerate(exp.CONTROLLER_DECODE_ORDER):
+    for position, name in enumerate(CONTROLLER_DECODE_ORDER):
         head = decoder.outputs[name]
         normalized = head.normalize(states)
         actual = decoder.group_features(states, name, embedded)
@@ -269,7 +317,7 @@ def test_action_group_conditioning_uses_adaptive_rmsnorm_and_cumulative_prefix()
             continue
         condition = decoder.group_condition[name]
         assert condition.in_features == position * cfg.arch.action_embed_dim
-        prefix = torch.cat([embedded[earlier] for earlier in exp.CONTROLLER_DECODE_ORDER[:position]], dim=-1)
+        prefix = torch.cat([embedded[earlier] for earlier in CONTROLLER_DECODE_ORDER[:position]], dim=-1)
         raw_scale, shift = condition(prefix).chunk(2, dim=-1)
         expected = normalized * (1 + torch.tanh(raw_scale)) + shift
         torch.testing.assert_close(actual, expected)
@@ -278,7 +326,7 @@ def test_action_group_conditioning_uses_adaptive_rmsnorm_and_cumulative_prefix()
         decoder.group_condition["buttons"].weight.fill_(0.01)
     decoder.group_features(states, "buttons", embedded).square().sum().backward()
     assert states.grad is not None and torch.count_nonzero(states.grad) > 0
-    for name in exp.CONTROLLER_DECODE_ORDER[:-1]:
+    for name in CONTROLLER_DECODE_ORDER[:-1]:
         assert embedded[name].grad is not None and torch.count_nonzero(embedded[name].grad) > 0
     assert embedded["buttons"].grad is None
 
@@ -286,7 +334,7 @@ def test_action_group_conditioning_uses_adaptive_rmsnorm_and_cumulative_prefix()
 def test_teacher_forced_action_head_does_not_renormalize_after_film() -> None:
     torch.manual_seed(29)
     cfg = _tiny_cfg(batch_size=1)
-    decoder = exp.GPT(cfg).temporal.eval()
+    decoder = exp.make_model(cfg).temporal.eval()
     condition = decoder.group_condition["buttons"]
     with torch.no_grad():
         condition.weight.zero_()
@@ -295,8 +343,8 @@ def test_teacher_forced_action_head_does_not_renormalize_after_film() -> None:
     hidden = torch.randn(1, 8, cfg.arch.d_model)
     ctx_pad = torch.tensor([1])
     prefixes = torch.tensor([[7]])
-    observed = torch.zeros(1, 1, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
-    targets = torch.zeros(1, 1, len(cfg.arch.head_offsets), exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    observed = torch.zeros(1, 1, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    targets = torch.zeros(1, 1, len(cfg.arch.head_offsets), CONTROLLER_GROUP_COUNT, dtype=torch.long)
     return_value = torch.zeros(1, 1)
     present = torch.ones(1, 1, dtype=torch.bool)
     states = decoder.teacher_forced_states(hidden, ctx_pad, prefixes, observed, targets, return_value, present)
@@ -316,7 +364,7 @@ def test_teacher_forced_action_head_does_not_renormalize_after_film() -> None:
 def test_teacher_forced_and_stepwise_decoding_match(button_input_scale: float) -> None:
     torch.manual_seed(5)
     cfg = _tiny_cfg(batch_size=1)
-    decoder = exp.GPT(cfg).temporal.eval()
+    decoder = exp.make_model(cfg).temporal.eval()
     assert decoder.outputs["buttons"].norm_eps == 1e-5
     assert all(head.norm_eps == 1e-6 for head in decoder.trunk_outputs.values())
     if button_input_scale != 1.0:
@@ -331,8 +379,8 @@ def test_teacher_forced_and_stepwise_decoding_match(button_input_scale: float) -
     hidden = torch.randn(1, 8, 32)
     ctx_pad = torch.tensor([2])
     prefix = torch.tensor([[7]])
-    observed = torch.zeros(1, 1, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
-    targets = torch.zeros(1, 1, 16, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    observed = torch.zeros(1, 1, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    targets = torch.zeros(1, 1, 16, CONTROLLER_GROUP_COUNT, dtype=torch.long)
 
     batched = decoder.teacher_forced_logits_by_group(
         hidden, ctx_pad, prefix, observed, targets, torch.zeros(1, 1), torch.ones(1, 1, dtype=torch.bool)
@@ -341,18 +389,18 @@ def test_teacher_forced_and_stepwise_decoding_match(button_input_scale: float) -
         hidden, observed[:, 0], targets[:, 0], torch.zeros(1), torch.ones(1, dtype=torch.bool), ctx_pad=ctx_pad
     )
     for depth in range(16):
-        for name in exp.CONTROLLER_GROUP_NAMES:
+        for name in CONTROLLER_GROUP_NAMES:
             torch.testing.assert_close(batched[name][:, 0, depth], stepwise[depth][name], atol=2e-5, rtol=2e-5)
 
 
 def test_live_decode_preserves_committed_action_prefix() -> None:
     torch.manual_seed(11)
     cfg = _tiny_cfg(batch_size=1)
-    decoder = exp.GPT(cfg).temporal.eval()
+    decoder = exp.make_model(cfg).temporal.eval()
     hidden = torch.randn(1, 8, 32)
-    observed = torch.zeros(1, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
-    committed = torch.zeros(1, 2, exp.CONTROLLER_GROUP_COUNT, dtype=torch.long)
-    committed[:, 0, exp.TRIGGERS_GROUP] = 1
+    observed = torch.zeros(1, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    committed = torch.zeros(1, 2, CONTROLLER_GROUP_COUNT, dtype=torch.long)
+    committed[:, 0, TRIGGERS_GROUP] = 1
 
     decoded = decoder.sample_indices(
         hidden,
@@ -370,7 +418,7 @@ def test_live_decode_preserves_committed_action_prefix() -> None:
 
 def test_optimizer_membership_and_logical_splits_are_complete() -> None:
     cfg = _tiny_cfg()
-    model = exp.GPT(cfg)
+    model = exp.make_model(cfg)
     roles = exp.optimizer_roles(model, cfg)
     optimizer = exp.make_optimizer(model, cfg)
     members = [parameter for group in optimizer.param_groups for parameter in group["params"]]
@@ -384,7 +432,7 @@ def test_optimizer_membership_and_logical_splits_are_complete() -> None:
     assert roles["temporal.trunk_outputs.buttons.up.weight"].lr_kind == "hidden"
     assert roles["temporal.trunk_outputs.buttons.down.weight"].optimizer == "adamw"
     assert roles["temporal.trunk_outputs.buttons.down.weight"].lr_kind == "output"
-    for name in exp.CONTROLLER_DECODE_ORDER[1:]:
+    for name in CONTROLLER_DECODE_ORDER[1:]:
         weight = roles[f"temporal.group_condition.{name}.weight"]
         bias = roles[f"temporal.group_condition.{name}.bias"]
         assert (weight.optimizer, weight.lr_kind, weight.decay) == ("adamw", "input", True)
@@ -393,9 +441,9 @@ def test_optimizer_membership_and_logical_splits_are_complete() -> None:
 
 def test_trunk_skip_uses_matching_nonlinear_heads_and_parameter_contract() -> None:
     cfg = exp.proxy_config()
-    model = exp.GPT(cfg)
+    model = exp.make_model(cfg)
 
-    for name in exp.CONTROLLER_GROUP_NAMES:
+    for name in CONTROLLER_GROUP_NAMES:
         decoder_head = model.temporal.outputs[name]
         trunk_head = model.temporal.trunk_outputs[name]
         assert isinstance(decoder_head, exp.NonlinearActionHead)
@@ -407,11 +455,7 @@ def test_trunk_skip_uses_matching_nonlinear_heads_and_parameter_contract() -> No
 
 
 def _live_inputs():
-    from hal.data.feature_stats import FeatureStats
-    from hal.training.ego_stats import consolidate_key
-    from hal.training.features import feature_kind
-
-    fields = exp.BASE_ITEMS_PROJECTION.columns - {f"ego_{name}" for name in exp.ACTION_CHANNELS}
+    fields = BASE_ITEMS_PROJECTION.columns - {f"ego_{name}" for name in ACTION_CHANNELS}
     flat = {}
     for name in fields:
         canonical = (
@@ -421,7 +465,7 @@ def _live_inputs():
     stats = {
         consolidate_key(name): FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
         for name in fields
-        if feature_kind(name, exp.ITEM_COLUMNS) == "float"
+        if feature_kind(name, ITEM_COLUMNS) == "float"
     }
     return flat, stats
 
@@ -429,17 +473,15 @@ def _live_inputs():
 @pytest.mark.parametrize(("delay", "stride"), [(2, 2), (0, 2), (1, 2), (3, 1)])
 def test_make_policy_plan_rows_bootstrap_continue_and_reset(delay: int, stride: int) -> None:
     from hal.sim.rollout import ObservationRow
-    from hal.sim.vec import Slot
+    from hal.sim.rollout import Slot
 
     torch.manual_seed(19)
     cfg = _tiny_cfg(batch_size=1)
-    model = exp.GPT(cfg).eval()
+    model = exp.make_model(cfg).eval()
     flat, stats = _live_inputs()
-    policy = exp.make_policy(
-        model, stats, cfg, decode_seed=3, device="cpu", delay_frames=delay, replan_interval_frames=stride
-    )
+    policy = exp.make_policy(model, stats, cfg, decode_seed=3, delay_frames=delay, replan_interval_frames=stride)
     slot = Slot(0, 2)
-    neutral = exp.NEUTRAL_ACTION.copy()
+    neutral = NEUTRAL_ACTION.copy()
     first = policy.plan_rows({slot: [ObservationRow(10, flat, neutral, reset=True)]})[slot]
     assert policy.runtime_spec.committed_frames == delay
     assert policy.runtime_spec.execution_stride == stride
@@ -453,22 +495,92 @@ def test_make_policy_plan_rows_bootstrap_continue_and_reset(delay: int, stride: 
     np.testing.assert_array_equal(reset[:delay], first_copy[:delay])
 
 
+def test_official_process_chunks_match_pre_refactor_control() -> None:
+    from hal.sim.rollout import ObservationRow
+    from hal.sim.rollout import Slot
+
+    torch.manual_seed(19)
+    cfg = _tiny_cfg(batch_size=1)
+    model = exp.make_model(cfg).eval()
+    flat, stats = _live_inputs()
+    policy = exp.make_policy(model, stats, cfg, decode_seed=3, delay_frames=2, replan_interval_frames=2)
+    slot = Slot(0, 2)
+    neutral = NEUTRAL_ACTION.copy()
+    outputs = [policy.plan_rows({slot: [ObservationRow(10, flat, neutral, reset=True)]})[slot].copy()]
+    previous = outputs[0]
+    for step in range(1, 26):
+        rows = [ObservationRow(10 + (step - 1) * 2 + offset, flat, previous[offset - 1].copy()) for offset in (1, 2)]
+        previous = policy.plan_rows({slot: rows})[slot].copy()
+        outputs.append(previous)
+    digest = hashlib.sha256(np.stack(outputs).astype(np.float32).tobytes()).hexdigest()
+    # Captured from source d7454f9 on the same CPU environment and 059 fixture.
+    assert digest == "201e83608dfaf194244d22b7036962feb98b178a8e7254332ce8f94d52255699"
+
+
+@pytest.mark.parametrize("fixed_prefix", [0, 2])
+def test_dense_fault_snapshot_captures_cpu_input_before_decode_failure(
+    monkeypatch: pytest.MonkeyPatch, fixed_prefix: int
+) -> None:
+    from hal.sim.rollout import ObservationRow
+    from hal.sim.rollout import Slot
+
+    cfg = _tiny_cfg(batch_size=1)
+    model = exp.make_model(cfg).eval()
+    flat, stats = _live_inputs()
+    adapter = exp.make_policy(
+        model,
+        stats,
+        cfg,
+        decode_seed=41,
+        delay_frames=fixed_prefix,
+        replan_interval_frames=2,
+        prewarm_executor=False,
+    )
+
+    def fail_decode(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected decoder failure")
+
+    monkeypatch.setattr(adapter.policy.executor, "decode", fail_decode)
+    neutral = NEUTRAL_ACTION.copy()
+    with pytest.raises(RuntimeError, match="injected decoder failure"):
+        adapter.plan_rows({Slot(0, 2): [ObservationRow(10, flat, neutral, reset=True)]})
+    metadata, arrays = adapter.fault_snapshot()
+    assert metadata["schema_version"] == 2
+    assert metadata["stream_ids"] == [2]
+    assert metadata["generations"] == [1]
+    assert metadata["source_frames"] == [10]
+    assert metadata["reset"] == [True]
+    assert metadata["fixed_prefix_frames"] == fixed_prefix
+    assert metadata["horizon"] == 4
+    assert metadata["sampling_seed"] == 41
+    assert metadata["sampling_generations"] == []
+    assert metadata["sampling_counters"] == []
+    assert metadata["checkpoint_sha256"] is None
+    assert arrays["floats"].shape[1:] == (1, cfg.arch.L_ctx)
+    assert arrays["cats"].shape[1:] == (1, cfg.arch.L_ctx)
+    assert arrays["fixed_actions"].shape == (1, fixed_prefix, len(neutral))
+    np.testing.assert_array_equal(arrays["fixed_actions"], np.broadcast_to(neutral, arrays["fixed_actions"].shape))
+
+
 @pytest.mark.parametrize("delay", [0, 1, 2, 3])
 def test_traced_and_normal_decoding_match_actions_draws_and_padding(delay: int) -> None:
     torch.manual_seed(23)
     cfg = _tiny_cfg(batch_size=3)
-    model = exp.GPT(cfg).eval()
-    engine = exp.BF16Inference(model, cfg, compiled=False)
-    normal_rng = exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES)
-    trace_rng = exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES)
+    model = exp.make_model(cfg).eval()
+    engine = exp.make_window_policy(model, cfg, compiled=False)
+    normal_rng = StreamGroupRng(41, CONTROLLER_GROUP_NAMES)
+    trace_rng = StreamGroupRng(41, CONTROLLER_GROUP_NAMES)
     ctx = exp.synthetic_context(cfg, 3, torch.device("cpu"))
-    ctx = replace(ctx, ctx_pad=torch.tensor([0, 2, 6]), slot_ids=torch.tensor([1, 2, 9]))
-    prefix = torch.zeros(3, delay, len(exp.ACTION_CHANNELS))
+    ctx = replace(ctx, ctx_pad=torch.tensor([0, 2, 6]))
+    prefix = torch.zeros(3, delay, len(ACTION_CHANNELS))
     prefix[..., 0] = 0.333
-    for resets in ([True, True, True], [False, True, False]):
-        ctx = replace(ctx, reset=torch.tensor(resets))
-        actions = engine.decode(ctx, 4, streams=normal_rng, committed=prefix)
-        traced = engine.decode_with_trace(ctx, 4, streams=trace_rng, committed=prefix)
+    for generations in ([0, 0, 0], [0, 1, 0]):
+        actions = engine.decode(
+            ctx, 4, streams=normal_rng, stream_ids=[1, 2, 9], sampling_generations=generations, committed=prefix
+        )
+        traced = engine.decode_with_trace(
+            ctx, 4, streams=trace_rng, stream_ids=[1, 2, 9], sampling_generations=generations, committed=prefix
+        )
         assert torch.equal(actions, traced.actions)
         assert normal_rng.state() == trace_rng.state()
         assert torch.equal(traced.indices[:, :delay], model.codec.quantize(prefix))
@@ -483,24 +595,24 @@ def test_traced_and_normal_decoding_match_actions_draws_and_padding(delay: int) 
 @pytest.mark.parametrize("shape", [(1, 2), (2, 2, 14), (1, 2, 13), (1, 5, 14)])
 def test_decode_rejects_invalid_commitment_before_advancing_rng(traced: bool, shape: tuple[int, ...]) -> None:
     cfg = _tiny_cfg(batch_size=1)
-    engine = exp.BF16Inference(exp.GPT(cfg).eval(), cfg, compiled=False)
-    rng = exp.SlotGroupRng(7, exp.CONTROLLER_GROUP_NAMES)
+    engine = exp.make_window_policy(exp.make_model(cfg).eval(), cfg, compiled=False)
+    rng = StreamGroupRng(7, CONTROLLER_GROUP_NAMES)
     context = exp.synthetic_context(cfg, 1, torch.device("cpu"))
     decode = engine.decode_with_trace if traced else engine.decode
     with pytest.raises(ValueError, match="committed actions"):
-        decode(context, 4, streams=rng, committed=torch.zeros(shape))
+        decode(context, 4, streams=rng, stream_ids=[0], sampling_generations=[0], committed=torch.zeros(shape))
     assert rng.state() == ()
     assert engine._trunks == {}
 
 
 def test_normal_decode_keeps_logits_out_of_the_decoder_path() -> None:
     cfg = _tiny_cfg(batch_size=1)
-    engine = exp.BF16Inference(exp.GPT(cfg).eval(), cfg, compiled=False)
+    engine = exp.make_window_policy(exp.make_model(cfg).eval(), cfg, compiled=False)
     context = exp.synthetic_context(cfg, 1, torch.device("cpu"))
     generator = torch.Generator().manual_seed(5)
-    engine.decode(context, 4, gen=generator, committed=torch.zeros(1, 2, len(exp.ACTION_CHANNELS)))
+    engine.decode(context, 4, gen=generator, committed=torch.zeros(1, 2, len(ACTION_CHANNELS)))
     expected = torch.Generator().manual_seed(5)
-    for _ in range(2 * exp.CONTROLLER_GROUP_COUNT):
+    for _ in range(2 * CONTROLLER_GROUP_COUNT):
         torch.rand(1, generator=expected)
     assert torch.equal(generator.get_state(), expected.get_state())
     assert engine._trace_decoders == {}
@@ -508,7 +620,7 @@ def test_normal_decode_keeps_logits_out_of_the_decoder_path() -> None:
 
 def test_prewarm_cache_includes_resolved_delay() -> None:
     cfg = _tiny_cfg()
-    engine = exp.BF16Inference(exp.GPT(cfg).eval(), cfg, compiled=False)
+    engine = exp.make_window_policy(exp.make_model(cfg).eval(), cfg, compiled=False)
     for delay in (0, 1, 2, 3):
         assert engine.prewarm(3, 4, committed_frames=delay) == 0
     assert engine._warmed == {(4, 4, delay) for delay in range(4)}
@@ -519,41 +631,59 @@ def test_resolved_delay_prewarm_avoids_live_recompilation() -> None:
     cfg = _tiny_cfg(batch_size=3)
     # Compiled flex attention requires at least 16 channels per head.
     cfg = replace(cfg, arch=replace(cfg.arch, temporal_heads=2))
-    model = exp.GPT(cfg).eval().cuda()
+    model = exp.make_model(cfg).eval().cuda()
     with torch.no_grad():
         for projection in model.temporal.return_conditioner.projections:
             projection.weight.normal_(std=0.01)
             projection.bias.normal_(std=0.01)
         for condition in model.temporal.group_condition.values():
             condition.bias.normal_(std=0.1)
-    engine = exp.BF16Inference(model, cfg, compiled=True, bucket=4, desired_return=120.0)
+    engine = exp.make_window_policy(model, cfg, compiled=True, bucket=4, desired_return=120.0)
     context = exp.synthetic_context(cfg, 3, torch.device("cuda"))
     for delay in (0, 1, 2, 3):
         engine.prewarm(3, 4, committed_frames=delay)
         for desired_return in (180.0, None):
             engine.desired_return = desired_return
             with torch.compiler.set_stance("fail_on_recompile"):
-                engine.decode(context, 4, committed=torch.zeros(3, delay, len(exp.ACTION_CHANNELS), device="cuda"))
+                engine.decode(context, 4, committed=torch.zeros(3, delay, len(ACTION_CHANNELS), device="cuda"))
         assert engine.prewarm(3, 4, committed_frames=delay) == 0
-    context = replace(
-        context, slot_ids=torch.arange(3, device="cuda"), reset=torch.ones(3, dtype=torch.bool, device="cuda")
+    committed = torch.zeros(3, 2, len(ACTION_CHANNELS), device="cuda")
+    engine.decode_with_trace(
+        context,
+        4,
+        streams=StreamGroupRng(41, CONTROLLER_GROUP_NAMES),
+        stream_ids=[0, 1, 2],
+        sampling_generations=[0] * 3,
+        committed=committed,
     )
-    committed = torch.zeros(3, 2, len(exp.ACTION_CHANNELS), device="cuda")
-    engine.decode_with_trace(context, 4, streams=exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES), committed=committed)
     for desired_return in (120.0, None):
         engine.desired_return = desired_return
-        normal_rng = exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES)
-        traced_rng = exp.SlotGroupRng(41, exp.CONTROLLER_GROUP_NAMES)
+        normal_rng = StreamGroupRng(41, CONTROLLER_GROUP_NAMES)
+        traced_rng = StreamGroupRng(41, CONTROLLER_GROUP_NAMES)
         with torch.compiler.set_stance("fail_on_recompile"):
-            actions = engine.decode(context, 4, streams=normal_rng, committed=committed)
-            traced = engine.decode_with_trace(context, 4, streams=traced_rng, committed=committed)
+            actions = engine.decode(
+                context,
+                4,
+                streams=normal_rng,
+                stream_ids=[0, 1, 2],
+                sampling_generations=[0] * 3,
+                committed=committed,
+            )
+            traced = engine.decode_with_trace(
+                context,
+                4,
+                streams=traced_rng,
+                stream_ids=[0, 1, 2],
+                sampling_generations=[0] * 3,
+                committed=committed,
+            )
         assert torch.equal(actions, traced.actions)
         assert normal_rng.state() == traced_rng.state()
 
 
 def test_target_gradient_attribution_matches_autograd_and_fixed_coefficients() -> None:
     torch.manual_seed(29)
-    logits = torch.randn(2, 3, 16, exp.CONTROLLER_GROUP_COUNT, 7, requires_grad=True)
+    logits = torch.randn(2, 3, 16, CONTROLLER_GROUP_COUNT, 7, requires_grad=True)
     targets = torch.randint(7, logits.shape[:-1])
     nll = -logits.log_softmax(-1).gather(-1, targets[..., None]).squeeze(-1)
     weights = torch.tensor([[0.2, 1.3, 2.7], [1.7, 0.4, 3.1]])
@@ -573,10 +703,10 @@ def test_target_gradient_attribution_matches_autograd_and_fixed_coefficients() -
     )
     prefix = "diagnostics/projection_local/target_logit_grad_l1"
     for depth, offset in enumerate(exp.Architecture.head_offsets):
-        for group, name in enumerate(exp.CONTROLLER_GROUP_NAMES):
+        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
             torch.testing.assert_close(metrics[f"{prefix}/o{offset:02d}/{name}"], target_grad[depth, group])
         torch.testing.assert_close(metrics[f"{prefix}/by_offset/o{offset:02d}"], target_grad[depth].sum())
-    for group, name in enumerate(exp.CONTROLLER_GROUP_NAMES):
+    for group, name in enumerate(CONTROLLER_GROUP_NAMES):
         torch.testing.assert_close(metrics[f"{prefix}/by_action_group/{name}"], target_grad[:, group].sum())
     torch.testing.assert_close(metrics[f"{prefix}/total"], target_grad.sum())
     means = nll.detach().mean((0, 1))
@@ -615,7 +745,7 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
     import json
 
     from hal.sim.rollout import ObservationRow
-    from hal.sim.vec import Slot
+    from hal.sim.rollout import Slot
 
     class Clock:
         seconds = 0.0
@@ -625,9 +755,9 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
 
     clock = Clock()
     cfg = _tiny_cfg(batch_size=1)
-    model = exp.GPT(cfg)
+    model = exp.make_model(cfg)
     flat, stats = _live_inputs()
-    engine = exp.BF16Inference(model, cfg, compiled=False)
+    engine = exp.make_window_policy(model, cfg, compiled=False)
     warmed = []
 
     def prewarm(rows, horizon, *, committed_frames):
@@ -636,9 +766,9 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
         return 30.0
 
     def decode(context, horizon, **kwargs):
-        assert kwargs["committed"].shape == (1, 1, len(exp.ACTION_CHANNELS))
+        assert kwargs["committed"].shape == (1, 1, len(ACTION_CHANNELS))
         clock.seconds += 0.25
-        return torch.zeros(1, horizon, len(exp.ACTION_CHANNELS))
+        return torch.zeros(1, horizon, len(ACTION_CHANNELS))
 
     rows = [
         exp.MatchRow(1, 2, 31, 0, 0, 100, 123, 1.0, 2.0, 0, 1),
@@ -649,7 +779,7 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
         assert kwargs["max_parallel"] == 1
         policy = factory()
         assert policy.runtime_spec.committed_frames == 1
-        policy.plan_rows({Slot(0, 1): [ObservationRow(0, flat, exp.NEUTRAL_ACTION, reset=True)]})
+        policy.plan_rows({Slot(0, 1): [ObservationRow(0, flat, NEUTRAL_ACTION, reset=True)]})
         process_telemetry.plan_calls = 1
         process_telemetry.plan_rows = 1
         process_telemetry.inference_latency_ms.append(300.0)
@@ -657,6 +787,7 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
         return [], rows
 
     monkeypatch.setattr(exp, "time", clock)
+    monkeypatch.setattr("hal.inference.window_policy.time", clock)
     monkeypatch.setattr(engine, "prewarm", prewarm)
     monkeypatch.setattr(engine, "decode", decode)
     monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", sweep)
@@ -722,13 +853,13 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     torch.manual_seed(13)
     batch = _return_batch(cfg).to(device)
     batch.context.features["ego_player_id"].fill_(17)
-    batch = replace(batch, batch=replace(batch.batch, context=replace(batch.context, slot_ids=None, reset=None)))
-    checked_model = exp.GPT(cfg).to(device)
+    checked_model = exp.make_model(cfg).to(device)
     trusted_model = copy.deepcopy(checked_model)
+    trusted_calibration = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
 
     def setup(model):
         optimizer = exp.make_optimizer(model, cfg)
-        scheduler = exp.LambdaLR(optimizer, exp.lr_schedule(cfg))
+        scheduler = exp.LearningRateScheduler(optimizer, exp.lr_schedule(cfg))
         sampler = exp.PrefixSampler(7, device)
         return optimizer, scheduler, sampler
 
@@ -761,7 +892,7 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     identity_masker = exp.IdentityMasker(11, 0.5)
     return_masker = exp.ReturnMasker(13, 0.2)
     first_masked = return_masker(identity_masker(batch.to("cpu")))
-    trusted_model.return_calibration.observe(first_masked)
+    exp.observe_calibration(trusted_calibration, first_masked)
     checkpoint = tmp_path / "training-resume.pt"
     next_batch = copy.deepcopy(batch)
     next_batch.context.features["ego_position_x"].fill_(0.5)
@@ -777,16 +908,17 @@ def test_training_validation_change_and_next_update_resume_are_exact(
             "batch": exp._return_batch_state(next_batch),
             "identity_masker": identity_masker.state_dict(),
             "return_masker": return_masker.state_dict(),
-            "calibration": trusted_model.return_calibration.state_dict(),
+            "calibration": trusted_calibration.state_dict(),
         },
         checkpoint,
     )
     expected_batch = return_masker(identity_masker(next_batch.to("cpu")))
-    trusted_model.return_calibration.observe(expected_batch)
+    exp.observe_calibration(trusted_calibration, expected_batch)
     expected = update(trusted_model, trusted, 2, True, expected_batch.to(device))
     expected_state = _step_snapshot(trusted_model, expected, trusted[2])
     saved = torch.load(checkpoint, weights_only=False)
-    restored_model = exp.GPT(cfg).to(device)
+    restored_model = exp.make_model(cfg).to(device)
+    restored_calibration = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
     restored = setup(restored_model)
     restored_model.load_state_dict(saved["model"])
     restored[0].load_state_dict(saved["optimizer"])
@@ -801,14 +933,15 @@ def test_training_validation_change_and_next_update_resume_are_exact(
     restored_return = exp.ReturnMasker(999, 0.2)
     restored_identity.load_state_dict(saved["identity_masker"])
     restored_return.load_state_dict(saved["return_masker"])
-    restored_model.return_calibration.load_state_dict(saved["calibration"])
+    restored_calibration.load_state_dict(saved["calibration"])
     restored_batch = restored_return(restored_identity(restored_batch.to("cpu")))
-    restored_model.return_calibration.observe(restored_batch)
+    exp.observe_calibration(restored_calibration, restored_batch)
     assert exp._return_batch_sha256(restored_batch) == exp._return_batch_sha256(expected_batch)
     assert torch.equal(restored_return.generator.get_state(), return_masker.generator.get_state())
     assert torch.equal(restored_identity.generator.get_state(), identity_masker.generator.get_state())
     actual = update(restored_model, restored, 2, True, restored_batch.to(device))
     _assert_nested_equal(expected_state, _step_snapshot(restored_model, actual, restored[2]))
+    assert restored_calibration.state_dict() == trusted_calibration.state_dict()
 
 
 def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
@@ -835,7 +968,7 @@ def test_compile_mode_is_versioned_and_preserved_on_resume() -> None:
 
 def _return_batch(cfg, *, values=None, available=None):
     batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
-    context = replace(batch.context, slot_ids=None, reset=None)
+    context = batch.context
     if values is None:
         values = torch.arange(cfg.batch_size * cfg.arch.L_ctx).reshape(cfg.batch_size, cfg.arch.L_ctx).float()
     if available is None:
@@ -856,7 +989,7 @@ def test_return_recipe_and_production_parameter_count() -> None:
     assert (cfg.awr.beta, cfg.awr.weight_max, cfg.awr.gamma) == (150.0, 10.0, 0.99855)
     assert cfg.return_conditioning and cfg.return_dropout == 0.2
     with torch.device("meta"):
-        model = exp.GPT(cfg)
+        model = exp.make_model(cfg)
     assert exp.subsystem_parameter_counts(model)["total"] == 246_862_205
     roles = exp.optimizer_roles(model, cfg)
     for name in dict(model.named_parameters()):
@@ -919,17 +1052,17 @@ def test_collation_keeps_awr_next_frame_and_conditioning_current_position() -> N
 def test_zero_initialization_is_neutral_and_preserves_rng() -> None:
     cfg = _tiny_cfg()
     torch.manual_seed(101)
-    enabled = exp.GPT(cfg)
+    enabled = exp.make_model(cfg)
     enabled_rng = torch.get_rng_state()
     torch.manual_seed(101)
-    disabled = exp.GPT(replace(cfg, return_conditioning=False))
+    disabled = exp.make_model(replace(cfg, return_conditioning=False))
     assert torch.equal(enabled_rng, torch.get_rng_state())
     for name, parameter in enabled.named_parameters():
         assert torch.equal(parameter, dict(disabled.named_parameters())[name])
     conditioner = enabled.temporal.return_conditioner
     state = torch.get_rng_state()
     with torch.random.fork_rng(devices=[]):
-        exp.ReturnConditioner(cfg)
+        ReturnConditioner(exp.model_config(cfg))
     assert torch.equal(state, torch.get_rng_state())
     values = torch.tensor([float("nan"), 0.0, 120.0], requires_grad=True)
     modulation = conditioner(values, torch.tensor([False, True, True]))
@@ -956,7 +1089,7 @@ def test_zero_initialization_is_neutral_and_preserves_rng() -> None:
 def test_nonzero_conditioned_parallel_stepwise_and_traced_parity() -> None:
     cfg = _tiny_cfg(batch_size=2)
     torch.manual_seed(91)
-    model = exp.GPT(cfg).eval()
+    model = exp.make_model(cfg).eval()
     with torch.no_grad():
         for projection in model.temporal.return_conditioner.projections:
             projection.weight.normal_(std=0.02)
@@ -973,15 +1106,26 @@ def test_nonzero_conditioned_parallel_stepwise_and_traced_parity() -> None:
         hidden, observed[:, 0], targets[:, 0], values[:, 0], present[:, 0], ctx_pad=torch.tensor([0, 2])
     )
     for index, logits in enumerate(stepwise):
-        for name in exp.CONTROLLER_GROUP_NAMES:
+        for name in CONTROLLER_GROUP_NAMES:
             torch.testing.assert_close(parallel[name][:, 0, index], logits[name], rtol=2e-5, atol=2e-5)
-    engine = exp.BF16Inference(model, cfg, desired_return=180.0, compiled=False)
+    engine = exp.make_window_policy(model, cfg, desired_return=180.0, compiled=False)
     context = exp.synthetic_context(cfg, 2, torch.device("cpu"))
-    context = replace(context, slot_ids=torch.tensor([1, 3]), reset=torch.ones(2, dtype=torch.bool))
-    committed = torch.zeros(2, 2, exp.A_DIM)
-    normal = engine.decode(context, 4, streams=exp.SlotGroupRng(1, exp.CONTROLLER_GROUP_NAMES), committed=committed)
+    committed = torch.zeros(2, 2, ACTION_DIM)
+    normal = engine.decode(
+        context,
+        4,
+        streams=StreamGroupRng(1, CONTROLLER_GROUP_NAMES),
+        stream_ids=[1, 3],
+        sampling_generations=[0, 0],
+        committed=committed,
+    )
     traced = engine.decode_with_trace(
-        context, 4, streams=exp.SlotGroupRng(1, exp.CONTROLLER_GROUP_NAMES), committed=committed
+        context,
+        4,
+        streams=StreamGroupRng(1, CONTROLLER_GROUP_NAMES),
+        stream_ids=[1, 3],
+        sampling_generations=[0, 0],
+        committed=committed,
     )
     assert torch.equal(normal, traced.actions)
 
@@ -998,18 +1142,18 @@ def test_masks_and_partial_calibration_resume_independently() -> None:
     restored.load_state_dict(state)
     assert torch.equal(expected.condition_present, restored(batch).condition_present)
     assert torch.equal(global_rng, torch.get_rng_state())
-    calibration = exp.ReturnCalibration()
+    calibration = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
     absent = replace(batch, condition_present=torch.zeros_like(batch.available))
-    calibration.observe(absent)
+    exp.observe_calibration(calibration, absent)
     assert calibration.values == [7.0, 15.0]
     saved = calibration.state_dict()
-    resumed = exp.ReturnCalibration()
+    resumed = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
     resumed.load_state_dict(saved)
-    resumed.observe(absent)
-    calibration.observe(absent)
+    exp.observe_calibration(resumed, absent)
+    exp.observe_calibration(calibration, absent)
     assert resumed.state_dict() == calibration.state_dict()
     with pytest.raises(ValueError, match="identity or targets"):
-        exp.ReturnCalibration().load_state_dict({**saved, "sha256": "0" * 64})
+        exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS).load_state_dict({**saved, "sha256": "0" * 64})
     with pytest.raises(ValueError, match="incomplete"):
         resumed.targets()
 
@@ -1017,12 +1161,12 @@ def test_masks_and_partial_calibration_resume_independently() -> None:
 def test_calibration_freezes_exactly_at_consumed_window_limit() -> None:
     cfg = _tiny_cfg(batch_size=257)
     batch = _return_batch(cfg)
-    calibration = exp.ReturnCalibration()
+    calibration = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
     for _ in range(256):
-        calibration.observe(batch)
+        exp.observe_calibration(calibration, batch)
     assert len(calibration.values) == 65_536
     state = calibration.state_dict()
-    calibration.observe(replace(batch, future_return=batch.future_return + 1e6))
+    exp.observe_calibration(calibration, replace(batch, future_return=batch.future_return + 1e6))
     assert state == calibration.state_dict()
     assert calibration.targets()[2] == pytest.approx(np.quantile(calibration.values, 0.9, method="linear"))
 
@@ -1031,7 +1175,7 @@ def test_prefetch_calibrates_only_consumed_batches() -> None:
     cfg = _tiny_cfg()
     cfg = replace(cfg, arch=replace(cfg.arch, L_ctx=128))
     batch = _return_batch(cfg)
-    calibration = exp.ReturnCalibration()
+    calibration = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
     prefetch = exp.DeviceBatchPrefetcher(
         [batch],
         cfg,
@@ -1087,7 +1231,6 @@ class _ResumeReplayAdapter:
             locators=tuple(replay_loader.PhysicalRow(task.source, task.shard, row) for row in request.rows),
             columns={"value": np.stack([[window["value"] for window in value[1]] for value in generations])},
             windows_per_generation=windows,
-            generations_per_replay=1,
         )
 
     def decode_generations(
@@ -1122,11 +1265,11 @@ def _resume_collate(
     )
 
 
-def _resume_loader(cfg: exp.TrainConfig) -> replay_loader.PhysicalShardReplayLoader[exp.ReturnBatch]:
+def _resume_loader(cfg: exp.TrainConfig) -> replay_loader.BufferedMDSReplayLoader[exp.ReturnBatch]:
     import functools
 
     selection = exp.PhysicalShardSelection.from_sources((exp.SourceRowSelection("source", 65),))
-    return replay_loader.PhysicalShardReplayLoader(
+    return replay_loader.BufferedMDSReplayLoader(
         selection=selection,
         adapter=_ResumeReplayAdapter(),
         tasks=(replay_loader.ShardTask("source", 0, 0, 65),),
@@ -1157,9 +1300,10 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
     torch.manual_seed(71)
 
     def setup(resources: ExitStack, saved: dict[str, Any] | None = None) -> tuple[Any, ...]:
-        model = exp.GPT(cfg)
+        model = exp.make_model(cfg)
+        calibration = exp.ReturnCalibration(window_count=exp.CALIBRATION_WINDOWS)
         optimizer = exp.make_optimizer(model, cfg)
-        scheduler = exp.LambdaLR(optimizer, exp.lr_schedule(cfg))
+        scheduler = exp.LearningRateScheduler(optimizer, exp.lr_schedule(cfg))
         sampler = exp.PrefixSampler(7, "cpu")
         identity = exp.IdentityMasker(11, 0.5)
         masker = exp.ReturnMasker(13, 0.2)
@@ -1173,13 +1317,13 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
             sampler.load_state_dict(saved["prefix"])
             identity.load_state_dict(saved["identity"])
             masker.load_state_dict(saved["return_masker"])
-            model.return_calibration.load_state_dict(saved["calibration"])
+            calibration.load_state_dict(saved["calibration"])
             exp.restore_rng(saved["rng"])
         prefetch = exp.DeviceBatchPrefetcher(
-            loader, cfg, "cpu", identity, return_masker=masker, calibration=model.return_calibration
+            loader, cfg, "cpu", identity, return_masker=masker, calibration=calibration
         )
         resources.callback(prefetch.close)
-        return model, optimizer, scheduler, sampler, identity, masker, loader, prefetch
+        return model, optimizer, scheduler, sampler, identity, masker, loader, calibration, prefetch
 
     def update(state: tuple[Any, ...], batch: exp.ReturnBatch, index: int) -> dict[str, object]:
         model, optimizer, scheduler, sampler, *_ = state
@@ -1201,7 +1345,7 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
 
     with ExitStack() as resources:
         original = setup(resources)
-        model, optimizer, scheduler, sampler, identity, masker, loader, prefetch = original
+        model, optimizer, scheduler, sampler, identity, masker, loader, calibration, prefetch = original
         for index in range(5):
             batch, _ = prefetch.next()
             update(original, batch, index)
@@ -1219,7 +1363,7 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
                 "prefix": sampler.state_dict(),
                 "identity": identity.state_dict(),
                 "return_masker": masker.state_dict(),
-                "calibration": model.return_calibration.state_dict(),
+                "calibration": calibration.state_dict(),
                 "rng": exp.rng_state(),
             },
             path,
@@ -1233,6 +1377,7 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
         assert exp._return_batch_sha256(actual_batch) == exp._return_batch_sha256(expected_batch)
         actual = update(restored, actual_batch, 5)
         _assert_nested_equal(expected, actual)
+        assert restored[-2].state_dict() == calibration.state_dict()
         assert restored[-1].drained
 
 
@@ -1240,7 +1385,7 @@ def test_conditioned_and_unconditioned_evidence_cannot_share_directory(tmp_path:
     import json
 
     cfg = _tiny_cfg()
-    model = exp.GPT(cfg)
+    model = exp.make_model(cfg)
     protocol = exp._eval_protocol(
         cfg,
         model,
@@ -1262,16 +1407,16 @@ def test_conditioned_and_unconditioned_evidence_cannot_share_directory(tmp_path:
         exp._validate_eval_directory(tmp_path, protocol)
 
 
-def test_serving_decoder_matches_frozen_experiment() -> None:
+def test_tensor_temperature_matches_scalar_decode() -> None:
     cfg = _tiny_cfg(batch_size=1)
-    reference = exp.GPT(cfg).eval()
-    serving = ServingGPT(cfg).eval()
+    reference = exp.make_model(cfg).eval()
+    serving = exp.make_model(cfg).eval()
     serving.load_state_dict(reference.state_dict(), strict=True)
     context = exp.synthetic_context(cfg, 1, torch.device("cpu"))
     observed = reference.codec.quantize(stack_actions(context.features))
     forced = reference.codec.quantize(torch.as_tensor(NEUTRAL_ACTION).reshape(1, 1, -1).expand(1, 2, -1))
     hidden = torch.randn(1, cfg.arch.L_ctx, cfg.arch.d_model)
-    uniforms = torch.rand(4, len(exp.CONTROLLER_GROUP_NAMES), 1)
+    uniforms = torch.rand(4, len(CONTROLLER_GROUP_NAMES), 1)
     target = torch.tensor([20.0])
     present = torch.tensor([True])
 

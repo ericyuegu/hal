@@ -1,14 +1,19 @@
 """Upload checkpoints and evaluation files to R2."""
 
 import hashlib
+import json
 import os
-import pickle
 import queue
+import re
 import threading
+from collections.abc import Mapping
+from dataclasses import asdict
+from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
-from typing import BinaryIO
 from typing import Final
+from typing import cast
 
 import torch
 from boto3.exceptions import S3UploadFailedError
@@ -23,35 +28,81 @@ _FileVersion = tuple[str, int, int, int, int, int]
 _UploadItem = tuple[str, str | None]
 
 
-class _PhysicalShardCheckpointUnpickler(pickle.Unpickler):
-    def find_class(self, module: str, name: str) -> Any:
-        if module == "hal.training.o51_replay_loader":
-            from hal.training.physical_shard_loader import GenerationDescriptor
-            from hal.training.physical_shard_loader import PhysicalRow
+@dataclass(frozen=True, slots=True)
+class ResumeLineage:
+    parent_checkpoint_sha256: str
+    old_source_sha: str
+    new_source_sha: str
+    parity_report_sha256: str
 
-            legacy = {"GenerationDescriptor": GenerationDescriptor, "PhysicalRow": PhysicalRow}
-            if name not in legacy:
-                raise pickle.UnpicklingError(f"unsupported legacy physical-shard class {name!r}")
-            return legacy[name]
-        return super().find_class(module, name)
+    def __post_init__(self) -> None:
+        for name, value, length in (
+            ("parent checkpoint", self.parent_checkpoint_sha256, 64),
+            ("old source", self.old_source_sha, 40),
+            ("new source", self.new_source_sha, 40),
+            ("parity report", self.parity_report_sha256, 64),
+        ):
+            if not isinstance(value, str) or re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
+                raise ValueError(f"invalid resume lineage {name} identity")
+        if self.old_source_sha == self.new_source_sha:
+            raise ValueError("resume lineage must declare a source change")
+
+    @classmethod
+    def from_record(cls, record: object) -> ResumeLineage:
+        expected = {"parent_checkpoint_sha256", "old_source_sha", "new_source_sha", "parity_report_sha256"}
+        if not isinstance(record, dict) or set(record) != expected:
+            raise ValueError("resume lineage fields changed")
+        values = cast(dict[str, str], record)
+        return cls(
+            values["parent_checkpoint_sha256"],
+            values["old_source_sha"],
+            values["new_source_sha"],
+            values["parity_report_sha256"],
+        )
+
+    def to_record(self) -> dict[str, str]:
+        return asdict(self)
 
 
-class _PhysicalShardCheckpointPickle:
-    Unpickler = _PhysicalShardCheckpointUnpickler
-
-    @staticmethod
-    def load(source: BinaryIO, *, encoding: str = "utf-8") -> object:
-        return _PhysicalShardCheckpointUnpickler(source, encoding=encoding).load()
+def read_resume_lineage(path: Path) -> ResumeLineage:
+    return ResumeLineage.from_record(json.loads(path.read_text()))
 
 
-def load_legacy_physical_shard_checkpoint(path: str | Path, *, device: str) -> dict[str, Any]:
-    """Read v5/v6 checkpoints that name the retired physical-shard module.
+def checkpoint_resume_lineage(record: object) -> tuple[ResumeLineage, ...]:
+    if record is None:
+        return ()
+    if not isinstance(record, list):
+        raise ValueError("checkpoint resume lineage must be an ordered list")
+    lineage = tuple(ResumeLineage.from_record(item) for item in record)
+    for previous, current in pairwise(lineage):
+        if previous.new_source_sha != current.old_source_sha:
+            raise ValueError("checkpoint resume lineage source transitions are not contiguous")
+    return lineage
 
-    PyTorch 2.11.0 cannot load those globals through its default unpickler.
-    Keep this mapping until v5/v6 checkpoint support ends; test_checkpoints.py
-    covers the known globals and rejects unknown ones.
-    """
-    return torch.load(path, map_location=device, weights_only=False, pickle_module=_PhysicalShardCheckpointPickle)
+
+def validate_resume_provenance(
+    stored: object,
+    current: Mapping[str, object],
+    *,
+    transition: ResumeLineage | None = None,
+    parent_checkpoint_sha256: str | None = None,
+) -> None:
+    if not isinstance(stored, Mapping):
+        raise ValueError("resume checkpoint has no provenance record")
+    previous = cast(Mapping[str, object], stored)
+    if set(previous) != set(current):
+        raise ValueError("resume provenance fields changed")
+    changed = {name for name, value in current.items() if previous[name] != value}
+    if transition is not None:
+        if (
+            transition.parent_checkpoint_sha256 != parent_checkpoint_sha256
+            or transition.old_source_sha != previous.get("git_sha")
+            or transition.new_source_sha != current.get("git_sha")
+        ):
+            raise ValueError("resume lineage does not identify this checkpoint and source transition")
+        changed.discard("git_sha")
+    if changed:
+        raise ValueError(f"resume provenance changed: {sorted(changed)}")
 
 
 class _Stop:
@@ -65,7 +116,7 @@ def checkpoint_sha256(path: Path) -> str:
     """Return the SHA-256 digest of a checkpoint file."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -185,7 +236,6 @@ def load_for_resume(
     *,
     device: str,
     name: str = "latest.pt",
-    legacy_physical_rows: bool = False,
 ) -> dict[str, Any] | None:
     """Load the resume checkpoint for ``run_name``: prefer the local copy, else
     pull it from R2. Returns the deserialized state dict, or ``None`` if no
@@ -194,8 +244,6 @@ def load_for_resume(
     path = local if local.is_file() else download_latest(run_name, ckpt_dir, name=name)
     if path is None:
         return None
-    if legacy_physical_rows:
-        return load_legacy_physical_shard_checkpoint(path, device=device)
     return torch.load(path, map_location=device, weights_only=False)
 
 

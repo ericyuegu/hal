@@ -22,12 +22,12 @@ normalizer still use all 128 suffix prefixes. One history cross-attention block
 after decoder block one shares a single projected 256-state memory per window.
 
 Run:
-    uv run experiments/059_muon_history_decoder.py train
-    uv run experiments/059_muon_history_decoder.py train --resume <run>
-    uv run experiments/059_muon_history_decoder.py train --resume <parent> \
+    uv run experiments/059_muon_action_sequence.py train
+    uv run experiments/059_muon_action_sequence.py train --resume <run>
+    uv run experiments/059_muon_action_sequence.py train --resume <parent> \
         --resume-checkpoint checkpoints/step-0098304.pt --resume-as <child> \
         --decay-duration 32768
-    uv run experiments/059_muon_history_decoder.py eval --checkpoint runs/<run>/final.pt
+    uv run experiments/059_muon_action_sequence.py eval --checkpoint runs/<run>/final.pt
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from __future__ import annotations
 import contextlib
 import functools
 import hashlib
-import itertools
 import json
 import math
 import os
@@ -52,6 +51,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from dataclasses import fields
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 from typing import ClassVar
@@ -79,13 +80,16 @@ from jaxtyping import Float
 from jaxtyping import Int
 from jaxtyping import jaxtyped
 from torch import Tensor
-from torch.nn.attention.flex_attention import flex_attention
 from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
+from hal.data.feature_stats import load_consolidated_mixture_stats
+from hal.data.player_identity import PlayerIdentitySidecar
+from hal.data.player_identity import ReplayPlayerLookup
+from hal.data.player_identity import load_player_identity_artifact
 from hal.data.policy_schema import unpack_player_stock
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
 from hal.eval.action_trace import ActionTraceWriter
@@ -100,82 +104,70 @@ from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import usable_cpus
 from hal.eval.matchups import matchups_for_vs_cpu
-from hal.eval.policy_sampling import SlotGroupRng
-from hal.eval.policy_sampling import sample_categorical
-from hal.eval.policy_sampling import validate_sampling_temperature
-from hal.eval.self_play import DecodeTelemetry
-from hal.eval.self_play import canonical_context
-from hal.eval.self_play import synthetic_context as build_synthetic_context
+from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.scheduling import FrameTiming
+from hal.inference.api import PredictionRequest
+from hal.inference.api import RuntimeConfig
+from hal.inference.benchmark import DecodeTelemetry
+from hal.inference.warmup import synthetic_context as build_synthetic_context
+from hal.inference.window_policy import DecodedPlan
+from hal.inference.window_policy import DenseWindowPredictionPolicy
+from hal.inference.window_policy import WindowPolicy
+from hal.models.action_sequence import ActionSequenceConfig
+from hal.models.action_sequence import ActionSequenceTransformer
+from hal.models.action_sequence import NonlinearActionHead
+from hal.models.action_sequence import SwiGLU
+from hal.models.action_sequence import activation_input_metrics
+from hal.models.action_sequence import activation_output_metrics
+from hal.models.action_sequence import decoder_rmsnorm
+from hal.models.controller_codec import BUTTON_LEFT_CHANNEL
+from hal.models.controller_codec import BUTTON_RIGHT_CHANNEL
+from hal.models.controller_codec import BUTTONS_GROUP
+from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
+from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.controller_codec import TRIGGER_LEFT_CHANNEL
+from hal.models.controller_codec import TRIGGER_RIGHT_CHANNEL
+from hal.models.controller_codec import TRIGGERS_GROUP
+from hal.models.sampling import validate_sampling_temperature
+from hal.representation.features import ITEM_PLAYER_COLUMNS
+from hal.representation.features import ITEM_PLAYER_PROJECTION
+from hal.representation.features import Context
+from hal.representation.features import FeatureProjection
+from hal.representation.features import stack_actions
+from hal.representation.player_identity import MASKED_PLAYER_ID
+from hal.representation.player_identity import PlayerVocabulary
+from hal.representation.player_identity import decode_player_codes
 from hal.sim.process_vec import ProcessVecTelemetry
 from hal.sim.rollout import covering_power_of_two
 from hal.training import returns as returns_lib
-from hal.training import scoring
+from hal.training.batches import TrainBatch
+from hal.training.buffered_mds_replay_loader import PREFETCH_FACTOR
+from hal.training.buffered_mds_replay_loader import BufferedMDSReplayLoader
+from hal.training.buffered_mds_replay_loader import MDSStorageAdapter
+from hal.training.buffered_mds_replay_loader import PhysicalShardSelection
+from hal.training.buffered_mds_replay_loader import SourceRowSelection
+from hal.training.buffered_mds_replay_loader import build_shard_plan
 from hal.training.checkpoints import BackgroundUploader
+from hal.training.checkpoints import ResumeLineage
 from hal.training.checkpoints import advance_checkpoint_link
+from hal.training.checkpoints import checkpoint_resume_lineage
 from hal.training.checkpoints import checkpoint_sha256
 from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
+from hal.training.checkpoints import read_resume_lineage
 from hal.training.checkpoints import save_checkpoint
-from hal.training.closed_loop import RecedingHorizon
-from hal.training.controller_codec import BUTTON_LEFT_CHANNEL
-from hal.training.controller_codec import BUTTON_RIGHT_CHANNEL
-from hal.training.controller_codec import BUTTONS_GROUP
-from hal.training.controller_codec import CONTROLLER_DECODE_ORDER
-from hal.training.controller_codec import CONTROLLER_GROUP_COUNT
-from hal.training.controller_codec import CONTROLLER_GROUP_INDEX
-from hal.training.controller_codec import CONTROLLER_GROUP_NAMES
-from hal.training.controller_codec import CONTROLLER_GROUP_VOCABS
-from hal.training.controller_codec import TRIGGER_LEFT_CHANNEL
-from hal.training.controller_codec import TRIGGER_RIGHT_CHANNEL
-from hal.training.controller_codec import TRIGGERS_GROUP
-from hal.training.controller_codec import DiscreteControllerCodec
-from hal.training.dataloader import make_loader
-from hal.training.dataloader import train_batch_from_columns
-from hal.training.ego_stats import load_consolidated_mixture_stats
-from hal.training.features import A_DIM
-from hal.training.features import ACTION_CHANNELS
-from hal.training.features import BASE_ITEMS_PROJECTION
-from hal.training.features import BASE_PLAYER_PREFIXES
-from hal.training.features import CAT_FEATURES
-from hal.training.features import FLOAT_FEATURES
-from hal.training.features import ITEM_CAT_VOCABS
-from hal.training.features import ITEM_COLUMNS
-from hal.training.features import ITEM_FLOATS
-from hal.training.features import ITEM_PLAYER_COLUMNS
-from hal.training.features import ITEM_PLAYER_PROJECTION
-from hal.training.features import ITEM_PRESENCE_SUFFIX
-from hal.training.features import ITEM_PROBE_COLUMN
-from hal.training.features import NEUTRAL_ACTION
-from hal.training.features import Context
-from hal.training.features import FeatureProjection
-from hal.training.features import TrainBatch
-from hal.training.features import stack_actions
+from hal.training.checkpoints import validate_resume_provenance
 from hal.training.mfu import bf16_dense_peak_flops
 from hal.training.mfu import bf16_peak_source
 from hal.training.mfu import model_flops_utilization
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
-from hal.training.physical_shard_loader import PREFETCH_FACTOR
-from hal.training.physical_shard_loader import MDSStorageAdapter
-from hal.training.physical_shard_loader import PhysicalShardReplayLoader
-from hal.training.physical_shard_loader import PhysicalShardSelection
-from hal.training.physical_shard_loader import SourceRowSelection
-from hal.training.physical_shard_loader import build_shard_plan
-from hal.training.player_identity import MASKED_PLAYER_ID
-from hal.training.player_identity import PlayerIdentitySidecar
-from hal.training.player_identity import PlayerVocabulary
-from hal.training.player_identity import ReplayPlayerLookup
-from hal.training.player_identity import decode_player_codes
-from hal.training.player_identity import load_player_identity_artifact
-from hal.training.player_identity import vocabulary_buffer
+from hal.training.replay_windows import train_batch_from_columns
+from hal.training.returns import ReturnCalibration
 from hal.training.runs import make_run_name
 from hal.training.runs import setup_run_dir
 from hal.training.system_metrics import HostMetricsSampler
-from hal.training.trunk import Rotary
-from hal.training.trunk import Trunk
-from hal.training.trunk import TrunkConfig
-from hal.training.trunk import apply_rotary_emb
-from hal.wire import ITEM_SLOTS
-from hal.wire import item_column
+from hal.training.validation_replay_loader import make_validation_replay_loader
+from hal.wire import ACTION_DIM
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _EXPERIMENT_ID: Final[str] = "059_muon_history_decoder_v5"
@@ -205,6 +197,10 @@ OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (
 RETURN_HORIZON: Final[int] = 60
 RETURN_SCALE: Final[float] = 120.0
 CALIBRATION_WINDOWS: Final[int] = 65_536
+
+
+def _nats_to_bits(values: Tensor) -> Tensor:
+    return values / math.log(2.0)
 
 
 def conditioning_protocol() -> dict[str, object]:
@@ -321,8 +317,6 @@ class ReturnBatch:
                 Context(
                     {name: value[:count] for name, value in self.context.features.items()},
                     self.context.ctx_pad[:count],
-                    None if self.context.slot_ids is None else self.context.slot_ids[:count],
-                    None if self.context.reset is None else self.context.reset[:count],
                 ),
                 self.target[:count],
                 None if self.batch.replay_ids is None else self.batch.replay_ids[:count],
@@ -335,89 +329,24 @@ class ReturnBatch:
         )
 
 
-class ReturnCalibration:
-    def __init__(self) -> None:
-        self.values: list[float] = []
-        self.valid: list[bool] = []
-        self.replay_ids: list[str] = []
-
-    def observe(self, batch: ReturnBatch) -> None:
-        remaining = CALIBRATION_WINDOWS - len(self.values)
-        if remaining <= 0:
-            return
-        count = min(remaining, len(batch.future_return))
-        if batch.batch.replay_ids is None:
-            raise ValueError("calibration requires replay identities")
-        valid = batch.available[:count, -1].detach().cpu()
-        values = torch.where(valid, batch.future_return[:count, -1].detach().cpu(), 0.0)
-        if not bool(torch.isfinite(values).all()):
-            raise ValueError("nonfinite valid calibration return")
-        self.values.extend(values.tolist())
-        self.valid.extend(valid.tolist())
-        self.replay_ids.extend(batch.batch.replay_ids[:count])
-
-    def targets(self) -> tuple[float, float, float]:
-        if len(self.values) != CALIBRATION_WINDOWS:
-            raise ValueError("return calibration is incomplete")
-        positive = np.asarray(self.values)[np.asarray(self.valid) & (np.asarray(self.values) > 0)]
-        if not positive.size:
-            raise ValueError("calibration has no strictly positive valid returns")
-        median, p90 = np.quantile(positive, [0.5, 0.9], method="linear")
-        return 0.0, float(median), float(p90)
-
-    def state_dict(self) -> dict[str, object]:
-        data = {"values": self.values.copy(), "valid": self.valid.copy(), "replay_ids": self.replay_ids.copy()}
-        identity = hashlib.sha256(json.dumps(data, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-        return {
-            "version": 1,
-            **data,
-            "sha256": identity,
-            "targets": self.targets() if len(self.values) == CALIBRATION_WINDOWS else None,
-        }
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        if set(state) != {"version", "values", "valid", "replay_ids", "sha256", "targets"} or state["version"] != 1:
-            raise ValueError("incompatible return calibration")
-        if not all(isinstance(state[name], list) for name in ("values", "valid", "replay_ids")):
-            raise ValueError("calibration samples must be ordered lists")
-        values = cast(list[float], state["values"])
-        valid = cast(list[bool], state["valid"])
-        replay_ids = cast(list[str], state["replay_ids"])
-        if (
-            any(type(value) is not float or not math.isfinite(value) for value in values)
-            or any(type(value) is not bool for value in valid)
-            or any(not isinstance(value, str) or not value for value in replay_ids)
-        ):
-            raise ValueError("invalid calibration sample types")
-        self.values = values.copy()
-        self.valid = list(cast(list[bool], state["valid"]))
-        self.replay_ids = list(cast(list[str], state["replay_ids"]))
-        if (
-            len(self.values) != len(self.valid)
-            or len(self.values) != len(self.replay_ids)
-            or len(self.values) > CALIBRATION_WINDOWS
-        ):
-            raise ValueError("invalid calibration lengths")
-        if self.state_dict() != state:
-            raise ValueError("return calibration identity or targets changed")
-
-
 @contextlib.contextmanager
 def _elapsed_heartbeat(message: str) -> Iterator[None]:
     stop = threading.Event()
     started = time.monotonic()
-
-    def report() -> None:
-        while not stop.wait(_STARTUP_LOG_INTERVAL_S):
-            print(f"{message}; {time.monotonic() - started:.1f}s elapsed", flush=True)
-
-    reporter = threading.Thread(target=report, name="startup-progress", daemon=True)
+    reporter = threading.Thread(
+        target=_report_startup_elapsed, args=(stop, started, message), name="startup-progress", daemon=True
+    )
     reporter.start()
     try:
         yield
     finally:
         stop.set()
         reporter.join()
+
+
+def _report_startup_elapsed(stop: threading.Event, started: float, message: str) -> None:
+    while not stop.wait(_STARTUP_LOG_INTERVAL_S):
+        print(f"{message}; {time.monotonic() - started:.1f}s elapsed", flush=True)
 
 
 @dataclass(frozen=True)
@@ -881,11 +810,9 @@ def proxy_config() -> TrainConfig:
 def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -> Context:
     """Build the fixed base observation with projectile columns."""
     context = build_synthetic_context(
-        cfg,
+        cfg.arch.L_ctx,
         batch_size,
         device,
-        context_length=cfg.arch.L_ctx,
-        observation_bundle="base",
         items=True,
     )
     return Context(
@@ -894,15 +821,13 @@ def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -
             "ego_player_id": torch.zeros(batch_size, cfg.arch.L_ctx, dtype=torch.long, device=device),
         },
         ctx_pad=context.ctx_pad,
-        slot_ids=context.slot_ids,
-        reset=context.reset,
     )
 
 
 def synthetic_awr_batch(cfg: TrainConfig, device: torch.device) -> ReturnBatch:
     """Build one fully valid production-shaped batch without touching the corpus."""
     context = synthetic_context(cfg, cfg.batch_size, device)
-    target = torch.zeros(cfg.batch_size, cfg.arch.sample_chunk_length, A_DIM, device=device)
+    target = torch.zeros(cfg.batch_size, cfg.arch.sample_chunk_length, ACTION_DIM, device=device)
     returns = torch.zeros(cfg.batch_size, cfg.arch.L_ctx, device=device)
     eligible = torch.ones(cfg.batch_size, cfg.arch.L_ctx, dtype=torch.bool, device=device)
     return ReturnBatch(
@@ -944,1043 +869,35 @@ def amp_context(cfg: TrainConfig, device: torch.device | str):
     return contextlib.nullcontext()
 
 
-def decoder_rmsnorm(x: Tensor) -> Tensor:
-    return F.rms_norm(x, (x.shape[-1],), eps=1e-6)
-
-
-class SwiGLU(nn.Module):
-    """Gated MLP used by every nonlinear projection in the policy."""
-
-    def __init__(self, d_input: int, d_hidden: int, d_output: int, *, output_bias: bool = False) -> None:
-        super().__init__()
-        self.up = nn.Linear(d_input, 2 * d_hidden, bias=False)
-        self.down = nn.Linear(d_hidden, d_output, bias=output_bias)
-
-    def activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Return the activated gate, value branch, and their product."""
-        gate_projection, value = self.up(x).chunk(2, dim=-1)
-        gate = F.silu(gate_projection)
-        return gate, value, gate * value
-
-    def forward(self, x: Float[Tensor, "... d_input"]) -> Float[Tensor, "... d_output"]:
-        _, _, product = self.activations(x)
-        return self.down(product)
-
-
-class NonlinearActionHead(nn.Module):
-    """O26 RMSNorm-SiLU controller readout."""
-
-    def __init__(self, d_model: int, d_hidden: int, vocab: int, *, norm_eps: float = 1e-6) -> None:
-        super().__init__()
-        self.norm_eps = norm_eps
-        self.up = nn.Linear(d_model, d_hidden, bias=False)
-        self.down = nn.Linear(d_hidden, vocab)
-
-    def normalize(self, x: Tensor) -> Tensor:
-        return F.rms_norm(x, (x.shape[-1],), eps=self.norm_eps)
-
-    def project(self, x: Tensor) -> Tensor:
-        """Apply the head MLP to an input prepared by its caller."""
-        return self.down(F.silu(self.up(x)))
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.project(self.normalize(x))
-
-    def forward_with_input(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        """Return logits and the normalized tensor read by the hidden layer."""
-        logits, normalized, _up_output, _down_input = self.projection_activations(x)
-        return logits, normalized
-
-    def projection_activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Return the output and the tensors at both projection boundaries."""
-        normalized = self.normalize(x)
-        output, up_output, down_input = self.project_activations(normalized)
-        return output, normalized, up_output, down_input
-
-    def project_activations(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Return the output and activations for an input prepared by its caller."""
-        up_output = self.up(x)
-        down_input = F.silu(up_output)
-        return self.down(down_input), up_output, down_input
-
-
-def _sampled_quantile(tensor: Tensor, percentile: float, *, absolute: bool = False) -> Tensor:
-    """Estimate a quantile from a deterministic bounded-size flat sample."""
-    if not 0.0 <= percentile <= 100.0:
-        raise ValueError(f"percentile must be in [0, 100], got {percentile}")
-    values = tensor.detach().flatten()
-    sample_size = Architecture.activation_percentile_sample_size
-    stride = max((values.numel() + sample_size - 1) // sample_size, 1)
-    if stride > 1:
-        stride += 1
-    sample = values[::stride].float()
-    if absolute:
-        sample = sample.abs()
-    rank = min(max(math.ceil(percentile * sample.numel() / 100.0), 1), sample.numel())
-    return torch.kthvalue(sample, rank).values
-
-
-def _bounded_flat_sample(tensor: Tensor) -> Tensor:
-    """Return a deterministic activation sample without retaining its source."""
-    values = tensor.detach().flatten()
-    sample_size = Architecture.activation_percentile_sample_size
-    stride = max((values.numel() + sample_size - 1) // sample_size, 1)
-    return values[::stride][:sample_size].float()
-
-
-def _activation_input_metrics(prefix: str, tensor: Tensor) -> dict[str, Tensor]:
-    values = _bounded_flat_sample(tensor)
-    return {
-        f"{prefix}/input_rms": values.square().mean().sqrt(),
-        f"{prefix}/input_abs_max": values.abs().amax(),
-    }
-
-
-def _activation_output_metrics(prefix: str, tensor: Tensor) -> dict[str, Tensor]:
-    """Measure a bounded output sample, ignoring masked infinite logits."""
-    values = _bounded_flat_sample(tensor)
-    legal = torch.isfinite(values)
-    count = legal.sum().clamp_min(1)
-    finite = values.masked_fill(~legal, 0)
-    ordered = values.abs().masked_fill(~legal, torch.inf).sort().values
-
-    def percentile(numerator: int, denominator: int) -> Tensor:
-        rank = (count * numerator + denominator - 1).div(denominator, rounding_mode="floor").clamp_min(1)
-        return ordered.gather(0, (rank - 1).reshape(1)).squeeze(0)
-
-    return {
-        f"{prefix}/output_rms": (finite.square().sum() / count).sqrt(),
-        f"{prefix}/output_abs_p99": percentile(99, 100),
-        f"{prefix}/output_abs_p999": percentile(999, 1000),
-    }
-
-
-def short_causal_attention(
-    query: Float[Tensor, "B H L D"],
-    key: Float[Tensor, "B H L D"],
-    value: Float[Tensor, "B H L D"],
-) -> Float[Tensor, "B H L D"]:
-    """Use explicit causal attention for the 16-token training sequence.
-
-    On a B200, cuDNN flash SDPA used 149 ms per step for forward and
-    backward. At this length, its launch and layout costs were more than the
-    cost to materialize 121 scores per head. This implementation reduced the
-    full train step by approximately 100 ms.
-    """
-    scores = query @ key.transpose(-2, -1)
-    scores = scores.float() * (query.shape[-1] ** -0.5)
-    causal = torch.ones(scores.shape[-2:], dtype=torch.bool, device=scores.device).tril()
-    weights = F.softmax(scores.masked_fill(~causal, -torch.inf), dim=-1).to(query.dtype)
-    return weights @ value
-
-
-TEMPORAL_ATTENTION_BATCH = 16_384
-
-
-@dataclass(frozen=True, slots=True)
-class DepthRule:
-    attention: float
-    mlp: float
-
-
-def depth_rule(stack: Literal["trunk", "temporal"], layers: int, alpha: float) -> DepthRule:
-    """Return O51's residual multipliers for one stack."""
-    if alpha != 0.5:
-        raise ValueError("O59 fixes depth_alpha to 0.5")
-    if layers < 1:
-        raise ValueError("stack depth must be positive")
-    if stack == "trunk":
-        base_layers = Architecture.trunk_reference_layers
-        base_attention = Architecture.trunk_reference_attention_scale
-    elif stack == "temporal":
-        base_layers = Architecture.temporal_reference_layers
-        base_attention = Architecture.temporal_reference_attention_scale
-    else:
-        raise ValueError(f"unknown stack {stack!r}")
-    branch = (layers / base_layers) ** -alpha
-    return DepthRule(attention=base_attention * branch, mlp=branch)
-
-
-class ReturnConditioner(nn.Module):
-    """Modulate decoder norms once per prefix; absence is exactly neutral."""
-
-    def __init__(self, cfg: TrainConfig) -> None:
-        super().__init__()
-        self.width = cfg.arch.temporal_d_model
-        self.enabled = cfg.return_conditioning
-        self.embedding = nn.Linear(1, cfg.arch.return_embed_dim, bias=True)
-        self.projections = nn.ModuleList(
-            nn.Linear(cfg.arch.return_embed_dim, 4 * self.width, bias=True) for _ in range(cfg.arch.temporal_layers)
-        )
-        nn.init.normal_(self.embedding.weight, std=cfg.hidden_std_multiplier)
-        nn.init.zeros_(self.embedding.bias)
-        for module in self.projections:
-            projection = cast(nn.Linear, module)
-            nn.init.zeros_(projection.weight)
-            nn.init.zeros_(projection.bias)
-
-    def forward(self, return_value: Tensor, condition_present: Tensor) -> tuple[Tensor, ...]:
-        if return_value.shape != condition_present.shape or condition_present.dtype != torch.bool:
-            raise ValueError("return values and boolean presence must have the same shape")
-        present = condition_present & self.enabled
-        safe = torch.where(present, return_value, 0.0)
-        embedded = F.silu(self.embedding((safe / RETURN_SCALE)[..., None]))
-        return tuple(
-            torch.where(
-                present[..., None, None],
-                projection(embedded).reshape(*return_value.shape, 4, self.width),
-                0.0,
-            )
-            for projection in self.projections
-        )
-
-
-class TemporalBlock(nn.Module):
-    """RoPE causal block with O51 depth scaling on both branches."""
-
-    def __init__(self, cfg: TrainConfig) -> None:
-        super().__init__()
-        self.n_heads = cfg.arch.temporal_heads
-        self.d_model = cfg.arch.temporal_d_model
-        self.head_dim = self.d_model // self.n_heads
-        rule = depth_rule("temporal", cfg.arch.temporal_layers, cfg.depth_alpha)
-        self.scale = rule.attention
-        self.mlp_scale = rule.mlp
-        self.qkv = nn.Linear(self.d_model, 3 * self.d_model, bias=False)
-        self.proj = nn.Linear(self.d_model, self.d_model, bias=False)
-        self.rotary = Rotary(self.head_dim)
-        self.up = nn.Linear(self.d_model, cfg.arch.temporal_ff_dim, bias=False)
-        self.down = nn.Linear(cfg.arch.temporal_ff_dim, self.d_model, bias=False)
-
-    def _qkv(self, x: Tensor, scale: Tensor, shift: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        batch, length, _ = x.shape
-        q, k, v = self.qkv((1 + scale) * decoder_rmsnorm(x) + shift).split(self.d_model, dim=-1)
-        shape = (batch, length, self.n_heads, self.head_dim)
-        return q.view(shape), k.view(shape), v.view(shape)
-
-    def forward(self, x: Tensor, modulation: Tensor) -> Tensor:
-        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
-        q, k, v = self._qkv(x, scale_attn, shift_attn)
-        cos, sin = self.rotary(q)
-        q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
-        k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
-        v = v.transpose(1, 2)
-        # Equal attention chunks keep the tiny BMMs efficient. The large linear
-        # and SwiGLU operations use the full batch.
-        attended = torch.cat(
-            [
-                short_causal_attention(query, key, values)
-                for query, key, values in zip(
-                    q.split(TEMPORAL_ATTENTION_BATCH),
-                    k.split(TEMPORAL_ATTENTION_BATCH),
-                    v.split(TEMPORAL_ATTENTION_BATCH),
-                    strict=True,
-                )
-            ],
-            dim=0,
-        )
-        attended = attended.transpose(1, 2).contiguous().view_as(x)
-        x = x + self.scale * self.proj(attended)
-        return x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
-
-    def forward_step(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, modulation: Tensor
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
-        q, k, v = self._qkv(x[:, None], scale_attn[:, None], shift_attn[:, None])
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        if past is not None:
-            k = torch.cat((past[0], k), dim=2)
-            v = torch.cat((past[1], v), dim=2)
-        cos, sin = self.rotary.at(k.shape[2], x.device)
-        q = apply_rotary_emb(q, cos[:, -1:], sin[:, -1:]).transpose(1, 2)
-        rotated_k = apply_rotary_emb(k.transpose(1, 2), cos, sin).transpose(1, 2)
-        attended = F.scaled_dot_product_attention(q, rotated_k, v)
-        attended = attended.transpose(1, 2).contiguous().view_as(x)
-        x = x + self.scale * self.proj(attended)
-        x = x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
-        return x, (k, v)
-
-
-class HistoryCrossAttention(nn.Module):
-    """Attend packed prefix/offset queries to one shared trunk memory."""
-
-    def __init__(self, cfg: TrainConfig) -> None:
-        super().__init__()
-        self.n_heads = cfg.arch.temporal_heads
-        self.d_model = cfg.arch.temporal_d_model
-        self.head_dim = self.d_model // self.n_heads
-        self.scale = depth_rule("temporal", cfg.arch.temporal_layers, cfg.depth_alpha).attention
-        self.query = nn.Linear(self.d_model, self.d_model, bias=False)
-        self.key_value = nn.Linear(cfg.arch.d_model, 2 * self.d_model, bias=False)
-        self.output = nn.Linear(self.d_model, self.d_model, bias=False)
-        self.rotary = Rotary(self.head_dim)
-
-    def project_memory(self, hidden: Tensor) -> tuple[Tensor, Tensor]:
-        if hidden.ndim != 3:
-            raise ValueError(f"history memory must be [B, L, d], got {tuple(hidden.shape)}")
-        batch, length, _ = hidden.shape
-        key, value = self.key_value(decoder_rmsnorm(hidden)).chunk(2, dim=-1)
-        shape = (batch, length, self.n_heads, self.head_dim)
-        key = key.view(shape)
-        value = value.view(shape).transpose(1, 2)
-        cos, sin = self.rotary.at(length, key.device, key.dtype)
-        return apply_rotary_emb(key, cos, sin).transpose(1, 2), value
-
-    def forward_projected(
-        self,
-        x: Tensor,
-        key: Tensor,
-        value: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        *,
-        offsets_per_prefix: int,
-    ) -> Tensor:
-        """Apply causal history attention without replicating K/V by prefix."""
-        batch, queries, _ = x.shape
-        length = key.shape[2]
-        if key.shape != (batch, self.n_heads, length, self.head_dim) or value.shape != key.shape:
-            raise ValueError("history K/V shape mismatch")
-        if ctx_pad.shape != (batch,) or prefix_positions.ndim != 2:
-            raise ValueError("history padding and prefix positions have the wrong shape")
-        if queries != prefix_positions.shape[1] * offsets_per_prefix:
-            raise ValueError("history query packing does not match prefix positions")
-
-        query = self.query(decoder_rmsnorm(x)).view(batch, queries, self.n_heads, self.head_dim)
-        query_positions = prefix_positions.repeat_interleave(offsets_per_prefix, dim=1)
-        cos, sin = self.rotary.at(length, query.device, query.dtype)
-        query_cos = cos[0, :, 0][query_positions][:, :, None, :]
-        query_sin = sin[0, :, 0][query_positions][:, :, None, :]
-        query = apply_rotary_emb(query, query_cos, query_sin).transpose(1, 2)
-
-        if query.device.type == "cuda":
-
-            def score_mod(score: Tensor, b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
-                del h
-                allowed = (kv >= ctx_pad[b]) & (kv <= query_positions[b, q])
-                return torch.where(allowed, score, -torch.inf)
-
-            attended = cast(Tensor, flex_attention(query, key, value, score_mod=score_mod))
-        else:
-            memory = torch.arange(length, device=x.device)
-            valid = (memory[None, None, :] >= ctx_pad[:, None, None]) & (
-                memory[None, None, :] <= query_positions[:, :, None]
-            )
-            attended = F.scaled_dot_product_attention(query, key, value, attn_mask=valid[:, None])
-        attended = attended.transpose(1, 2).contiguous().view_as(x)
-        return x + self.scale * self.output(attended)
-
-
-class CausalTemporalDecoder(nn.Module):
-    """Temporal action chain conditioned by concatenation."""
-
-    def __init__(self, cfg: TrainConfig, codec: DiscreteControllerCodec) -> None:
-        super().__init__()
-        self.codec = codec
-        self.head_offsets = tuple(cfg.arch.head_offsets)
-        self.live_horizons = (cfg.prediction_frames,)
-        self.d_model = cfg.arch.temporal_d_model
-        self.training_diagnostics = cfg.optimizer == "adamw"
-        controller_width = CONTROLLER_GROUP_COUNT * cfg.arch.action_embed_dim
-        self.offset_embedding = nn.Embedding(cfg.arch.sample_chunk_length + 1, cfg.arch.offset_embed_dim)
-        self.token_projection = nn.Linear(
-            cfg.arch.d_model + controller_width + cfg.arch.offset_embed_dim, self.d_model
-        )
-        self.blocks = nn.ModuleList([TemporalBlock(cfg) for _ in range(cfg.arch.temporal_layers)])
-        self.history_attention = HistoryCrossAttention(cfg)
-        self.group_condition = nn.ModuleDict(
-            {
-                name: nn.Linear(position * cfg.arch.action_embed_dim, 2 * self.d_model)
-                for position, name in enumerate(CONTROLLER_DECODE_ORDER)
-                if position
-            }
-        )
-        self.outputs = nn.ModuleDict(
-            {
-                name: NonlinearActionHead(
-                    self.d_model,
-                    cfg.arch.group_head_dim,
-                    CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]],
-                    # Keep the near-zero button Jacobian bounded in every path.
-                    norm_eps=1e-5 if name == "buttons" else 1e-6,
-                )
-                for name in CONTROLLER_GROUP_NAMES
-            }
-        )
-        self.trunk_outputs = nn.ModuleDict(
-            {
-                name: NonlinearActionHead(
-                    cfg.arch.d_model,
-                    cfg.arch.group_head_dim,
-                    CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]],
-                )
-                for name in CONTROLLER_GROUP_NAMES
-            }
-        )
-        self.trunk_width = cfg.arch.d_model
-        self.controller_width = controller_width
-
-    return_conditioner: ReturnConditioner
-
-    def _state_bias(self, trunk: Tensor) -> Tensor:
-        """The trunk share of the token projection, computed once per position.
-
-        A linear layer over a concatenation decomposes into a sum of per-part
-        linears: ``W [h | a | o] + b = W_h h + W_a a + W_o o + b``. The trunk
-        part is constant across the chain's steps, so it never needs the
-        per-step copy the concatenation implied. The single ``token_projection``
-        parameter is kept (same shape, same initialization as the concatenating
-        form); only the compute schedule changes.
-        """
-        weight = self.token_projection.weight
-        return F.linear(trunk, weight[:, : self.trunk_width], self.token_projection.bias)
-
-    def _step_features(self, previous: Tensor, offsets: Tensor, embedded: Tensor | None = None) -> Tensor:
-        """The per-step share of the token projection: previous action and offset."""
-        weight = self.token_projection.weight
-        action_weight = weight[:, self.trunk_width : self.trunk_width + self.controller_width]
-        offset_weight = weight[:, self.trunk_width + self.controller_width :]
-        action = F.linear(self.codec.embed_frame(previous) if embedded is None else embedded, action_weight)
-        return action + F.linear(self.offset_embedding(offsets), offset_weight)
-
-    def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
-        """Compute context-only logits once for all decoded offsets."""
-        return {name: self.trunk_outputs[name](hidden) for name in CONTROLLER_GROUP_NAMES}
-
-    def _decode_step(
-        self,
-        previous: Tensor,
-        offset: int,
-        state_bias: Tensor,
-        caches: list[tuple[Tensor, Tensor] | None],
-        history: tuple[Tensor, Tensor, Tensor, Tensor],
-        conditioning: tuple[Tensor, ...],
-    ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
-        """Advance the temporal chain by one selected frame offset."""
-        offsets = torch.full((previous.shape[0],), offset, device=previous.device, dtype=torch.long)
-        state = decoder_rmsnorm(state_bias + self._step_features(previous, offsets))
-        next_caches: list[tuple[Tensor, Tensor] | None] = []
-        for index, (module, past) in enumerate(zip(self.blocks, caches, strict=True)):
-            block = cast(TemporalBlock, module)
-            state, present = block.forward_step(state, past, conditioning[index])
-            if index == 0:
-                key, value, ctx_pad, prefix_positions = history
-                state = self.history_attention.forward_projected(
-                    state[:, None],
-                    key,
-                    value,
-                    ctx_pad,
-                    prefix_positions,
-                    offsets_per_prefix=1,
-                )[:, 0]
-            next_caches.append(present)
-        return decoder_rmsnorm(state), next_caches
-
-    def teacher_forced_states(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-    ) -> Tensor:
-        prefix_shape = tuple(prefix_positions.shape)
-        expected = (*prefix_shape, len(self.head_offsets), CONTROLLER_GROUP_COUNT)
-        if observed.shape != (*prefix_shape, CONTROLLER_GROUP_COUNT) or targets.shape != expected:
-            raise ValueError(
-                f"expected observed {(*prefix_shape, CONTROLLER_GROUP_COUNT)} and targets {expected}, got "
-                f"{tuple(observed.shape)} and {tuple(targets.shape)}"
-            )
-        batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
-        selected_hidden = hidden[batch_indices, prefix_positions]
-        previous = torch.cat((observed[:, :, None], targets[..., :-1, :]), dim=2)
-        trunk = decoder_rmsnorm(selected_hidden)
-        offsets = torch.tensor(self.head_offsets, device=hidden.device)
-        x = self._state_bias(trunk)[:, :, None] + self._step_features(previous, offsets)
-        x = decoder_rmsnorm(x)
-        x = x.reshape(hidden.shape[0] * prefix_positions.shape[1], len(self.head_offsets), self.d_model)
-        conditioning = self.return_conditioner(return_value, condition_present)
-        for index, block in enumerate(self.blocks):
-            x = block(x, conditioning[index].reshape(-1, 1, 4, self.d_model))
-            if index == 0:
-                packed = x.view(hidden.shape[0], -1, self.d_model)
-                key, value = self.history_attention.project_memory(hidden)
-                packed = self.history_attention.forward_projected(
-                    packed,
-                    key,
-                    value,
-                    ctx_pad,
-                    prefix_positions,
-                    offsets_per_prefix=len(self.head_offsets),
-                )
-                x = packed.view_as(x)
-        return decoder_rmsnorm(x.view(*prefix_shape, len(self.head_offsets), self.d_model))
-
-    def group_features(self, states: Tensor, name: str, embedded: dict[str, Tensor]) -> Tensor:
-        head = cast(NonlinearActionHead, self.outputs[name])
-        normalized = head.normalize(states)
-        position = CONTROLLER_DECODE_ORDER.index(name)
-        if position == 0:
-            return normalized
-        prefix = torch.cat([embedded[group] for group in CONTROLLER_DECODE_ORDER[:position]], dim=-1)
-        raw_scale, raw_shift = self.group_condition[name](prefix).chunk(2, dim=-1)
-        scale = torch.tanh(raw_scale)
-        shift = raw_shift
-        return normalized * (1.0 + scale) + shift
-
-    def _teacher_forced_outputs(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-    ) -> tuple[
-        dict[str, Tensor],
-        tuple[Tensor, Tensor, Tensor],
-        dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
-    ]:
-        """Return group logits and tensors at the action projection boundaries."""
-        states = self.teacher_forced_states(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
-        )
-        batch_indices = torch.arange(hidden.shape[0], device=hidden.device)[:, None]
-        selected_hidden = hidden[batch_indices, prefix_positions]
-        embedded = self.codec.embed_groups(targets)
-        logits: dict[str, Tensor] = {}
-        projection_values: dict[
-            str,
-            tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
-        ] = {}
-        button_values: tuple[Tensor, Tensor] | None = None
-        for name in CONTROLLER_GROUP_NAMES:
-            features = self.group_features(states, name, embedded)
-            head = cast(NonlinearActionHead, self.outputs[name])
-            head_output, up_output, down_input = head.project_activations(features)
-            head_input = features
-            trunk_head = cast(NonlinearActionHead, self.trunk_outputs[name])
-            trunk_output, trunk_input, trunk_up_output, trunk_down_input = trunk_head.projection_activations(
-                selected_hidden
-            )
-            combined_logits = head_output + trunk_output[..., None, :]
-            projection_values[name] = (
-                head_input,
-                up_output,
-                down_input,
-                head_output,
-                trunk_input,
-                trunk_up_output,
-                trunk_down_input,
-                trunk_output,
-            )
-            if name == "buttons":
-                button_values = (head_input, combined_logits)
-            logits[name] = self._center(combined_logits)
-        if button_values is None:
-            raise RuntimeError("button head was not evaluated")
-        button_mask = self.codec.button_mask(targets[..., TRIGGERS_GROUP])
-        logits["buttons"] = logits["buttons"].masked_fill(button_mask, float("-inf"))
-        return logits, (*button_values, button_mask), projection_values
-
-    def teacher_forced_logits_by_group(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-    ) -> dict[str, Tensor]:
-        logits, _button_values, _projection_values = self._teacher_forced_outputs(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
-        )
-        return logits
-
-    @staticmethod
-    def nll_from_logits(logits: dict[str, Tensor], targets: Tensor) -> Tensor:
-        losses = [
-            F.cross_entropy(
-                logits[name].float().reshape(-1, CONTROLLER_GROUP_VOCABS[group]),
-                targets[..., group].reshape(-1),
-                reduction="none",
-            ).view(*targets.shape[:-1])
-            for group, name in enumerate(CONTROLLER_GROUP_NAMES)
-        ]
-        return torch.stack(losses, dim=-1)
-
-    def teacher_forced_nll(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-    ) -> Tensor:
-        logits = self.teacher_forced_logits_by_group(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
-        )
-        return self.nll_from_logits(logits, targets)
-
-    def teacher_forced_nll_with_diagnostics(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Return NLL plus a compact button-boundary stability signal."""
-        logits, button_values, projection_values = self._teacher_forced_outputs(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
-        )
-        metrics = self._button_metrics(*button_values, targets)
-        if self.training_diagnostics:
-            for name, values in projection_values.items():
-                metrics.update(self._group_metrics(name, values, logits[name]))
-        return self.nll_from_logits(logits, targets), metrics
-
-    @staticmethod
-    def _button_metrics(
-        head_input: Tensor, raw_logits: Tensor, button_mask: Tensor, targets: Tensor
-    ) -> dict[str, Tensor]:
-        input_values = head_input.detach()
-        raw_logits_values = raw_logits.detach()
-        button_targets = targets[..., BUTTONS_GROUP, None]
-        target_logits = raw_logits_values.gather(-1, button_targets).squeeze(-1).float()
-        legal_logits = raw_logits_values.masked_fill(button_mask, float("-inf"))
-        competing_logits = legal_logits.scatter(-1, button_targets, float("-inf")).amax(dim=-1).float()
-        margin = target_logits - competing_logits
-        return {
-            "stability/button_input_abs_p999": _sampled_quantile(input_values, 99.9, absolute=True),
-            "stability/button_logit_abs_p999": _sampled_quantile(raw_logits_values, 99.9, absolute=True),
-            "stability/button_margin_mean": margin.mean(),
-        }
-
-    @staticmethod
-    def _group_metrics(
-        name: str, values: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor], logits: Tensor
-    ) -> dict[str, Tensor]:
-        (
-            head_input,
-            up_output,
-            down_input,
-            down_output,
-            trunk_input,
-            trunk_up_output,
-            trunk_down_input,
-            trunk_output,
-        ) = values
-        metrics: dict[str, Tensor] = {}
-        prefix = f"diagnostics/activations/action/{name}"
-        metrics.update(_activation_input_metrics(f"{prefix}/up", head_input))
-        metrics.update(_activation_output_metrics(f"{prefix}/up", up_output))
-        metrics.update(_activation_input_metrics(f"{prefix}/down", down_input))
-        metrics.update(_activation_output_metrics(f"{prefix}/down", down_output))
-        metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/up", trunk_input))
-        metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/up", trunk_up_output))
-        metrics.update(_activation_input_metrics(f"{prefix}/trunk_skip/down", trunk_down_input))
-        metrics.update(_activation_output_metrics(f"{prefix}/trunk_skip/down", trunk_output))
-        metrics.update(_activation_output_metrics(f"{prefix}/combined_centered_logits", logits))
-        return metrics
-
-    def teacher_forced_logits(
-        self,
-        hidden: Tensor,
-        ctx_pad: Tensor,
-        prefix_positions: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-    ) -> list[dict[str, Tensor]]:
-        values = self.teacher_forced_logits_by_group(
-            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
-        )
-        return [
-            {name: logits[..., depth, :] for name, logits in values.items()} for depth in range(len(self.head_offsets))
-        ]
-
-    def _live_history(self, hidden: Tensor, ctx_pad: Tensor | None = None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        if ctx_pad is None:
-            ctx_pad = torch.zeros(hidden.shape[0], dtype=torch.long, device=hidden.device)
-        prefix_positions = torch.full(
-            (hidden.shape[0], 1), hidden.shape[1] - 1, dtype=torch.long, device=hidden.device
-        )
-        return (*self.history_attention.project_memory(hidden), ctx_pad, prefix_positions)
-
-    def forced_stepwise_logits(
-        self,
-        hidden: Tensor,
-        observed: Tensor,
-        targets: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-        *,
-        ctx_pad: Tensor | None = None,
-    ) -> list[dict[str, Tensor]]:
-        if targets.shape != (hidden.shape[0], len(self.head_offsets), CONTROLLER_GROUP_COUNT):
-            raise ValueError("stepwise targets have the wrong shape")
-        raw_trunk = hidden[:, -1]
-        trunk = decoder_rmsnorm(raw_trunk)
-        state_bias = self._state_bias(trunk)
-        trunk_logits = self._trunk_skip_logits(raw_trunk)
-        previous = observed
-        caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
-        history = self._live_history(hidden, ctx_pad)
-        conditioning = self.return_conditioner(return_value, condition_present)
-        out: list[dict[str, Tensor]] = []
-        for depth, offset in enumerate(self.head_offsets):
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
-            target = targets[:, depth]
-            embedded = self.codec.embed_groups(target)
-            group_logits = {
-                name: self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
-                    + trunk_logits[name]
-                )
-                for name in CONTROLLER_GROUP_NAMES
-            }
-            group_logits["buttons"] = group_logits["buttons"].masked_fill(
-                self.codec.button_mask(target[:, TRIGGERS_GROUP]), float("-inf")
-            )
-            out.append(group_logits)
-            previous = target
-        return out
-
-    def sample_indices(
-        self,
-        hidden: Tensor,
-        observed: Tensor,
-        offsets: tuple[int, ...],
-        return_value: Tensor,
-        condition_present: Tensor,
-        *,
-        argmax: bool,
-        uniforms: Tensor | None = None,
-        gen: torch.Generator | None = None,
-        temperature: float = 1.0,
-        ctx_pad: Tensor | None = None,
-        forced_prefix: Tensor | None = None,
-    ) -> Tensor:
-        indices, _ = self._sample_indices_and_logits(
-            hidden,
-            observed,
-            offsets,
-            return_value,
-            condition_present,
-            argmax=argmax,
-            uniforms=uniforms,
-            gen=gen,
-            temperature=temperature,
-            capture_logits=False,
-            ctx_pad=ctx_pad,
-            forced_prefix=forced_prefix,
-        )
-        return indices
-
-    def sample_indices_with_logits(
-        self,
-        hidden: Tensor,
-        observed: Tensor,
-        offsets: tuple[int, ...],
-        return_value: Tensor,
-        condition_present: Tensor,
-        *,
-        argmax: bool,
-        uniforms: Tensor | None = None,
-        gen: torch.Generator | None = None,
-        temperature: float = 1.0,
-        ctx_pad: Tensor | None = None,
-        forced_prefix: Tensor | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, ...]]:
-        """Sample once and return the exact conditional logits used by each draw."""
-        return self._sample_indices_and_logits(
-            hidden,
-            observed,
-            offsets,
-            return_value,
-            condition_present,
-            argmax=argmax,
-            uniforms=uniforms,
-            gen=gen,
-            temperature=temperature,
-            capture_logits=True,
-            ctx_pad=ctx_pad,
-            forced_prefix=forced_prefix,
-        )
-
-    def _sample_indices_and_logits(
-        self,
-        hidden: Tensor,
-        observed: Tensor,
-        offsets: tuple[int, ...],
-        return_value: Tensor,
-        condition_present: Tensor,
-        *,
-        argmax: bool,
-        uniforms: Tensor | None,
-        gen: torch.Generator | None,
-        temperature: float,
-        capture_logits: bool,
-        ctx_pad: Tensor | None,
-        forced_prefix: Tensor | None,
-    ) -> tuple[Tensor, tuple[Tensor, ...]]:
-        temperature = validate_sampling_temperature(temperature)
-        allowed = tuple(self.head_offsets[:horizon] for horizon in self.live_horizons)
-        if offsets not in allowed:
-            raise ValueError(f"live decode offsets must select one of the dense prefixes {allowed}")
-        if uniforms is not None and uniforms.shape != (len(offsets), CONTROLLER_GROUP_COUNT, hidden.shape[0]):
-            raise ValueError("uniform table must be [frames, groups, batch]")
-        if forced_prefix is not None and (
-            forced_prefix.ndim != 3
-            or forced_prefix.shape[0] != hidden.shape[0]
-            or forced_prefix.shape[2] != CONTROLLER_GROUP_COUNT
-            or forced_prefix.shape[1] > len(offsets)
-        ):
-            raise ValueError("forced prefix must be [B, K, groups] with K no larger than the horizon")
-        raw_trunk = hidden[:, -1]
-        trunk = decoder_rmsnorm(raw_trunk)
-        state_bias = self._state_bias(trunk)
-        trunk_logits = self._trunk_skip_logits(raw_trunk)
-        previous = observed
-        caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
-        history = self._live_history(hidden, ctx_pad)
-        conditioning = self.return_conditioner(return_value, condition_present)
-        frames: list[Tensor] = []
-        captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
-        for depth, offset in enumerate(offsets):
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
-            embedded: dict[str, Tensor] = {}
-            picks: dict[str, Tensor] = {}
-            for name in CONTROLLER_DECODE_ORDER:
-                logits = self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
-                    + trunk_logits[name]
-                )
-                if name == "buttons":
-                    logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
-                if capture_logits:
-                    captured[name].append(logits)
-                group = CONTROLLER_GROUP_INDEX[name]
-                uniform = None if uniforms is None else uniforms[depth, group]
-                if forced_prefix is not None and depth < forced_prefix.shape[1]:
-                    pick = forced_prefix[:, depth, group]
-                else:
-                    pick = sample_categorical(
-                        logits,
-                        argmax=argmax,
-                        uniform=uniform,
-                        generator=gen,
-                        temperature=temperature,
-                    )
-                picks[name] = pick
-                embedded[name] = self.codec.group_embedding(name, pick)
-            indices = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
-            frames.append(indices)
-            previous = indices
-        logits_by_group = (
-            tuple(torch.stack(captured[name], dim=1) for name in CONTROLLER_GROUP_NAMES) if capture_logits else ()
-        )
-        return torch.stack(frames, dim=1), logits_by_group
-
-    def rollout_conditioned_logits(
-        self,
-        hidden: Tensor,
-        observed: Tensor,
-        return_value: Tensor,
-        condition_present: Tensor,
-        *,
-        ctx_pad: Tensor | None = None,
-    ) -> tuple[list[dict[str, Tensor]], Tensor]:
-        """Offline ancestral diagnostic across every selected offset.
-
-        Unlike :meth:`sample_indices`, this intentionally includes the sparse
-        tail.  It is used only by validation to measure exposure gaps and is not
-        reachable from the closed-loop inference wrapper.
-        """
-        raw_trunk = hidden[:, -1]
-        trunk = decoder_rmsnorm(raw_trunk)
-        state_bias = self._state_bias(trunk)
-        trunk_logits = self._trunk_skip_logits(raw_trunk)
-        previous = observed
-        caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
-        history = self._live_history(hidden, ctx_pad)
-        conditioning = self.return_conditioner(return_value, condition_present)
-        frames: list[Tensor] = []
-        all_logits: list[dict[str, Tensor]] = []
-        for offset in self.head_offsets:
-            state, caches = self._decode_step(previous, offset, state_bias, caches, history, conditioning)
-            embedded: dict[str, Tensor] = {}
-            picks: dict[str, Tensor] = {}
-            frame_logits: dict[str, Tensor] = {}
-            for name in CONTROLLER_DECODE_ORDER:
-                logits = self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
-                    + trunk_logits[name]
-                )
-                if name == "buttons":
-                    logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), float("-inf"))
-                pick = logits.argmax(dim=-1)
-                frame_logits[name] = logits
-                picks[name] = pick
-                embedded[name] = self.codec.group_embedding(name, pick)
-            previous = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
-            frames.append(previous)
-            all_logits.append(frame_logits)
-        return all_logits, torch.stack(frames, dim=1)
-
-    @staticmethod
-    def _center(logits: Tensor) -> Tensor:
-        return center_class_logits(logits)
-
-
-class GPT(nn.Module):
-    def __init__(self, cfg: TrainConfig, vocabulary: PlayerVocabulary | None = None) -> None:
-        super().__init__()
-        self.cfg = cfg
-        self.L_chunk = cfg.arch.sample_chunk_length
-        self.head_offsets = tuple(cfg.arch.head_offsets)
-        self.codec = DiscreteControllerCodec(cfg.arch.action_embed_dim)
-        self.cat_specs = {**CAT_FEATURES, "action": (cfg.arch.action_vocab, cfg.arch.action_state_embed_dim)}
-        self.cat_embeds = nn.ModuleDict(
-            {name: nn.Embedding(vocab, dim) for name, (vocab, dim) in self.cat_specs.items()}
-        )
-        self.char_emb = nn.Embedding(cfg.arch.char_vocab, cfg.arch.char_dim)
-        self.stage_emb = nn.Embedding(cfg.arch.stage_vocab, cfg.arch.stage_dim)
-        per_player = len(FLOAT_FEATURES) * 2 + sum(dim for _, dim in self.cat_specs.values())
-        d_in = (
-            len(BASE_PLAYER_PREFIXES) * per_player
-            + CONTROLLER_GROUP_COUNT * cfg.arch.action_embed_dim
-            + 2 * cfg.arch.char_dim
-            + cfg.arch.stage_dim
-        )
-        self.item_type_emb = nn.Embedding(ITEM_CAT_VOCABS["type"], cfg.arch.item_type_dim)
-        self.item_state_emb = nn.Embedding(ITEM_CAT_VOCABS["state"], cfg.arch.item_state_dim)
-        slot_width = cfg.arch.item_type_dim + cfg.arch.item_state_dim + 2 * len(ITEM_FLOATS) + 1
-        self.item_encoder = SwiGLU(slot_width, cfg.arch.item_hidden_dim, cfg.arch.item_dim)
-        d_in += cfg.arch.item_dim
-        self.observation_encoder = nn.Linear(d_in, cfg.arch.d_model)
-        self.player_embedding = nn.Embedding(
-            cfg.player_vocab_size,
-            cfg.arch.player_embed_dim,
-            padding_idx=MASKED_PLAYER_ID,
-        )
-        self.player_projection = nn.Linear(cfg.arch.player_embed_dim, cfg.arch.d_model, bias=False)
-        code_payload = b"" if vocabulary is None else vocabulary_buffer(vocabulary)
-        if vocabulary is not None and (
-            vocabulary.size != cfg.player_vocab_size or vocabulary.sha256 != cfg.player_vocab_sha256
-        ):
-            raise ValueError("identity vocabulary does not match the frozen O59 contract")
-        self.register_buffer("player_code_bytes", torch.from_numpy(np.frombuffer(code_payload, dtype=np.uint8).copy()))
-        trunk_rule = depth_rule("trunk", cfg.arch.n_layers, cfg.depth_alpha)
-        self.trunk = Trunk(
-            TrunkConfig(
-                d_model=cfg.arch.d_model,
-                n_layers=cfg.arch.n_layers,
-                n_heads=cfg.arch.n_heads,
-                L_ctx=cfg.arch.L_ctx,
-                attn_window=cfg.arch.attn_window,
-                attention_backend=cfg.arch.trunk_attention_backend,
-                attention_scale=trunk_rule.attention,
-                mlp_scale=trunk_rule.mlp,
-            )
-        )
-        self.temporal = CausalTemporalDecoder(cfg, self.codec)
-        # V(s_t) predicts G_{t+1}, the return aligned with the next action. Keep
-        # it last so the same seed preserves every policy parameter's draw.
-        # Closed-loop inference never reads it.
-        self.value_head = SwiGLU(cfg.arch.d_model, cfg.arch.value_hidden_dim, 1, output_bias=True)
-        initialize_o51_parameters(self, cfg)
-        with torch.random.fork_rng(devices=[]):
-            self.temporal.return_conditioner = ReturnConditioner(cfg)
-        self.return_calibration = ReturnCalibration()
-
-    def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
-        ref = features[f"{prefix}_position_x"]
-        batch, length = ref.shape
-        values: list[Tensor] = []
-        masks: list[Tensor] = []
-        for name in FLOAT_FEATURES:
-            value = features[f"{prefix}_{name}"]
-            mask = features.get(f"{prefix}_{name}_mask", torch.zeros_like(ref))
-            values.append(value[..., None])
-            masks.append(mask[..., None])
-        parts: list[Tensor] = values + masks
-        for name, (vocab, _) in self.cat_specs.items():
-            parts.append(self.cat_embeds[name](features[f"{prefix}_{name}"].clamp(0, vocab - 1)))
-        return torch.cat(parts, dim=-1)
-
-    def _item_features(self, features: dict[str, Tensor]) -> Tensor:
-        """Pool the four projectile slots into one permutation-invariant vector.
-
-        One shared encoder reads each slot, the presence flag gates its output, and the
-        gated outputs are summed. An empty slot therefore contributes the exact zero
-        vector, the pooled value does not depend on WHICH slots the live items occupy,
-        and the item count stays implicit in the sum.
-        """
-        if ITEM_PROBE_COLUMN not in features:
-            raise ValueError(
-                f"the observation carries no {ITEM_PROBE_COLUMN!r} column; training needs policy-world "
-                "sources and closed-loop evaluation needs projectile routing"
-            )
-        zeros = torch.zeros_like(features[ITEM_PROBE_COLUMN])
-        slots: list[Tensor] = []
-        presence: list[Tensor] = []
-        for slot in range(ITEM_SLOTS):
-            # The stored type is peppi's raw u16 item id, so the clamp lands every id at
-            # or above the last row on that row, which is the unknown projectile.
-            type_ids = features[item_column(slot, "type")].clamp(0, self.item_type_emb.num_embeddings - 1)
-            state_ids = features[item_column(slot, "state")].clamp(0, self.item_state_emb.num_embeddings - 1)
-            masks = {name: features.get(f"{item_column(slot, name)}_mask", zeros) for name in ITEM_FLOATS}
-            live = 1.0 - masks[ITEM_PRESENCE_SUFFIX]
-            parts = [self.item_type_emb(type_ids), self.item_state_emb(state_ids)]
-            parts += [features[item_column(slot, name)][..., None] for name in ITEM_FLOATS]
-            parts += [masks[name][..., None] for name in ITEM_FLOATS]
-            parts.append(live[..., None])
-            slots.append(torch.cat(parts, dim=-1))
-            presence.append(live)
-        encoded = self.item_encoder(torch.stack(slots, dim=-2))
-        return (encoded * torch.stack(presence, dim=-1)[..., None]).sum(dim=-2)
-
-    def context_tokens(self, features: dict[str, Tensor], action_indices: Tensor | None = None) -> Tensor:
-        if "opp_player_id" in features:
-            raise ValueError("opponent identity must never enter the model")
-        if "ego_player_id" not in features:
-            raise KeyError("context is missing ego_player_id")
-        if action_indices is None:
-            action_indices = self.codec.quantize(stack_actions(features))
-        parts = [self._per_player_features(features, prefix) for prefix in BASE_PLAYER_PREFIXES]
-        parts.append(self.codec.embed_frame(action_indices))
-        parts.append(self.char_emb(features["ego_character"].clamp(0, self.char_emb.num_embeddings - 1)))
-        parts.append(self.char_emb(features["opp_character"].clamp(0, self.char_emb.num_embeddings - 1)))
-        parts.append(self.stage_emb(features["stage"].clamp(0, self.stage_emb.num_embeddings - 1)))
-        parts.append(self._item_features(features))
-        observation = self.observation_encoder(torch.cat(parts, dim=-1))
-        player_ids = features["ego_player_id"].clamp(0, self.player_embedding.num_embeddings - 1)
-        return observation + self.player_projection(self.player_embedding(player_ids))
-
-    def forward(self, features: dict[str, Tensor], ctx_pad: Tensor, action_indices: Tensor | None = None) -> Tensor:
-        return self.trunk(self.context_tokens(features, action_indices), ctx_pad)
-
-    def forward_dense(
-        self,
-        features: dict[str, Tensor],
-        ctx_pad: Tensor,
-        action_indices: Tensor | None = None,
-    ) -> Tensor:
-        """Run the shared model weights through the dense inference trunk."""
-        return self.trunk.forward_dense(self.context_tokens(features, action_indices), ctx_pad)
+def model_config(cfg: TrainConfig) -> ActionSequenceConfig:
+    """Translate saved experiment choices to the neural model contract."""
+    return ActionSequenceConfig(
+        **asdict(cfg.arch),
+        player_vocab_size=cfg.player_vocab_size,
+        player_vocab_sha256=cfg.player_vocab_sha256,
+        depth_alpha=cfg.depth_alpha,
+        hidden_std_multiplier=cfg.hidden_std_multiplier,
+        return_conditioning=cfg.return_conditioning,
+    )
+
+
+def make_model(cfg: TrainConfig, vocabulary: PlayerVocabulary | None = None) -> ActionSequenceTransformer:
+    return ActionSequenceTransformer(
+        model_config(cfg),
+        vocabulary,
+        live_horizons=(cfg.prediction_frames,),
+        training_diagnostics=cfg.optimizer == "adamw",
+    )
+
+
+def observe_calibration(calibration: ReturnCalibration, batch: ReturnBatch) -> None:
+    if batch.batch.replay_ids is None:
+        raise ValueError("calibration requires replay identities")
+    calibration.observe(
+        future_returns_BL=batch.future_return,
+        available_BL=batch.available,
+        replay_ids=batch.batch.replay_ids,
+    )
 
 
 class IdentityMasker:
@@ -2105,7 +1022,7 @@ class PrefixSampler:
 
 @jaxtyped(typechecker=beartype)
 def prepared_targets(
-    model: GPT, batch: TrainBatch | ReturnBatch
+    model: ActionSequenceTransformer, batch: TrainBatch | ReturnBatch
 ) -> tuple[
     Int[Tensor, "B L_ctx n_groups"],
     Int[Tensor, "B L_ctx n_offsets n_groups"],
@@ -2218,7 +1135,7 @@ class DeviceBatchPrefetcher:
             device_batch.record_stream(compute_stream)
         self._staged = None
         if self._calibration is not None:
-            self._calibration.observe(cpu_batch)
+            observe_calibration(self._calibration, cpu_batch)
         del cpu_batch
         return device_batch, valid_prefixes
 
@@ -2463,18 +1380,18 @@ def value_with_activation_diagnostics(head: SwiGLU, inputs: Tensor) -> tuple[Ten
     output = head.down(down_input)
     prefix = "diagnostics/activations/value"
     metrics = {
-        **_activation_input_metrics(f"{prefix}/gate", inputs),
-        **_activation_output_metrics(f"{prefix}/gate", gate_output),
-        **_activation_input_metrics(f"{prefix}/value", inputs),
-        **_activation_output_metrics(f"{prefix}/value", value_output),
-        **_activation_input_metrics(f"{prefix}/down", down_input),
-        **_activation_output_metrics(f"{prefix}/down", output),
+        **activation_input_metrics(f"{prefix}/gate", inputs),
+        **activation_output_metrics(f"{prefix}/gate", gate_output),
+        **activation_input_metrics(f"{prefix}/value", inputs),
+        **activation_output_metrics(f"{prefix}/value", value_output),
+        **activation_input_metrics(f"{prefix}/down", down_input),
+        **activation_output_metrics(f"{prefix}/down", output),
     }
     return output, metrics
 
 
 def microbatch_loss(
-    model: GPT,
+    model: ActionSequenceTransformer,
     batch: ReturnBatch,
     cfg: TrainConfig,
     *,
@@ -2565,9 +1482,9 @@ def microbatch_loss(
     loss = policy_loss + cfg.awr.value_loss_weight * value_loss
     nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
     extra = {
-        "train/loss": scoring.nats_to_bits(policy_loss.detach()),
-        "train/near_loss": scoring.nats_to_bits(near.detach()),
-        "train/far_nll": scoring.nats_to_bits(far.detach()),
+        "train/loss": _nats_to_bits(policy_loss.detach()),
+        "train/near_loss": _nats_to_bits(near.detach()),
+        "train/far_nll": _nats_to_bits(far.detach()),
         "train/objective": loss.detach(),
         "value/loss": value_stats["value_loss"],
         "value/rmse": value_stats["value_rmse"],
@@ -2591,7 +1508,7 @@ def nll_mean_metrics(
 ) -> dict[str, float]:
     if mean_nll.shape != (len(offsets), CONTROLLER_GROUP_COUNT):
         raise ValueError(f"mean NLL has shape {tuple(mean_nll.shape)}")
-    joint = scoring.nats_to_bits(mean_nll.sum(dim=-1))
+    joint = _nats_to_bits(mean_nll.sum(dim=-1))
     if len(offsets) <= AWRCalibration.near_offsets:
         raise ValueError(
             f"the {AWRCalibration.near_offsets} near offsets must leave at least one far offset, got {len(offsets)}"
@@ -2608,7 +1525,7 @@ def nll_mean_metrics(
     for depth, offset in enumerate(offsets):
         out[f"nll_o{offset:02d}"] = float(joint[depth])
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
-            out[f"nll_o{offset:02d}_{name}"] = float(scoring.nats_to_bits(mean_nll[depth, group]))
+            out[f"nll_o{offset:02d}_{name}"] = float(_nats_to_bits(mean_nll[depth, group]))
     return out
 
 
@@ -2634,7 +1551,7 @@ def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) ->
 
 
 @torch.no_grad()
-def val_metrics(model: GPT, batches: list[ReturnBatch], cfg: TrainConfig) -> dict[str, float]:
+def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cfg: TrainConfig) -> dict[str, float]:
     """Score teacher-forced and rollout policies on the same final-prefix rows."""
     was_training = model.training
     model.eval()
@@ -2745,8 +1662,8 @@ def val_metrics(model: GPT, batches: list[ReturnBatch], cfg: TrainConfig) -> dic
             denominator = float(exposure_count[depth, group])
             if denominator <= 0:
                 raise RuntimeError(f"validation has no compatible rollout rows for offset {offset} group {name}")
-            roll_nll = float(scoring.nats_to_bits(rollout_nll[depth, group] / denominator))
-            teacher_nll = float(scoring.nats_to_bits(teacher_exposure_nll[depth, group] / denominator))
+            roll_nll = float(_nats_to_bits(rollout_nll[depth, group] / denominator))
+            teacher_nll = float(_nats_to_bits(teacher_exposure_nll[depth, group] / denominator))
             out[f"rollout_nll_o{offset:02d}_{name}"] = roll_nll
             out[f"exposure_gap_o{offset:02d}_{name}"] = roll_nll - teacher_nll
             out[f"rollout_acc_o{offset:02d}_{name}"] = float(rollout_correct[depth, group] / count)
@@ -2803,8 +1720,6 @@ def _slice_train_batch(batch: TrainBatch, rows: int) -> TrainBatch:
 
 
 def _train_batch_state(batch: TrainBatch) -> dict[str, object]:
-    if batch.context.slot_ids is not None or batch.context.reset is not None:
-        raise ValueError("the fixed diagnostic batch must not contain closed-loop metadata")
     return {
         "features": {name: value.detach().cpu().contiguous() for name, value in batch.context.features.items()},
         "ctx_pad": batch.context.ctx_pad.detach().cpu().contiguous(),
@@ -2883,370 +1798,36 @@ def _return_batch_sha256(batch: ReturnBatch) -> str:
     return digest.hexdigest()
 
 
-def _pad_context(ctx: Context, bucket: int) -> Context:
-    rows = ctx.ctx_pad.shape[0]
-    if rows == bucket:
-        return ctx
-    if rows > bucket:
-        raise ValueError("cannot pad a context to a smaller bucket")
-    extra = bucket - rows
-    features = {
-        name: torch.cat((value, torch.zeros((extra, *value.shape[1:]), dtype=value.dtype, device=value.device)))
-        for name, value in ctx.features.items()
-    }
-    ctx_pad = torch.cat(
-        (
-            ctx.ctx_pad,
-            torch.full(
-                (extra,),
-                ctx.features[next(iter(ctx.features))].shape[1] - 1,
-                dtype=ctx.ctx_pad.dtype,
-                device=ctx.ctx_pad.device,
-            ),
-        )
+def make_window_policy(
+    model: ActionSequenceTransformer,
+    cfg: TrainConfig,
+    *,
+    bucket: int | None = None,
+    compiled: bool | None = None,
+    compile_mode: str = "default",
+    compiled_buckets: tuple[int, ...] | None = None,
+    temperature: float = 1.0,
+    desired_return: float | None = None,
+) -> WindowPolicy:
+    """Translate 059 evaluation choices into the shared dense executor."""
+    if bucket is not None and compiled_buckets is not None:
+        raise ValueError("pass bucket or compiled_buckets, not both")
+    use_compiled = cfg.inference_mode == "compiled" if compiled is None else compiled
+    prepared = (bucket,) if bucket is not None else compiled_buckets
+    if prepared is None:
+        prepared = _planned_inference_buckets(cfg) if use_compiled else cfg.inference_buckets
+    return WindowPolicy(
+        model,
+        context_frames=cfg.arch.L_ctx,
+        prediction_frames=cfg.prediction_frames,
+        prepared_buckets=prepared,
+        compiled=use_compiled,
+        amp_dtype=cfg.amp_dtype,
+        return_conditioning=cfg.return_conditioning,
+        compile_mode=compile_mode,
+        temperature=temperature,
+        desired_return=desired_return,
     )
-    slot_ids = None
-    reset = None
-    if ctx.slot_ids is not None:
-        slot_ids = torch.cat(
-            (ctx.slot_ids, torch.full((extra,), -1, dtype=ctx.slot_ids.dtype, device=ctx.slot_ids.device))
-        )
-    if ctx.reset is not None:
-        reset = torch.cat((ctx.reset, torch.ones(extra, dtype=ctx.reset.dtype, device=ctx.reset.device)))
-    return Context(features=features, ctx_pad=ctx_pad, slot_ids=slot_ids, reset=reset)
-
-
-def _condition_ego_player(ctx: Context, player_id: int) -> Context:
-    """Attach one runtime ego identity without specializing the compiled graph."""
-    if "opp_player_id" in ctx.features:
-        raise ValueError("opponent identity must never enter inference")
-    if not isinstance(player_id, int) or isinstance(player_id, bool) or player_id < 0:
-        raise ValueError(f"player_id must be a non-negative integer, got {player_id!r}")
-    reference = ctx.features[next(iter(ctx.features))]
-    features = dict(ctx.features)
-    features["ego_player_id"] = torch.full(
-        reference.shape[:2],
-        player_id,
-        dtype=torch.long,
-        device=reference.device,
-    )
-    return replace(ctx, features=features)
-
-
-@dataclass(frozen=True, slots=True)
-class DecodedPlan:
-    actions: Tensor
-    indices: Tensor
-    logits: tuple[Tensor, ...]
-    uniforms: Tensor
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedDecode:
-    rows: int
-    bucket: int
-    ctx_pad: Tensor
-    hidden: Tensor
-    observed: Tensor
-    uniforms: Tensor
-    forced_prefix: Tensor
-    return_value: Tensor
-    condition_present: Tensor
-
-
-class BF16Inference:
-    """Hardware-bucketed compiled trunk and unrolled dense-prefix decoders.
-
-    Evaluation compiles each required program synchronously on first use. Runtime
-    calls use the smallest compiled bucket that fits. Padding and slot-keyed random
-    streams leave real rows unchanged.
-    """
-
-    def __init__(
-        self,
-        model: GPT,
-        cfg: TrainConfig,
-        *,
-        bucket: int | None = None,
-        compiled: bool | None = None,
-        compile_mode: str = "default",
-        compiled_buckets: tuple[int, ...] | None = None,
-        temperature: float = 1.0,
-        desired_return: float | None = None,
-    ) -> None:
-        if desired_return is not None and (not math.isfinite(desired_return) or not cfg.return_conditioning):
-            raise ValueError("desired return requires finite input and enabled conditioning")
-        self.desired_return = desired_return
-        self.model = model
-        self.cfg = cfg
-        if bucket is not None and compiled_buckets is not None:
-            raise ValueError("pass bucket or compiled_buckets, not both")
-        chosen = (bucket,) if bucket is not None else compiled_buckets
-        chosen = _planned_inference_buckets(cfg) if chosen is None else chosen
-        self.compiled_buckets = tuple(sorted(set(chosen)))
-        if not self.compiled_buckets:
-            raise ValueError("compiled_buckets must contain at least one bucket")
-        if any(bucket < 1 or bucket & (bucket - 1) for bucket in self.compiled_buckets):
-            raise ValueError(f"compiled_buckets must be positive powers of two, got {self.compiled_buckets}")
-        requested = cfg.inference_mode == "compiled" if compiled is None else compiled
-        self.compiled = bool(requested and next(model.parameters()).device.type == "cuda")
-        self.compile_mode = compile_mode
-        self.temperature = validate_sampling_temperature(temperature)
-        self.attention_backend = "dense_sdpa"
-        self.compile_seconds = 0.0
-        self._warmed: set[tuple[int, int, int]] = set()
-        self._trunks: dict[int, Callable] = {}
-        self._decoders: dict[tuple[int, int, int], Callable] = {}
-        self._trace_decoders: dict[tuple[int, int, int], Callable] = {}
-
-    @property
-    def uses_cuda_graphs(self) -> bool:
-        return self.compiled and self.compile_mode == "reduce-overhead"
-
-    def _bucket(self, rows: int) -> int:
-        if self.compiled:
-            try:
-                return next(bucket for bucket in self.compiled_buckets if bucket >= rows)
-            except StopIteration as exc:
-                raise ValueError(
-                    f"inference batch {rows} exceeds largest compiled bucket {self.compiled_buckets[-1]}"
-                ) from exc
-        try:
-            return next(bucket for bucket in self.cfg.inference_buckets if bucket >= rows)
-        except StopIteration:
-            return covering_power_of_two(rows)
-
-    def _trunk(self, bucket: int) -> Callable:
-        if bucket not in self._trunks:
-            forward = self.model.forward_dense
-            self._trunks[bucket] = (
-                torch.compile(forward, dynamic=False, fullgraph=True, mode=self.compile_mode)
-                if self.compiled
-                else forward
-            )
-        return self._trunks[bucket]
-
-    def _decoder(self, bucket: int, horizon: int, committed_frames: int) -> Callable:
-        key = (bucket, horizon, committed_frames)
-        if key not in self._decoders:
-            offsets = self.model.head_offsets[:horizon]
-
-            def fn(
-                hidden: Tensor,
-                ctx_pad: Tensor,
-                observed: Tensor,
-                uniforms: Tensor,
-                forced_prefix: Tensor,
-                return_value: Tensor,
-                condition_present: Tensor,
-            ):
-                return self.model.temporal.sample_indices(
-                    hidden,
-                    observed,
-                    offsets,
-                    return_value,
-                    condition_present,
-                    argmax=False,
-                    uniforms=uniforms,
-                    temperature=self.temperature,
-                    ctx_pad=ctx_pad,
-                    forced_prefix=forced_prefix,
-                )
-
-            self._decoders[key] = torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
-        return self._decoders[key]
-
-    def _trace_decoder(self, bucket: int, horizon: int, committed_frames: int) -> Callable:
-        key = (bucket, horizon, committed_frames)
-        if key not in self._trace_decoders:
-            offsets = self.model.head_offsets[:horizon]
-
-            def fn(
-                hidden: Tensor,
-                ctx_pad: Tensor,
-                observed: Tensor,
-                uniforms: Tensor,
-                forced_prefix: Tensor,
-                return_value: Tensor,
-                condition_present: Tensor,
-            ):
-                return self.model.temporal.sample_indices_with_logits(
-                    hidden,
-                    observed,
-                    offsets,
-                    return_value,
-                    condition_present,
-                    argmax=False,
-                    uniforms=uniforms,
-                    temperature=self.temperature,
-                    ctx_pad=ctx_pad,
-                    forced_prefix=forced_prefix,
-                )
-
-            self._trace_decoders[key] = (
-                torch.compile(fn, dynamic=False, mode=self.compile_mode) if self.compiled else fn
-            )
-        return self._trace_decoders[key]
-
-    def _prepare_decode(
-        self,
-        ctx: Context,
-        horizon: int,
-        *,
-        streams: SlotGroupRng | None,
-        gen: torch.Generator | None,
-        committed: Tensor | None,
-    ) -> _PreparedDecode:
-        if horizon != self.cfg.prediction_frames:
-            raise ValueError(f"horizon must be {self.cfg.prediction_frames}")
-        rows = ctx.ctx_pad.shape[0]
-        if committed is not None and (
-            committed.ndim != 3
-            or committed.shape[0] != rows
-            or committed.shape[2] != len(ACTION_CHANNELS)
-            or committed.shape[1] > horizon
-        ):
-            raise ValueError("committed actions have the wrong shape")
-        committed_frames = 0 if committed is None else committed.shape[1]
-        bucket = self._bucket(rows)
-        padded = _pad_context(ctx, bucket)
-        if "ego_player_id" not in padded.features:
-            padded = _condition_ego_player(padded, MASKED_PLAYER_ID)
-        padded = canonical_context(padded, "base", items=True)
-        observed = self.model.codec.quantize(stack_actions(padded.features))
-        uniform_parts: list[Tensor] = []
-        if streams is not None:
-            streams.begin(ctx)
-        for frame in range(horizon):
-            groups = []
-            for name in CONTROLLER_GROUP_NAMES:
-                if frame < committed_frames:
-                    real = torch.full((rows,), 0.5, device=ctx.ctx_pad.device)
-                elif streams is None:
-                    real = torch.rand(rows, device=ctx.ctx_pad.device, generator=gen)
-                else:
-                    real = streams.uniforms(name)
-                groups.append(F.pad(real, (0, bucket - rows), value=0.5))
-            uniform_parts.append(torch.stack(groups))
-        uniforms = torch.stack(uniform_parts)
-        if self.uses_cuda_graphs:
-            # The trunk and decoder share one graph step so the next trunk replay
-            # can reuse its output storage only after the decoder consumes it.
-            torch.compiler.cudagraph_mark_step_begin()
-        with amp_context(self.cfg, ctx.ctx_pad.device):
-            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
-            if committed is None:
-                forced_prefix = torch.empty(bucket, 0, CONTROLLER_GROUP_COUNT, dtype=torch.long, device=hidden.device)
-            else:
-                padded_committed = F.pad(committed, (0, 0, 0, 0, 0, bucket - rows))
-                forced_prefix = self.model.codec.quantize(padded_committed)
-        return_value = torch.full(
-            (bucket,), 0.0 if self.desired_return is None else self.desired_return, device=hidden.device
-        )
-        condition_present = (torch.arange(bucket, device=hidden.device) < rows) & (self.desired_return is not None)
-        return _PreparedDecode(
-            rows,
-            bucket,
-            padded.ctx_pad,
-            hidden,
-            observed[:, -1],
-            uniforms,
-            forced_prefix,
-            return_value,
-            condition_present,
-        )
-
-    @torch.no_grad()
-    def prewarm(self, rows: int, horizon: int, *, committed_frames: int) -> float:
-        """Compile and replay the exact evaluation program before Dolphin starts."""
-        if horizon != self.cfg.prediction_frames or not 0 <= committed_frames <= horizon:
-            raise ValueError("invalid prewarm horizon or committed-prefix length")
-        bucket = self._bucket(rows)
-        key = (bucket, horizon, committed_frames)
-        if key in self._warmed or not self.compiled:
-            self._warmed.add(key)
-            return 0.0
-        device = next(self.model.parameters()).device
-        started = time.perf_counter()
-        context = synthetic_context(self.cfg, rows, device)
-        neutral = torch.as_tensor(NEUTRAL_ACTION, device=device).expand(rows, committed_frames, -1)
-        self.decode(context, horizon, committed=neutral)
-        self.decode(context, horizon, committed=neutral)
-        torch.cuda.synchronize(device)
-        elapsed = time.perf_counter() - started
-        self.compile_seconds += elapsed
-        self._warmed.add(key)
-        print(
-            f"[inference] synchronously compiled batch {bucket}, horizon {horizon} in {elapsed:.1f}s",
-            flush=True,
-        )
-        return elapsed
-
-    @torch.no_grad()
-    def decode(
-        self,
-        ctx: Context,
-        horizon: int,
-        *,
-        streams: SlotGroupRng | None = None,
-        argmax: bool = False,
-        gen: torch.Generator | None = None,
-        committed: Tensor | None = None,
-    ) -> Tensor:
-        prepared = self._prepare_decode(ctx, horizon, streams=streams, gen=gen, committed=committed)
-        with amp_context(self.cfg, ctx.ctx_pad.device):
-            if argmax:
-                indices = self.model.temporal.sample_indices(
-                    prepared.hidden,
-                    prepared.observed,
-                    self.model.head_offsets[:horizon],
-                    prepared.return_value,
-                    prepared.condition_present,
-                    argmax=True,
-                    temperature=self.temperature,
-                    ctx_pad=prepared.ctx_pad,
-                    forced_prefix=prepared.forced_prefix,
-                )
-            else:
-                indices = self._decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
-                    prepared.hidden,
-                    prepared.ctx_pad,
-                    prepared.observed,
-                    prepared.uniforms,
-                    prepared.forced_prefix,
-                    prepared.return_value,
-                    prepared.condition_present,
-                )
-        return self.model.codec.dequantize(indices[: prepared.rows])
-
-    @torch.no_grad()
-    def decode_with_trace(
-        self,
-        ctx: Context,
-        horizon: int,
-        *,
-        streams: SlotGroupRng,
-        committed: Tensor | None = None,
-    ) -> DecodedPlan:
-        """Decode once and retain the exact logits and uniforms used to sample."""
-        prepared = self._prepare_decode(ctx, horizon, streams=streams, gen=None, committed=committed)
-        with amp_context(self.cfg, ctx.ctx_pad.device):
-            indices, logits = self._trace_decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
-                prepared.hidden,
-                prepared.ctx_pad,
-                prepared.observed,
-                prepared.uniforms,
-                prepared.forced_prefix,
-                prepared.return_value,
-                prepared.condition_present,
-            )
-        real_indices = indices[: prepared.rows]
-        return DecodedPlan(
-            actions=self.model.codec.dequantize(real_indices),
-            indices=real_indices,
-            logits=tuple(values[: prepared.rows] for values in logits),
-            uniforms=prepared.uniforms[:, :, : prepared.rows],
-        )
 
 
 def _validate_deployment_timing(prediction_frames: int, delay_frames: int, replan_interval_frames: int) -> None:
@@ -3265,87 +1846,76 @@ def _validate_deployment_timing(prediction_frames: int, delay_frames: int, repla
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _ActionTraceRecorder:
+    writer: ActionTraceWriter
+    seed: int
+    head_offsets: tuple[int, ...]
+    temperature: float
+    fixed_prefix_frames: int
+    replan_interval_frames: int
+
+    def __call__(self, requests: Sequence[PredictionRequest], decoded: DecodedPlan) -> None:
+        self.writer.record_plan(
+            decode_seed=self.seed,
+            slot_ids=torch.tensor([request.stream_id for request in requests]),
+            resets=torch.tensor([request.sequence == 0 for request in requests], dtype=torch.bool),
+            indices=decoded.indices,
+            logits=decoded.logits,
+            uniforms=decoded.uniforms,
+            head_offsets=self.head_offsets,
+            temperature=self.temperature,
+            delay_frames=self.fixed_prefix_frames,
+            replan_interval_frames=self.replan_interval_frames,
+        )
+
+
 def make_policy(
-    model: GPT,
+    model: ActionSequenceTransformer,
     stats: dict[str, FeatureStats],
     cfg: TrainConfig,
     *,
     decode_seed: int | None = None,
-    inference: BF16Inference | None = None,
+    inference: WindowPolicy | None = None,
     telemetry: DecodeTelemetry | None = None,
     ego_player_id: int = MASKED_PLAYER_ID,
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
     decode_temperature: float = 1.0,
     action_trace: ActionTraceWriter | None = None,
-    device: str = DEVICE,
-) -> RecedingHorizon:
+    max_batch_size: int | None = None,
+    prewarm_executor: bool = True,
+) -> PolicyBatchAdapter:
+    """Build the official dense profile on the shared process/scheduler path."""
     horizon = cfg.prediction_frames
-    delay = cfg.delay_frames if delay_frames is None else delay_frames
+    prefix = cfg.delay_frames if delay_frames is None else delay_frames
     replan = cfg.replan_interval_frames if replan_interval_frames is None else replan_interval_frames
-    _validate_deployment_timing(horizon, delay, replan)
+    _validate_deployment_timing(horizon, prefix, replan)
     temperature = validate_sampling_temperature(decode_temperature)
-    engine = BF16Inference(model, cfg, temperature=temperature) if inference is None else inference
+    engine = make_window_policy(model, cfg, temperature=temperature) if inference is None else inference
     if engine.temperature != temperature:
         raise ValueError(f"inference temperature {engine.temperature} does not match policy temperature {temperature}")
-    random_streams = None if decode_seed is None else SlotGroupRng(decode_seed, CONTROLLER_GROUP_NAMES)
-    generator = None if decode_seed is None else torch.Generator(device=device).manual_seed(decode_seed)
-    if action_trace is not None and (decode_seed is None or random_streams is None):
+    if action_trace is not None and decode_seed is None:
         raise ValueError("action tracing requires a fixed decode_seed")
-
-    @torch.no_grad()
-    def predict(ctx: Context, committed: np.ndarray | None) -> np.ndarray:
-        if committed is None:
-            raise ValueError("O59 live decoding requires the committed-action prefix")
-        started = time.perf_counter()
-        conditioned = _condition_ego_player(ctx, ego_player_id)
-        committed_tensor = torch.as_tensor(committed, device=device, dtype=next(model.parameters()).dtype)
-        if action_trace is None:
-            result = engine.decode(
-                conditioned,
-                horizon,
-                streams=random_streams,
-                gen=generator,
-                committed=committed_tensor,
-            )
-        else:
-            if ctx.slot_ids is None:
-                raise ValueError("action tracing requires evaluation slot_ids")
-            if decode_seed is None or random_streams is None:
-                raise RuntimeError("validated action-trace sampling state is missing")
-            decoded = engine.decode_with_trace(
-                conditioned, horizon, streams=random_streams, committed=committed_tensor
-            )
-            action_trace.record_plan(
-                decode_seed=decode_seed,
-                slot_ids=ctx.slot_ids,
-                resets=ctx.reset,
-                indices=decoded.indices,
-                logits=decoded.logits,
-                uniforms=decoded.uniforms,
-                head_offsets=model.head_offsets[:horizon],
-                temperature=engine.temperature,
-                delay_frames=delay,
-                replan_interval_frames=replan,
-            )
-            result = decoded.actions
-        result_array = result.cpu().numpy()
-        if telemetry is not None:
-            telemetry.record(rows=ctx.ctx_pad.shape[0], horizon=horizon, seconds=time.perf_counter() - started)
-        return result_array
-
-    return RecedingHorizon(
-        predict_chunk=predict,
-        stats=stats,
-        L_ctx=cfg.arch.L_ctx,
-        L_chunk=horizon,
-        s=replan,
-        d=delay,
-        bootstrap_committed="neutral",
-        device=device,
-        float_dtype=next(model.parameters()).dtype,
-        extra=ITEM_COLUMNS,
-        projection=BASE_ITEMS_PROJECTION,
+    seed = torch.seed() if decode_seed is None else decode_seed
+    trace_sink = (
+        None
+        if action_trace is None
+        else _ActionTraceRecorder(action_trace, seed, model.head_offsets[:horizon], temperature, prefix, replan)
+    )
+    policy = DenseWindowPredictionPolicy(
+        engine, stats, seed=seed, ego_player_id=ego_player_id, telemetry=telemetry, trace_sink=trace_sink
+    )
+    capacity = max(engine.prepared_buckets) if max_batch_size is None else max_batch_size
+    runtime = RuntimeConfig(capacity, (0,), replan_interval_frames=replan)
+    policy.prepare_prediction(runtime, horizon, prefix, prewarm_executor=prewarm_executor)
+    return PolicyBatchAdapter(
+        policy,
+        runtime,
+        FrameTiming(0, 0, prefix, replan, horizon),
+        desired_return=engine.desired_return,
+        temperature=temperature,
+        observed_actions=False,
     )
 
 
@@ -3388,6 +1958,34 @@ class EvalProtocol:
     start_retries: int = DEFAULT_START_RETRIES
 
 
+@dataclass(slots=True)
+class _EvalPolicyFactory:
+    model: ActionSequenceTransformer
+    stats: dict[str, FeatureStats]
+    cfg: TrainConfig
+    inference: WindowPolicy
+    telemetry: DecodeTelemetry
+    protocol: EvalProtocol
+    policy_index: int = 0
+
+    def __call__(self) -> PolicyBatchAdapter:
+        seed = self.protocol.seed + self.policy_index
+        self.policy_index += 1
+        return make_policy(
+            self.model,
+            self.stats,
+            self.cfg,
+            decode_seed=seed,
+            inference=self.inference,
+            telemetry=self.telemetry,
+            ego_player_id=self.protocol.ego_player_id,
+            delay_frames=self.protocol.delay_frames,
+            replan_interval_frames=self.protocol.replan_interval_frames,
+            max_batch_size=self.protocol.max_parallel,
+            prewarm_executor=False,
+        )
+
+
 def matchup_diversity(
     n_matchups: int,
     fixed_ego_character: melee.Character | None = None,
@@ -3413,7 +2011,7 @@ def assert_protocol_diversity(n_matchups: int) -> tuple[int, int, int, str]:
 
 def _eval_protocol(
     cfg: TrainConfig,
-    model: GPT,
+    model: ActionSequenceTransformer,
     *,
     n_matchups: int,
     checkpoint_sha256: str,
@@ -3505,14 +2103,14 @@ def _write_eval_evidence(
 
 
 def eval_vs_cpu(
-    model: GPT,
+    model: ActionSequenceTransformer,
     stats: dict[str, FeatureStats],
     cfg: TrainConfig,
     *,
     n_matchups: int,
     replay_dir: Path,
     checkpoint_sha256: str = "unavailable",
-    inference: BF16Inference | None = None,
+    inference: WindowPolicy | None = None,
     eager: bool = False,
     max_parallel: int | None = None,
     fixed_ego_character: melee.Character | None = None,
@@ -3526,7 +2124,7 @@ def eval_vs_cpu(
     horizon = cfg.prediction_frames
     inference_mode = "eager" if eager else cfg.inference_mode
     inference = (
-        BF16Inference(
+        make_window_policy(
             model,
             cfg,
             bucket=_eval_inference_bucket(cfg, n_matchups, max_parallel),
@@ -3563,21 +2161,8 @@ def eval_vs_cpu(
     ):
         raise RuntimeError("official CUDA evaluation requires compiled BF16 inference")
     telemetry = DecodeTelemetry()
-    policy_index = itertools.count()
+    factory = _EvalPolicyFactory(model, stats, cfg, inference, telemetry, protocol)
     process_telemetry = ProcessVecTelemetry()
-
-    def factory() -> RecedingHorizon:
-        return make_policy(
-            model,
-            stats,
-            cfg,
-            decode_seed=protocol.seed + next(policy_index),
-            inference=inference,
-            telemetry=telemetry,
-            ego_player_id=protocol.ego_player_id,
-            delay_frames=protocol.delay_frames,
-            replan_interval_frames=protocol.replan_interval_frames,
-        )
 
     was_training = model.training
     model.eval()
@@ -3673,70 +2258,44 @@ def closed_loop_evaluation_updates(final_update: int, every: int) -> tuple[int, 
     return tuple(updates)
 
 
-def lr_schedule(cfg: TrainConfig):
+def _learning_rate_scale(
+    step: int,
+    *,
+    warmup_steps: int,
+    decay_start_update: int | None,
+    decay_duration: int | None,
+    lr_floor_ratio: float,
+) -> float:
+    update = step + 1
+    if update <= warmup_steps:
+        return update / warmup_steps
+    if decay_start_update is None or update <= decay_start_update:
+        return 1.0
+    if decay_duration is None:
+        raise RuntimeError("decay duration is missing")
+    progress = min((update - decay_start_update) / decay_duration, 1.0)
+    return 1.0 + progress * (lr_floor_ratio - 1.0)
+
+
+def lr_schedule(cfg: TrainConfig) -> Callable[[int], float]:
     """Return warmup/stable/decay WSD independent of the stopping update."""
-
-    def schedule(step: int) -> float:
-        update = step + 1
-        if update <= cfg.warmup_steps:
-            return update / cfg.warmup_steps
-        if cfg.decay_start_update is None or update <= cfg.decay_start_update:
-            return 1.0
-        if cfg.decay_duration is None:
-            raise RuntimeError("decay duration is missing")
-        progress = min((update - cfg.decay_start_update) / cfg.decay_duration, 1.0)
-        return 1.0 + progress * (cfg.lr_floor_ratio - 1.0)
-
-    return schedule
-
-
-def center_class_logits(logits: Tensor) -> Tensor:
-    """Remove the softmax-invariant common mode from each class group."""
-    return logits - logits.mean(dim=-1, keepdim=True)
-
-
-def mup_readout_std(fan_in: int, base_fan_in: int) -> float:
-    if fan_in < 1 or base_fan_in < 1:
-        raise ValueError("readout fan-ins must be positive")
-    return math.sqrt(base_fan_in) / fan_in
-
-
-def _final_readouts(model: GPT) -> tuple[tuple[nn.Linear, int], ...]:
-    action = tuple((cast(nn.Linear, model.temporal.outputs[name].down), 128) for name in CONTROLLER_GROUP_NAMES)
-    trunk_skip = tuple(
-        (cast(NonlinearActionHead, model.temporal.trunk_outputs[name]).down, 128) for name in CONTROLLER_GROUP_NAMES
+    return partial(
+        _learning_rate_scale,
+        warmup_steps=cfg.warmup_steps,
+        decay_start_update=cfg.decay_start_update,
+        decay_duration=cfg.decay_duration,
+        lr_floor_ratio=cfg.lr_floor_ratio,
     )
-    return (*action, *trunk_skip, (model.value_head.down, 128))
 
 
-def initialize_o51_parameters(model: GPT, cfg: TrainConfig) -> None:
-    """Apply O51's selected hidden and μP-normal readout initialization."""
-    final_modules = {id(module) for module, _ in _final_readouts(model)}
-    for module in model.modules():
-        if isinstance(module, nn.Linear):
-            if id(module) in final_modules:
-                continue
-            nn.init.normal_(
-                module.weight,
-                mean=0.0,
-                std=cfg.hidden_std_multiplier / math.sqrt(module.weight.shape[1]),
-            )
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(
-                module.weight,
-                mean=0.0,
-                std=cfg.hidden_std_multiplier / math.sqrt(module.embedding_dim),
-            )
-            if module.padding_idx is not None:
-                with torch.no_grad():
-                    module.weight[module.padding_idx].zero_()
-    for module, base_fan_in in _final_readouts(model):
-        nn.init.normal_(module.weight, mean=0.0, std=mup_readout_std(module.in_features, base_fan_in))
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
-    nn.init.zeros_(model.player_projection.weight)
+class LearningRateScheduler(LambdaLR):
+    def state_dict(self) -> dict[str, object]:
+        # Torch 2.11 serializes a partial's attributes but omits a function's.
+        # 059 format 4 stores schedule values in cfg and None in this record.
+        # Remove this normalization when that checkpoint format is retired.
+        state = super().state_dict()
+        state["lr_lambdas"] = [None] * len(self.lr_lambdas)
+        return state
 
 
 def scaling_multipliers(cfg: TrainConfig) -> tuple[float, float]:
@@ -3784,7 +2343,7 @@ def _output_fan_in_multiplier(name: str, cfg: TrainConfig) -> float:
     raise ValueError(f"{name!r} is not a final readout")
 
 
-def optimizer_roles(model: GPT, cfg: TrainConfig) -> dict[str, OptimizerRole]:
+def optimizer_roles(model: ActionSequenceTransformer, cfg: TrainConfig) -> dict[str, OptimizerRole]:
     """Assign each parameter by its semantic role."""
     embedding_prefixes = (
         "codec.class_embeddings.",
@@ -3843,7 +2402,7 @@ def _role_lr(role: OptimizerRole, cfg: TrainConfig) -> float:
     return lr / role.fan_in_multiplier if role.lr_kind == "output" else lr
 
 
-def make_optimizer(model: GPT, cfg: TrainConfig) -> torch.optim.Optimizer:
+def make_optimizer(model: ActionSequenceTransformer, cfg: TrainConfig) -> torch.optim.Optimizer:
     """Build the selected optimizer with O51's semantic learning-rate roles."""
     roles = optimizer_roles(model, cfg)
     named = dict(model.named_parameters())
@@ -3892,7 +2451,7 @@ def make_optimizer(model: GPT, cfg: TrainConfig) -> torch.optim.Optimizer:
     )
 
 
-def _button_path_parameters(model: GPT) -> dict[str, nn.Parameter]:
+def _button_path_parameters(model: ActionSequenceTransformer) -> dict[str, nn.Parameter]:
     """Return the action-path matrices monitored before clipping."""
     button_head = cast(NonlinearActionHead, model.temporal.outputs["buttons"])
     return {
@@ -3902,7 +2461,7 @@ def _button_path_parameters(model: GPT) -> dict[str, nn.Parameter]:
     }
 
 
-def _button_gradient_abs_max(model: GPT) -> Tensor:
+def _button_gradient_abs_max(model: ActionSequenceTransformer) -> Tensor:
     """Return one pre-clipping action-path gradient guardrail."""
     maxima: list[Tensor] = []
     for name, parameter in _button_path_parameters(model).items():
@@ -3912,7 +2471,7 @@ def _button_gradient_abs_max(model: GPT) -> Tensor:
     return torch.stack(maxima).amax()
 
 
-def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
+def parameter_subsystems(model: ActionSequenceTransformer) -> dict[str, tuple[nn.Parameter, ...]]:
     """Partition every parameter by the model subsystem that owns it."""
     all_parameters = tuple(model.parameters())
     trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
@@ -3952,14 +2511,16 @@ def parameter_subsystems(model: GPT) -> dict[str, tuple[nn.Parameter, ...]]:
     return partitions
 
 
-def subsystem_parameter_counts(model: GPT) -> dict[str, int]:
+def subsystem_parameter_counts(model: ActionSequenceTransformer) -> dict[str, int]:
     partitions = parameter_subsystems(model)
     counts = {name: sum(parameter.numel() for parameter in parameters) for name, parameters in partitions.items()}
     counts["total"] = sum(parameter.numel() for parameter in model.parameters())
     if sum(value for name, value in counts.items() if name != "total") != counts["total"]:
         raise RuntimeError("parameter subsystem partition is incomplete")
     try:
-        expected = model.cfg.arch.parameter_count_contract
+        expected = Architecture(
+            **{item.name: getattr(model.cfg, item.name) for item in fields(Architecture)}
+        ).parameter_count_contract
     except ValueError as error:
         raise RuntimeError(str(error)) from error
     if counts != expected:
@@ -3992,22 +2553,20 @@ def model_tag(cfg: TrainConfig) -> str:
     )
 
 
+def _include_training_source(path: str, code_root: str) -> bool:
+    try:
+        relative = Path(path).resolve().relative_to(Path(code_root).resolve())
+    except ValueError:
+        return False
+    return (
+        bool(relative.parts)
+        and relative.parts[0] in {"docker", "experiments", "hal", "notebooks", "scripts", "tests"}
+        and relative.suffix in {".py", ".sh", ".toml", ".yaml", ".yml"}
+    )
+
+
 def log_wandb_code(run: wandb.Run) -> None:
-    root = Path(__file__).resolve().parents[1]
-    allowed_dirs = {"docker", "experiments", "hal", "notebooks", "scripts", "tests"}
-
-    def include(path: str, code_root: str) -> bool:
-        try:
-            relative = Path(path).resolve().relative_to(Path(code_root).resolve())
-        except ValueError:
-            return False
-        return (
-            bool(relative.parts)
-            and relative.parts[0] in allowed_dirs
-            and relative.suffix in {".py", ".sh", ".toml", ".yaml", ".yml"}
-        )
-
-    run.log_code(root=str(root), include_fn=include)
+    run.log_code(root=str(Path(__file__).resolve().parents[1]), include_fn=_include_training_source)
 
 
 def data_selection(cfg: TrainConfig) -> PhysicalShardSelection:
@@ -4044,9 +2603,9 @@ def validate_batch_geometry(
             raise ValueError("conditioning cannot be present for unavailable labels")
         if not bool(torch.isfinite(batch.future_return[batch.available]).all()):
             raise ValueError("available return labels must be finite")
-    if batch.target.shape[1:] != (cfg.arch.sample_chunk_length, A_DIM):
+    if batch.target.shape[1:] != (cfg.arch.sample_chunk_length, ACTION_DIM):
         raise ValueError(
-            f"target must be [B, {cfg.arch.sample_chunk_length}, {A_DIM}], got {tuple(batch.target.shape)}"
+            f"target must be [B, {cfg.arch.sample_chunk_length}, {ACTION_DIM}], got {tuple(batch.target.shape)}"
         )
     batch_size = batch.target.shape[0]
     if expected_batch_size is not None and batch_size != expected_batch_size:
@@ -4093,7 +2652,8 @@ def save_boundary_checkpoint(
     run_dir: Path,
     *,
     update: int,
-    model: GPT,
+    model: ActionSequenceTransformer,
+    calibration: ReturnCalibration,
     optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
     cfg: TrainConfig,
@@ -4105,6 +2665,7 @@ def save_boundary_checkpoint(
     return_masker_state: dict[str, object],
     identity_masker_state: dict[str, object] | None = None,
     prefix_sampler_state: dict[str, object] | None = None,
+    resume_lineage: tuple[ResumeLineage, ...] = (),
 ) -> Path:
     """Save one immutable boundary snapshot, then atomically advance latest."""
     snapshot = run_dir / f"boundary-step-{update:07d}.pt"
@@ -4135,13 +2696,14 @@ def save_boundary_checkpoint(
             "rng": rng_state(),
             "conditioning_protocol": conditioning_protocol(),
             "return_masker": return_masker_state,
-            "return_calibration": model.return_calibration.state_dict(),
+            "return_calibration": calibration.state_dict(),
             "provenance": run_provenance(cfg),
             "loader": loader_state,
             "identity_masker": (
                 loader_state.get("identity_masker") if identity_masker_state is None else identity_masker_state
             ),
             "prefix_sampler": prefix_sampler_state,
+            "resume_lineage": [entry.to_record() for entry in resume_lineage],
         },
     )
     os.replace(temporary, snapshot)
@@ -4229,15 +2791,6 @@ def run_provenance(cfg: TrainConfig) -> dict[str, object]:
     }
 
 
-def validate_resume_provenance(stored: object, current: Mapping[str, object]) -> None:
-    if not isinstance(stored, Mapping):
-        raise ValueError("resume checkpoint has no O59 provenance record")
-    typed_stored = cast(Mapping[str, object], stored)
-    changed = [name for name, value in current.items() if typed_stored.get(name) != value]
-    if changed:
-        raise ValueError(f"resume provenance changed: {changed}")
-
-
 def load_identity_sidecar(cfg: TrainConfig) -> PlayerIdentitySidecar:
     return load_player_identity_artifact(
         Path(cfg.player_sidecar_local),
@@ -4279,7 +2832,7 @@ def _collate_o59_batch(
     )
 
 
-def _require_loader_disk(loader: PhysicalShardReplayLoader[ReturnBatch]) -> None:
+def _require_loader_disk(loader: BufferedMDSReplayLoader[ReturnBatch]) -> None:
     required = loader.required_disk_bytes
     available = loader.disk_free_bytes
     if available < required:
@@ -4293,7 +2846,7 @@ def _make_train_loader(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
     player_lookup: ReplayPlayerLookup,
-) -> PhysicalShardReplayLoader[ReturnBatch]:
+) -> BufferedMDSReplayLoader[ReturnBatch]:
     selection = data_selection(cfg)
     adapter = MDSStorageAdapter(selection, download_retry=cfg.download_retry)
     adapter.validate_manifests(
@@ -4305,9 +2858,8 @@ def _make_train_loader(
     projection = FeatureProjection(
         columns=ITEM_PLAYER_PROJECTION.columns
         | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
-        derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
     )
-    train_loader = PhysicalShardReplayLoader[ReturnBatch](
+    train_loader = BufferedMDSReplayLoader[ReturnBatch](
         selection=selection,
         adapter=adapter,
         tasks=build_shard_plan(selection, adapter.manifests),
@@ -4361,34 +2913,27 @@ def _make_loaders(
     cfg: TrainConfig,
     stats: dict[str, FeatureStats],
     player_lookup: ReplayPlayerLookup | None = None,
-) -> tuple[PhysicalShardReplayLoader[ReturnBatch], list[ReturnBatch]]:
-    """Build physical-shard training and the unchanged generic validation cohort."""
+) -> tuple[BufferedMDSReplayLoader[ReturnBatch], list[ReturnBatch]]:
+    """Build buffered training and the fixed 059 validation cohort."""
     if player_lookup is None:
         player_lookup = ReplayPlayerLookup(load_identity_sidecar(cfg).by_replay)
     train_loader = _make_train_loader(cfg, stats, player_lookup)
     try:
-        val_loader = make_loader(
-            data_root=None,
-            split=cfg.val_split,
+        val_loader = make_validation_replay_loader(
+            sources=tuple(streams.BY_NAME[name] for name in cfg.source_names),
             stats=stats,
-            L_ctx=cfg.arch.L_ctx,
-            L_chunk=cfg.arch.sample_chunk_length,
+            context_length=cfg.arch.L_ctx,
+            chunk_length=cfg.arch.sample_chunk_length,
             batch_size=cfg.val_batch_size,
             seed=cfg.seed,
-            sources=tuple(streams.BY_NAME[name] for name in cfg.source_names),
             cache_limit="1792gb",
-            shuffle_block_size=8192,
-            shuffle_seed=cfg.seed,
-            num_workers=0,
             schema_version=cfg.mds_schema_version,
             extra=ITEM_PLAYER_COLUMNS,
             projection=FeatureProjection(
                 columns=ITEM_PLAYER_PROJECTION.columns
                 | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
-                derive_spatial=ITEM_PLAYER_PROJECTION.derive_spatial,
             ),
             batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx),
-            replay_format="policy-world",
             replay_labels=ReturnLabels(
                 returns_lib.PolicyReturnLabels(
                     player_lookup,
@@ -4399,8 +2944,6 @@ def _make_loaders(
                     cfg.awr.return_suffix,
                 )
             ),
-            require_full_context=True,
-            shuffle=True,
         )
         validation = cache_validation(val_loader, cfg.val_n_samples)
     except Exception:
@@ -4411,13 +2954,20 @@ def _make_loaders(
 
 @dataclass(slots=True)
 class PreparedTrainingData:
-    loader: PhysicalShardReplayLoader[ReturnBatch]
+    loader: BufferedMDSReplayLoader[ReturnBatch]
     validation: list[ReturnBatch]
     iterator: Iterator[ReturnBatch]
     first_batch_future: Future[ReturnBatch]
     resources: ExitStack
     worker_start_seconds: float
     first_batch_seconds: list[float]
+
+
+def _load_timed_first_batch(iterator: Iterator[ReturnBatch], elapsed_seconds: list[float]) -> ReturnBatch:
+    started = time.monotonic()
+    batch = next(iterator)
+    elapsed_seconds.append(time.monotonic() - started)
+    return batch
 
 
 def _prepare_training_data(
@@ -4442,16 +2992,10 @@ def _prepare_training_data(
         raise
     first_batch_seconds: list[float] = []
 
-    def load_first_batch() -> ReturnBatch:
-        started = time.monotonic()
-        batch = next(train_iterator)
-        first_batch_seconds.append(time.monotonic() - started)
-        return batch
-
     try:
         with ExitStack() as setup:
             executor = setup.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="o59-first-batch"))
-            first_batch = executor.submit(load_first_batch)
+            first_batch = executor.submit(_load_timed_first_batch, train_iterator, first_batch_seconds)
             resources = setup.pop_all()
     except Exception:
         train_loader.close()
@@ -4541,7 +3085,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
 def _log_training_summary(
     cfg: TrainConfig,
     parameter_counts: dict[str, int],
-    train_loader: PhysicalShardReplayLoader[ReturnBatch],
+    train_loader: BufferedMDSReplayLoader[ReturnBatch],
     *,
     flops_per_update: int,
     device_name: str | None,
@@ -4623,7 +3167,9 @@ def _log_training_summary(
         wandb.run.summary[f"data/source_sampling_share/{name}"] = weight / source_weight_total
 
 
-def _training_functions(model: GPT, cfg: TrainConfig, *, compile_mode: str | None = None) -> tuple[Callable, Callable]:
+def _training_functions(
+    model: ActionSequenceTransformer, cfg: TrainConfig, *, compile_mode: str | None = None
+) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
     temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
@@ -4632,7 +3178,7 @@ def _training_functions(model: GPT, cfg: TrainConfig, *, compile_mode: str | Non
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.
         model.trunk.resolve_attention(DEVICE)
-        if model.trunk.attn_path not in ("flex", "varlen_flash"):
+        if model.trunk.attn_path != "varlen_flash":
             raise RuntimeError(
                 f"compiled CUDA training requires a fused attention path, resolved {model.trunk.attn_path!r} instead"
             )
@@ -4727,7 +3273,7 @@ class _TrainingMetricAccumulator:
 
 
 def train_step(
-    model: GPT,
+    model: ActionSequenceTransformer,
     batch: ReturnBatch,
     cfg: TrainConfig,
     *,
@@ -4848,7 +3394,8 @@ def spawn_closed_loop_evaluation(
 
 def _finalize_training(
     *,
-    model: GPT,
+    model: ActionSequenceTransformer,
+    calibration: ReturnCalibration,
     optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
     cfg: TrainConfig,
@@ -4865,12 +3412,14 @@ def _finalize_training(
     update: int,
     actual_loss_positions: int,
     smoke: bool,
+    resume_lineage: tuple[ResumeLineage, ...] = (),
 ) -> None:
     """Save the final model and queue evaluation for a separate L40S worker."""
     snapshot = save_boundary_checkpoint(
         run_dir,
         update=update,
         model=model,
+        calibration=calibration,
         optimizer=optimizer,
         scheduler=scheduler,
         cfg=cfg,
@@ -4882,6 +3431,7 @@ def _finalize_training(
         identity_masker_state=identity_masker_state,
         return_masker_state=return_masker_state,
         prefix_sampler_state=prefix_sampler_state,
+        resume_lineage=resume_lineage,
     )
     final_path = run_dir / ("smoke-final.pt" if smoke else "final.pt")
     advance_checkpoint_link(snapshot, final_path)
@@ -4909,7 +3459,7 @@ def _finalize_training(
 
 
 def _compile_synthetic_forward_backward(
-    model: GPT,
+    model: ActionSequenceTransformer,
     cfg: TrainConfig,
     *,
     step: int,
@@ -4985,11 +3535,25 @@ def train(
     comment: str = "",
     resume_run: str | None = None,
     resume_state: dict | None = None,
+    source_transition: ResumeLineage | None = None,
+    resume_checkpoint_sha256: str | None = None,
     smoke: bool = False,
     proxy: bool = False,
     stop_after_update: int | None = None,
 ) -> None:
     validate_config(cfg)
+    lineage = checkpoint_resume_lineage(None if resume_state is None else resume_state.get("resume_lineage"))
+    if source_transition is not None and resume_state is None:
+        raise ValueError("a source transition requires a resume checkpoint")
+    if lineage:
+        assert resume_state is not None
+        provenance = resume_state.get("provenance")
+        if not isinstance(provenance, dict) or provenance.get("git_sha") != lineage[-1].new_source_sha:
+            raise ValueError("resume lineage does not end at the checkpoint source")
+    if source_transition is not None:
+        if lineage and lineage[-1].new_source_sha != source_transition.old_source_sha:
+            raise ValueError("resume lineage source transitions are not contiguous")
+        lineage = (*lineage, source_transition)
     if smoke and proxy:
         raise ValueError("proxy and smoke modes are mutually exclusive")
     if stop_after_update is not None and stop_after_update < 1:
@@ -5017,8 +3581,9 @@ def train(
     sidecar = load_identity_sidecar(cfg)
     prepared_data = _prepare_training_data(cfg, stats, sidecar, resume_state)
     model_started = time.monotonic()
-    print(f"[model] constructing GPT and moving parameters to {DEVICE}", flush=True)
-    model = GPT(cfg, sidecar.vocabulary).to(DEVICE)
+    print(f"[model] constructing ActionSequenceTransformer and moving parameters to {DEVICE}", flush=True)
+    model = make_model(cfg, sidecar.vocabulary).to(DEVICE)
+    calibration = ReturnCalibration(window_count=CALIBRATION_WINDOWS)
     print(f"[model] construction complete in {time.monotonic() - model_started:.1f}s", flush=True)
     counts = subsystem_parameter_counts(model)
     flops_per_update = approximate_training_flops_per_update(cfg, counts)
@@ -5033,7 +3598,7 @@ def train(
         peak_flops=peak_flops,
     )
     optimizer = make_optimizer(model, cfg)
-    scheduler = LambdaLR(optimizer, lr_schedule(cfg))
+    scheduler = LearningRateScheduler(optimizer, lr_schedule(cfg))
     start_step = 0
     actual_positions = 0
     identity_masker = IdentityMasker(cfg.seed ^ 0x0501D, cfg.identity_dropout)
@@ -5042,7 +3607,7 @@ def train(
     if resume_state is not None:
         validate_conditioning_state(resume_state, cfg)
         return_masker.load_state_dict(resume_state["return_masker"])
-        model.return_calibration.load_state_dict(resume_state["return_calibration"])
+        calibration.load_state_dict(resume_state["return_calibration"])
         model.load_state_dict(resume_state["model"])
         optimizer.load_state_dict(resume_state["opt"])
         scheduler.load_state_dict(resume_state["sched"])
@@ -5057,7 +3622,12 @@ def train(
         rng = resume_state.get("rng")
         if not isinstance(rng, Mapping):
             raise ValueError("resume checkpoint has no global RNG state")
-        validate_resume_provenance(resume_state.get("provenance"), run_provenance(cfg))
+        validate_resume_provenance(
+            resume_state.get("provenance"),
+            run_provenance(cfg),
+            transition=source_transition,
+            parent_checkpoint_sha256=resume_checkpoint_sha256,
+        )
         restore_rng(rng)
         start_step = int(resume_state["step"]) + 1
         positions_per_update = cfg.policy_prefixes_per_update
@@ -5089,7 +3659,7 @@ def train(
             DEVICE,
             identity_masker,
             return_masker=return_masker,
-            calibration=model.return_calibration,
+            calibration=calibration,
             iterator=prepared_data.iterator,
             first_batch_future=prepared_data.first_batch_future,
         )
@@ -5255,6 +3825,7 @@ def train(
                     run_dir,
                     update=update,
                     model=model,
+                    calibration=calibration,
                     optimizer=optimizer,
                     scheduler=scheduler,
                     cfg=cfg,
@@ -5266,6 +3837,7 @@ def train(
                     identity_masker_state=identity_masker.state_dict(),
                     return_masker_state=return_masker.state_dict(),
                     prefix_sampler_state=prefix_sampler.state_dict(),
+                    resume_lineage=lineage,
                 )
             boundary_metrics: dict[str, float] = {}
             if val_due:
@@ -5292,6 +3864,7 @@ def train(
             raise RuntimeError("CPU lookahead was not drained at the final update")
         _finalize_training(
             model=model,
+            calibration=calibration,
             optimizer=optimizer,
             scheduler=scheduler,
             cfg=cfg,
@@ -5305,6 +3878,7 @@ def train(
             identity_masker_state=identity_masker.state_dict(),
             return_masker_state=return_masker.state_dict(),
             prefix_sampler_state=prefix_sampler.state_dict(),
+            resume_lineage=lineage,
             update=run_stop,
             actual_loss_positions=actual_positions,
             smoke=smoke,
@@ -5378,13 +3952,15 @@ def validate_conditioning_state(state: Mapping[str, object], cfg: TrainConfig) -
     masker = state.get("return_masker")
     if not isinstance(calibration, dict) or not isinstance(masker, dict):
         raise ValueError("checkpoint lacks return calibration or masker state")
-    ReturnCalibration().load_state_dict(cast(dict[str, object], calibration))
+    ReturnCalibration(window_count=CALIBRATION_WINDOWS).load_state_dict(cast(dict[str, object], calibration))
     ReturnMasker(0, cfg.return_dropout, enabled=cfg.return_conditioning).load_state_dict(
         cast(Mapping[str, object], masker)
     )
 
 
-def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfig, dict[str, FeatureStats], dict]:
+def load_checkpoint(
+    path: str, *, device: str = DEVICE
+) -> tuple[ActionSequenceTransformer, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(path, map_location=device, weights_only=False)
     cfg = config_from_state(state["cfg"])
     validate_config(cfg)
@@ -5393,9 +3969,8 @@ def load_checkpoint(path: str, *, device: str = DEVICE) -> tuple[GPT, TrainConfi
     if not isinstance(encoded, Tensor) or not encoded.numel():
         raise ValueError("checkpoint has no embedded identity vocabulary")
     vocabulary = PlayerVocabulary(decode_player_codes(encoded.detach().cpu().numpy().tobytes()))
-    model = GPT(cfg, vocabulary).to(device)
+    model = make_model(cfg, vocabulary).to(device)
     model.load_state_dict(state["model"])
-    model.return_calibration.load_state_dict(state["return_calibration"])
     model.eval()
     stats = load_stats(cfg)
     return model, cfg, stats, state
@@ -5463,8 +4038,10 @@ def eval_checkpoint(
     validate_config(cfg)
     if return_target not in ("p90", "unconditioned"):
         raise ValueError("unknown return target")
-    desired_return = model.return_calibration.targets()[2] if return_target == "p90" else None
-    calibration_hash = cast(str, model.return_calibration.state_dict()["sha256"])
+    calibration = ReturnCalibration(window_count=CALIBRATION_WINDOWS)
+    calibration.load_state_dict(state["return_calibration"])
+    desired_return = calibration.targets()[2] if return_target == "p90" else None
+    calibration_hash = cast(str, calibration.state_dict()["sha256"])
     if return_target == "unconditioned" and (output_name is None or wandb_namespace == "eval"):
         raise ValueError("unconditioned comparisons require a separate output directory and W&B namespace")
     if player_code is None:
@@ -5551,6 +4128,7 @@ class TrainArgs:
     comment: str = ""
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
+    resume_source_transition: Path | None = None
     resume_as: str | None = None
     resume_num_workers: int | None = None
     decay_duration: int | None = None
@@ -5613,6 +4191,8 @@ def main(args: Command) -> None:
         )
         return
     resume_run = resume_state = None
+    source_transition = None
+    resume_checkpoint_sha = None
     cfg = args.cfg
     proxy_arch: Architecture | None = None
     target_positions: int | None = None
@@ -5622,6 +4202,8 @@ def main(args: Command) -> None:
         target_positions = proxy.target_positions
     if args.resume is None and (args.resume_checkpoint != "latest.pt" or args.resume_as is not None):
         raise SystemExit("--resume-checkpoint and --resume-as require --resume")
+    if args.resume is None and args.resume_source_transition is not None:
+        raise SystemExit("--resume-source-transition requires --resume")
     if args.resume is None and args.resume_num_workers is not None:
         raise SystemExit("--resume-num-workers requires --resume")
     if args.resume is None and args.decay_duration is not None:
@@ -5643,6 +4225,9 @@ def main(args: Command) -> None:
         )
         if resume_state is None:
             raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
+        if args.resume_source_transition is not None:
+            source_transition = read_resume_lineage(args.resume_source_transition)
+            resume_checkpoint_sha = checkpoint_sha256(Path("runs") / args.resume / args.resume_checkpoint)
         resume_run = args.resume_as or args.resume
         cfg = config_from_state(resume_state["cfg"])
         proxy = proxy_config()
@@ -5693,6 +4278,8 @@ def main(args: Command) -> None:
         comment=args.comment,
         resume_run=resume_run,
         resume_state=resume_state,
+        source_transition=source_transition,
+        resume_checkpoint_sha256=resume_checkpoint_sha,
         smoke=args.smoke,
         proxy=args.proxy,
         stop_after_update=args.stop_after_update,

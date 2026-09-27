@@ -3,21 +3,106 @@
 Experiments weight losses or fit value functions against the outcome of a match.
 This module owns the shared formulas: per-frame reward events from the stock and
 percent columns, the discounted return over a complete replay, and the per-port
-labeling a loader ``replay_transform`` applies before window sampling.
+labels added before window sampling.
 
 The formulas were first written and tested inside experiments 020 and 031. This
 module is their single home; experiments import it instead of copying it.
 """
 
+import hashlib
+import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
+import torch
 from scipy.signal import lfilter
+from torch import Tensor
 
+from hal.data.player_identity import ReplayPlayerLookup
 from hal.data.policy_schema import unpack_player_stock
-from hal.training.player_identity import ReplayPlayerLookup
 from hal.wire import MASK_INT32
+
+
+class ReturnCalibration:
+    """Ordered return samples whose identity is part of a resumable checkpoint."""
+
+    def __init__(self, *, window_count: int) -> None:
+        if window_count < 1:
+            raise ValueError("calibration window count must be positive")
+        self.window_count = window_count
+        self.values: list[float] = []
+        self.valid: list[bool] = []
+        self.replay_ids: list[str] = []
+
+    def observe(
+        self,
+        *,
+        future_returns_BL: Tensor,
+        available_BL: Tensor,
+        replay_ids: tuple[str, ...] | None,
+    ) -> None:
+        remaining = self.window_count - len(self.values)
+        if remaining <= 0:
+            return
+        count = min(remaining, len(future_returns_BL))
+        if replay_ids is None:
+            raise ValueError("calibration requires replay identities")
+        valid = available_BL[:count, -1].detach().cpu()
+        values = torch.where(valid, future_returns_BL[:count, -1].detach().cpu(), 0.0)
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError("nonfinite valid calibration return")
+        self.values.extend(values.tolist())
+        self.valid.extend(valid.tolist())
+        self.replay_ids.extend(replay_ids[:count])
+
+    def targets(self) -> tuple[float, float, float]:
+        if len(self.values) != self.window_count:
+            raise ValueError("return calibration is incomplete")
+        values = np.asarray(self.values)
+        positive = values[np.asarray(self.valid) & (values > 0)]
+        if not positive.size:
+            raise ValueError("calibration has no strictly positive valid returns")
+        median, p90 = np.quantile(positive, [0.5, 0.9], method="linear")
+        return 0.0, float(median), float(p90)
+
+    def state_dict(self) -> dict[str, object]:
+        data = {"values": self.values.copy(), "valid": self.valid.copy(), "replay_ids": self.replay_ids.copy()}
+        identity = hashlib.sha256(json.dumps(data, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        return {
+            "version": 1,
+            **data,
+            "sha256": identity,
+            "targets": self.targets() if len(self.values) == self.window_count else None,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        if set(state) != {"version", "values", "valid", "replay_ids", "sha256", "targets"} or state["version"] != 1:
+            raise ValueError("incompatible return calibration")
+        if not all(isinstance(state[name], list) for name in ("values", "valid", "replay_ids")):
+            raise ValueError("calibration samples must be ordered lists")
+        values = cast(list[float], state["values"])
+        valid = cast(list[bool], state["valid"])
+        replay_ids = cast(list[str], state["replay_ids"])
+        if (
+            any(type(value) is not float or not math.isfinite(value) for value in values)
+            or any(type(value) is not bool for value in valid)
+            or any(not isinstance(value, str) or not value for value in replay_ids)
+        ):
+            raise ValueError("invalid calibration sample types")
+        if len(values) != len(valid) or len(values) != len(replay_ids) or len(values) > self.window_count:
+            raise ValueError("invalid calibration lengths")
+        candidate = ReturnCalibration(window_count=self.window_count)
+        candidate.values = values.copy()
+        candidate.valid = valid.copy()
+        candidate.replay_ids = replay_ids.copy()
+        if candidate.state_dict() != state:
+            raise ValueError("return calibration identity or targets changed")
+        self.values = candidate.values
+        self.valid = candidate.valid
+        self.replay_ids = candidate.replay_ids
 
 
 def stock_loss_events(stock: np.ndarray) -> np.ndarray:
@@ -131,7 +216,7 @@ def replay_returns(
 
     The keys are ``p{1,2}_<suffix>`` and ``p{1,2}_<suffix>_valid``, both full-length
     per-frame arrays. The columns are named per port, not per role, because the
-    sampler picks the ego port after windowing: ``dataloader.relabel_ego`` then
+    sampler picks the ego port after windowing: ``replay_windows.relabel_ego`` then
     renames the sampled port's columns to ``ego_<suffix>`` with no extra code.
 
     A truncated replay (``terminated`` false, or inferred false) has an unknown
@@ -154,31 +239,6 @@ def replay_returns(
         out[f"{port}_{suffix}"] = returns
         out[f"{port}_{suffix}_valid"] = np.full(reward.shape, complete, dtype=np.bool_)
     return out
-
-
-def label_replay(
-    sample: dict,
-    *,
-    gamma: float,
-    damage_shaping: float,
-    win_reward: float,
-    stock_value: float = 1.0,
-    suffix: str,
-    terminated: bool | None = None,
-) -> dict:
-    """Add full-episode return labels to a replay row before the loader makes windows."""
-    return {
-        **sample,
-        **replay_returns(
-            sample,
-            gamma=gamma,
-            damage_shaping=damage_shaping,
-            win_reward=win_reward,
-            stock_value=stock_value,
-            suffix=suffix,
-            terminated=terminated,
-        ),
-    }
 
 
 def compact_policy_returns(
