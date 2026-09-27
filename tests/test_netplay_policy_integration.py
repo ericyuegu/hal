@@ -69,8 +69,8 @@ def policy_harness() -> _Harness:
     parent_1, child_1 = Pipe()
     try:
         configure_inference_process()
-        batcher, ready = _prepare_netplay_engine(
-            _InferenceProcessConfig(policy_path, "cuda", 0, compiled, 2, 0.0005),
+        prepared_engine = _prepare_netplay_engine(
+            _InferenceProcessConfig(policy_path, "cuda", 0, compiled, 2, 0.0005, "0" * 16, "0" * 40, "0" * 64, None),
             {0: parent_0, 1: parent_1},
         )
     except BaseException:
@@ -78,12 +78,13 @@ def policy_harness() -> _Harness:
             connection.close()
         raise
     runtime = RuntimeConfig(2, (2, 3), replan_interval_frames=4)
+    batcher, ready = prepared_engine.engine, prepared_engine.ready
     stop = threading.Event()
     lost = threading.Event()
-    prepared = {profile.fixed_prefix_frames: profile for profile in ready.profiles}
+    profiles_by_prefix = {profile.fixed_prefix_frames: profile for profile in ready.profiles}
     clients = (
-        InferenceClient(ready.spec, ready.context_frames, child_0, lost, prepared),
-        InferenceClient(ready.spec, ready.context_frames, child_1, lost, prepared),
+        InferenceClient(ready.spec, ready.context_frames, child_0, lost, profiles_by_prefix),
+        InferenceClient(ready.spec, ready.context_frames, child_1, lost, profiles_by_prefix),
     )
     errors: list[BaseException] = []
 

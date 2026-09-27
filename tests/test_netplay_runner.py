@@ -2,6 +2,7 @@ import json
 import signal
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -28,6 +29,7 @@ from hal.inference.api import PolicySpec
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
 from hal.inference.benchmark import LatencyMeasurement
+from hal.inference.cuda_graph import CaptureCounter
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
@@ -120,14 +122,18 @@ def test_generation_uses_cold_preparation_budget_and_preserves_recovery_deadline
     monkeypatch.setattr(runner.mp, "get_context", lambda _method: context)
     monkeypatch.setattr(runner.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(runner, "_await_engine_ready", ready)
+    config = replace(_runner_config(tmp_path), measurement_dir=tmp_path / "measurements")
 
     with pytest.raises(TimeoutError, match="preparation deadline"):
         runner._run_generation(
-            _runner_config(tmp_path), ("BOT#1",), "b" * 64, runner._ShutdownFlag(), recovery_deadline=recovery_deadline
+            config, ("BOT#1",), "b" * 64, runner._ShutdownFlag(), recovery_deadline=recovery_deadline
         )
 
     assert ready.call_args.kwargs["deadline"] == expected
     process.start.assert_called_once()
+    records = tuple((config.measurement_dir / "engine-audits").glob("*-started.json"))
+    assert len(records) == 1
+    assert json.loads(records[0].read_text())["policy_bundle_sha256"] == "b" * 64
 
 
 def test_recovery_keeps_120_seconds_after_a_long_cold_preparation_budget(
@@ -208,6 +214,7 @@ def test_gpu_preparation_shares_one_model_across_distinct_netplay_profiles(
 
         def __init__(self, received_model: object, *_args: object, **_kwargs: object) -> None:
             assert received_model is model
+            self.capture_counter = CaptureCounter()
             policies.append(self)
 
         def validate_prepared_profile(self, profile: PreparedInferenceProfile) -> None:
@@ -230,8 +237,10 @@ def test_gpu_preparation_shares_one_model_across_distinct_netplay_profiles(
     monkeypatch.setattr(runner, "freeze_inference_runtime", lambda: None)
     parent, child = Pipe()
     try:
-        engine, ready = runner._prepare_netplay_engine(
-            runner._InferenceProcessConfig(tmp_path / "policy.halpolicy", "cpu", 7, False, 2, 0.0005),
+        prepared = runner._prepare_netplay_engine(
+            runner._InferenceProcessConfig(
+                tmp_path / "policy.halpolicy", "cpu", 7, False, 2, 0.0005, "a" * 16, "b" * 40, "c" * 64, None
+            ),
             {17: parent},
         )
     finally:
@@ -241,10 +250,121 @@ def test_gpu_preparation_shares_one_model_across_distinct_netplay_profiles(
     assert len(policies) == 2
     assert len(engine_profiles) == 2
     assert tuple(qualified) == runner._NETPLAY_TIMINGS
-    assert {profile.fixed_prefix_frames for profile in engine.profiles} == {3, 4}
-    assert ready.profiles == tuple(engine.profiles)
-    assert ready.checkpoint_sha256 == "a" * 64
-    assert ready.context_frames == 256
+    assert {profile.fixed_prefix_frames for profile in prepared.engine.profiles} == {3, 4}
+    assert prepared.ready.profiles == tuple(prepared.engine.profiles)
+    assert prepared.ready.checkpoint_sha256 == "a" * 64
+    assert prepared.ready.context_frames == 256
+    assert len(prepared.capture_counters) == 2
+
+
+@pytest.mark.parametrize("serving_fails", [False, True])
+def test_engine_audit_records_ready_and_final_while_listener_is_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serving_fails: bool
+) -> None:
+    profile = PreparedInferenceProfile("netplay-delay-2", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 1)
+    ready = runner._EngineReady(
+        PolicySpec("059", "o59-history-decoder", (), (0, 2, 3)),
+        256,
+        "a" * 64,
+        2,
+        (),
+        (7,),
+        "test GPU",
+        (profile,),
+    )
+    capture = CaptureCounter()
+    capture.attempts = 2
+    capture.completed = 2
+    compiler = SimpleNamespace(snapshot=Mock(return_value=0))
+    status = Mock()
+    engine = Mock()
+    config = runner._InferenceProcessConfig(
+        tmp_path / "policy.halpolicy",
+        "cpu",
+        7,
+        True,
+        1,
+        0.0005,
+        "a" * 16,
+        "b" * 40,
+        "c" * 64,
+        tmp_path / "measurements",
+    )
+    audit_dir = config.measurement_dir / "engine-audits"
+    listener_active = False
+
+    @contextmanager
+    def listener():
+        nonlocal listener_active
+        listener_active = True
+        try:
+            yield compiler
+        finally:
+            listener_active = False
+
+    def serve(_stop: object, _pulse: object) -> None:
+        assert listener_active
+        assert (audit_dir / f"{config.generation_id}-ready.json").exists()
+        if serving_fails:
+            raise RuntimeError("serve failed")
+
+    engine.serve.side_effect = serve
+    monkeypatch.setattr(runner, "configure_inference_process", lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "_prepare_netplay_engine",
+        lambda _config, _connections: runner._PreparedNetplayEngine(engine, ready, ((profile, capture),)),
+    )
+    monkeypatch.setattr(runner, "count_compilation_starts", listener)
+    monkeypatch.setattr(runner.signal, "signal", lambda _signal, _handler: None)
+    if serving_fails:
+        with pytest.raises(RuntimeError, match="serve failed"):
+            runner._gpu_inference_process(config, {}, status, threading.Event())
+    else:
+        runner._gpu_inference_process(config, {}, status, threading.Event())
+    assert not listener_active
+    first = json.loads((audit_dir / f"{config.generation_id}-ready.json").read_text())
+    final = json.loads((audit_dir / f"{config.generation_id}-final.json").read_text())
+    assert first["compilation_starts"] == final["compilation_starts"] == 0
+    assert first["profiles"][0]["capture_attempts"] == final["profiles"][0]["capture_attempts"] == 2
+    assert final["outcome"] == ("error" if serving_fails else "stopped")
+    assert compiler.snapshot.call_count == 2
+    assert status.send.call_count == (2 if serving_fails else 1)
+
+
+def test_engine_audit_records_are_immutable(tmp_path: Path) -> None:
+    runner._write_engine_audit_record(tmp_path, "a" * 16, "started", {"schema_version": 1})
+    with pytest.raises(FileExistsError):
+        runner._write_engine_audit_record(tmp_path, "a" * 16, "started", {"schema_version": 2})
+    record = tmp_path / "engine-audits" / f"{'a' * 16}-started.json"
+    assert json.loads(record.read_text()) == {"schema_version": 1}
+
+
+def test_production_engine_does_not_create_audit_or_register_listener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = runner._InferenceProcessConfig(
+        tmp_path / "policy.halpolicy", "cpu", 7, False, 1, 0.0005, "0" * 16, "0" * 40, "0" * 64, None
+    )
+    engine = Mock()
+    ready = Mock()
+    status = Mock()
+    listener = Mock(side_effect=AssertionError("production must not register an audit listener"))
+    monkeypatch.setattr(runner, "configure_inference_process", lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "_prepare_netplay_engine",
+        lambda _config, _connections: runner._PreparedNetplayEngine(engine, ready, ()),
+    )
+    monkeypatch.setattr(runner, "count_compilation_starts", listener)
+    monkeypatch.setattr(runner.signal, "signal", lambda _signal, _handler: None)
+
+    runner._gpu_inference_process(config, {}, status, threading.Event())
+
+    status.send.assert_called_once_with(ready)
+    engine.serve.assert_called_once()
+    listener.assert_not_called()
+    assert not (tmp_path / "engine-audits").exists()
 
 
 def test_slot_process_inherits_ignored_terminal_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:

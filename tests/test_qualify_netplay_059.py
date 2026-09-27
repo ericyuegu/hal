@@ -160,6 +160,138 @@ def test_resource_sampler_finishes_its_inflight_gpu_sample(tmp_path: Path, monke
     assert len(sampler.samples) == 1
 
 
+def _engine_audit_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    measurement_dir = tmp_path / "match-measurements"
+    audit_dir = measurement_dir / "engine-audits"
+    audit_dir.mkdir(parents=True)
+    budget_path = tmp_path / "runner-status.budget.json"
+    budget_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "git_sha": "c" * 40,
+                "bundle_sha256": "b" * 64,
+                "checkpoint_sha256": "a" * 64,
+                "qualified_capacity": 1,
+                "capability_version": 2,
+                "compiled": True,
+            }
+        )
+    )
+    profiles = [
+        {
+            "profile": {
+                "name": f"netplay-delay-{delay}",
+                "checkpoint_sha256": "a" * 64,
+                "execution_mode": "kv_cache",
+                "prediction_horizon_frames": 8,
+                "fixed_prefix_frames": delay + 1,
+                "update_shapes": [1, 2, 4],
+                "capacity": 1,
+            },
+            "capture_attempts": 5,
+            "capture_completed": 5,
+        }
+        for delay in (2, 3)
+    ]
+    common = {
+        "schema_version": 1,
+        "engine_generation_id": "d" * 16,
+        "source_git_sha": "c" * 40,
+        "policy_bundle_sha256": "b" * 64,
+    }
+    started = dict(common, phase="started")
+    ready = dict(
+        common,
+        phase="ready",
+        checkpoint_sha256="a" * 64,
+        capability_version=2,
+        compiled=True,
+        outcome="serving",
+        compilation_starts=0,
+        profiles=profiles,
+    )
+    final = dict(ready, phase="final", outcome="stopped")
+    for phase, record in (("started", started), ("ready", ready), ("final", final)):
+        (audit_dir / f"{'d' * 16}-{phase}.json").write_text(json.dumps(record))
+    return measurement_dir, budget_path
+
+
+def _assess_engine_audit(tmp_path: Path) -> qualify_netplay_059.EngineAuditAssessment:
+    return qualify_netplay_059._assess_engine_audit(
+        tmp_path / "match-measurements",
+        tmp_path / "runner-status.budget.json",
+        source_git_sha="c" * 40,
+        bundle_sha256="b" * 64,
+        capacity=1,
+    )
+
+
+def test_engine_audit_requires_one_unchanged_prepared_generation(tmp_path: Path) -> None:
+    measurement_dir, _ = _engine_audit_fixture(tmp_path)
+    result = _assess_engine_audit(tmp_path)
+    assert result.generation_id == "d" * 16
+    assert result.profile_names == ("netplay-delay-2", "netplay-delay-3")
+    assert result.compilation_starts == result.capture_attempts_delta == result.capture_completed_delta == 0
+    assert Path(result.ready_path).parent == measurement_dir / "engine-audits"
+    assert len(result.ready_sha256) == len(result.final_sha256) == 64
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("restart", "exactly one inference engine generation"),
+        ("missing_final", "missing, extra, or incomplete"),
+        ("malformed_final", "Expecting property name"),
+        ("compile", "occurred after preparation"),
+        ("capture_attempt", "occurred after preparation"),
+        ("capture_completed", "occurred after preparation"),
+        ("profile", "profile identity"),
+        ("checkpoint", "checkpoint, capability"),
+        ("source", "audit identity"),
+        ("error_outcome", "serving outcome"),
+        ("extra_temp", "missing, extra, or incomplete"),
+        ("unqualified_budget", "preparation budget identity"),
+    ],
+)
+def test_engine_audit_rejects_missing_or_tampered_evidence(tmp_path: Path, tamper: str, message: str) -> None:
+    measurement_dir, budget_path = _engine_audit_fixture(tmp_path)
+    audit_dir = measurement_dir / "engine-audits"
+    final_path = audit_dir / f"{'d' * 16}-final.json"
+    if tamper == "restart":
+        (audit_dir / f"{'e' * 16}-started.json").write_text("{}")
+    elif tamper == "missing_final":
+        final_path.unlink()
+    elif tamper == "malformed_final":
+        final_path.write_text("{bad json")
+    elif tamper == "extra_temp":
+        (audit_dir / "leftover.tmp").touch()
+    elif tamper == "unqualified_budget":
+        budget = json.loads(budget_path.read_text())
+        budget["compiled"] = False
+        budget_path.write_text(json.dumps(budget))
+    else:
+        record = json.loads(final_path.read_text())
+        if tamper == "compile":
+            record["compilation_starts"] += 1
+        elif tamper == "capture_attempt":
+            record["profiles"][0]["capture_attempts"] += 1
+        elif tamper == "capture_completed":
+            record["profiles"][0]["capture_attempts"] += 1
+            record["profiles"][0]["capture_completed"] += 1
+        elif tamper == "profile":
+            record["profiles"][0]["profile"]["fixed_prefix_frames"] += 1
+        elif tamper == "checkpoint":
+            record["checkpoint_sha256"] = "e" * 64
+        elif tamper == "source":
+            record["source_git_sha"] = "e" * 40
+        else:
+            record["outcome"] = "error"
+        final_path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match=message):
+        _assess_engine_audit(tmp_path)
+
+
 def _plan_decision(source_frame: int, sequence: int, timing: FrameTiming) -> dict[str, object]:
     prefix = [[0] * 7 for _ in range(timing.fixed_prefix_frames)]
     return {

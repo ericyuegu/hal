@@ -113,6 +113,22 @@ class MatchAssessment:
     failures: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class EngineAuditAssessment:
+    generation_id: str
+    checkpoint_sha256: str
+    started_path: str
+    started_sha256: str
+    ready_path: str
+    ready_sha256: str
+    final_path: str
+    final_sha256: str
+    profile_names: tuple[str, ...]
+    compilation_starts: int
+    capture_attempts_delta: int
+    capture_completed_delta: int
+
+
 _STEADY_START_FRAME = 300
 _SCHEDULE_COUNTERS = (
     "deadline_misses",
@@ -123,7 +139,6 @@ _SCHEDULE_COUNTERS = (
     "transport_corrections",
 )
 _UNMEASURED_GATES = (
-    "Post-preparation compilation and CUDA graph capture counts",
     "Process, thread, and memory stability across rematches",
     "Three same-day matched control/candidate delivery trials",
 )
@@ -239,6 +254,128 @@ def _validate_plan_decisions(
             raise ValueError(f"{path}: accepted plan is late or has a mismatched wire prefix")
         accepted_count += int(accepted)
     return accepted_count
+
+
+def _audit_capture_counts(
+    payload: Mapping[str, object], expected_profiles: list[dict[str, object]], path: Path
+) -> tuple[tuple[str, int, int], ...]:
+    raw_profiles = _array(payload.get("profiles"), "engine audit profiles")
+    if len(raw_profiles) != len(expected_profiles):
+        raise ValueError(f"{path}: engine audit profiles differ from prepared netplay shapes")
+    captures = []
+    for raw, expected in zip(raw_profiles, expected_profiles, strict=True):
+        item = _mapping(raw, "engine audit profile")
+        if item.get("profile") != expected:
+            raise ValueError(f"{path}: engine audit profile identity differs from prepared netplay shapes")
+        attempts = _integer(item.get("capture_attempts"), "CUDA graph capture attempts")
+        completed = _integer(item.get("capture_completed"), "CUDA graph captures completed")
+        if attempts < 0 or not 0 <= completed <= attempts:
+            raise ValueError(f"{path}: invalid CUDA graph capture counts")
+        captures.append((str(expected["name"]), attempts, completed))
+    return tuple(captures)
+
+
+def _assess_engine_audit(
+    measurement_dir: Path,
+    budget_path: Path,
+    *,
+    source_git_sha: str,
+    bundle_sha256: str,
+    capacity: int,
+) -> EngineAuditAssessment:
+    budget = _mapping(json.loads(budget_path.read_text()), "netplay preparation budget")
+    if (
+        budget.get("schema_version") != 4
+        or budget.get("git_sha") != source_git_sha
+        or budget.get("bundle_sha256") != bundle_sha256
+        or budget.get("qualified_capacity") != capacity
+        or budget.get("compiled") is not True
+    ):
+        raise ValueError(f"{budget_path}: preparation budget identity or execution mode differs")
+    checkpoint_sha256 = budget.get("checkpoint_sha256")
+    if (
+        not isinstance(checkpoint_sha256, str)
+        or len(checkpoint_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in checkpoint_sha256)
+    ):
+        raise ValueError(f"{budget_path}: invalid checkpoint identity")
+    capability_version = _integer(budget.get("capability_version"), "backend capability version")
+    if capability_version < 2:
+        raise ValueError(f"{budget_path}: unsupported netplay backend capability")
+    expected_profiles: list[dict[str, object]] = [
+        {
+            "name": f"netplay-delay-{delay}",
+            "checkpoint_sha256": checkpoint_sha256,
+            "execution_mode": "kv_cache",
+            "prediction_horizon_frames": 8,
+            "fixed_prefix_frames": delay + 1,
+            "update_shapes": [1, 2, 4],
+            "capacity": capacity,
+        }
+        for delay in (2, 3)
+    ]
+    audit_dir = measurement_dir / "engine-audits"
+    files = set(audit_dir.iterdir())
+    started_files = tuple(path for path in files if path.name.endswith("-started.json"))
+    if len(started_files) != 1:
+        raise ValueError(f"{audit_dir}: expected exactly one inference engine generation")
+    generation_id = started_files[0].name.removesuffix("-started.json")
+    if len(generation_id) != 16 or any(char not in "0123456789abcdef" for char in generation_id):
+        raise ValueError(f"{audit_dir}: invalid inference engine generation ID")
+    paths = {phase: audit_dir / f"{generation_id}-{phase}.json" for phase in ("started", "ready", "final")}
+    if files != set(paths.values()):
+        raise ValueError(f"{audit_dir}: missing, extra, or incomplete inference engine audit records")
+    records = {phase: _mapping(json.loads(path.read_text()), f"{phase} engine audit") for phase, path in paths.items()}
+    common = {
+        "schema_version": 1,
+        "engine_generation_id": generation_id,
+        "source_git_sha": source_git_sha,
+        "policy_bundle_sha256": bundle_sha256,
+    }
+    for phase, record in records.items():
+        if any(record.get(key) != value for key, value in common.items()) or record.get("phase") != phase:
+            raise ValueError(f"{paths[phase]}: engine audit identity differs from the qualification run")
+    ready = records["ready"]
+    final = records["final"]
+    for phase, record, outcome in (("ready", ready, "serving"), ("final", final, "stopped")):
+        if (
+            record.get("checkpoint_sha256") != checkpoint_sha256
+            or record.get("capability_version") != capability_version
+            or record.get("compiled") is not True
+            or record.get("outcome") != outcome
+        ):
+            raise ValueError(f"{paths[phase]}: engine audit checkpoint, capability, or serving outcome differs")
+    ready_starts = _integer(ready.get("compilation_starts"), "ready compilation starts")
+    final_starts = _integer(final.get("compilation_starts"), "final compilation starts")
+    if ready_starts != 0 or final_starts < ready_starts:
+        raise ValueError(f"{audit_dir}: invalid post-preparation compilation counts")
+    ready_captures = _audit_capture_counts(ready, expected_profiles, paths["ready"])
+    final_captures = _audit_capture_counts(final, expected_profiles, paths["final"])
+    capture_attempts_delta = sum(end[1] - start[1] for start, end in zip(ready_captures, final_captures, strict=True))
+    capture_completed_delta = sum(end[2] - start[2] for start, end in zip(ready_captures, final_captures, strict=True))
+    if (
+        final_starts != ready_starts
+        or any(
+            end[1] < start[1] or end[2] < start[2] for start, end in zip(ready_captures, final_captures, strict=True)
+        )
+        or capture_attempts_delta
+        or capture_completed_delta
+    ):
+        raise ValueError(f"{audit_dir}: compilation or CUDA graph capture occurred after preparation")
+    return EngineAuditAssessment(
+        generation_id,
+        checkpoint_sha256,
+        str(paths["started"]),
+        _sha256(paths["started"]),
+        str(paths["ready"]),
+        _sha256(paths["ready"]),
+        str(paths["final"]),
+        _sha256(paths["final"]),
+        tuple(name for name, _, _ in ready_captures),
+        final_starts - ready_starts,
+        capture_attempts_delta,
+        capture_completed_delta,
+    )
 
 
 def _assess_match(
@@ -778,6 +915,18 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
         observed_processes = {} if sampler is None else sampler.owned_processes
         shutdown = _terminate(process, observed_processes)
         finalization_error: RuntimeError | None = None
+        engine_audit: EngineAuditAssessment | None = None
+        engine_audit_failure: str | None = None
+        try:
+            engine_audit = _assess_engine_audit(
+                runner.measurement_dir or config.output / "match-measurements",
+                status_path.with_suffix(".budget.json"),
+                source_git_sha=source_sha,
+                bundle_sha256=bundle_sha256,
+                capacity=len(runner.user_jsons),
+            )
+        except (OSError, ValueError) as error:
+            engine_audit_failure = f"{type(error).__name__}: {error}"
         sources_unchanged = _source_hashes() == source_hashes
         if shutdown.remaining_descendants:
             finalization_error = RuntimeError(
@@ -785,6 +934,8 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
             )
         elif not sources_unchanged:
             finalization_error = RuntimeError("runtime sources changed during qualification")
+        elif engine_audit_failure is not None:
+            finalization_error = RuntimeError(f"inference engine audit failed: {engine_audit_failure}")
         if finalization_error is not None:
             if failure is None:
                 failure = str(finalization_error)
@@ -795,16 +946,20 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
         samples = [] if sampler is None else [asdict(sample) for sample in sampler.samples]
         _write_json(config.output / "resources.json", samples)
         has_soak_duration = len(assessments) >= 10 and gameplay_seconds >= 1800
+        unmeasured_gates = list(_UNMEASURED_GATES)
+        if engine_audit is None:
+            unmeasured_gates.insert(0, "Post-preparation compilation and CUDA graph capture counts")
+        if not has_soak_duration:
+            unmeasured_gates.append("At least ten completed matches and 1800 gameplay seconds")
         report: dict[str, object] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "qualification_status": "failed" if failure is not None else "incomplete",
             "smoke": config.smoke_frames is not None,
             "measured_checks_passed": failure is None and config.smoke_frames is None and has_soak_duration,
-            "unmeasured_gates": [
-                *_UNMEASURED_GATES,
-                *([] if has_soak_duration else ["At least ten completed matches and 1800 gameplay seconds"]),
-            ],
+            "unmeasured_gates": unmeasured_gates,
             "match_assessments": [asdict(assessment) for assessment in assessments],
+            "engine_audit": None if engine_audit is None else asdict(engine_audit),
+            "engine_audit_failure": engine_audit_failure,
             "ended_at": datetime.now(UTC).isoformat(),
             "games_observed": len(games),
             "gameplay_seconds": gameplay_seconds,

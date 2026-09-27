@@ -72,6 +72,8 @@ def main() -> None:
         raise RuntimeError("CUDA hardware qualification requires a GPU")
     root = Path(__file__).resolve().parents[3]
     source_before = {name: _sha256(root / name) for name in _SOURCE_FILES}
+    git_sha = source_git_sha(root)
+    bundle_sha256 = _sha256(args.bundle)
     compute_before = _nvidia_query("pid", "used_gpu_memory", compute_apps=True)
     gpu_before = _nvidia_query("utilization.gpu", "utilization.memory", "memory.used")
     configure_inference_process()
@@ -79,10 +81,22 @@ def main() -> None:
     try:
         torch.cuda.reset_peak_memory_stats()
         preparation_started = time.perf_counter()
-        _, ready = _prepare_netplay_engine(
-            _InferenceProcessConfig(args.bundle, "cuda", args.seed, True, args.capacity, 0.0005),
+        prepared = _prepare_netplay_engine(
+            _InferenceProcessConfig(
+                args.bundle,
+                "cuda",
+                args.seed,
+                True,
+                args.capacity,
+                0.0005,
+                "0" * 16,
+                git_sha,
+                bundle_sha256,
+                None,
+            ),
             {slot: parent for slot, (parent, _) in enumerate(connections)},
         )
+        ready = prepared.ready
         torch.cuda.synchronize()
         preparation_seconds = time.perf_counter() - preparation_started
         budgets = []
@@ -104,14 +118,14 @@ def main() -> None:
             budgets.append({"timings": [asdict(value) for value in check.timings], "measurements": measurements})
         result = {
             "schema_version": 1,
-            "bundle_sha256": _sha256(args.bundle),
+            "bundle_sha256": bundle_sha256,
             "checkpoint_sha256": ready.checkpoint_sha256,
             "capability_version": ready.capability_version,
             "capacity": args.capacity,
             "hardware": ready.hardware,
             "torch": torch.__version__,
             "python": platform.python_version(),
-            "git_sha": source_git_sha(root),
+            "git_sha": git_sha,
             "process_pid": os.getpid(),
             "preparation_seconds": preparation_seconds,
             "gpu_peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,

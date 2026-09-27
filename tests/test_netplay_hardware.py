@@ -36,11 +36,13 @@ def prepared_hardware() -> tuple[InferenceEngine, _EngineReady, int]:
     pairs: list[tuple[Connection, Connection]] = [Pipe() for _ in range(capacity)]
     try:
         configure_inference_process()
-        engine, ready = _prepare_netplay_engine(
-            _InferenceProcessConfig(Path(value), "cuda", 0, True, capacity, 0.0005),
+        prepared = _prepare_netplay_engine(
+            _InferenceProcessConfig(
+                Path(value), "cuda", 0, True, capacity, 0.0005, "0" * 16, "0" * 40, "0" * 64, None
+            ),
             {slot: parent for slot, (parent, _) in enumerate(pairs)},
         )
-        yield engine, ready, capacity
+        yield prepared.engine, prepared.ready, capacity
     finally:
         for parent, child in pairs:
             parent.close()

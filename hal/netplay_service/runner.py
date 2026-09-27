@@ -44,12 +44,14 @@ from hal.eval.scheduling import FrameTiming
 from hal.inference.action_sequence_artifact import read_action_sequence_artifact
 from hal.inference.action_sequence_policy import ActionSequencePolicy
 from hal.inference.api import PolicySpec
-from hal.inference.api import PredictionPolicy
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
 from hal.inference.client import InferenceClient
 from hal.inference.client import InferenceUnavailable
+from hal.inference.cuda_graph import CaptureCounter
+from hal.inference.cuda_graph import CompilationStartCounter
+from hal.inference.cuda_graph import count_compilation_starts
 from hal.inference.engine import InferenceEngine
 from hal.inference.engine import ModelRegistry
 from hal.inference.engine import configure_inference_process
@@ -200,6 +202,10 @@ class _InferenceProcessConfig:
     compiled: bool
     capacity: int
     batch_wait_seconds: float
+    generation_id: str
+    source_git_sha: str
+    bundle_sha256: str
+    measurement_dir: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +218,13 @@ class _EngineReady:
     sampling_seeds: tuple[int, ...]
     hardware: str
     profiles: tuple[PreparedInferenceProfile, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedNetplayEngine:
+    engine: InferenceEngine
+    ready: _EngineReady
+    capture_counters: tuple[tuple[PreparedInferenceProfile, CaptureCounter], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +257,7 @@ class _ShutdownFlag:
 def _prepare_netplay_engine(
     config: _InferenceProcessConfig,
     connections: dict[int, Connection],
-) -> tuple[InferenceEngine, _EngineReady]:
+) -> _PreparedNetplayEngine:
     artifact = read_action_sequence_artifact(config.policy)
     if artifact.capability_version < 2 or not {2, 3}.issubset(artifact.spec.supported_transport_delays):
         raise ValueError("netplay delay-2 and delay-3 profiles require a qualified 059 capability-v2 bundle")
@@ -252,7 +265,7 @@ def _prepare_netplay_engine(
     registry = ModelRegistry()
     model = registry.register_artifact(artifact, device=config.device, inference_dtype=inference_dtype)
     device = next(model.parameters()).device
-    policies: dict[PreparedInferenceProfile, PredictionPolicy] = {}
+    policies: dict[PreparedInferenceProfile, ActionSequencePolicy] = {}
     budgets: list[RealtimeBudgetCheck] = []
     seeds: list[int] = []
     for timing in _NETPLAY_TIMINGS:
@@ -296,7 +309,7 @@ def _prepare_netplay_engine(
     freeze_inference_runtime()
     hardware = torch.cuda.get_device_name(device) if device.type == "cuda" else platform.processor()
     engine = InferenceEngine(policies, connections, batch_wait_seconds=config.batch_wait_seconds)
-    return engine, _EngineReady(
+    ready = _EngineReady(
         artifact.spec,
         model.cfg.L_ctx,
         artifact.checkpoint_sha256,
@@ -306,6 +319,54 @@ def _prepare_netplay_engine(
         hardware,
         tuple(policies),
     )
+    return _PreparedNetplayEngine(
+        engine,
+        ready,
+        tuple((profile, policy.capture_counter) for profile, policy in policies.items()),
+    )
+
+
+def _write_engine_audit_record(directory: Path, generation_id: str, phase: str, payload: dict[str, object]) -> None:
+    audit_directory = directory / "engine-audits"
+    audit_directory.mkdir(parents=True, exist_ok=True)
+    path = audit_directory / f"{generation_id}-{phase}.json"
+    pending = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with pending.open("x") as output:
+            output.write(json.dumps(payload, allow_nan=False, sort_keys=True))
+        os.link(pending, path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _engine_audit_snapshot(
+    config: _InferenceProcessConfig,
+    prepared: _PreparedNetplayEngine,
+    compiler: CompilationStartCounter,
+    phase: str,
+    outcome: str,
+) -> dict[str, object]:
+    captures = tuple((profile, counter.snapshot()) for profile, counter in prepared.capture_counters)
+    return {
+        "schema_version": 1,
+        "phase": phase,
+        "engine_generation_id": config.generation_id,
+        "source_git_sha": config.source_git_sha,
+        "policy_bundle_sha256": config.bundle_sha256,
+        "checkpoint_sha256": prepared.ready.checkpoint_sha256,
+        "capability_version": prepared.ready.capability_version,
+        "compiled": config.compiled,
+        "outcome": outcome,
+        "compilation_starts": compiler.snapshot(),
+        "profiles": [
+            {
+                "profile": asdict(profile),
+                "capture_attempts": counts.attempts,
+                "capture_completed": counts.completed,
+            }
+            for profile, counts in captures
+        ],
+    }
 
 
 class _EnginePulseSender:
@@ -331,9 +392,24 @@ def _gpu_inference_process(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         configure_inference_process()
-        engine, ready = _prepare_netplay_engine(config, connections)
-        status.send(ready)
-        engine.serve(stop, _EnginePulseSender(status, engine))
+        prepared = _prepare_netplay_engine(config, connections)
+        if config.measurement_dir is None:
+            status.send(prepared.ready)
+            prepared.engine.serve(stop, _EnginePulseSender(status, prepared.engine))
+        else:
+            with count_compilation_starts() as compiler:
+                ready_record = _engine_audit_snapshot(config, prepared, compiler, "ready", "serving")
+                _write_engine_audit_record(config.measurement_dir, config.generation_id, "ready", ready_record)
+                outcome = "stopped"
+                try:
+                    status.send(prepared.ready)
+                    prepared.engine.serve(stop, _EnginePulseSender(status, prepared.engine))
+                except BaseException:
+                    outcome = "error"
+                    raise
+                finally:
+                    final_record = _engine_audit_snapshot(config, prepared, compiler, "final", outcome)
+                    _write_engine_audit_record(config.measurement_dir, config.generation_id, "final", final_record)
     except BaseException as error:
         with suppress(OSError, EOFError):
             status.send(_EngineFailure(f"{type(error).__name__}: {error}"))
@@ -1265,6 +1341,19 @@ def _run_generation(
     processes: list[BaseProcess] = []
     slot_status_paths = tuple(_slot_status_path(config.status_path, slot) for slot in range(len(config.user_jsons)))
     try:
+        if config.measurement_dir is not None:
+            _write_engine_audit_record(
+                config.measurement_dir,
+                generation_id,
+                "started",
+                {
+                    "schema_version": 1,
+                    "phase": "started",
+                    "engine_generation_id": generation_id,
+                    "source_git_sha": config.git_sha,
+                    "policy_bundle_sha256": policy_sha256,
+                },
+            )
         config.status_path.unlink(missing_ok=True)
         for path in slot_status_paths:
             path.unlink(missing_ok=True)
@@ -1275,6 +1364,10 @@ def _run_generation(
             config.compiled,
             len(config.user_jsons),
             config.batch_wait_seconds,
+            generation_id,
+            config.git_sha,
+            policy_sha256,
+            config.measurement_dir,
         )
         gpu_process = context.Process(
             target=_gpu_inference_process,
