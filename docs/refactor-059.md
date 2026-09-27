@@ -329,6 +329,15 @@ The follow-up passes global Ruff format/lint, the maintained Ty target, and
 99.83 s). Its focused test also verifies cleanup of a child that ignores SIGTERM.
 Logs are under `runs/refactor-059/cloud-qualification-fixes-*`.
 
+The continuation at source `3148a5ae` completes all three serial/batched/sparse
+pairs on one RTX PRO 6000. Batched pair latency improves by 49.2%, 43.1%, and
+42.7%; the corresponding sparse-load p95 ratios are 1.022, 1.043, and 1.038.
+All sparse requests execute as batch two with 32 streams admitted. Shared- and distinct-checkpoint H2H each complete all eight matches without
+crashes. The idle recovery test fails before fault injection because initial
+preparation exceeds 120 seconds; cleanup leaves no descendants. The three paired
+dense evaluations remain in progress. These results do not replace
+the required Ada measurement or live netplay soak.
+
 The separate B200 job uses the saved training environment, source `a6785725`,
 the original checkpoint source `f05d4150`, and update 8192. Both strict provenance
 preflights pass. It prepares the published replay cache, then runs three paired
@@ -336,6 +345,56 @@ loader and training measurements with exact update-8193 captures. Its hard limit
 are one GPU, 32 CPUs, 192 GiB RAM, 2.5 TiB disk, six hours, and zero retries.
 The disk allocation preserves the saved 256 GiB free-space requirement. This job
 does not run a corpus audit, publish production checkpoints, or create a W&B run.
+The compressed cache prefetch finishes in 1,328.7 seconds, downloading 159.9 GB;
+the original cache warmer completes all 7,191 shards. The first production
+loader pair measures 19,945/19,638 samples per second for control/candidate
+(98.46%). The control capture completes update 8193 with maximum AWR weight
+3.3824. It then completes 100 warm and 200 measured updates, but the report writer
+attempts to convert its 16-by-4 NLL matrix to a scalar. The job exits with the
+control snapshot preserved and no performance report. Candidate comparison and
+three complete performance pairs remain open. The report fix preserves all head
+values, with a CPU test that exercises all 300 updates and JSON serialization.
+It passes 28 focused tests and 1,252 CPU tests (22 skips, 18 deselections, nine
+warnings, 100.12 seconds), plus global Ruff format/lint and the maintained Ty
+target. Logs: `runs/refactor-059/training-report-*`.
+
+The B200 host omits `/proc/*/status`'s `VmHWM` and cgroup peak counters. Its
+first loader reports therefore contain invalid zero peak-RSS measurements.
+They remain preserved as raw evidence and cannot qualify memory parity.
+The measurement tools now return `null` for absent, zero, or incomplete peak
+counters, and the loader comparator rejects missing memory evidence explicitly.
+A separate read-only sampler records current container usage during that attempt;
+its sampled maxima do not reconstruct an unavailable kernel high-water counter
+or the missed first loader trial. The cloud job's code remained unchanged.
+
+Local 3060 qualification now uses an isolated Docker container with six CPUs,
+12 GiB RAM, no additional swap, and at most two Dolphins. Preflight verifies
+the enforced limits, CUDA, pinned package versions, and Slippi 3.6.4. It found
+a missing `libOpenGL.so.0`; the netplay image now installs `libopengl0` explicitly.
+Adding Docker's init process also fixes `xvfb-run` waiting when run as PID 1.
+Both failed preflights and the successful retry remain under
+`runs/refactor-059/docker-3060/`. Prepared prefix-3/4 calls measure
+11.657/7.960 ms p95 and 14.038/8.081 ms p99 over 200 calls each. These are
+preparation measurements, not the three-trial live-delivery gate. A first smoke
+attempt stalls before gameplay because CUDA access alone did not expose Vulkan.
+Selecting the NVIDIA container runtime fixes GPU discovery; the deployment
+configuration now selects that runtime and includes a Vulkan preflight.
+
+The next smoke reaches live play but fails because libmelee supplies a NumPy
+integer port to the strict inference contract. The simulator now converts ports
+to Python integers at discovery. That failed smoke incorrectly exits zero because
+only its peer kept advancing; the smoke harness now checks the bot reservation
+and runner during gameplay. Both failures are retained and neither qualifies
+netplay. The tests use a separate queue and ports, without starting the production
+API or publishing replays. The port and smoke fixes pass 51 focused tests,
+1,251 CPU tests, all seven required emulator integration cases, Ruff, and Ty.
+Logs: `runs/refactor-059/netplay-port-*`.
+
+The memory-reporting fix passes global Ruff format/lint, the maintained Ty
+target, and **1,241 CPU tests** (22 CUDA/opt-in skips, 18 integration deselections,
+nine warnings, 100.31 seconds). Six regression cases distinguish valid peak
+counters from absent or zero counters in either process. Focused measurement
+tests: 27 passed in 2.15 seconds. Logs: `runs/refactor-059/memory-counter-*`.
 
 | Gate | Required evidence | Current status |
 |---|---|---|
@@ -350,7 +409,7 @@ does not run a corpus audit, publish production checkpoints, or create a W&B run
 | I Batching | Ada B2 delivery≥5% faster than two serial B1 calls; 32-admitted/2-ready p95≤105% of2/2; capacity sweep | Real spawned-process 3060 B2 and sparse-load measurements pass these numerical limits. Required Ada measurement remains open. |
 | J Real time | 3060 p95≤12ms,p99<16.67ms, matched p95≤105%; Ada≥2 sessions; three2400-frame trials minus300; both30min and10matches/rematches | Direct calls and short process benchmarks are evidence only. Complete-path trials, hardware capacity, and both soaks remain open. |
 | K Gameplay | 96×7200-frame CPU protocol,p90,allboots complete,NSM regression≤.2,paired uncertainty; shared/separate weights H2H; separate new-profile results | Maintained commands/profiles are in place. Full matched gameplay runs and H2H qualification remain open. |
-| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,229 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
+| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,241 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
 
 Cache FP32 tolerances remain trunk/history `atol=2e-6,rtol=2e-5` and decoder
 `atol=2e-5,rtol=2e-4`. CUDA BF16 conditional KL limits are mean ≤5e-4 nats and
@@ -901,11 +960,14 @@ The exact per-file archive/deletion/addition ledger is
 │   │       ├── conditioning_protocol.json
 │   │       ├── cuda_functional_3060.md
 │   │       ├── data_validation.json
+│   │       ├── dev_mds_fixture.json
 │   │       ├── fd_trace.py
 │   │       ├── final_direct_cached_3060.md
 │   │       ├── idle_runner_faults.py
 │   │       ├── loader_resume_fingerprint.py
 │   │       ├── make_loader_control_benchmark.py
+│   │       ├── measure_training_updates.py
+│   │       ├── modal_qualification.json
 │   │       ├── model_proxy_parity.json
 │   │       ├── model_proxy_parity.md
 │   │       ├── netplay_ready_3060.md

@@ -41,28 +41,297 @@
       "three paired 96-boot dense evaluations"
     ]
   },
+  "inference_continuation": {
+    "app_id": "ap-bo830wm2lbOqwD6dRRDveO",
+    "archive_sha256": "90eaedf654e195f645c612a78ba6cacfee58505b06c25e45150bbf319610a654",
+    "container_id": "ta-01M3HYFK3XE658KKBK7MGHH4QR",
+    "cpu": 8,
+    "function_call_id": "fc-01M3HYFJYGTQD327M5BYV798JJ",
+    "git_sha": "3148a5aee0451a75f7bbb8619fc269297735ee04",
+    "gpu": "RTX PRO 6000 Blackwell Server Edition 96 GB",
+    "h2h": {
+      "h2h-distinct": {
+        "finished": "2026-09-27T18:10:00",
+        "git": "3148a5aee0451a75f7bbb8619fc269297735ee04",
+        "instant_match_restart": false,
+        "matches_completed": 8,
+        "matches_failed": 0,
+        "max_frames": 7200,
+        "max_parallel": 2,
+        "model_a": "alpha",
+        "model_b": "beta",
+        "models": {
+          "alpha": {
+            "artifact": "data/qualification/current.hal",
+            "checkpoint_sha256": "52b5233ed506f59f514f7e90a6a6111206152db7413f451dc35be5c30d1e671b",
+            "desired_return": null,
+            "name": "alpha",
+            "player_identity": "IBDW#0",
+            "temperature": 1.0
+          },
+          "beta": {
+            "artifact": "data/qualification/milestone.hal",
+            "checkpoint_sha256": "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+            "desired_return": null,
+            "name": "beta",
+            "player_identity": "IBDW#0",
+            "temperature": 1.0
+          }
+        },
+        "n_configs": 4,
+        "n_matches": 8,
+        "orientation_0_seconds": 137.5567184270003,
+        "orientation_1_seconds": 158.33868291199997,
+        "profile": "local",
+        "record_schema_version": 3,
+        "seed": 0,
+        "stages": [
+          "FINAL_DESTINATION",
+          "BATTLEFIELD",
+          "POKEMON_STADIUM",
+          "DREAMLAND",
+          "FOUNTAIN_OF_DREAMS",
+          "YOSHIS_STORY"
+        ],
+        "start_retries": 3,
+        "started": "2026-09-27T18:05:01",
+        "timing": {
+          "fixed_prefix_frames": 0,
+          "inference_allowance_frames": 0,
+          "physical_delay_frames": 0,
+          "prediction_horizon_frames": 4,
+          "replan_interval_frames": 2
+        }
+      },
+      "h2h-shared": {
+        "finished": "2026-09-27T18:04:07",
+        "git": "3148a5aee0451a75f7bbb8619fc269297735ee04",
+        "instant_match_restart": false,
+        "matches_completed": 8,
+        "matches_failed": 0,
+        "max_frames": 7200,
+        "max_parallel": 2,
+        "model_a": "alpha",
+        "model_b": "beta",
+        "models": {
+          "alpha": {
+            "artifact": "data/qualification/current.hal",
+            "checkpoint_sha256": "52b5233ed506f59f514f7e90a6a6111206152db7413f451dc35be5c30d1e671b",
+            "desired_return": null,
+            "name": "alpha",
+            "player_identity": "IBDW#0",
+            "temperature": 1.0
+          },
+          "beta": {
+            "artifact": "data/qualification/current.hal",
+            "checkpoint_sha256": "52b5233ed506f59f514f7e90a6a6111206152db7413f451dc35be5c30d1e671b",
+            "desired_return": null,
+            "name": "beta",
+            "player_identity": "IBDW#0",
+            "temperature": 1.0
+          }
+        },
+        "n_configs": 4,
+        "n_matches": 8,
+        "orientation_0_seconds": 134.55158674699987,
+        "orientation_1_seconds": 118.0200560090002,
+        "profile": "local",
+        "record_schema_version": 3,
+        "seed": 0,
+        "stages": [
+          "FINAL_DESTINATION",
+          "BATTLEFIELD",
+          "POKEMON_STADIUM",
+          "DREAMLAND",
+          "FOUNTAIN_OF_DREAMS",
+          "YOSHIS_STORY"
+        ],
+        "start_retries": 3,
+        "started": "2026-09-27T17:59:50",
+        "timing": {
+          "fixed_prefix_frames": 0,
+          "inference_allowance_frames": 0,
+          "physical_delay_frames": 0,
+          "prediction_horizon_frames": 4,
+          "replan_interval_frames": 2
+        }
+      }
+    },
+    "idle_recovery_failure": "initial inference preparation exceeded 120 seconds; no fault was injected; cleanup left no descendants",
+    "maximum_dolphin_processes": 4,
+    "memory_limit_gib": 64,
+    "qualification_sources": {
+      "bytes": 3391960,
+      "files": [
+        "source.tar",
+        "capture_dense_cloud.py",
+        "launch.py",
+        "prepare_runtime.py",
+        "run_qualification.py",
+        "source-identity.json",
+        "control-identity.json",
+        "launch.json",
+        "preflight-review.json",
+        "fixture-manifest.json",
+        "reused_gpu_suite.json",
+        "control.tar"
+      ],
+      "r2_key": "runs/refactor-059/modal/hal-o59-rtx-pro-6000-remaining-20260927-172551/qualification-sources-79faf21d4cfbef4ade614472e7dfa19b821643959668e953f3ad430feeda1cc9.tar.zst",
+      "sha256": "79faf21d4cfbef4ade614472e7dfa19b821643959668e953f3ad430feeda1cc9"
+    },
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-rtx-pro-6000-remaining-20260927-172551",
+    "result_sha256": {
+      "batched-1/results.json": "0f3c82554e177dfe77a51217c113b5b1d47745c14bd3adfc43713db5db159ed2",
+      "batched-2/results.json": "661acdcc209df141d4e0606b5043b73199b68371cd034b4af83b239f1e4aa527",
+      "batched-3/results.json": "c40f947c3a817728f5e9b9ad6cc99dfcd2430adf1b716a0b9c6f10f34b63f4e2",
+      "h2h-distinct/meta.json": "fc9d590a23ccacabede0c566e7aefe154093010782d8681100ec5b9087241361",
+      "h2h-shared/meta.json": "875076d0544fb23f239f0f52150dcf2a530629dab892da1fb4423f3769e3f312",
+      "idle-engine-recovery.log": "597bb040d354d218ad30dcd70d10a4cbd09dc47695023846ba79f2f70e42079f",
+      "idle-recovery/report.json": "a2d840b2efac8e7b2bc9a7d979e200779261799fbc24fc560a3e82f6a4c770da",
+      "serial-1/results.json": "57598090727c02151241471d2a98ee163f016a0c10dd699f900b848d7d522bf9",
+      "serial-2/results.json": "76388ecaca21a5caa3462d52829e9f0b88a6f1fb78189f8d5692dd16ffb617e5",
+      "serial-3/results.json": "eba5d2b0b2f8cf62531d31f9289b5e50cf40064a4ca35cdcc3f7f8e6346a8aa1",
+      "sparse-1/results.json": "12627389624c88b5404ad0df46f2871a5b47926a6358e650af1bd48840421fed",
+      "sparse-2/results.json": "1a404ce78cee5e95650889de0cd9a621d742af23818a52fc6ad72045c326e754",
+      "sparse-3/results.json": "d4b7fe448357129a3e180af620554b56f17e19dffd823da480828dc536be797f"
+    },
+    "status": "running: three batching trials and shared/distinct H2H passed; idle recovery failed cold preparation; dense pairs continue",
+    "trials": [
+      {
+        "actual_maximum_batch": 2,
+        "batched_pair_median_ms": 10.143692999974974,
+        "batched_pair_p95_ms": 11.184392699959744,
+        "batching_speedup_fraction": 0.49244347602487737,
+        "serial_pair_median_ms": 19.985346499993284,
+        "sparse_p95_ratio": 1.0217487311444249,
+        "sparse_pair_p95_ms": 11.427639049804837,
+        "trial": 1
+      },
+      {
+        "actual_maximum_batch": 2,
+        "batched_pair_median_ms": 10.127196499979618,
+        "batched_pair_p95_ms": 10.917484750109452,
+        "batching_speedup_fraction": 0.4308120412842086,
+        "serial_pair_median_ms": 17.792359000054603,
+        "sparse_p95_ratio": 1.0427479415436822,
+        "sparse_pair_p95_ms": 11.384184750011173,
+        "trial": 2
+      },
+      {
+        "actual_maximum_batch": 2,
+        "batched_pair_median_ms": 10.129118000122617,
+        "batched_pair_p95_ms": 10.953842450112457,
+        "batching_speedup_fraction": 0.42679416598466113,
+        "serial_pair_median_ms": 17.670996000106243,
+        "sparse_p95_ratio": 1.0378800773958476,
+        "sparse_pair_p95_ms": 11.36877484990464,
+        "trial": 3
+      }
+    ]
+  },
   "limitations": [
     "RTX PRO 6000 Blackwell Server Edition is not RTX 6000 Ada",
-    "one completed timing pair does not qualify three-trial performance",
     "no live netplay or long soak claim",
-    "production resume remains open until capture and exact comparison finish"
+    "production resume remains open until capture and exact comparison finish",
+    "the first production loader pair lacks a peak-memory counter; end-of-run RSS does not substitute for a peak"
   ],
-  "recorded_at": "2026-09-27T17:13:00.171177+00:00",
+  "recorded_at": "2026-09-27T18:29:26.823200+00:00",
   "schema_version": 1,
   "training": {
     "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
     "archive_sha256": "d3331a8e8d82669f7a5ffe390b67c6b041241514531f0847664f3612956eecee",
+    "compressed_prefetch": {
+      "counts": {
+        "downloaded": 6866,
+        "raw_already_present": 325
+      },
+      "downloaded_bytes": 159905730707,
+      "elapsed_seconds": 1328.725669326,
+      "result_sha256": "2c5df484ee64a388c3204cfa84734b26ffefc0314667a98849fe4000a5b6be1a",
+      "shard_count": 7191,
+      "source_sha256": "283276ed4ef41cc2a507d446a965dea0b5574d9669604aeff32849fffb8ae8da",
+      "status": "completed",
+      "workers": 16
+    },
     "control_identity": {
       "archive_sha256": "81ff16d46775731afaa77f4a7b54610be2d6bb02709b4f308cc1bd0b16a9156a",
       "git_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379"
     },
+    "control_resume": {
+      "awr_weight_max": 3.3823556900024414,
+      "capture_sha256": "8258a4b26ec696a8f85cc3947e9762d2742708ebbce355f7f2a7092c6b94d7c6",
+      "cgroup_memory": {
+        "system/cgroup/current_gib": 133.1487579345703,
+        "system/cgroup/limit_gib": 192.0,
+        "system/cgroup/usage_fraction": 0.6934831142425537,
+        "system/cgroup/version": 1.0
+      },
+      "checkpoint_sha256": "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+      "environment": {
+        "cuda": "13.0",
+        "device": "cuda",
+        "gpu": "NVIDIA B200",
+        "numpy": "2.1.3",
+        "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.39",
+        "python": "3.14.3 (main, Mar 20 2026, 00:34:32) [Clang 22.1.1 ]",
+        "torch": "2.11.0+cu130"
+      },
+      "mode": "control",
+      "raw_columns_sha256": "f5c4ccfc25f958ca937b8348906e42f40d90ef34ffa89b606ffcb4a25f1145a4",
+      "snapshot_sha256": "19b94a5fcc8fd8972785045f8c7d1be2d4b6f3a82175e2b86803f51f88a90f79",
+      "source_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379",
+      "update": 8193
+    },
     "cpu": 32,
     "disk_gib": 2560,
+    "failure": "measurement report attempted float() on the 16-by-4 NLL matrix after completing 100 warm and 200 measured updates; no performance report was saved",
     "function_call_id": "fc-01M3HX1DZVGMFF9QF66629260N",
     "git_sha": "a67857255e80fdc307be009a11fd320738d6027a",
     "gpu": "B200",
+    "loader_trial_1": {
+      "candidate": {
+        "peak_rss_counter": "unavailable: gVisor omits VmHWM; the old measurement program incorrectly emitted zero",
+        "result_sha256": "7a8b076eab2f0ce8dd4465bd04caaeb095df0dd3266da9565cf5b79cc208b9aa",
+        "rss_gib_at_end": 157.01633834838867,
+        "samples_per_second": 19638.12120636865
+      },
+      "control": {
+        "peak_rss_counter": "unavailable: gVisor omits VmHWM; the old measurement program incorrectly emitted zero",
+        "result_sha256": "62f12e1cb7189aa7216857a7563ac59dc7e8e3db5c27defe28a534d03071f2e6",
+        "rss_gib_at_end": 159.3050880432129,
+        "samples_per_second": 19945.218582623325
+      },
+      "throughput_ratio": 0.9846029575969539
+    },
     "memory_limit_gib": 192,
+    "qualification_sources": {
+      "bytes": 3359036,
+      "files": [
+        "source.tar",
+        "control-loader-benchmark.py",
+        "launch.py",
+        "prefetch_compressed_shards.py",
+        "preflight_training.py",
+        "run_training_qualification.py",
+        "start_compressed_prefetch.py",
+        "source-identity.json",
+        "control-identity.json",
+        "launch.json",
+        "preflight-review.json",
+        "source-transition.json",
+        "source-transition-basis.json",
+        "compressed-prefetch-launch.json",
+        "control.tar"
+      ],
+      "r2_key": "runs/refactor-059/modal/hal-o59-b200-resume-and-performance-20260927-170043/qualification-sources-ac4bcd745e7f15c84082ed937a21d12e689c7fc0860f58db4ab24154e0bad6ec.tar.zst",
+      "sha256": "ac4bcd745e7f15c84082ed937a21d12e689c7fc0860f58db4ab24154e0bad6ec"
+    },
     "r2_prefix": "runs/refactor-059/modal/hal-o59-b200-resume-and-performance-20260927-170043",
+    "result_sha256": {
+      "report.json": "4842d8a23c93c1e92e376f34eba09fdff3ea06c5181984be3e764437ab9d5008",
+      "resume-control-1.log": "05c42748c9756b45fac1cbb9f15e233b88df7451ef4d4c2cd4228280588cf8e1",
+      "resume-control-1/report.json": "99726a21611c0024e15b468f3bd8890c7e1cac4b95d77d98212fef4442aadd01"
+    },
     "retries": 0,
     "source_transition": {
       "new_source_sha": "a67857255e80fdc307be009a11fd320738d6027a",
@@ -70,7 +339,7 @@
       "parent_checkpoint_sha256": "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
       "parity_report_sha256": "ce7b8fd6e2705000bb9da0cf574b3d4a4bea6cb6e900ac1b659a5334a5d59b76"
     },
-    "status": "running; strict control/candidate preflight passed; no next-update result yet",
+    "status": "failed after saving the control update-8193 capture; candidate comparison and paired performance remain open",
     "timeout_seconds": 21600
   }
 }
