@@ -7,6 +7,21 @@
       "archive_sha256": "c63d8d0b1b409aebe45cb4f4fbe6202005b942e8296c80346e21fb1c28890cdc",
       "git_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf"
     },
+    "control_trial_1": {
+      "aggregate_emulator_fps": 190.3029074468275,
+      "compile_seconds": 76.08428887399998,
+      "completed_boots": 96,
+      "emulator_unknown_instruction_count": 2,
+      "frames_per_boot": 7200,
+      "interpretation": "Completed output after two in-game emulator crashes and retries. The old harness mislabels these as startup failures and aggregate crashed=0 omits failed attempts. Runtime specs26 vs24 expected means unchanged per-wave sampling cannot be claimed. Keep raw results; not a clean crash-free or matched-workload pass.",
+      "log_sha256": "dd7b674041952c0a5642e5c8b254bea295450a0c667cc92a5a112a03850f6fcb",
+      "net_stock_per_min": 1.1923982384350889,
+      "remaining_dolphin_pids": [],
+      "report_sha256": "36f3446654c5715bffc35420df5a6192f816aa4fc39f28857564bf366c353da0",
+      "retry_warning_count": 2,
+      "runtime_specs": 26,
+      "sweep_seconds": 3632.104255649
+    },
     "cpu": 8,
     "dense_command_timeout_seconds": 6000,
     "disk_gib": 512,
@@ -64,7 +79,7 @@
     "recovery_bound_seconds": 120,
     "retries": 0,
     "review_sha256": "4dd38cbc096930493e1a692e3010512396f08efd95ef35870ec914b1eb3a875f",
-    "status": "running dense-control-1 after initial idle preparation rejected prefix-3 measured p99; no fault injected",
+    "status": "running dense-candidate-1; first control completed96 boots after2 in-game emulator crashes/retries; no clean control qualification claim",
     "supplemental_review": {
       "control_source_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
       "memory_observer_sha256": "106bba203c9fbe6cf900a88c0a7265dea9eb3c72507c2781ad074d4f7f448df0",
@@ -79,6 +94,20 @@
       "source_sha": "572a0e6167230db97e6defe105fb81d41b930662"
     },
     "timeout_seconds": 28800
+  },
+  "diagnostic_evidence": {
+    "bytes": 4300978,
+    "files": 53,
+    "r2_key": "runs/refactor-059/qualification-diagnostics/evidence-35463810b1429a6e9c18b8ff5013b47f6a29de62ed5b38bfcbbd49a1fbc92e75.tar.gz",
+    "sha256": "35463810b1429a6e9c18b8ff5013b47f6a29de62ed5b38bfcbbd49a1fbc92e75",
+    "upload_verified": true
+  },
+  "followup_evidence": {
+    "bytes": 8745569,
+    "files": 51,
+    "r2_key": "runs/refactor-059/qualification-followup/evidence-b2646f9186195ce393da5bd326750c12225bc0b6eae67f9225a93358ce560650.tar.gz",
+    "sha256": "b2646f9186195ce393da5bd326750c12225bc0b6eae67f9225a93358ce560650",
+    "upload_verified": true
   },
   "gpu_process_identity_probe": {
     "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
@@ -329,12 +358,85 @@
     ]
   },
   "limitations": [
-    "RTX PRO 6000 Blackwell Server Edition is not RTX 6000 Ada",
-    "no live netplay or long soak claim",
-    "production resume remains open until capture and exact comparison finish",
-    "the first production loader pair lacks a peak-memory counter; end-of-run RSS does not substitute for a peak"
+    "RTX PRO 6000 Blackwell Server Edition is not RTX 6000 Ada.",
+    "Short live diagnostics do not qualify real-time capacity or long soaks.",
+    "Production resumes and has matching data/loss/RNG state, but strict next-update bitwise equality remains unresolved; repeated unmodified control also differs.",
+    "Memory observations are sampled cgroup maxima where kernel high-water counters are unavailable; end-of-run RSS is not a peak.",
+    "First dense control retries two mid-game emulator crashes; final accepted boots alone do not establish crash-free or unchanged per-wave sampling."
   ],
-  "recorded_at": "2026-09-27T19:38:20.403122+00:00",
+  "local_service_audit": {
+    "container_removed": true,
+    "engine_audit": {
+      "capture_attempts_delta": 0,
+      "capture_completed_delta": 0,
+      "checkpoint_sha256": "52b5233ed506f59f514f7e90a6a6111206152db7413f451dc35be5c30d1e671b",
+      "compilation_starts": 0,
+      "final_path": "/results/audit-smoke/match-measurements/engine-audits/24035bdaf9897519-final.json",
+      "final_sha256": "7e5c86c502ff29cce33365adc2b08c0fcd818f4b74fa8eb28ab67a9dff4cfd88",
+      "generation_id": "24035bdaf9897519",
+      "profile_names": [
+        "netplay-delay-2",
+        "netplay-delay-3"
+      ],
+      "ready_path": "/results/audit-smoke/match-measurements/engine-audits/24035bdaf9897519-ready.json",
+      "ready_sha256": "5ebded679bc20ef824df0079f938c49210ad9f01403e3c090edc76c9b5ef41fa",
+      "started_path": "/results/audit-smoke/match-measurements/engine-audits/24035bdaf9897519-started.json",
+      "started_sha256": "b56b9ec487a64bcc3e9c15ffbc1d15e7877fa71be05de21cd1d079333871d050"
+    },
+    "runner_exitcode": 0,
+    "scope": "600-frame service smoke. Prepared engine generation has zero post-readiness compilation or graph capture. This is not real-time or soak qualification; forced descendants during bounded shutdown are recorded.",
+    "shutdown": {
+      "forced_descendants": [
+        69,
+        120,
+        121,
+        295
+      ],
+      "forced_runner": false,
+      "remaining_descendants": [],
+      "seconds": 1.2439757999964058
+    },
+    "source_archive_sha256": "b47e1a685dee15f63e3dc1e5f6fbcc5ef1d2e86fdd39f0497b4e856f8a91b574",
+    "source_sha": "c7399b191ff26a3012158f74c912d5d0aae4dd53",
+    "startup_seconds": 34.82058699801564
+  },
+  "neutral_netplay_control": {
+    "bot": {
+      "first_600_fps": 27.68917627863367,
+      "gap_over_100_ms_count": 43,
+      "raw_sha256": "7bdd6bb2d219a732b9c12041d5f85592567688d7253b254f2aef34a64df14f00"
+    },
+    "cleanup_errors": [],
+    "container_removed": true,
+    "control_sha256": "b02a13fca907d76c33ea8a8b4d2ac88db989b6ab47041d8e044e345b006dc407",
+    "cpu_limit": 6,
+    "exit_code": 0,
+    "image_id": "sha256:5e9389dc6e30af672831c55f244bee2fc1227a61bb439fbe5515a2b4534d49dd",
+    "launcher_sha256": "60c291b7e9ee71e9a6a8119fbb2164aaf3dd0e663bbd4defc6cf85119e462442",
+    "maximum_dolphin_processes": 2,
+    "memory_gib": 12,
+    "peer": {
+      "first_600_fps": 27.755679908181015,
+      "gap_over_100_ms_count": 43,
+      "raw_sha256": "069af2abe13bec28ea6d46afb7e1a071ddb51bb3144a89313214e6e10cec7bad"
+    },
+    "result_sha256": "98c43bcff16a84668c5f0ffd51b76349ace0de70fc671f78de1ff21fd8dbc022",
+    "scope": "Two neutral players, same pinned transport and container as packet probe, no policy/inference service. Pauses persist; model inference is not necessary to reproduce them. Exact Dolphin/netplay cause remains unknown.",
+    "shutdown": {
+      "exit_codes": {
+        "neutral-bot": 0,
+        "neutral-peer": 0
+      },
+      "killed": [],
+      "live_workers": [],
+      "seconds": 0.13059556693769991,
+      "terminated": []
+    },
+    "source_archive_sha256": "98477439a6eb95bc7501778a77aef07e95d8f950b9d61d04d01f9d92b24c5b02",
+    "source_sha": "18dfb4b9a591fe3eb1c8fb5545ffa150fd93a414",
+    "transport_probe_sha256": "e0af8b739dc877a8d5c6e6b47e5da2114483dbeded28cad30918cdbcdba77c88"
+  },
+  "recorded_at": "2026-09-27T20:44:00Z",
   "schema_version": 1,
   "supplemental_sources": {
     "bytes": 20480,
@@ -578,7 +680,7 @@
         "performance.json": "3e7f8c3c1725435a1a25143e9fc0ef10d897d7ec2e701ed257ac45777eb5a21c",
         "report.json": "a1164a46637cbde432dbfb4698319b882a57a2805aad370db77d037c4fe0081d"
       },
-      "status": "completed; candidate and exact comparison still running"
+      "status": "completed; first candidate/control and repeated-control results are recorded below"
     },
     "cpu": 32,
     "disk_gib": 2560,
@@ -587,20 +689,70 @@
     "gpu": "B200",
     "image_id": "im-FJFZHA7kVqjDidwfY4zcOt",
     "index_initialization": "existing benchmark --cache-status-only initializes adapter metadata before compressed-shard prefetch",
+    "loader_three_trial_summary": {
+      "maximum_paired_sampled_memory_ratio": 0.9943720389784375,
+      "median_paired_throughput_ratio": 1.123178820254098,
+      "scope": "Three alternating production loader pairs, 200 warmup and 500 measured batches each. Candidate trial 3 is slower; all trials retained. Memory is sampled cgroup high-water, not a kernel peak."
+    },
     "loader_trial_1": {
       "candidate": {
-        "process_tree_peak_rss_upper_bound_bytes": null,
-        "process_tree_rss_gib_at_end": 156.98734283447266,
+        "measured_batches": 500,
+        "report_sha256": "752c3717e7a9e766032d015249dd1013c1775613fc932c0e633e34534bfd0afe",
+        "sampled_cgroup_peak_gib": 90.83793258666992,
         "samples_per_second": 20232.176805991483,
-        "startup_seconds_total": 64.17971027300018
+        "startup_seconds_total": 64.17971027300018,
+        "warm_batches": 200
       },
       "control": {
-        "process_tree_peak_rss_upper_bound_bytes": null,
-        "process_tree_rss_gib_at_end": 159.42148208618164,
+        "measured_batches": 500,
+        "report_sha256": "1323d09704f82b293305529f2fde764031477502d8ac99b1a14bdcaa9f72d063",
+        "sampled_cgroup_peak_gib": 91.35205841064453,
         "samples_per_second": 18013.317595691784,
-        "startup_seconds_total": 66.89141834200018
+        "startup_seconds_total": 66.89141834200018,
+        "warm_batches": 200
       },
+      "sampled_memory_ratio": 0.9943720389784375,
       "throughput_ratio": 1.123178820254098
+    },
+    "loader_trial_2": {
+      "candidate": {
+        "measured_batches": 500,
+        "report_sha256": "5a76c74d0ebcc97cb1da747cd6f9cfdbbda1a9fe85c2a5c18cd86a652ddd5dae",
+        "sampled_cgroup_peak_gib": 90.98548889160156,
+        "samples_per_second": 19212.854046830966,
+        "startup_seconds_total": 61.53007035700011,
+        "warm_batches": 200
+      },
+      "control": {
+        "measured_batches": 500,
+        "report_sha256": "288a15135ef922366d25d685105e0b898753e28e35690302644c2f7d4dff7658",
+        "sampled_cgroup_peak_gib": 91.50102996826172,
+        "samples_per_second": 17085.078774262576,
+        "startup_seconds_total": 66.8781906510003,
+        "warm_batches": 200
+      },
+      "sampled_memory_ratio": 0.9943657347153472,
+      "throughput_ratio": 1.1245399743648667
+    },
+    "loader_trial_3": {
+      "candidate": {
+        "measured_batches": 500,
+        "report_sha256": "f95f687b0f49c38901b802ff2dbecdfdb12f53e00eaff722b119197dc9d7b2dd",
+        "sampled_cgroup_peak_gib": 90.93838119506836,
+        "samples_per_second": 16757.407730600404,
+        "startup_seconds_total": 66.8589878419998,
+        "warm_batches": 200
+      },
+      "control": {
+        "measured_batches": 500,
+        "report_sha256": "f096934b2e6749af6f164e050d099bcbebacc3f3e0f82fa0d4c6415d8378190c",
+        "sampled_cgroup_peak_gib": 91.56660461425781,
+        "samples_per_second": 18154.985315959086,
+        "startup_seconds_total": 63.796241422001,
+        "warm_batches": 200
+      },
+      "sampled_memory_ratio": 0.9931391644165909,
+      "throughput_ratio": 0.9230196245804646
     },
     "memory_limit_gib": 192,
     "memory_scope": "0.25-second sampled cgroup current-usage maxima; kernel peak counters remain unavailable",
@@ -626,6 +778,81 @@
       "sha256": "a46cc6bc538d266d0f06f7a772d47e3ed13cee92a06538befa2fee1f70a32ab7"
     },
     "r2_prefix": "runs/refactor-059/modal/hal-o59-b200-resume-retry-20260927-184104",
+    "resume_diagnosis": {
+      "comparisons": {
+        "candidate_vs_control": {
+          "candidate_snapshot_sha256": "30b3cdea519e9b54251cbd60993bbd86536d372935d6dc3bc72c2e04e30aa388",
+          "comparison_sha256": "4ff7e85076c2421410bb250e8125c03581394deb0d06ffdc4971aef0ec10ae98",
+          "comparison_source_sha256": "e1de870549c3b0dcbf28286c74768863bb01f752585f9c2d75c0ed0689189024",
+          "control_snapshot_sha256": "728d46883eef231fed3c43dd3010558bc236b2578a716877dde8eede6c29a7b3",
+          "diagnosis_sha256": "512b46a0968af2775e2c95196211ef0a73721736fa5a7381e601d89b47d7ff03",
+          "differences": {
+            "gradients": {
+              "finite_differing_elements_including_aliases": 5723,
+              "maximum_absolute_difference": 3.448803909122944e-08,
+              "maximum_ulp_difference": 24576,
+              "tensor_records": 14
+            },
+            "model": {
+              "finite_differing_elements_including_aliases": 10,
+              "maximum_absolute_difference": 7.450580596923828e-09,
+              "maximum_ulp_difference": 1,
+              "tensor_records": 6
+            },
+            "optimizer": {
+              "finite_differing_elements_including_aliases": 3938,
+              "maximum_absolute_difference": 4.2928149923682213e-10,
+              "maximum_ulp_difference": 26215,
+              "tensor_records": 25
+            }
+          },
+          "leaf_count": 989116,
+          "local_comparison": "runs/refactor-059/modal-training-qualification-retry-2/results/resume-comparison-1-paired-nans.json",
+          "local_diagnosis": "runs/refactor-059/modal-training-qualification-retry-2/results/resume-diagnosis-1.json",
+          "mismatch_count": 45,
+          "snapshot_hash_verification": "The comparator verifies each downloaded snapshot against its capture report before comparison.",
+          "status": "failed"
+        },
+        "control_repeat": {
+          "candidate_snapshot_sha256": "53a3bf68149b95eb4f5fde0e86cb7a1f7399a5ac3ded1f88f19567bf502bb702",
+          "comparison_sha256": "dceba25ecc3c1650449b4b9d0713acddc7d472e9498540173c08d1e4e62ee9a5",
+          "comparison_source_sha256": "e1de870549c3b0dcbf28286c74768863bb01f752585f9c2d75c0ed0689189024",
+          "control_snapshot_sha256": "728d46883eef231fed3c43dd3010558bc236b2578a716877dde8eede6c29a7b3",
+          "diagnosis_sha256": "f726cc58a6e7833a5b0042ec6cfcc2a2528206e9a466b735ba6ef4ca0b73056b",
+          "differences": {
+            "gradients": {
+              "finite_differing_elements_including_aliases": 5698,
+              "maximum_absolute_difference": 4.470348358154297e-08,
+              "maximum_ulp_difference": 38912,
+              "tensor_records": 14
+            },
+            "model": {
+              "finite_differing_elements_including_aliases": 12,
+              "maximum_absolute_difference": 2.3283064365386963e-10,
+              "maximum_ulp_difference": 1,
+              "tensor_records": 7
+            },
+            "optimizer": {
+              "finite_differing_elements_including_aliases": 3923,
+              "maximum_absolute_difference": 5.602487362921238e-10,
+              "maximum_ulp_difference": 29492,
+              "tensor_records": 22
+            }
+          },
+          "leaf_count": 989116,
+          "local_comparison": "runs/refactor-059/modal-training-qualification-retry-2/results/resume-control-repeat-comparison.json",
+          "local_diagnosis": "runs/refactor-059/modal-training-qualification-retry-2/results/resume-control-repeat-diagnosis.json",
+          "mismatch_count": 43,
+          "snapshot_hash_verification": "The comparator verifies each downloaded snapshot against its capture report before comparison.",
+          "status": "failed"
+        }
+      },
+      "finite_labels_equal": true,
+      "interpretation": "Both candidate/control and control/control differ in the same 14 embedding-gradient keys; all changed parameters differ by one FP32 representable step. Non-embedding gradients, losses, input identities, batches, masks, prefixes, RNG, loader, scheduler and calibration match. Indexed CUDA gradient reduction is a hypothesis, not a confirmed kernel diagnosis.",
+      "paired_nan_labels_per_return_tensor": 5632,
+      "paired_nan_masks_equal": true,
+      "scope": "Diagnosis only. Strict bitwise qualification remains failed. No acceptance tolerance or active job code was changed."
+    },
     "retries": 0,
     "review_sha256": "6f3fd69f3b5abe386ec47f44fa085cf7b9f95c0aad1d9713a1f6cf8d95389030",
     "source_transition_review": {
@@ -664,65 +891,346 @@
         }
       ]
     },
-    "status": "running resume-candidate-1 after first control exact-update capture and throughput measurement completed",
+    "status": "Third resume pair running. Three loader pairs and two training pairs complete; strict bitwise comparison still differs on embedding-related tensors, including repeated unmodified control.",
     "steps": [
       {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal-control",
+          "HAL_GIT_SHA=f05d41502a429b399fe9b64d534c442d1a9a6379",
+          "/opt/venv/bin/python",
+          "/opt/training-qualification/preflight_training.py",
+          "control",
+          "/opt/hal-control",
+          "/opt/hal/runs/training-qualification/preflight-control.json"
+        ],
         "elapsed_seconds": 11.091242221,
         "exit_code": 0,
+        "log_sha256": "fb093f51e04b41542043f2699b8af780c14dcdf715ae6f02ad53ef7d3d26f0d1",
         "memory_samples": 45,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "preflight-control",
         "sampled_cgroup_peak_gib": 3.6905784606933594
       },
       {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal",
+          "HAL_GIT_SHA=24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+          "/opt/venv/bin/python",
+          "/opt/training-qualification/preflight_training.py",
+          "candidate",
+          "/opt/hal",
+          "/opt/hal/runs/training-qualification/preflight-candidate.json"
+        ],
         "elapsed_seconds": 6.870486587,
         "exit_code": 0,
+        "log_sha256": "fb093f51e04b41542043f2699b8af780c14dcdf715ae6f02ad53ef7d3d26f0d1",
         "memory_samples": 28,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "preflight-candidate",
         "sampled_cgroup_peak_gib": 3.6907615661621094
       },
       {
+        "command": [
+          "/opt/venv/bin/python",
+          "scripts/benchmark_replay_loader.py",
+          "--cache-status-only",
+          "--max-memory-fraction",
+          "0.8",
+          "--output",
+          "/opt/hal/runs/training-qualification/cache-before-prefetch.json"
+        ],
         "elapsed_seconds": 25.295594160999997,
         "exit_code": 0,
+        "log_sha256": "1bbcf1f93c8f0a6716f6939758975faaead20da43fdddf246c7b58c8912747d8",
         "memory_samples": 101,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "initialize-replay-indexes",
         "sampled_cgroup_peak_gib": 3.974090576171875
       },
       {
+        "command": [
+          "/opt/venv/bin/python",
+          "/opt/training-qualification/prefetch_compressed_shards.py"
+        ],
         "elapsed_seconds": 499.02560079200003,
         "exit_code": 0,
+        "log_sha256": "1ce4a6a80afd1714af30dbfd4a0c00172a9d30194decd9f1cbcbc03ee044ea73",
         "memory_samples": 1987,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "prefetch-compressed-shards",
         "sampled_cgroup_peak_gib": 0.23589706420898438
       },
       {
+        "command": [
+          "/opt/venv/bin/python",
+          "scripts/benchmark_replay_loader.py",
+          "--materialize-only",
+          "--max-memory-fraction",
+          "0.8",
+          "--output",
+          "/opt/hal/runs/training-qualification/materialization.json"
+        ],
         "elapsed_seconds": 850.8897312070001,
         "exit_code": 0,
+        "log_sha256": "b8849b68350c604e29a802af1f17d570b03f27084b8dd4ba381ee5f5bb7e7260",
         "memory_samples": 3372,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "materialize-replay-cache",
         "sampled_cgroup_peak_gib": 3.6870994567871094
       },
       {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal-control",
+          "HAL_GIT_SHA=f05d41502a429b399fe9b64d534c442d1a9a6379",
+          "CUDA_VISIBLE_DEVICES=",
+          "/opt/venv/bin/python",
+          "/opt/training-qualification/control-loader-benchmark.py",
+          "--warm-batches",
+          "200",
+          "--measured-batches",
+          "500",
+          "--max-memory-fraction",
+          "0.8",
+          "--label",
+          "loader-control-1",
+          "--output",
+          "/opt/hal/runs/training-qualification/loader-control-1.json"
+        ],
         "elapsed_seconds": 172.82111735600006,
         "exit_code": 0,
+        "log_sha256": "48fa3983dd3e4c762686f06a3bc8168442252549443ce278a6e812d81a1453d3",
         "memory_samples": 661,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "loader-control-1",
         "sampled_cgroup_peak_gib": 91.35205841064453
       },
       {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal",
+          "HAL_GIT_SHA=24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+          "CUDA_VISIBLE_DEVICES=",
+          "/opt/venv/bin/python",
+          "scripts/benchmark_replay_loader.py",
+          "--warm-batches",
+          "200",
+          "--measured-batches",
+          "500",
+          "--max-memory-fraction",
+          "0.8",
+          "--label",
+          "loader-candidate-1",
+          "--output",
+          "/opt/hal/runs/training-qualification/loader-candidate-1.json"
+        ],
         "elapsed_seconds": 173.0645838280002,
         "exit_code": 0,
+        "log_sha256": "67a86e03930807fa6a6079c0d5342313343be52414b62b00e85e1259a46a2445",
         "memory_samples": 660,
+        "memory_sampling_interval_seconds": 0.25,
         "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
         "name": "loader-candidate-1",
         "sampled_cgroup_peak_gib": 90.83793258666992
+      },
+      {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal-control",
+          "HAL_GIT_SHA=f05d41502a429b399fe9b64d534c442d1a9a6379",
+          "/opt/venv/bin/python",
+          "tests/fixtures/o59/capture_resume_update.py",
+          "control",
+          "/opt/hal-control",
+          "/opt/hal/data/qualification/step-0008192.pt",
+          "/opt/hal/runs/training-qualification/resume-control-1",
+          "--checkpoint-sha256",
+          "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+          "--measure-training"
+        ],
+        "elapsed_seconds": 1085.68246171,
+        "exit_code": 0,
+        "log_sha256": "b9cdee3bdca5100c3cd2b72bf4dc3d721011e693763532f6af99d9103edf6ead",
+        "memory_samples": 3960,
+        "memory_sampling_interval_seconds": 0.25,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "resume-control-1",
+        "sampled_cgroup_peak_gib": 134.92110443115234
+      },
+      {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal",
+          "HAL_GIT_SHA=24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+          "/opt/venv/bin/python",
+          "tests/fixtures/o59/capture_resume_update.py",
+          "candidate",
+          "/opt/hal",
+          "/opt/hal/data/qualification/step-0008192.pt",
+          "/opt/hal/runs/training-qualification/resume-candidate-1",
+          "--checkpoint-sha256",
+          "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+          "--measure-training",
+          "--source-transition",
+          "/opt/training-qualification/source-transition.json"
+        ],
+        "elapsed_seconds": 875.7646191469998,
+        "exit_code": 0,
+        "log_sha256": "432511e4e61afd7c5634d1e420d65fc5b2c141e9ef8344c7c6c1a31ab3aba7f8",
+        "memory_samples": 3207,
+        "memory_sampling_interval_seconds": 0.25,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "resume-candidate-1",
+        "sampled_cgroup_peak_gib": 134.2706642150879
+      },
+      {
+        "command": [
+          "/opt/venv/bin/python",
+          "tests/fixtures/o59/compare_resume_updates.py",
+          "/opt/hal/runs/training-qualification/resume-control-1",
+          "/opt/hal/runs/training-qualification/resume-candidate-1",
+          "/opt/hal/runs/training-qualification/resume-comparison-1.json"
+        ],
+        "elapsed_seconds": 8.643752877000225,
+        "exit_code": 1,
+        "log_sha256": "14a1e4a03f4fdb3621a3924a47181f9cdf44b7fac021ee41c6fec81c43530088",
+        "memory_samples": 35,
+        "memory_sampling_interval_seconds": 0.25,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "compare-resume-1",
+        "sampled_cgroup_peak_gib": 3.1830711364746094
+      },
+      {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal-control",
+          "HAL_GIT_SHA=f05d41502a429b399fe9b64d534c442d1a9a6379",
+          "CUDA_VISIBLE_DEVICES=",
+          "/opt/venv/bin/python",
+          "/opt/training-qualification/control-loader-benchmark.py",
+          "--warm-batches",
+          "200",
+          "--measured-batches",
+          "500",
+          "--max-memory-fraction",
+          "0.8",
+          "--label",
+          "loader-control-2",
+          "--output",
+          "/opt/hal/runs/training-qualification/loader-control-2.json"
+        ],
+        "elapsed_seconds": 194.49045550799974,
+        "exit_code": 0,
+        "log_sha256": "8f5af019397feb93e92cee7bb08d5677bdba162ea69d6793b1a988a4f4cc6235",
+        "memory_samples": 741,
+        "memory_sampling_interval_seconds": 0.25,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "loader-control-2",
+        "sampled_cgroup_peak_gib": 91.50102996826172
+      },
+      {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal",
+          "HAL_GIT_SHA=24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+          "CUDA_VISIBLE_DEVICES=",
+          "/opt/venv/bin/python",
+          "scripts/benchmark_replay_loader.py",
+          "--warm-batches",
+          "200",
+          "--measured-batches",
+          "500",
+          "--max-memory-fraction",
+          "0.8",
+          "--label",
+          "loader-candidate-2",
+          "--output",
+          "/opt/hal/runs/training-qualification/loader-candidate-2.json"
+        ],
+        "elapsed_seconds": 180.21880838900051,
+        "exit_code": 0,
+        "log_sha256": "cfccc3f068d75de4a7e0a73130f132ccb5754b81d01bad52f99b278f604f21ba",
+        "memory_samples": 687,
+        "memory_sampling_interval_seconds": 0.25,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "loader-candidate-2",
+        "sampled_cgroup_peak_gib": 90.98548889160156
+      },
+      {
+        "command": [
+          "env",
+          "PYTHONPATH=/opt/hal-control",
+          "HAL_GIT_SHA=f05d41502a429b399fe9b64d534c442d1a9a6379",
+          "/opt/venv/bin/python",
+          "tests/fixtures/o59/capture_resume_update.py",
+          "control",
+          "/opt/hal-control",
+          "/opt/hal/data/qualification/step-0008192.pt",
+          "/opt/hal/runs/training-qualification/resume-control-2",
+          "--checkpoint-sha256",
+          "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+          "--measure-training"
+        ],
+        "elapsed_seconds": 856.690206145,
+        "exit_code": 0,
+        "log_sha256": "1d174d94bf2d9d0d4b5645e262689c6baa1e5cdbc80e20bbacf657ced8070ed0",
+        "memory_samples": 3091,
+        "memory_sampling_interval_seconds": 0.25,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "resume-control-2",
+        "sampled_cgroup_peak_gib": 134.02132415771484
       }
     ],
-    "timeout_seconds": 21600
+    "timeout_seconds": 21600,
+    "training_trial_1": {
+      "candidate_measurement_seconds": 80.1379798349999,
+      "candidate_peak_gpu_allocated_bytes": 3382684672,
+      "candidate_peak_gpu_reserved_bytes": 135444561920,
+      "candidate_performance_sha256": "b67441945f53d01193b758da956dd724e2c62b49aaea524260803469dd795c48",
+      "candidate_sampled_cgroup_peak_gib": 134.2706642150879,
+      "candidate_samples_per_second": 1277.7961237709821,
+      "candidate_warm_seconds": 42.875995835999674,
+      "control_measurement_seconds": 80.12128091900013,
+      "control_peak_gpu_allocated_bytes": 3382683136,
+      "control_peak_gpu_reserved_bytes": 137319415808,
+      "control_performance_sha256": "3e7f8c3c1725435a1a25143e9fc0ef10d897d7ec2e701ed257ac45777eb5a21c",
+      "control_sampled_cgroup_peak_gib": 134.92110443115234,
+      "control_samples_per_second": 1278.0624426551904,
+      "control_warm_seconds": 63.99082668200026,
+      "first_measured_update": 8294,
+      "last_measured_update": 8493,
+      "measured_updates": 200,
+      "throughput_ratio": 0.9997916229478937,
+      "warm_updates": 100
+    },
+    "training_trial_2": {
+      "candidate_measurement_seconds": 80.15512633900016,
+      "candidate_peak_gpu_allocated_bytes": 3382687232,
+      "candidate_peak_gpu_reserved_bytes": 135444561920,
+      "candidate_performance_sha256": "2efafd5901c838c76a780bb205e10d8377cbf960b5348e47ba5c2fda509b9f5b",
+      "candidate_sampled_cgroup_peak_gib": 134.08992385864258,
+      "candidate_samples_per_second": 1277.5227820977984,
+      "candidate_warm_seconds": 42.98608145799972,
+      "control_measurement_seconds": 80.09411531099977,
+      "control_peak_gpu_allocated_bytes": 3382687232,
+      "control_peak_gpu_reserved_bytes": 135444561920,
+      "control_performance_sha256": "9e81262d7bb51a6e922b40d65c8df92539beb75ceb4fdc35ab8141957845ffca",
+      "control_sampled_cgroup_peak_gib": 134.02132415771484,
+      "control_samples_per_second": 1278.4959244806946,
+      "control_warm_seconds": 42.81478089599932,
+      "first_measured_update": 8294,
+      "last_measured_update": 8493,
+      "measured_updates": 200,
+      "throughput_ratio": 0.9992388381032256,
+      "warm_updates": 100
+    }
   }
 }

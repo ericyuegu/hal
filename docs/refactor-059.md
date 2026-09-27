@@ -72,6 +72,12 @@ source tree. No repository or global hook configuration was changed.
 | `572a0e61` | Separate initial preparation from the fixed recovery deadline |
 | `c9e014bc` | Report unavailable GPU memory when container and host process identities differ |
 | `5b5008f7` | Apply production GC preparation before readiness timing and report failed measurements |
+| `c7998f41` | Record resumed training progress and the local transport diagnosis |
+| `18dfb4b9` | Record accepted and rejected action plans and validate their wire prefixes and deadlines |
+| `4d4ba9d3` | Compare paired NaN return labels without relaxing finite-value resume checks |
+| `fc710f32` | Count policy CUDA graph captures and scoped Torch compilation starts |
+| `c7399b19` | Record and validate one prepared engine generation across netplay qualification |
+| `5dca3f75` | Keep failed evaluation replays separate from accepted attempts and correct retry diagnostics |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -296,14 +302,16 @@ records validate. Its SHA-256 is
 The fixture records source `f05d41502a429b399fe9b64d534c442d1a9a6379`, a B200,
 Python 3.14.3, Torch 2.11.0+cu130, and the production batch-512/131,072-slot
 loader. [The fixture manifest](../tests/fixtures/o59/artifacts.json) records
-its R2 location and environment. The next-update comparison has not run.
+its R2 location and environment. The first next-update comparison and a repeated
+unmodified-control comparison have run; their numerical results are recorded below.
 
 `tests/fixtures/o59/capture_resume_update.py` invokes each checkout's existing
 loader, prefetcher, training loss, optimizer, and scheduler for update 8193.
 It records raw window identity, transformed and masked batches, prefixes,
 clipped gradients, updated parameters, and saved optimizer/loader/RNG/calibration
 state. `compare_resume_updates.py` verifies capture hashes and compares every
-saved field exactly. Capture requires the checkpoint's environment and the
+saved field exactly, treating paired NaNs with identical masks as equal. Capture
+requires the checkpoint's environment and the
 candidate's explicit source transition. It rejects a host memory limit below
 100 GiB before constructing the production loader. With `--measure-training`,
 it saves that exact boundary capture, removes the capture hook, and continues
@@ -371,6 +379,16 @@ container-memory observer starts during the first control sweep, so only later
 stages have full loading/compile/sweep coverage. Both are sampled maxima, not
 kernel high-water counters.
 
+The first full control finishes 96 boots at 7,200 frames each in 3,632.10 sweep
+seconds (190.30 aggregate FPS), with net stock per minute 1.19240. However, the
+log records two Dolphin invalid-instruction crashes during gameplay, followed by
+retries. The old harness labels these as failures to reach the game and its final
+`crashed=0` aggregate omits the failed attempts. There are 26 recorded policy
+instances, rather than 24. Preserve this completed output and the failures; it is
+not a clean crash-free run and does not establish matched per-wave sampling or
+an identical amount of emulator work. The candidate and further trials continue
+as independent evidence.
+
 The separate B200 job uses the saved training environment, source `a6785725`,
 the original checkpoint source `f05d4150`, and update 8192. Both strict provenance
 preflights pass. It prepares the published replay cache, then runs three paired
@@ -415,10 +433,40 @@ loader, checkpoint, and exact-capture sources are byte-identical between
 `a6785725` and `24bf25ec`; the current real-checkpoint comparison remains the
 required production parity evidence. It checks update 8193 at a deliberately
 drained prefetch boundary, not numerical equality of the later throughput run.
-The first control resume completes with non-unit AWR weights (maximum 3.38236)
-and measures 1,278.06 samples per second over updates 8294–8493 after 100 warmup
-updates. The candidate is running; no paired training or exact-resume result is
-claimed yet.
+Both first resume captures complete with non-unit AWR weights (maximum 3.38236).
+Control/candidate throughput is 1,278.06/1,277.80 samples per second over updates
+8294–8493 after 100 warmup updates, a ratio of 99.979%. Their sampled container
+peaks are 134.92/134.27 GiB. The second training pair measures 1,278.50/1,277.52 samples per second
+(99.924%). The third training pair is still running.
+
+All three production loader pairs are complete: control/candidate throughput is
+18,013/20,232, 17,085/19,213, and 18,155/16,757 samples per second. The median
+paired ratio is 112.32%; the third candidate trial is slower and is retained.
+Sampled container peaks are 91.35/90.84, 91.50/90.99, and 91.57/90.94 GiB. Each
+trial warms 200 batches and measures 500 with the production 131,072-slot buffer.
+
+The original exact comparison reports 47 differing tensor records among 989,116
+leaves. Two are a comparator defect: both captures have the same 5,632 masked
+NaN return labels and all finite labels match. The corrected comparator leaves
+45 differences: 14 embedding-gradient records, six model records (five unique
+parameter values plus shared codec aliases), and 25 Adam moment records. All
+other saved values match, including replay identity, batches, masks, prefixes,
+losses, non-embedding gradients, loader/scheduler/RNG state, and calibration.
+The maximum gradient difference is 3.45e-8; each changed parameter differs by one
+FP32 representable step, with maximum absolute difference 7.45e-9.
+
+Repeating the unmodified control on the same B200 also fails bitwise comparison:
+43 records differ, confined to the same 14 embedding-gradient keys, seven model
+records (seven unique parameter values), and 22 Adam moment records. Its maximum
+gradient difference is 4.47e-8 and changed parameters again differ by one FP32
+step. This establishes run-to-run variation in the control; it does not make the
+strict bitwise gate pass or identify the CUDA kernel responsible. The AST review
+finds unchanged embedding computation, initialization, parameter groups, autocast,
+and RNG restoration. Neither source enables deterministic algorithms. Both raw
+comparison failures and the bounded numerical diagnoses are retained separately.
+The source helpers, comparison reports, packet traces, and current test logs are
+also preserved in the verified R2 diagnostic archive recorded in
+`modal_qualification.json` (`35463810b1429a6e9c18b8ff5013b47f6a29de62ed5b38bfcbbd49a1fbc92e75`).
 
 Supplemental source review, cancellation evidence, and the memory observer are
 preserved in `runs/refactor-059/supplemental-review/` in R2. The content-addressed
@@ -473,6 +521,57 @@ ENet delivery, not in the measured pipe or consumer handling. It does not yet
 distinguish Dolphin packet production from network or ENet delay. Logs and traces
 are under `runs/refactor-059/docker-3060/`; this diagnostic is not a timing pass.
 
+The next packet probe at `18dfb4b9` observes 55 bot and 54 peer waits above 100 ms.
+There are no spectator packets waiting in the kernel during those pauses; the
+median kernel-packet-to-ENet time is about 20 microseconds. Thus the long wait
+precedes Dolphin's observation emission. Game UDP uses the two local private-IP
+endpoints during gameplay, with no public-endpoint traffic in the measured gaps.
+This narrows the diagnosis but does not establish the cause inside Dolphin or
+its netplay synchronization. The 600-frame smoke remains incomplete, and both
+Dolphins and their container are removed afterward.
+
+Action-plan evidence now records request/response identity, exact canonical wire
+prefixes, target frames, choice frame, and acceptance. Qualification independently
+checks the trace. Engine audit records cover startup, prepared readiness, and
+shutdown; they require one generation, matching artifact/profile identities, and
+zero compilation or CUDA graph capture after readiness. Missing final records
+fail the audit. Production without a measurement directory installs no compile
+listener and writes no audit files.
+
+A 600-frame service smoke at `c7399b19` now verifies the real audit: one engine
+generation, zero compilation starts and zero graph captures after readiness.
+Startup takes 34.82 seconds. The runner exits normally; shutdown terminates four
+remaining descendants in 1.24 seconds, with none left behind. This validates the
+audit lifecycle, not real-time gameplay or a long soak.
+
+The separate two-neutral-player control, using the same `18dfb4b9` source and
+container image as the packet probe, also pauses: 27.69/27.76 FPS and 43 gaps over
+100 ms per side in 600 frames. Both workers exit normally and the container is
+removed. Model inference and the service are absent from this run. The active
+netplay loop, Console options, and vendored library match the pre-refactor code;
+this narrows the next control to the emulator, netplay synchronization, and host.
+The cause is still unresolved. Source snapshots, raw audit and neutral traces, the first dense control, and
+completed performance records are preserved in the verified R2 follow-up archive
+listed in `modal_qualification.json`
+(`b2646f9186195ce393da5bd326750c12225bc0b6eae67f9225a93358ce560650`).
+
+The combined changes through `c7399b19` pass global Ruff format/lint, the maintained
+Ty target, **1,320 CPU tests** (24 CUDA/opt-in skips, 18 integration deselections,
+nine warnings, 101.95 seconds), all **seven required emulator cases** (six
+deselections, six warnings, 53.35 seconds), and seven CUDA/compile counter cases
+(14 dependency warnings, 1.98 seconds). Logs:
+`runs/refactor-059/compile-audit-{cpu,integration,gpu}.log`. The protected user-file
+hashes still match the initial capture.
+
+The failed-replay retention fix at `5dca3f75` passes **1,324 CPU tests** (24 skips,
+18 deselections, nine warnings, 101.11 seconds), global Ruff format/lint, and Ty.
+Its focused harness/H2H suite passes 39 tests. An earlier sandboxed broad run
+was interrupted at 42% after three failure markers; it produced no failure
+identities or tracebacks. The complete rerun is recorded in
+`runs/refactor-059/failed-replay-cpu.log`. Accepted replay paths, retry count,
+ports, and seed call order are unchanged; failed attempts now retain their files
+in a separate sibling directory.
+
 Separating cold preparation from recovery passes 70 focused tests and the full
 CPU suite: 1,270 passed, 24 CUDA/opt-in skips, 18 integration deselections, nine
 warnings, 100.29 seconds. Global Ruff format/lint and the maintained Ty target
@@ -495,7 +594,7 @@ tests: 27 passed in 2.15 seconds. Logs: `runs/refactor-059/memory-counter-*`.
 |---|---|---|
 | A Ownership | Final tree, one model/loader/scheduler/process driver, import boundaries, typed code, protected edits | Runtime retirement and import-boundary tests pass; final inventory/checks in progress. |
 | B Data | `.slp` full path/parity, 44-source metadata and representative row audits, hashes, 2048 validation identities/tensors, sampler/resume geometry | Pass for the revised scope: cohort and statistics match exactly; synthetic loader resume and `.slp`→MDS→R2 publication pass; 33 v8 row audits reproduce the publication records. The user waived the remaining 11 row scans on 2026-09-27. |
-| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy exact, synthetic boundary resume, and default count pass. Update 8192 is downloaded and its saved configuration validates. Capture/comparison tools are prepared; the real update-8193 comparison remains open. |
+| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy, synthetic resume, and default count pass. Production update 8193 runs successfully with non-unit AWR; data, losses, RNG, and non-embedding values match. Bitwise comparison fails on small embedding differences; the unmodified control also differs on repetition. Numerical diagnosis is recorded above; strict exact-update qualification remains unresolved. |
 | D Artifacts | Old artifacts, descendants, new profiles, identity rejection | Actual update-131072 checkpoint validates without changing caller RNG, and re-exports as capability v2 with its checkpoint hash preserved. Artifact contract suite passes on CPU; qualified new profiles remain open. |
 | E Cache | B1/2/4/8/16/32, Q1/2/4/decomposition, wraps, sparse/permutation/reset/identity/temp/prefix0/2/3/4, dummy rows, one weights copy | Focused CPU/CUDA independence tests and real-checkpoint B2 BF16 conditional KL pass. Complete capacity/profile matrix remains open. |
 | F Scheduling | Exact deadlines, wire prefix, whole-plan rejection, consumed cursor, malformed replies, fallback counters | Focused scheduler/client/engine tests pass. Official intended-action chunk trace matches control. Live qualification remains open. |
@@ -503,8 +602,8 @@ tests: 27 passed in 2.15 seconds. Logs: `runs/refactor-059/memory-counter-*`.
 | H Mechanical speed | Three alternating trials; loader warm200/measure500, training warm100/measure200, matched local concurrency/stride; throughput≥95%, memory≤105% | Final direct cached 3060 pairs and the reduced loader-core comparison pass throughput/memory limits. Production loader, training, and dense-local measurements remain open. |
 | I Batching | Ada B2 delivery≥5% faster than two serial B1 calls; 32-admitted/2-ready p95≤105% of2/2; capacity sweep | Real spawned-process 3060 B2 and sparse-load measurements pass these numerical limits. Required Ada measurement remains open. |
 | J Real time | 3060 p95≤12ms,p99<16.67ms, matched p95≤105%; Ada≥2 sessions; three2400-frame trials minus300; both30min and10matches/rematches | Direct calls and short process benchmarks are evidence only. Complete-path trials, hardware capacity, and both soaks remain open. |
-| K Gameplay | 96×7200-frame CPU protocol,p90,allboots complete,NSM regression≤.2,paired uncertainty; shared/separate weights H2H; separate new-profile results | Maintained commands/profiles are in place. Full matched gameplay runs and H2H qualification remain open. |
-| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,241 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
+| K Gameplay | 96×7200-frame CPU protocol,p90,allboots complete,NSM regression≤.2,paired uncertainty; shared/separate weights H2H; separate new-profile results | Shared-checkpoint and distinct-checkpoint H2H each complete eight boots. Full gameplay comparison remains open; the first dense control completes after two emulator crashes and retries. |
+| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,324 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
 
 Cache FP32 tolerances remain trunk/history `atol=2e-6,rtol=2e-5` and decoder
 `atol=2e-5,rtol=2e-4`. CUDA BF16 conditional KL limits are mean ≤5e-4 nats and
