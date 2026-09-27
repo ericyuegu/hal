@@ -51,6 +51,8 @@ source tree. No repository or global hook configuration was changed.
 | `da58c965` | Reproducible qualification capture and comparison tools |
 | `537a0fa2` | Generated controls and measured parity evidence |
 | `590aa57c` | Accounting, controls, and acceptance evidence |
+| `384a732d` | Validate netplay soak measurements and report unmeasured gates |
+| `e67a51ea` | Match loader file-cache preparation and remove the benchmark's module-global path override |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -167,7 +169,7 @@ are not the final architecture.
 | Control owner and symbol | Maintained owner and disposition |
 |---|---|
 | `HistoryDecoderPolicy` | `ActionSequencePolicy`; one stream record owns observation history, cache row, generation, consumed frame, and sampling identity. |
-| `GpuTokenHistory`, `GpuContextHistory` | `GpuObservationUpdates`, `GpuObservationWindow`; reuse prepared storage rather than allocating on a new external stream ID. |
+| `GpuTokenHistory`, `GpuContextHistory` | `GpuObservationUpdates`, `GpuObservationWindow`; cached inference reuses prepared update storage. Dense GPU-window integration remains open, as described below. |
 | Batch-one `KVCache` | Retain bounded rings and attention math; add `KVCachePool` for prepared rows and batch scratch. Only real rows are scattered back. |
 | 059 `BF16Inference` | `WindowPolicy`; `DenseWindowPredictionPolicy` supplies request/history ownership around the same dense executor. |
 | `RecedingHorizon` and `_SlotState` | Delete after moving history and fault capture into inference and timing into `ActionScheduler`. `PolicyBatchAdapter` is the sole bridge into the process harness. |
@@ -417,6 +419,7 @@ Do not merge different revisions into a single claim of full qualification.
 | Commit-series validation | Explicit Ruff format/lint and the full maintained Ty target pass. `uv run pytest -q -ra -m "not integration"` passed **1,180 tests**, with 22 CUDA/opt-in skips, 18 integration deselections, and nine warnings, in 93.75 s. The required replay/cleanup integration command passed **seven tests**, with two non-integration deselections and six fork warnings, in 55.95 s. Logs are under `runs/refactor-059/commit-series/`. The initial format check found one extra blank line in a test; the corrected check passed. |
 | Cached local action timeline | The new scheduler matches the frozen delay-2 local transport at exact controller wire precision over startup, eight replans, and the final scheduled actions. The control record and capture-source digests are checked by `tests/test_cached_timeline_parity.py`; the capture helper is in the research archive. This establishes action timing, not matched emulator throughput. |
 | Netplay soak assessment | The harness now rejects malformed or mismatched match evidence, slow steady delivery/gameplay, skipped submissions, and plan exhaustion. Its version-2 result distinguishes measured checks from unmeasured qualification gates. Resource sampling finishes before cleanup/reporting. Focused tests: **21 passed**. Full CPU suite: **1,198 passed, 22 skipped, 18 deselected**, nine warnings, 93.96 s. Global Ruff format/lint and the maintained Ty target pass. Initial lint found an omitted `zip(strict=...)`; Ty found two return annotations that needed explicit narrowing. Both were fixed before the passing runs. Logs: `runs/refactor-059/soak-assessment-{focused,cpu,format,lint,types,types-fixed}.log`. This tool change does not substitute for a live soak. |
+| Loader measurement follow-up | Five cache-preparation tests pass. Global Ruff format/lint and the maintained Ty target pass. The complete CPU suite has **1,203 passed, 22 skipped, 18 deselected**, nine warnings, in 95.26 s; skip categories are unchanged. Logs: `runs/refactor-059/loader-cache-preparation-tests.log` and `runs/refactor-059/loader-followup-{cpu,format,lint,types}.log`. The selected R2 loader evidence archive passed download verification: 52 matching files, zero differences. Protected user-file hashes remain unchanged, and the accounting now contains 105 new maintained paths. |
 
 The remote preprocessing fixture contains six replays from `dev.7z`, two per
 split, with no extraction failures. Its nine staged data objects total 842,904
@@ -439,7 +442,16 @@ and 79,506,116 bytes and reproduced the publication marker's row counts,
 retained/rejected counts, object lengths, and train frames. Its marker SHA-256
 is `36030e304dae352ca1a0636364d8dacead455c749dabdf9d33ebc56c6402d57a`.
 The complete report is `runs/refactor-059/v8-full-rapm.json`. This verifies one
-of the retained draft exceptions; the other 43 corpus audits remain open.
+of the retained draft exceptions.
+
+The larger Aklo pilot also passed, in 285.88 seconds. It checked 103 objects,
+2,168,847,919 compressed bytes, and all 19,177 retained rows, reproducing the
+published 169,867,381 train frames. Its report SHA-256 is
+`1d22bab6a01b5c4e35ac195fbea4bdb40a3e606479e0057977917b940691b92b`.
+`runs/refactor-059/v8-full-audit/summary-attempt-1.json` records both pilots.
+The remaining full-row audits are running through the resumable read-only
+driver; their individual reports and attempt logs are under
+`runs/refactor-059/v8-full-audit/`. A partial inventory does not close gate B.
 
 The capability-v2 qualification bundle is
 `runs/refactor-059/o59-capability-v2.hal`, SHA-256
@@ -482,9 +494,26 @@ batch 64, 1,600 replay slots, and two workers. Its median paired throughput
 ratio was 97.40%, and its maximum paired peak-RSS ratio was 103.53%.
 The first control still materialized raw shards during measurement, so this
 series does not close the matched-cache gate. The last two pairs were 96.43%
-and 97.40%. Complete the cache before repeating all three pairs. The raw
+and 97.40%. The raw
 record is `runs/refactor-059/loader-small-pairs-1/summary.json`; it is not a
 production-geometry or transformed-training measurement.
+
+The completed-cache second series had a 109.87% median throughput ratio, but
+physical disk reads were unequal; that apparent speedup is not attributed to
+the refactor. The third series applies the same file-scoped page-cache advice
+before every control and candidate warmup. All six trials then read exactly
+5,243,879,424 physical bytes and wrote none. Median throughput is **100.66%**
+of control, and the highest paired peak-RSS ratio is **97.12%**. This meets the
+limits for the reduced loader-core workload only. The
+[full report](../tests/fixtures/o59/loader_performance.md) includes every trial,
+startup, CPU, I/O, memory, source identity, and the selected R2 evidence archive.
+
+Dense storage ownership still needs work: `GpuObservationWindow` and its batch
+gather exist and have parity tests, but `DenseWindowPredictionPolicy` currently
+uses CPU window collation and transfer. Compare the complete dense path at the
+same concurrency before selecting the applicable storage path. The retained
+GPU helper alone is not evidence that the planned integration is complete or
+that it improves performance. Gates A and H remain open for this item.
 
 ## Repository trees
 
