@@ -1,16 +1,18 @@
 """Model-independent input and output contract for live HAL policies."""
 
 import math
+import re
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from numbers import Real
+from typing import Literal
 from typing import Protocol
 from typing import runtime_checkable
 
-from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
+from hal.controller import validate_controller_action
 
 ObservationScalar = float | int
 
@@ -79,12 +81,50 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyInput:
-    """One observed stream and the exact controller actions around it.
+class PreparedInferenceProfile:
+    name: str
+    checkpoint_sha256: str
+    execution_mode: Literal["window", "kv_cache"]
+    prediction_horizon_frames: int
+    fixed_prefix_frames: int
+    update_shapes: tuple[int, ...]
+    capacity: int
 
-    ``applied_action`` produced this observation. ``pending_actions`` are in
-    execution order for the next transport-delayed frames. ``player_identity``
-    selects the behavior to imitate; it does not identify the live opponent.
+    def __post_init__(self) -> None:
+        if (
+            type(self.name) is not str
+            or not self.name
+            or type(self.checkpoint_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", self.checkpoint_sha256) is None
+        ):
+            raise ValueError("prepared inference profile needs a name and checkpoint hash")
+        if type(self.execution_mode) is not str or self.execution_mode not in ("window", "kv_cache"):
+            raise ValueError("prepared inference execution mode is unsupported")
+        if (
+            any(
+                type(value) is not int
+                for value in (self.prediction_horizon_frames, self.fixed_prefix_frames, self.capacity)
+            )
+            or self.prediction_horizon_frames < 1
+            or not 0 <= self.fixed_prefix_frames < self.prediction_horizon_frames
+            or self.capacity < 1
+        ):
+            raise ValueError("prepared inference horizon, prefix, or capacity is invalid")
+        if (
+            type(self.update_shapes) is not tuple
+            or not self.update_shapes
+            or any(type(shape) is not int or shape < 1 for shape in self.update_shapes)
+            or tuple(sorted(set(self.update_shapes))) != self.update_shapes
+        ):
+            raise ValueError("prepared inference update shapes must be sorted positive values")
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyInput:
+    """One observed frame and the controller action that produced it.
+
+    ``player_identity`` selects the behavior to imitate; it does not identify
+    the live opponent. Future committed actions belong to the request prefix.
     """
 
     stream_id: int
@@ -92,7 +132,6 @@ class PolicyInput:
     controlled_port: int
     observation: Mapping[str, ObservationScalar]
     applied_action: ControllerAction
-    pending_actions: tuple[ControllerAction, ...]
     player_identity: str | None = None
     desired_return: float | None = 20.0
     temperature: float = 1.0
@@ -109,14 +148,22 @@ class PredictionRequest:
     source_frame: int
     observations: tuple[PolicyInput, ...]
     fixed_actions: tuple[ControllerAction, ...]
+    deadline_monotonic: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("stream_id", "generation", "sequence", "source_frame"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool):
                 raise ValueError(f"prediction {name} must be an integer")
-        if self.generation < 0 or self.sequence < 0:
-            raise ValueError("prediction generation and sequence must be non-negative")
+        if self.generation < 1 or self.sequence < 0:
+            raise ValueError("prediction generation must be positive and sequence non-negative")
+        if self.deadline_monotonic is not None and (
+            not isinstance(self.deadline_monotonic, (float, int))
+            or isinstance(self.deadline_monotonic, bool)
+            or not math.isfinite(self.deadline_monotonic)
+            or self.deadline_monotonic < 0
+        ):
+            raise ValueError("prediction deadline must be finite and non-negative")
         if not self.observations or self.observations[-1].frame_id != self.source_frame:
             raise ValueError("prediction observations must end at the source frame")
         for index, item in enumerate(self.observations):
@@ -182,6 +229,12 @@ def validate_prediction_request(
 
 
 def validate_action_plan(request: PredictionRequest, plan: ActionPlan, horizon: int) -> None:
+    if (
+        not isinstance(plan, ActionPlan)
+        or type(plan.actions) is not tuple
+        or any(type(value) is not int for value in (plan.stream_id, plan.generation, plan.sequence, plan.source_frame))
+    ):
+        raise ValueError("action plan identity must contain exact integers")
     if (plan.stream_id, plan.generation, plan.sequence, plan.source_frame) != (
         request.stream_id,
         request.generation,
@@ -193,6 +246,8 @@ def validate_action_plan(request: PredictionRequest, plan: ActionPlan, horizon: 
         raise ValueError("action plan has the wrong prediction horizon")
     first = request.source_frame + len(request.fixed_actions) + 1
     for index, item in enumerate(plan.actions):
+        if not isinstance(item, FrameAction) or type(item.target_frame) is not int:
+            raise ValueError("action plan target frames must contain exact integers")
         if item.target_frame != first + index:
             raise ValueError("action plan target frames are not contiguous")
         validate_controller_action(item.action)
@@ -201,6 +256,15 @@ def validate_action_plan(request: PredictionRequest, plan: ActionPlan, horizon: 
 @runtime_checkable
 class PredictionPolicy(Protocol):
     """A stateful model that predicts actions for one or more streams."""
+
+    @property
+    def checkpoint_sha256(self) -> str | None: ...
+
+    @property
+    def history_mode(self) -> Literal["window", "kv_cache"]: ...
+
+    @property
+    def prepared_update_shapes(self) -> tuple[int, ...]: ...
 
     @property
     def spec(self) -> PolicySpec: ...
@@ -219,28 +283,13 @@ class PredictionPolicy(Protocol):
 
     def prepare_prediction(self, runtime: RuntimeConfig, horizon: int, prefix_frames: int) -> None: ...
 
+    def validate_prepared_profile(self, profile: PreparedInferenceProfile) -> None: ...
+
     def reset_prediction(self) -> None: ...
 
     def predict(self, requests: Sequence[PredictionRequest]) -> Sequence[ActionPlan]: ...
 
-
-def validate_controller_action(action: ControllerAction) -> None:
-    """Reject values that cannot represent a logical GameCube controller."""
-    analog = {
-        "main_x": (action.main_x, -1.0, 1.0),
-        "main_y": (action.main_y, -1.0, 1.0),
-        "c_x": (action.c_x, -1.0, 1.0),
-        "c_y": (action.c_y, -1.0, 1.0),
-        "trigger_l": (action.trigger_l, 0.0, 1.0),
-        "trigger_r": (action.trigger_r, 0.0, 1.0),
-    }
-    for name, (value, lower, upper) in analog.items():
-        if not math.isfinite(value) or not lower <= value <= upper:
-            raise ValueError(f"controller {name} must be finite and in [{lower}, {upper}], got {value!r}")
-    if not isinstance(action.buttons, int) or isinstance(action.buttons, bool) or not 0 <= action.buttons <= 0xFFFF:
-        raise ValueError(f"controller buttons must be a uint16 bitmask, got {action.buttons!r}")
-    if action.buttons & ~POLICY_BUTTON_MASK:
-        raise ValueError(f"controller buttons contain unsupported bits 0x{action.buttons & ~POLICY_BUTTON_MASK:04x}")
+    def release_stream(self, stream_id: int) -> None: ...
 
 
 def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequence[PolicyInput]) -> None:
@@ -262,16 +311,10 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
             raise ValueError(f"policy stream_id must be an integer, got {item.stream_id!r}")
         if not isinstance(item.frame_id, int) or isinstance(item.frame_id, bool):
             raise ValueError(f"stream {item.stream_id} frame_id must be an integer, got {item.frame_id!r}")
-        if item.controlled_port not in (1, 2):
+        if type(item.controlled_port) is not int or item.controlled_port not in (1, 2):
             raise ValueError(f"stream {item.stream_id} controls unsupported port {item.controlled_port}")
         if not isinstance(item.reset, bool):
             raise ValueError(f"stream {item.stream_id} reset must be a boolean")
-        delay = len(item.pending_actions)
-        if delay not in config.transport_delays:
-            raise ValueError(
-                f"stream {item.stream_id} has {delay} pending actions; prepared transport delays are "
-                f"{config.transport_delays}"
-            )
         missing = required - item.observation.keys()
         if missing:
             raise ValueError(f"stream {item.stream_id} is missing observation fields {sorted(missing)}")
@@ -305,5 +348,3 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
         ):
             raise ValueError(f"stream {item.stream_id} temperature must be in [0.8, 1.1]")
         validate_controller_action(item.applied_action)
-        for action in item.pending_actions:
-            validate_controller_action(action)

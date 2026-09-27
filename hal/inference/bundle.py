@@ -209,7 +209,7 @@ def _file_identity(path: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        while chunk := source.read(1024 * 1024):
             size += len(chunk)
             digest.update(chunk)
     return size, digest.hexdigest()
@@ -261,7 +261,7 @@ def write_policy_bundle(
                     member_paths[member.name].open("rb") as source,
                     archive.open(_zip_info(member.name, compressed=False), "w", force_zip64=True) as output,
                 ):
-                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    while chunk := source.read(1024 * 1024):
                         output.write(chunk)
         os.replace(temporary, destination_path)
     finally:
@@ -307,7 +307,7 @@ def extract_policy_bundle(path: str | Path) -> Iterator[tuple[PolicyBundleManife
             size = 0
             destination = root / member.name
             with archive.open(member.name) as source, destination.open("wb") as output:
-                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                while chunk := source.read(1024 * 1024):
                     size += len(chunk)
                     digest.update(chunk)
                     output.write(chunk)

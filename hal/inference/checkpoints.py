@@ -13,7 +13,7 @@ from hal import r2
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
 
