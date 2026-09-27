@@ -14,17 +14,13 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.14"
-      - run: uv sync --frozen --all-groups
+      - run: uv sync --frozen --all-groups --extra netplay-server
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - name: Type check maintained code
         run: |
           uv run ty check --python-version 3.14 --error-on-warning \
             hal \
-            experiments/051_muon_parameterization.py \
-            scripts/cache_modal_fixtures.py \
-            scripts/launch_gce.py \
-            scripts/launch_modal.py \
-            scripts/launch_vast.py \
-            scripts/replay_policy_fault.py
-      - run: uv run pytest -q --ignore=tests/experiments -m "not integration"
+            experiments/059_muon_action_sequence.py \
+            scripts
+      - run: uv run pytest -q -m "not integration"

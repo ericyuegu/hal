@@ -24,7 +24,8 @@ Use this order:
 ## Boundaries
 
 - `hal/` owns stable, reusable code.
-- `experiments/` contains standalone research programs.
+- `experiments/` contains the maintained 059 training program and its current evidence.
+- `archive/` preserves earlier research source and evidence; it is not a supported runtime.
 - An experiment can import `hal`. It must not import another experiment.
 - Duplication between experiments is intentional.
 - Move code to `hal/` only when its contract is stable and it has two real consumers or a production boundary.
@@ -96,13 +97,9 @@ Before you hand off a code change, run:
     uv run ruff check .
     uv run ty check --python-version 3.14 --error-on-warning \
       hal \
-      experiments/051_muon_parameterization.py \
-      scripts/cache_modal_fixtures.py \
-      scripts/launch_gce.py \
-      scripts/launch_modal.py \
-      scripts/launch_vast.py \
-      scripts/replay_policy_fault.py
-    uv run pytest -q --ignore=tests/experiments -m "not integration"
+      experiments/059_muon_action_sequence.py \
+      scripts
+    uv run pytest -q -m "not integration"
 
 If a change touches replay extraction, wire format, controller input, session stepping, or offline/live parity, also run:
 

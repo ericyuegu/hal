@@ -1,3 +1,4 @@
+exclude: ^(?:archive|outputs)/
 repos:
   - repo: local
     hooks:
@@ -17,7 +18,7 @@ repos:
 
       - id: ty
         name: ty check
-        entry: uv run --quiet ty check --python-version 3.14 hal
+        entry: uv run --quiet ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts
         language: system
         types_or: [python, pyi]
         pass_filenames: false

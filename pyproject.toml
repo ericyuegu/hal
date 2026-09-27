@@ -12,38 +12,23 @@ requires-python = ">=3.14"
 dependencies = [
     "beartype>=0.22.9",
     "boto3",
-    "click",
+    "fsspec",
     "jaxtyping>=0.3.9",
-    "libcst",
     "loguru",
-    "matplotlib",
     "melee",
     "modal>=1.5.3",
-    "more-itertools",
     "mosaicml-streaming==0.13.0",
-    "mypy-extensions",
     "numpy",
-    "nvidia-ml-py>=13.590.48",
-    "nvitop",
-    "pandas",
     "peppi-py",
-    "polars",
     "py7zr==1.1.0",
     "pyarrow>=22",
     "s3fs>=2025",
-    "safetensors>=0.7.0",
-    "scikit-learn",
     "scipy>=1.17.1",
-    "seaborn",
-    "tabulate",
-    "tensordict",
-    "torch>=2.6",
-    "torchvision",
+    "torch==2.11.0",
     "tqdm",
     "tyro",
     "vastai>=1.0.13",
     "wandb",
-    "yasoo",
 ]
 
 [project.optional-dependencies]
@@ -64,11 +49,13 @@ slp-link = "hal.scripts.slp_link:main"
 slippi-jwt = "hal.scripts.slippi_jwt:main"
 
 [dependency-groups]
-dev = [
-    "autoflake",
-    "autotyping",
-    "httpx",
+analysis = [
     "ipykernel",
+    "matplotlib",
+    "pandas",
+]
+dev = [
+    "httpx",
     "pre-commit",
     "pytest",
     "ruff",
@@ -90,7 +77,9 @@ line-length = 119
 target-version = "py314"
 extend-exclude = [
     ".venv",
+    "archive",
     "build",
+    "outputs",
     "venv",
 ]
 
@@ -99,22 +88,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"notebooks/**" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
-# Completed experiments retain their historical lint exemptions.
-"experiments/0[0-4][0-9]_*.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
-"experiments/050_*.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
-"experiments/benchmark_closed_loop.py" = ["B007", "B015", "B018", "B020", "B905", "E402", "E712", "F401", "F722", "F821", "F841", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117", "SIM118", "UP031"]
+"notebooks/039_scaling_viz.py" = ["B007", "B905"]
 # Ruff parses jaxtyping dimension strings as forward-reference type expressions.
-"experiments/051_muon_parameterization.py" = ["F722"]
-"experiments/052_adamw_temporal_awr.py" = ["F722"]
-"experiments/053_polar_controller.py" = ["F722"]
-"experiments/054_bc_capacity_latency.py" = ["F722"]
-"experiments/055_history_cross_attention.py" = ["F722"]
-"experiments/056_decoder_capacity_reallocation.py" = ["F722"]
-"experiments/057_scaled_endpoint_flow.py" = ["F722"]
-"experiments/058_return_conditioning.py" = ["F722"]
-"experiments/059_muon_history_decoder.py" = ["F722"]
-"hal/training/trunk.py" = ["F722"]  # same jaxtyping dim specs as the experiment copies
+"experiments/059_muon_action_sequence.py" = ["F722"]
+"hal/models/attention.py" = ["F722"]
 
 [tool.pytest.ini_options]
 # Without this a bare `pytest` walks runs/, wandb/ and data/ and dies on the

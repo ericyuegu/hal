@@ -7,7 +7,9 @@
 .orca/
 .venv
 .o*-launch-*/
+archive/
 data/
+outputs/
 results/
 replays/
 runs/
