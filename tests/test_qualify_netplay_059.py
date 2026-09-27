@@ -10,13 +10,18 @@ import sys
 import threading
 import time
 from dataclasses import asdict
+from dataclasses import replace
 from multiprocessing.connection import Connection
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from hal.eval.scheduling import FrameTiming
+from hal.netplay_service.domain import JobStatus
+from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.health import ChunkHealth
+from hal.netplay_service.queue import QueueStore
 
 _SPEC = importlib.util.spec_from_file_location(
     "hal_qualify_netplay_059", Path(__file__).parents[1] / "scripts" / "qualify_netplay_059.py"
@@ -84,6 +89,40 @@ def test_source_manifest_covers_all_maintained_runtime_modules() -> None:
     assert "hal/eval/qualification.py" in hashes
     assert "hal/inference/observation_history.py" in hashes
     assert "scripts/qualify_netplay_059.py" in hashes
+
+
+@pytest.mark.parametrize("status", [JobStatus.PLAYING, JobStatus.FAILED, JobStatus.QUEUED])
+def test_smoke_requires_a_healthy_bot_reservation(tmp_path: Path, status: JobStatus) -> None:
+    store = QueueStore(tmp_path / "queue.sqlite3")
+    credentials = store.create_job("TEST#1", MatchChoices("FOX", "IBDW#0", 2))
+    current = replace(
+        credentials.job, status=status, error_code="engine_unavailable" if status is JobStatus.FAILED else None
+    )
+    observed_store = Mock(spec=QueueStore)
+    observed_store.get_job.return_value = current
+    session = Mock()
+    session.step.return_value = ({"id": 600}, True)
+    runner = Mock()
+    runner.is_alive.return_value = True
+    if status is JobStatus.PLAYING:
+        result = qualify_netplay_059._play_peer_game(
+            session, {"id": 0}, credentials, 1, 600, store=observed_store, runner=runner
+        )
+        assert result.last_frame == 600
+    else:
+        with pytest.raises(RuntimeError, match="bot reservation stopped"):
+            qualify_netplay_059._play_peer_game(
+                session, {"id": 0}, credentials, 1, 600, store=observed_store, runner=runner
+            )
+
+
+def test_live_reservation_rejects_an_exited_runner(tmp_path: Path) -> None:
+    store = QueueStore(tmp_path / "queue.sqlite3")
+    credentials = store.create_job("TEST#1", MatchChoices("FOX", "IBDW#0", 2))
+    with pytest.raises(RuntimeError, match="service exited"):
+        qualify_netplay_059._validate_live_reservation(
+            replace(credentials.job, status=JobStatus.PLAYING), is_runner_alive=False
+        )
 
 
 def test_resource_sampler_finishes_its_inflight_gpu_sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

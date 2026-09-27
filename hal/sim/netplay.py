@@ -313,7 +313,8 @@ class NetplaySession:
                 raise RuntimeError("netplay left the game during the pre-game countdown")
 
     def _discover_ports(self, gamestate: melee.GameState, setup: NetplaySetup) -> None:
-        ports = {port: player for port, player in gamestate.players.items() if port in (1, 2)}
+        # libmelee 0.47.0 can key pre-frame players with NumPy integer scalars.
+        ports = {int(port): player for port, player in gamestate.players.items() if port in (1, 2)}
         opponent_matches = [
             port for port, player in ports.items() if getattr(player, "connectCode", "") == setup.opponent_code
         ]
@@ -341,8 +342,8 @@ class NetplaySession:
                         "cannot discover local netplay port: no player matched the remote connect code "
                         f"and port_detector returned {detected!r}"
                     )
-                self.ego_port = detected
-                self.opponent_port = 3 - detected
+                self.ego_port = int(detected)
+                self.opponent_port = 3 - self.ego_port
         ego = ports.get(self.ego_port)
         if ego is None:
             raise RuntimeError(f"local netplay port {self.ego_port} is absent from the live frame")

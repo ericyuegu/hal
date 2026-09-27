@@ -8,6 +8,7 @@ from unittest.mock import call
 
 import melee
 import melee.console
+import numpy as np
 import pytest
 
 import hal.sim.netplay as netplay
@@ -269,6 +270,27 @@ def test_opponent_code_disambiguates_same_character_ports(tmp_path: Path, monkey
     session = _session(tmp_path)
     session._discover_ports(_live(ego_port=2), NetplaySetup(melee.Character.FOX, "HUMAN#1"))
     assert (session.ego_port, session.opponent_port) == (2, 1)
+
+
+@pytest.mark.parametrize("ego_port", [1, 2])
+@pytest.mark.parametrize("identification", ["connect_code", "costume", "detector"])
+def test_discovered_ports_are_python_integers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ego_port: int, identification: str
+) -> None:
+    gamestate = _live(ego_port=ego_port)
+    gamestate.players = {np.uint8(port): player for port, player in gamestate.players.items()}
+    if identification != "connect_code":
+        for player in gamestate.players.values():
+            player.connectCode = ""
+        gamestate.players[3 - ego_port].costume = 1
+    if identification == "detector":
+        gamestate.players[ego_port].costume = 1
+        monkeypatch.setattr(melee.gamestate, "port_detector", lambda *_args: np.uint8(ego_port))
+    session = _session(tmp_path)
+    session._discover_ports(gamestate, NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+    assert (session.ego_port, session.opponent_port) == (ego_port, 3 - ego_port)
+    assert type(session.ego_port) is int
+    assert type(session.opponent_port) is int
 
 
 def test_same_character_ports_without_identity_are_rejected(tmp_path: Path) -> None:

@@ -452,10 +452,14 @@ def _play_peer_game(
     credentials: JobCredentials,
     game_number: int,
     smoke_frames: int | None,
+    *,
+    store: QueueStore,
+    runner: BaseProcess,
 ) -> PeerGame:
     first_id = int(first["id"])
     last_id = first_id
     steps: list[float] = []
+    next_health_check = time.monotonic() + 1
     while True:
         started = time.perf_counter()
         frame, in_game = session.step(NEUTRAL_CONTROLLER_ACTION)
@@ -463,8 +467,23 @@ def _play_peer_game(
         if not in_game:
             return PeerGame(credentials.job.id, game_number, len(steps), first_id, last_id, True, tuple(steps))
         last_id = int(frame["id"])
-        if smoke_frames is not None and last_id >= smoke_frames:
+        is_smoke_complete = smoke_frames is not None and last_id >= smoke_frames
+        if time.monotonic() >= next_health_check or is_smoke_complete:
+            _validate_live_reservation(
+                store.get_job(credentials.job.id, credentials.token), is_runner_alive=runner.is_alive()
+            )
+            next_health_check = time.monotonic() + 1
+        if is_smoke_complete:
             return PeerGame(credentials.job.id, game_number, len(steps), first_id, last_id, False, tuple(steps))
+
+
+def _validate_live_reservation(job: Job, *, is_runner_alive: bool) -> None:
+    if not is_runner_alive:
+        raise RuntimeError("netplay service exited while the peer was still playing")
+    if job.status not in (JobStatus.PLAYING, JobStatus.REMATCH_WAIT, JobStatus.COMPLETE):
+        raise RuntimeError(
+            f"bot reservation stopped while the peer was still playing: {job.status.value}: {job.error_code}"
+        )
 
 
 def _terminate(process: BaseProcess, observed_processes: Mapping[int, int]) -> ShutdownResult:
@@ -606,7 +625,9 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                     first = peer.start_match(setup)
                     game_number = 1
                     while True:
-                        game = _play_peer_game(peer, first, credentials, game_number, config.smoke_frames)
+                        game = _play_peer_game(
+                            peer, first, credentials, game_number, config.smoke_frames, store=store, runner=process
+                        )
                         games.append(game)
                         _write_json(config.output / f"peer-game-{len(games):03d}.json", asdict(game))
                         if not game.ended:
