@@ -431,7 +431,7 @@ def _wait_ready(process: BaseProcess, status_path: Path, timeout_seconds: float)
         if status.state is RunnerState.UNAVAILABLE:
             raise RuntimeError(f"netplay service unavailable: {status.message}")
         time.sleep(0.2)
-    raise TimeoutError("netplay service did not prepare within 150 seconds")
+    raise TimeoutError(f"netplay service did not prepare within {timeout_seconds:g} seconds")
 
 
 def _wait_job(store: QueueStore, credentials: JobCredentials, process: BaseProcess, timeout_seconds: float) -> Job:
@@ -604,7 +604,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
             raise RuntimeError("qualification service did not start")
         sampler = _ResourceSampler(os.getpid(), status_path)
         with sampler:
-            startup_seconds = _wait_ready(process, status_path, 150)
+            startup_seconds = _wait_ready(process, status_path, runner.preparation_timeout_seconds + 30)
             while True:
                 credentials = store.create_job(
                     peer_code,

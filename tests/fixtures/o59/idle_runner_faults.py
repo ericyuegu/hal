@@ -131,11 +131,13 @@ def _ready(status_path: Path) -> bool:
     return status.state is RunnerState.READY
 
 
-def _wait_first_ready(process: BaseProcess, status_path: Path, owned: dict[int, int]) -> tuple[int, int, float]:
+def _wait_first_ready(
+    process: BaseProcess, status_path: Path, owned: dict[int, int], *, timeout_seconds: float
+) -> tuple[int, int, float]:
     if process.pid is None:
         raise RuntimeError("isolated runner did not start")
     started = time.monotonic()
-    while time.monotonic() - started < 150:
+    while time.monotonic() - started < timeout_seconds:
         if not process.is_alive():
             raise RuntimeError(f"isolated runner exited during preparation: {process.exitcode}")
         _remember_descendants(process.pid, owned)
@@ -144,7 +146,7 @@ def _wait_first_ready(process: BaseProcess, status_path: Path, owned: dict[int, 
             if identity is not None:
                 return gpu_pid, identity[1], time.monotonic() - started
         time.sleep(0.1)
-    raise TimeoutError("isolated runner did not prepare within 150 seconds")
+    raise TimeoutError(f"isolated runner did not prepare within {timeout_seconds:g} seconds")
 
 
 def _signal_owned(pid: int, started: int, signal_number: int) -> None:
@@ -273,7 +275,9 @@ def qualify_idle_runner_faults(output: Path, bundle: Path, account: Path, *, sli
     primary_error: BaseException | None = None
     try:
         process.start()
-        first_pid, first_started, measured["startup_seconds"] = _wait_first_ready(process, status_path, owned)
+        first_pid, first_started, measured["startup_seconds"] = _wait_first_ready(
+            process, status_path, owned, timeout_seconds=config.preparation_timeout_seconds + 30
+        )
         measured["first_gpu_pid"] = first_pid
         measured["first_gpu_start_ticks"] = first_started
         first_injected_at = time.monotonic()

@@ -149,6 +149,7 @@ class RunnerConfig:
     seed: int | None = None
     compiled: bool = False
     batch_wait_seconds: float = 0.0005
+    preparation_timeout_seconds: float = 1800.0
     max_frames: int = 54_000
     measurement_dir: Path | None = None
     publish_replays: bool = True
@@ -173,6 +174,12 @@ class RunnerConfig:
             raise ValueError("netplay batch coalescing must be in [0, 0.5] ms")
         if type(self.max_frames) is not int or self.max_frames < 6:
             raise ValueError("runner max_frames must be at least 6")
+        if (
+            type(self.preparation_timeout_seconds) not in (float, int)
+            or not math.isfinite(self.preparation_timeout_seconds)
+            or self.preparation_timeout_seconds <= 0
+        ):
+            raise ValueError("runner preparation timeout must be finite and positive")
         if type(self.publish_replays) is not bool:
             raise ValueError("runner replay publication must be a boolean")
 
@@ -181,7 +188,7 @@ _NETPLAY_TIMINGS = (
     FrameTiming(2, 1, 3, 4, 8),
     FrameTiming(3, 1, 4, 4, 8),
 )
-_ENGINE_STARTUP_TIMEOUT_SECONDS = 120.0
+_ENGINE_RECOVERY_TIMEOUT_SECONDS = 120.0
 _ENGINE_PROGRESS_TIMEOUT_SECONDS = 1.0
 
 
@@ -1161,7 +1168,7 @@ def _await_engine_ready(
             raise RuntimeError("inference preparation returned an unknown status")
         if not process.is_alive():
             raise RuntimeError(f"inference process exited during preparation: {process.exitcode}")
-    raise TimeoutError("inference preparation did not finish within 120 seconds")
+    raise TimeoutError("inference preparation did not finish before its deadline")
 
 
 def _write_budget_record(config: RunnerConfig, ready: _EngineReady, policy_sha256: str) -> None:
@@ -1179,6 +1186,7 @@ def _write_budget_record(config: RunnerConfig, ready: _EngineReady, policy_sha25
         "hardware": ready.hardware,
         "platform": platform.platform(),
         "batch_wait_seconds": config.batch_wait_seconds,
+        "preparation_timeout_seconds": config.preparation_timeout_seconds,
         "compiled": config.compiled,
         "history_mode": "kv_cache",
         "sampling_seeds": ready.sampling_seeds,
@@ -1274,7 +1282,7 @@ def _run_generation(
         status_send.close()
         for connection in parent_connections.values():
             connection.close()
-        startup_deadline = time.monotonic() + _ENGINE_STARTUP_TIMEOUT_SECONDS
+        startup_deadline = time.monotonic() + config.preparation_timeout_seconds
         if recovery_deadline is not None:
             startup_deadline = min(startup_deadline, recovery_deadline)
         ready = _await_engine_ready(status_receive, gpu_process, shutdown, deadline=startup_deadline)
@@ -1432,7 +1440,7 @@ def run(config: RunnerConfig) -> None:
             except _EngineLost as error:
                 if attempt == 1 or shutdown.requested:
                     raise RuntimeError("netplay inference recovery failed; service remains unavailable") from error
-                recovery_deadline = time.monotonic() + 120.0
+                recovery_deadline = time.monotonic() + _ENGINE_RECOVERY_TIMEOUT_SECONDS
                 logger.error("netplay inference lost: {}; preparing one replacement process", error)
     finally:
         signal.signal(signal.SIGINT, previous_int)
@@ -1462,6 +1470,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--batch-wait-ms", type=float, default=0.5)
+    parser.add_argument("--preparation-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
     if args.user_jsons is None:
@@ -1487,6 +1496,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=args.seed,
             compiled=args.compiled,
             batch_wait_seconds=args.batch_wait_ms / 1000,
+            preparation_timeout_seconds=args.preparation_timeout_seconds,
             max_frames=args.max_frames,
         )
     )

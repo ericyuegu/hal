@@ -83,6 +83,67 @@ def _slot_config(tmp_path: Path) -> runner.SlotConfig:
     )
 
 
+def _runner_config(tmp_path: Path) -> runner.RunnerConfig:
+    return runner.RunnerConfig(
+        database=tmp_path / "queue.sqlite3",
+        policy=tmp_path / "policy.hal",
+        user_jsons=(tmp_path / "account.json",),
+        slippi_ports=(51441,),
+        iso_path=tmp_path / "game.ciso",
+        dolphin_path=tmp_path / "Slippi.AppImage",
+        replay_dir=tmp_path / "replays",
+        status_path=tmp_path / "status.json",
+        git_sha="a" * 40,
+    )
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_runner_rejects_invalid_preparation_timeout(tmp_path: Path, value: float) -> None:
+    with pytest.raises(ValueError, match="preparation timeout"):
+        replace(_runner_config(tmp_path), preparation_timeout_seconds=value)
+
+
+@pytest.mark.parametrize("recovery_deadline,expected", [(None, 1900.0), (220.0, 220.0), (99.0, 99.0)])
+def test_generation_uses_cold_preparation_budget_and_preserves_recovery_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_deadline: float | None,
+    expected: float,
+) -> None:
+    from multiprocessing import Pipe
+
+    process = Mock(pid=123, name="gpu")
+    process.is_alive.return_value = False
+    context = SimpleNamespace(Event=threading.Event, Pipe=Pipe, Process=Mock(return_value=process))
+    ready = Mock(side_effect=TimeoutError("preparation deadline"))
+    monkeypatch.setattr(runner.mp, "get_context", lambda _method: context)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(runner, "_await_engine_ready", ready)
+
+    with pytest.raises(TimeoutError, match="preparation deadline"):
+        runner._run_generation(
+            _runner_config(tmp_path), ("BOT#1",), "b" * 64, runner._ShutdownFlag(), recovery_deadline=recovery_deadline
+        )
+
+    assert ready.call_args.kwargs["deadline"] == expected
+    process.start.assert_called_once()
+
+
+def test_recovery_keeps_120_seconds_after_a_long_cold_preparation_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(_runner_config(tmp_path), preparation_timeout_seconds=3600)
+    generation = Mock(side_effect=[runner._EngineLost("hung GPU"), None])
+    monkeypatch.setattr(runner, "_run_generation", generation)
+    monkeypatch.setattr(runner, "_bot_connect_codes", lambda _paths: ("BOT#1",))
+    monkeypatch.setattr(runner, "_sha256", lambda _path: "b" * 64)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 100.0)
+
+    runner.run(config)
+
+    assert [call.kwargs["recovery_deadline"] for call in generation.call_args_list] == [None, 220.0]
+
+
 def test_live_policy_settings_follow_job_revision(tmp_path: Path) -> None:
     store = QueueStore(tmp_path / "queue.sqlite3")
     credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
@@ -331,6 +392,33 @@ def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch:
     )
     assert captured[0].compiled is False
     assert captured[0].batch_wait_seconds == 0.0005
+    assert captured[0].preparation_timeout_seconds == 1800.0
+
+
+def test_runner_cli_accepts_explicit_cold_preparation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    account = tmp_path / "user.json"
+    account.write_text('{"connectCode":"HAL#1"}')
+    policy = tmp_path / "policy.hal"
+    policy.touch()
+    captured: list[runner.RunnerConfig] = []
+    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
+    monkeypatch.setattr(runner, "run", captured.append)
+
+    runner.main(
+        [
+            str(policy),
+            "--user-jsons",
+            str(account),
+            "--slippi-ports",
+            "51441",
+            "--git-sha",
+            "test-sha",
+            "--preparation-timeout-seconds",
+            "600",
+        ]
+    )
+
+    assert captured[0].preparation_timeout_seconds == 600.0
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), True])

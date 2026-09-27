@@ -44,6 +44,8 @@ do not switch to software rendering or another Dolphin backend to hide it.
 
 Check `/health/ready` and `/v1/capacity` before admitting users. The runner writes a schema-4 preparation and timing record beside its status file. Slot health uses schema 4; aggregate runner health uses schema 5. A live inference process that stops responding is detected within one second. The supervisor invalidates old streams and prepares one replacement before new admission; failed recovery leaves the service unavailable.
 
+Initial preparation can compile kernels and has a separate 30-minute limit, set with `--preparation-timeout-seconds`. Recovery still has a 120-second deadline with cached artifacts. Neither path admits a match before preparation finishes.
+
 The fixed delay-2 profile uses physical delay 2, fixed prefix 3, one frame of inference allowance, replan interval 4, and horizon 8. Delay 3 uses prefix 4 with the same allowance, interval, and horizon. The engine prepares them separately, uses at most 0.5 ms to coalesce ready requests, and does not wait for admitted idle streams. There is no automatic timing selection in production.
 
 The API accepts `desired_return` in `[0, 40]` or `null` and `temperature` in `[0.8, 1.1]`. During a game, `PATCH /v1/jobs/{id}/policy` changes either setting at the next replan after the runner receives it.
