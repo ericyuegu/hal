@@ -837,6 +837,7 @@
     "tests/test_replay_selection.py",
     "tests/test_replay_windows.py",
     "tests/test_resume_capture_tools.py",
+    "tests/test_run_identity.py",
     "tests/test_streaming_compat.py",
     "tests/test_validation_replay_loader.py",
     "tests/test_window_policy_preparation.py"

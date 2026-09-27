@@ -26,6 +26,7 @@ from hal.netplay_service.runner import RunnerConfig
 from hal.netplay_service.runner import run
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
+from hal.training.runs import source_git_sha
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +224,7 @@ def qualify_idle_runner_faults(output: Path, bundle: Path, account: Path, *, sli
         raise FileNotFoundError("fault qualification requires the bundle and unused account file")
     output.mkdir(parents=True)
     source_hashes = _source_hashes()
-    git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    git_sha = source_git_sha()
     manifest = {
         "schema_version": 1,
         "workload": "one idle compiled netplay runner; no reservation, Dolphin, or Slippi login",

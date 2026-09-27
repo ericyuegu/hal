@@ -5,12 +5,29 @@ boilerplate out of the experiment files. ``wandb.init`` itself stays in the
 experiment (it's a one-liner and the tags are run-specific).
 """
 
+import os
+import re
+import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+
+def source_git_sha(root: Path | None = None) -> str:
+    """Use the launcher's pinned source identity when an image has no Git metadata."""
+    value = os.environ.get("HAL_GIT_SHA")
+    if value is None:
+        value = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2] if root is None else root,
+            text=True,
+        ).strip()
+    if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ValueError("source Git identity must be a full lowercase commit SHA")
+    return value
 
 
 def make_run_name(exp: str, model_tag: str, data_root: str, comment: str = "") -> str:

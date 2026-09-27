@@ -1,7 +1,6 @@
 """Evaluate two policy artifacts with mirrored ports and shared checkpoint weights."""
 
 import re
-import subprocess
 from dataclasses import asdict
 from dataclasses import dataclass
 from functools import partial
@@ -24,6 +23,7 @@ from hal.inference.engine import configure_inference_process
 from hal.inference.engine import freeze_inference_runtime
 from hal.policy import INCLUDED_STAGES
 from hal.training.checkpoints import BackgroundUploader
+from hal.training.runs import source_git_sha
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +113,7 @@ def main(args: Args) -> None:
                     }
                     for model in (args.model_a, args.model_b)
                 },
-                "git": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                "git": source_git_sha(),
             },
             on_orientation_done=None
             if uploader is None

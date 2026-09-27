@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +21,7 @@ from hal.inference.api import RuntimeConfig
 from hal.inference.benchmark import measure_process_ready_pair
 from hal.inference.engine import configure_inference_process
 from hal.inference.engine import freeze_inference_runtime
+from hal.training.runs import source_git_sha
 from hal.wire import ACTION_CHANNELS
 
 
@@ -236,7 +236,7 @@ def main() -> None:
         "peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
         "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(),
-        "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "git_sha": source_git_sha(),
         "bundle_sha256": sha256(args.bundle),
         "replay_sha256": sha256(args.replay),
         "source_sha256": {

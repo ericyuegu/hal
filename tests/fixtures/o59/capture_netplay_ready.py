@@ -17,6 +17,7 @@ import torch
 from hal.inference.engine import configure_inference_process
 from hal.netplay_service.runner import _InferenceProcessConfig
 from hal.netplay_service.runner import _prepare_netplay_engine
+from hal.training.runs import source_git_sha
 
 _SOURCE_FILES = (
     "hal/controller.py",
@@ -110,7 +111,7 @@ def main() -> None:
             "hardware": ready.hardware,
             "torch": torch.__version__,
             "python": platform.python_version(),
-            "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+            "git_sha": source_git_sha(root),
             "process_pid": os.getpid(),
             "preparation_seconds": preparation_seconds,
             "gpu_peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
