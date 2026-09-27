@@ -3,9 +3,11 @@
 import math
 from collections.abc import Collection
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Literal
 from typing import Protocol
 
+from hal.eval.scheduling import PlanDecision
 from hal.sim.trajectory import Trajectory
 
 
@@ -36,6 +38,7 @@ class NetplayProgress:
     frame_interval_seconds: tuple[float, ...]
     dolphin_step_seconds: tuple[float, ...]
     schedule_events: tuple[ScheduleEvent, ...]
+    plan_decisions: tuple[PlanDecision, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,8 @@ class PlayResult:
     schedule_events: tuple[ScheduleEvent, ...] = ()
     connection_countdown_seconds: float = 0.0
     match_end_seconds: float = 0.0
+    plan_decisions: tuple[PlanDecision, ...] = ()
+    generation: int = field(kw_only=True)
 
     @property
     def inference_p95_ms(self) -> float:

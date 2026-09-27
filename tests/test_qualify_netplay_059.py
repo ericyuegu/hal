@@ -160,6 +160,28 @@ def test_resource_sampler_finishes_its_inflight_gpu_sample(tmp_path: Path, monke
     assert len(sampler.samples) == 1
 
 
+def _plan_decision(source_frame: int, sequence: int, timing: FrameTiming) -> dict[str, object]:
+    prefix = [[0] * 7 for _ in range(timing.fixed_prefix_frames)]
+    return {
+        "request_stream_id": 0,
+        "request_generation": 1,
+        "request_sequence": sequence,
+        "request_source_frame": source_frame,
+        "response_stream_id": 0,
+        "response_generation": 1,
+        "response_sequence": sequence,
+        "response_source_frame": source_frame,
+        "choice_frame": source_frame + 1,
+        "first_submittable_target": source_frame + timing.physical_delay_frames + 2,
+        "generated_target_frames": list(
+            range(source_frame + timing.fixed_prefix_frames + 1, source_frame + timing.prediction_horizon_frames + 1)
+        ),
+        "request_prefix_wire": prefix,
+        "pinned_prefix_wire": [[0] * 7 for _ in prefix],
+        "accepted": True,
+    }
+
+
 @pytest.fixture
 def match_measurement(tmp_path: Path) -> Path:
     timing = FrameTiming(2, 1, 3, 4, 8)
@@ -176,10 +198,13 @@ def match_measurement(tmp_path: Path) -> Path:
         "transport_corrections": 0,
         "inference_failed": False,
     }
+    inference_frames = list(range(-120, 600, 4))
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "reservation_id": "reservation",
         "game_number": 1,
+        "stream_id": 0,
+        "generation": 1,
         "policy_bundle_sha256": "b" * 64,
         "source_git_sha": "c" * 40,
         "desired_return": 19.976,
@@ -188,8 +213,9 @@ def match_measurement(tmp_path: Path) -> Path:
         "gameplay_seconds": 10,
         "frame_ids": [*range(600), 0],
         "frame_interval_seconds": [1 / 60] * 600,
-        "inference_source_frames": list(range(-120, 600, 4)),
+        "inference_source_frames": inference_frames,
         "inference_seconds": [0.1] * 105 + [0.01] * 75,
+        "plan_decisions": [_plan_decision(frame, index, timing) for index, frame in enumerate(inference_frames)],
         "schedule": asdict(health),
         "schedule_events": [event],
         "controller_submission_gaps": 0,
@@ -218,12 +244,67 @@ def test_match_assessment_excludes_startup_latency_and_menu_frame(match_measurem
     assessment = _assess(match_measurement)
     assert assessment.failures == ()
     assert assessment.steady_inference_count == 75
+    assert assessment.plan_decision_count == 180
+    assert assessment.accepted_plan_count == 180
     assert assessment.steady_inference_p95_ms == 10
     assert assessment.steady_inference_p99_ms == 10
     assert assessment.steady_game_fps == pytest.approx(60)
     assert assessment.steady_frame_count == 299
     assert assessment.startup_count_by_event["neutral_fallback_frames"] == 10
     assert assessment.steady_count_by_event["neutral_fallback_frames"] == 0
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("missing", "plan_decisions"),
+        ("short", "every inference response"),
+        ("identity", "identity"),
+        ("generation", "identity"),
+        ("bound", "submitability bound"),
+        ("target", "target frames"),
+        ("late_accepted", "accepted plan"),
+        ("prefix_accepted", "accepted plan"),
+        ("rejected_valid", "accepted plan"),
+        ("wire_shape", "seven controller wire values"),
+        ("wire_range", "invalid controller wire values"),
+        ("old_schema", "identity"),
+    ],
+)
+def test_match_assessment_rejects_missing_or_tampered_plan_evidence(
+    match_measurement: Path, tamper: str, message: str
+) -> None:
+    payload = json.loads(match_measurement.read_text())
+    if tamper == "missing":
+        del payload["plan_decisions"]
+    elif tamper == "short":
+        payload["plan_decisions"].pop()
+    elif tamper == "identity":
+        payload["plan_decisions"][0]["response_sequence"] += 1
+    elif tamper == "generation":
+        payload["plan_decisions"][0]["request_generation"] += 1
+        payload["plan_decisions"][0]["response_generation"] += 1
+    elif tamper == "bound":
+        payload["plan_decisions"][0]["first_submittable_target"] += 1
+    elif tamper == "target":
+        payload["plan_decisions"][0]["generated_target_frames"][0] += 1
+    elif tamper == "late_accepted":
+        payload["plan_decisions"][0]["choice_frame"] += 1
+        payload["plan_decisions"][0]["first_submittable_target"] += 1
+    elif tamper == "prefix_accepted":
+        payload["plan_decisions"][0]["pinned_prefix_wire"][0][0] += 1
+    elif tamper == "rejected_valid":
+        payload["plan_decisions"][0]["accepted"] = False
+    elif tamper == "wire_shape":
+        payload["plan_decisions"][0]["request_prefix_wire"][0].pop()
+    elif tamper == "wire_range":
+        payload["plan_decisions"][0]["request_prefix_wire"][0][0] = 81
+        payload["plan_decisions"][0]["pinned_prefix_wire"][0][0] = 81
+    else:
+        payload["schema_version"] = 1
+    match_measurement.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=message):
+        _assess(match_measurement)
 
 
 @pytest.mark.parametrize(

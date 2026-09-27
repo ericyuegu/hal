@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
-from hal.controller import controller_actions_equal_at_wire_precision
+from hal.controller import controller_action_wire_values
 from hal.inference.api import ActionPlan
 from hal.inference.api import PolicyInput
 from hal.inference.api import PredictionRequest
@@ -50,6 +50,24 @@ class PlanProtocolError(ValueError):
     """An active inference response violated its request contract."""
 
 
+@dataclass(frozen=True, slots=True)
+class PlanDecision:
+    request_stream_id: int
+    request_generation: int
+    request_sequence: int
+    request_source_frame: int
+    response_stream_id: int
+    response_generation: int
+    response_sequence: int
+    response_source_frame: int
+    choice_frame: int
+    first_submittable_target: int
+    generated_target_frames: tuple[int, ...]
+    request_prefix_wire: tuple[tuple[int, ...], ...]
+    pinned_prefix_wire: tuple[tuple[int, ...] | None, ...]
+    accepted: bool
+
+
 class ActionScheduler:
     """Own one controlled port's future actions and inference deadlines."""
 
@@ -65,6 +83,7 @@ class ActionScheduler:
         self._has_plan = False
         self._exhausted = False
         self.request: PredictionRequest | None = None
+        self.last_decision: PlanDecision | None = None
         self.sequence = 0
         self.last_consumed_source_frame: int | None = None
         self.last_accepted_source_frame: int | None = None
@@ -138,6 +157,7 @@ class ActionScheduler:
 
     def accept_plan(self, plan: ActionPlan, choice_frame: int) -> bool:
         """Acknowledge valid inference; commit its entire tail only while submit-able."""
+        self.last_decision = None
         request = self.request
         if request is None:
             return False
@@ -152,19 +172,39 @@ class ActionScheduler:
         self.request = None
         self.next_request_frame = max(request.source_frame + self.timing.replan_interval_frames, choice_frame)
 
-        mismatches = 0
-        for offset, expected in enumerate(request.fixed_actions, 1):
+        request_prefix_wire = tuple(controller_action_wire_values(action) for action in request.fixed_actions)
+        pinned_prefix_wire = []
+        for offset in range(1, len(request.fixed_actions) + 1):
             target = request.source_frame + offset
             pinned = self.submitted.get(target, self.planned.get(target))
-            if pinned is None or not controller_actions_equal_at_wire_precision(pinned, expected):
-                mismatches += 1
+            pinned_prefix_wire.append(None if pinned is None else controller_action_wire_values(pinned))
+        mismatches = sum(
+            expected != pinned for expected, pinned in zip(request_prefix_wire, pinned_prefix_wire, strict=True)
+        )
+        first_submit_frame = choice_frame + self.timing.physical_delay_frames + 1
+        missed = sum(item.target_frame < first_submit_frame for item in plan.actions)
+        accepted = not mismatches and not missed
+        self.last_decision = PlanDecision(
+            request_stream_id=request.stream_id,
+            request_generation=request.generation,
+            request_sequence=request.sequence,
+            request_source_frame=request.source_frame,
+            response_stream_id=plan.stream_id,
+            response_generation=plan.generation,
+            response_sequence=plan.sequence,
+            response_source_frame=plan.source_frame,
+            choice_frame=choice_frame,
+            first_submittable_target=first_submit_frame,
+            generated_target_frames=tuple(item.target_frame for item in plan.actions),
+            request_prefix_wire=request_prefix_wire,
+            pinned_prefix_wire=tuple(pinned_prefix_wire),
+            accepted=accepted,
+        )
         if mismatches:
             self.prefix_mismatches += mismatches
             self.next_request_frame = choice_frame
             return False
 
-        first_submit_frame = choice_frame + self.timing.physical_delay_frames + 1
-        missed = sum(item.target_frame < first_submit_frame for item in plan.actions)
         if missed:
             self.deadline_misses += missed
             self.next_request_frame = choice_frame

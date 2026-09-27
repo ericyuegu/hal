@@ -23,6 +23,7 @@ from hal.eval.results import NetplayProgress
 from hal.eval.results import PlayResult
 from hal.eval.results import ScheduleEvent
 from hal.eval.scheduling import FrameTiming
+from hal.eval.scheduling import PlanDecision
 from hal.inference.api import PolicySpec
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
@@ -871,8 +872,39 @@ def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path
     timing = FrameTiming(2, 1, 3, 4, 8)
     trajectory = Trajectory(np.array([0, 1]), {}, np.array([0, 0]))
     event = ScheduleEvent(0, 3, "gameplay", 0, 0, 0, 0, 1, 0, False)
+    neutral_wire = (0, 0, 0, 0, 0, 0, 0)
+    decision = PlanDecision(
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        4,
+        (4, 5, 6, 7, 8),
+        (neutral_wire,) * 3,
+        (neutral_wire,) * 3,
+        True,
+    )
     result = PlayResult(
-        trajectory, 1, 2, 31, 0.1, (0.005,), (0.016, 0.016), (0.001, 0.001), 0, (0,), (event,), 1.5, 0.4
+        trajectory,
+        1,
+        2,
+        31,
+        0.1,
+        (0.005,),
+        (0.016, 0.016),
+        (0.001, 0.001),
+        0,
+        (0,),
+        (event,),
+        1.5,
+        0.4,
+        (decision,),
+        generation=1,
     )
     health = Mock()
     health.status.return_value.chunk_health = ChunkHealth(timing, submission_gaps=1)
@@ -885,15 +917,22 @@ def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path
     assert path is not None
     payload = json.loads(path.read_text())
     assert payload["worker_id"] == "slot-0"
+    assert payload["schema_version"] == 2
+    assert payload["generation"] == 1
     assert payload["checkpoint_sha256"] == "c" * 64
     assert payload["inference_source_frames"] == [0]
     assert payload["inference_seconds"] == [0.005]
     assert payload["schedule"]["submission_gaps"] == 1
     assert payload["controller_submission_gaps"] == 1
     assert payload["schedule_events"][0]["target_frame"] == 3
+    assert payload["plan_decisions"][0]["generated_target_frames"] == [4, 5, 6, 7, 8]
     assert payload["connection_countdown_seconds"] == pytest.approx(1.5)
     assert payload["match_end_seconds"] == pytest.approx(0.4)
     assert payload["total_elapsed_seconds"] == pytest.approx(2.0)
+    with pytest.raises(ValueError, match="plan decisions"):
+        runner._write_match_measurement(
+            config, _job(), replace(result, plan_decisions=()), timing, health, started, started
+        )
 
 
 def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_path: Path) -> None:
@@ -907,6 +946,7 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
 
     path = config.measurement_dir / "reservation-game-1-failure.json"
     payload = json.loads(path.read_text())
+    assert payload["schema_version"] == 1
     assert payload["worker_id"] == "slot-0"
     assert payload["failure"] == "RuntimeError: lost"
     assert payload["progress"]["observed_frame_ids"] == [-2, -1, 0, 1]

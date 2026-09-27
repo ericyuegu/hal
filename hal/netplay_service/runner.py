@@ -790,18 +790,21 @@ def _write_match_measurement(
     directory = config.measurement_dir
     if directory is None:
         return None
-    if len(result.inference_source_frames) != len(result.inference_seconds):
-        raise ValueError("match inference timing samples lack source frame IDs")
+    if len(result.inference_source_frames) != len(result.inference_seconds) or len(result.plan_decisions) != len(
+        result.inference_source_frames
+    ):
+        raise ValueError("match inference samples lack source frame IDs or plan decisions")
     directory.mkdir(parents=True, exist_ok=True)
     elapsed = (ended_at - started_at).total_seconds()
     counters = health.status().chunk_health
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "reservation_id": job.id,
         "game_number": job.game_count + 1,
         "slot": config.slot,
         "worker_id": config.worker_id,
         "stream_id": config.stream_id,
+        "generation": result.generation,
         "source_git_sha": config.git_sha,
         "policy_bundle_sha256": config.policy_sha256,
         "checkpoint_sha256": config.checkpoint_sha256,
@@ -827,6 +830,7 @@ def _write_match_measurement(
         "dolphin_step_seconds": result.dolphin_step_seconds,
         "schedule": None if counters is None else asdict(counters),
         "schedule_events": [asdict(event) for event in result.schedule_events],
+        "plan_decisions": [asdict(decision) for decision in result.plan_decisions],
         "controller_submission_gaps": None if counters is None else counters.submission_gaps,
         "transport_correction_frames": result.transport_correction_frames,
     }

@@ -2,6 +2,7 @@
 
 import time
 from collections import deque
+from dataclasses import replace
 from unittest.mock import Mock
 
 import melee
@@ -153,6 +154,10 @@ def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pyt
     assert result.connection_countdown_seconds >= 0
     assert result.match_end_seconds >= 0
     assert len(result.inference_source_frames) == len(result.inference_seconds)
+    assert len(result.plan_decisions) == len(result.inference_source_frames)
+    assert result.generation == client.generation
+    assert all(decision.request_generation == result.generation for decision in result.plan_decisions)
+    assert tuple(decision.request_source_frame for decision in result.plan_decisions) == result.inference_source_frames
     assert set(result.inference_source_frames) <= {request.source_frame for request in client.requests}
     assert result.schedule_events[0].phase == "countdown"
     assert all(
@@ -332,11 +337,62 @@ def test_valid_late_plans_without_an_initial_plan_end_neutral_fallback(monkeypat
     assert schedule.last_consumed_source_frame == 4
     assert schedule.deadline_misses >= 2
     assert schedule.exhausted_chunks == 0
+    assert (
+        len(lifecycle.plan_decisions)
+        == len(lifecycle.inference_seconds)
+        == len(lifecycle.inference_source_frames)
+        == 2
+    )
+    assert all(not decision.accepted for decision in lifecycle.plan_decisions)
+    assert tuple(decision.request_source_frame for decision in lifecycle.plan_decisions) == tuple(
+        lifecycle.inference_source_frames
+    )
+    assert lifecycle.progress().plan_decisions == tuple(lifecycle.plan_decisions)
 
     clock[0] = 2.1
     lifecycle.advance(_frame(11, NEUTRAL_CONTROLLER_ACTION))
     with pytest.raises(netplay.NoUsableActionPlan, match="no usable action plan for two seconds"):
         lifecycle.choose(11)
+
+
+@pytest.mark.parametrize("failure", ["malformed", "no_active_request"])
+def test_invalid_response_has_no_valid_plan_trace(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    monkeypatch.setattr(
+        observations,
+        "flatten_canonical_frame",
+        lambda frame: {
+            "stage": frame["_matchup"]["stage"],
+            "p1_character": frame["_matchup"]["character"][1],
+        },
+    )
+
+    class MalformedClient(_Client):
+        def poll(self):
+            plan = super().poll()
+            return replace(plan, sequence=plan.sequence + 1) if plan is not None and failure == "malformed" else plan
+
+    client = MalformedClient()
+    generation = client.start_match(0, 3)
+    schedule = ActionScheduler(FrameTiming(2, 1, 3, 4, 8), client.context_frames, generation)
+    lifecycle = netplay._NetplayLifecycle(
+        _Session(),
+        client,
+        schedule,
+        player_identity=None,
+        policy_settings=None,
+        observer=None,
+        schedule_observer=None,
+        stream_id=0,
+    )
+    lifecycle.advance(_frame(-2, NEUTRAL_CONTROLLER_ACTION))
+    lifecycle.choose(-2)
+    lifecycle.advance(_frame(-1, NEUTRAL_CONTROLLER_ACTION))
+    if failure == "no_active_request":
+        schedule.request = None
+    lifecycle.choose(-1)
+    assert schedule.inference_failed
+    assert schedule.last_decision is None
+    assert lifecycle.plan_decisions == lifecycle.inference_seconds == lifecycle.inference_source_frames == []
 
 
 def test_no_usable_plan_releases_stream_and_release_failure_stops_slot(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,6 +14,7 @@ from hal.eval import results
 from hal.eval.observations import policy_input_from_frame
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
+from hal.eval.scheduling import PlanDecision
 from hal.eval.scheduling import PlanProtocolError
 from hal.inference.api import RuntimeConfig
 from hal.inference.client import InferenceClient
@@ -61,6 +62,7 @@ class _NetplayLifecycle:
         self.stream_id = stream_id
         self.inference_seconds: list[float] = []
         self.inference_source_frames: list[int] = []
+        self.plan_decisions: list[PlanDecision] = []
         self.observed_frame_ids: list[int] = []
         self.frame_interval_seconds: list[float] = []
         self.dolphin_step_seconds: list[float] = []
@@ -102,6 +104,10 @@ class _NetplayLifecycle:
                 response = self.client.poll()
                 if response is not None:
                     self.schedule.accept_plan(response, frame_id)
+                    decision = self.schedule.last_decision
+                    if decision is None:
+                        raise PlanProtocolError("inference response had no active request")
+                    self.plan_decisions.append(decision)
                     self.inference_seconds.append(self.client.last_latency)
                     self.inference_source_frames.append(response.source_frame)
                     if self.observer is not None and frame_id >= 0:
@@ -183,6 +189,7 @@ class _NetplayLifecycle:
             frame_interval_seconds=tuple(self.frame_interval_seconds),
             dolphin_step_seconds=tuple(self.dolphin_step_seconds),
             schedule_events=tuple(self.schedule_events),
+            plan_decisions=tuple(self.plan_decisions),
         )
 
     def run(
@@ -257,6 +264,8 @@ class _NetplayLifecycle:
             tuple(self.inference_source_frames),
             tuple(self.schedule_events),
             connection_countdown_seconds,
+            plan_decisions=tuple(self.plan_decisions),
+            generation=self.schedule.generation,
         )
         return replace(result, match_end_seconds=time.monotonic() - game_ended)
 

@@ -6,6 +6,7 @@ import pytest
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
+from hal.controller import controller_action_wire_values
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
 from hal.eval.scheduling import PlanProtocolError
@@ -53,6 +54,11 @@ def test_local_zero_delay_zero_prefix_targets_next_frame() -> None:
     plan = action_plan(request, (_action(0.5),) * 4)
     assert tuple(item.target_frame for item in plan.actions) == (11, 12, 13, 14)
     assert schedule.accept_plan(plan, 10)
+    decision = schedule.last_decision
+    assert decision is not None and decision.accepted
+    assert decision.generated_target_frames == (11, 12, 13, 14)
+    assert decision.first_submittable_target == 11
+    assert decision.request_prefix_wire == decision.pinned_prefix_wire == ()
     assert schedule.action_to_submit(10) == _action(0.5)
 
 
@@ -70,6 +76,7 @@ def test_matching_active_response_rejects_boolean_frame_identity(malformed: str)
     with pytest.raises(PlanProtocolError, match="malformed"):
         schedule.accept_plan(plan, 0)
     assert schedule.inference_failed
+    assert schedule.last_decision is None
 
 
 def test_deadline_equality_accepts_and_one_frame_late_rejects_whole_tail() -> None:
@@ -81,6 +88,9 @@ def test_deadline_equality_accepts_and_one_frame_late_rejects_whole_tail() -> No
     schedule.observe(_observation(1))
     first = action_plan(request, tuple(_action(index / 10) for index in range(4, 9)))
     assert schedule.accept_plan(first, 1)
+    first_decision = schedule.last_decision
+    assert first_decision is not None and first_decision.accepted
+    assert first_decision.generated_target_frames[0] == first_decision.first_submittable_target == 4
     assert schedule.last_consumed_source_frame == 0
     for frame in range(1, 5):
         if frame > 1:
@@ -103,6 +113,9 @@ def test_deadline_equality_accepts_and_one_frame_late_rejects_whole_tail() -> No
     schedule.observe(_observation(6))
     prior = dict(schedule.planned)
     assert not schedule.accept_plan(action_plan(second_request, (_action(0.9),) * 5), 6)
+    late = schedule.last_decision
+    assert late is not None and not late.accepted and late != first_decision
+    assert late.generated_target_frames[0] == 8 < late.first_submittable_target == 9
     assert schedule.deadline_misses == 1
     assert schedule.planned == prior
     assert schedule.last_consumed_source_frame == 4
@@ -121,6 +134,11 @@ def test_prefix_mismatch_rejects_tail_at_controller_wire_precision() -> None:
     schedule.submitted[1] = _action(0.519)
     prior = dict(schedule.planned)
     assert not schedule.accept_plan(action_plan(request, (_action(0.7),) * 2), 1)
+    decision = schedule.last_decision
+    assert decision is not None and not decision.accepted
+    assert decision.request_prefix_wire[0] == controller_action_wire_values(_action(0.5))
+    assert decision.pinned_prefix_wire[0] == controller_action_wire_values(_action(0.519))
+    assert decision.request_prefix_wire != decision.pinned_prefix_wire
     assert schedule.prefix_mismatches == 1
     assert schedule.planned == prior
     assert schedule.last_consumed_source_frame == 0
@@ -138,6 +156,7 @@ def test_malformed_active_response_fails_protocol_and_releases_request() -> None
     assert schedule.inference_failed
     assert schedule.request is None
     assert schedule.last_consumed_source_frame is None
+    assert schedule.last_decision is None
 
 
 def test_controller_submission_gaps_have_their_own_counter() -> None:

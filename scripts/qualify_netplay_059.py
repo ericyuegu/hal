@@ -32,6 +32,7 @@ from typing import cast
 import melee
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
+from hal.controller import POLICY_BUTTON_MASK
 from hal.eval.scheduling import FrameTiming
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobCredentials
@@ -103,6 +104,8 @@ class MatchAssessment:
     steady_frame_count: int
     steady_game_fps: float
     steady_inference_count: int
+    plan_decision_count: int
+    accepted_plan_count: int
     steady_inference_p95_ms: float
     steady_inference_p99_ms: float
     startup_count_by_event: dict[str, int]
@@ -121,7 +124,6 @@ _SCHEDULE_COUNTERS = (
 )
 _UNMEASURED_GATES = (
     "Post-preparation compilation and CUDA graph capture counts",
-    "Accepted-plan validity traces (rejection counters do not prove this)",
     "Process, thread, and memory stability across rematches",
     "Three same-day matched control/candidate delivery trials",
 )
@@ -151,6 +153,94 @@ def _array(value: object, name: str) -> list[object]:
     return cast(list[object], value)
 
 
+def _wire_prefix(value: object, name: str, *, allow_missing: bool) -> tuple[tuple[int, ...] | None, ...]:
+    prefix = []
+    for action in _array(value, name):
+        if action is None and allow_missing:
+            prefix.append(None)
+            continue
+        channels = tuple(_integer(channel, name) for channel in _array(action, name))
+        if len(channels) != 7:
+            raise ValueError(f"{name} must contain seven controller wire values per action")
+        if (
+            any(not -80 <= channel <= 80 for channel in channels[:4])
+            or any(not 0 <= channel <= 140 for channel in channels[4:6])
+            or channels[6] < 0
+            or channels[6] & ~POLICY_BUTTON_MASK
+        ):
+            raise ValueError(f"{name} contains invalid controller wire values")
+        prefix.append(channels)
+    return tuple(prefix)
+
+
+def _validate_plan_decisions(
+    payload: Mapping[str, object],
+    inference_frames: tuple[int, ...],
+    timing: FrameTiming,
+    last_choice_frame: int,
+    path: Path,
+) -> int:
+    decisions = _array(payload.get("plan_decisions"), "plan_decisions")
+    if len(decisions) != len(inference_frames):
+        raise ValueError(f"{path}: plan decisions do not cover every inference response")
+    stream_id = _integer(payload.get("stream_id"), "stream_id")
+    generation = _integer(payload.get("generation"), "generation")
+    if generation < 1:
+        raise ValueError(f"{path}: match generation must be positive")
+    accepted_count = 0
+    previous_choice: int | None = None
+    for index, (raw, source_frame) in enumerate(zip(decisions, inference_frames, strict=True)):
+        decision = _mapping(raw, "plan decision")
+        request_identity = tuple(
+            _integer(decision.get(f"request_{name}"), f"request_{name}")
+            for name in ("stream_id", "generation", "sequence", "source_frame")
+        )
+        response_identity = tuple(
+            _integer(decision.get(f"response_{name}"), f"response_{name}")
+            for name in ("stream_id", "generation", "sequence", "source_frame")
+        )
+        if (
+            request_identity != response_identity
+            or request_identity[0] != stream_id
+            or request_identity[1] != generation
+            or request_identity[2] != index
+            or request_identity[3] != source_frame
+        ):
+            raise ValueError(f"{path}: plan decision identity differs from its inference response")
+        choice_frame = _integer(decision.get("choice_frame"), "plan choice frame")
+        if (
+            choice_frame < source_frame
+            or choice_frame > last_choice_frame
+            or (previous_choice is not None and choice_frame <= previous_choice)
+        ):
+            raise ValueError(f"{path}: plan decisions have invalid controller choice frames")
+        previous_choice = choice_frame
+        first_target = choice_frame + timing.physical_delay_frames + 1
+        if _integer(decision.get("first_submittable_target"), "first submittable target") != first_target:
+            raise ValueError(f"{path}: plan decision submitability bound differs from frame timing")
+        targets = tuple(
+            _integer(value, "generated target frame")
+            for value in _array(decision.get("generated_target_frames"), "generated_target_frames")
+        )
+        expected_targets = tuple(
+            range(source_frame + timing.fixed_prefix_frames + 1, source_frame + timing.prediction_horizon_frames + 1)
+        )
+        if targets != expected_targets:
+            raise ValueError(f"{path}: plan decision target frames differ from the declared horizon")
+        requested = _wire_prefix(decision.get("request_prefix_wire"), "request_prefix_wire", allow_missing=False)
+        pinned = _wire_prefix(decision.get("pinned_prefix_wire"), "pinned_prefix_wire", allow_missing=True)
+        if len(requested) != timing.fixed_prefix_frames or len(pinned) != timing.fixed_prefix_frames:
+            raise ValueError(f"{path}: plan decision fixed prefix differs from the declared shape")
+        accepted = decision.get("accepted")
+        if type(accepted) is not bool:
+            raise ValueError(f"{path}: plan decision acceptance must be a boolean")
+        valid = requested == pinned and all(target >= first_target for target in targets)
+        if accepted != valid:
+            raise ValueError(f"{path}: accepted plan is late or has a mismatched wire prefix")
+        accepted_count += int(accepted)
+    return accepted_count
+
+
 def _assess_match(
     path: Path,
     *,
@@ -164,7 +254,7 @@ def _assess_match(
     payload = _mapping(json.loads(path.read_text()), "match measurement")
     timing = FrameTiming(delay, 1, delay + 1, 4, 8)
     expected = {
-        "schema_version": 1,
+        "schema_version": 2,
         "reservation_id": reservation_id,
         "game_number": game_number,
         "policy_bundle_sha256": bundle_sha256,
@@ -199,6 +289,7 @@ def _assess_match(
         raise ValueError(f"{path}: inference timings have missing or repeated source frames")
     if any(frame > frames[-2] for frame in inference_frames):
         raise ValueError(f"{path}: inference source frame follows the last controller choice")
+    accepted_plan_count = _validate_plan_decisions(payload, inference_frames, timing, frames[-2], path)
 
     startup_counts = dict.fromkeys(_SCHEDULE_COUNTERS, 0)
     previous_counts = startup_counts.copy()
@@ -263,6 +354,8 @@ def _assess_match(
         len(steady_intervals),
         fps,
         len(steady_inference),
+        len(inference_frames),
+        accepted_plan_count,
         p95 * 1000,
         p99 * 1000,
         startup_counts,
