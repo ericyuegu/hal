@@ -1,7 +1,7 @@
 # Real-time netplay
 
 The current module layout, frame contract, and measurement limits are documented
-in [Inference runtime](inference-runtime.md). Local evaluation and nonblocking
+in [Inference runtime](inference.md). Local evaluation and nonblocking
 netplay share prediction and scheduling contracts. Checkpoint formats are unchanged.
 
 The following sections retain the historical qualification record. Their module

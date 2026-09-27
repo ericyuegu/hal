@@ -14,6 +14,9 @@ uv sync
 source .venv/bin/activate
 ```
 
+Use `uv sync --group analysis` for the retained notebooks, or
+`uv sync --extra netplay-server` for the service and its API tests.
+
 To download ready-made datasets and emulator for training and eval, request keys for the S3 bucket from the maintainer [@ericyuegu](https://github.com/ericyuegu).
 
 You can copy keys to `.env` or your `.bashrc`.
@@ -22,14 +25,15 @@ source .env
 uv run fetch    # will download to `<repo_root>/data/` by default
 ```
 
-Training experiments reside as single files under `experiments/`.
+The maintained training program is experiment 059. It requires the published
+policy-world-v8 corpus and its pinned manifests.
 ```
-uv run experiments/001_flow_matching_baseline.py
+uv run experiments/059_muon_action_sequence.py
 ```
 
 To launch experiments on cloud, wrap your local training command with a launcher script:
 ```
-uv run scripts/launch_vast.py --max-price 1.0 -- uv run experiments/001_flow_matching_baseline.py
+uv run scripts/launch_vast.py --max-price 1.0 -- uv run experiments/059_muon_action_sequence.py
 ```
 
 Modal is the default fixed-hardware option. One-time setup requires an authenticated
@@ -48,9 +52,9 @@ The launcher defaults to one B200, 32 requested/48 maximum CPU cores, 128 GiB
 RAM, a 384 GiB memory limit, and a 2 TiB ephemeral SSD. It submits a detached
 Function by default:
 ```bash
-uv run scripts/launch_modal.py --dry-run -- uv run experiments/028_onehot_controller.py
-uv run scripts/launch_modal.py -- uv run experiments/028_onehot_controller.py
-uv run scripts/launch_modal.py --wait -- uv run experiments/028_onehot_controller.py
+uv run scripts/launch_modal.py --dry-run -- uv run experiments/059_muon_action_sequence.py
+uv run scripts/launch_modal.py -- uv run experiments/059_muon_action_sequence.py
+uv run scripts/launch_modal.py --wait -- uv run experiments/059_muon_action_sequence.py
 ```
 Modal can preempt GPU Functions, and each Function attempt is limited to 24 hours.
 The launcher gives an input ten retries and records its run name in the automatically
@@ -66,8 +70,8 @@ Google Compute Engine is also supported. The launcher uses your interactive
 `gcloud auth login` session (no service-account key file) and reads job secrets
 from Secret Manager through the VM's attached service account:
 ```
-uv run scripts/launch_gce.py --dry-run --zone us-central1-a -- uv run experiments/001_flow_matching_baseline.py
-uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@PROJECT.iam.gserviceaccount.com -- uv run experiments/001_flow_matching_baseline.py
+uv run scripts/launch_gce.py --dry-run --zone us-central1-a -- uv run experiments/059_muon_action_sequence.py
+uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@PROJECT.iam.gserviceaccount.com -- uv run experiments/059_muon_action_sequence.py
 ```
 The service account needs `roles/secretmanager.secretAccessor` on the secrets
 listed by `--secret`. See `uv run scripts/launch_gce.py --help` for GPU, Spot,
@@ -75,7 +79,7 @@ network, disk, and lifecycle options.
 
 ## Netplay service
 
-Run one compiled policy slot locally:
+Start the netplay service locally:
 
 ```bash
 cp deploy/netplay/.env.example deploy/netplay/.env
@@ -84,6 +88,7 @@ deploy/netplay/run-local.sh
 
 See [deploy/netplay/README.md](deploy/netplay/README.md) for requirements,
 Cloudflare publishing, Docker, health checks, and GPU qualification.
+The policy request and timing contract is in [Inference](docs/inference.md).
 
 
 ## Data
@@ -113,3 +118,26 @@ uv run hal/scripts/filter.py --index data/processed/dev/index.jsonl --output dat
 # step 3: materializing
 uv run hal/scripts/materialize.py --paths-file data/processed/dev/paths.txt --index data/processed/dev/index.jsonl --output data/processed/dev/mds
 ```
+
+The example writes full replay rows for extraction and roundtrip diagnostics.
+To write packed policy-world rows directly, add `--replay-format policy-world`
+and choose a fresh output directory. This produces a new corpus; it does not
+reproduce the published 059 corpus identity or row order.
+
+Audit and publish an R2 staging prefix into a fresh final prefix:
+
+```bash
+uv run hal/scripts/publish_mds.py --staging r2:hal/staging/dev --final r2:hal/processed/dev
+```
+
+The maintained v8 construction and audit entrypoint is
+`scripts/rematerialize_policy_world_v8_modal.py`. Inspect its deterministic
+44-source job list with `--dry-run`; `--command status` reads existing publication
+records. Experiment 059 continues to use its published manifests, statistics,
+player-identity sidecar, and vocabulary. Replacing those inputs is a new
+experiment. Roundtrip diagnostics read full MDS rows, not packed policy-world rows.
+
+Training, export, local evaluation, H2H, and service contracts are described in
+[inference.md](docs/inference.md). The [refactor acceptance record](docs/refactor-059.md)
+lists current evidence and the gates that remain open.
+Earlier experiments and their original notes are under [archive/](archive/).
