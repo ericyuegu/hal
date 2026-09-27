@@ -284,7 +284,7 @@ satisfy a gate. Raw large results belong in the existing run/artifact store.
 | Gate | Required evidence | Current status |
 |---|---|---|
 | A Ownership | Final tree, one model/loader/scheduler/process driver, import boundaries, typed code, protected edits | Runtime retirement and import-boundary tests pass; final inventory/checks in progress. |
-| B Data | `.slp` full path/parity, 44-source audit, hashes, 2048 validation identities/tensors, sampler/resume geometry | Real cohort and statistics match exactly; synthetic loader resume and `.slp`→MDS→R2 publication audit pass. The complete 44-source v8 row audit remains open. |
+| B Data | `.slp` full path/parity, 44-source metadata and representative row audits, hashes, 2048 validation identities/tensors, sampler/resume geometry | Pass for the revised scope: cohort and statistics match exactly; synthetic loader resume and `.slp`→MDS→R2 publication pass; 33 v8 row audits reproduce the publication records. The user waived the remaining 11 row scans on 2026-09-27. |
 | C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy exact, synthetic boundary resume, and default count pass. The retained update-8192 checkpoint is selected for the production comparison; that run remains open. |
 | D Artifacts | Old artifacts, descendants, new profiles, identity rejection | Actual update-131072 checkpoint validates without changing caller RNG, and re-exports as capability v2 with its checkpoint hash preserved. Artifact contract suite passes on CPU; qualified new profiles remain open. |
 | E Cache | B1/2/4/8/16/32, Q1/2/4/decomposition, wraps, sparse/permutation/reset/identity/temp/prefix0/2/3/4, dummy rows, one weights copy | Focused CPU/CUDA independence tests and real-checkpoint B2 BF16 conditional KL pass. Complete capacity/profile matrix remains open. |
@@ -440,15 +440,14 @@ bytes; publication adds `_SUCCESS`. Local, staging, and final object checksums
 and lengths match. Both new prefixes are under
 `r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2`; existing published
 corpora were not changed. The [fixture identity record](../tests/fixtures/o59/publication_fixture.json)
-and its capture helper make this check reproducible. This full-MDS fixture does
-not substitute for the packed-v8 audit of all 44 published sources.
+and its capture helper make this check reproducible. Packed-v8 publication is
+covered by the representative row audits below.
 
 The separate read-only v8 object/marker inventory validates all 44 published
 prefixes and 1,295,370 train rows. The compressed shards total 172,490,094,626
 bytes (160.65 GiB). `runs/refactor-059/v8-published-inventory.json` records the
 objects and marker identities, including the original marker form retained by
-ranked-1 and Druggedfox. This metadata inventory has not yet read every retained
-row through `audit_dataset`; that full audit remains a distinct open gate.
+ranked-1 and Druggedfox. Row audits are recorded separately below.
 
 The first full-row pilot, RapM, passed in 17.47 seconds. It read 15 objects
 and 79,506,116 bytes and reproduced the publication marker's row counts,
@@ -462,9 +461,13 @@ The larger Aklo pilot also passed, in 285.88 seconds. It checked 103 objects,
 published 169,867,381 train frames. Its report SHA-256 is
 `1d22bab6a01b5c4e35ac195fbea4bdb40a3e606479e0057977917b940691b92b`.
 `runs/refactor-059/v8-full-audit/summary-attempt-1.json` records both pilots.
-The remaining full-row audits are running through the resumable read-only
-driver; their individual reports and attempt logs are under
-`runs/refactor-059/v8-full-audit/`. A partial inventory does not close gate B.
+On 2026-09-27 the user accepted representative coverage and stopped the full
+scan after 33 sources passed. The remaining 11 row scans are no longer required.
+The driver stopped with SIGINT (exit 130); no audit processes remained, and its
+scratch directory was empty. The interrupted source is not counted as passed.
+Individual reports and attempt logs remain under
+`runs/refactor-059/v8-full-audit/`. The summary is `summary-user-stop.json`,
+SHA-256 `9ba71666335148b12480b47fea18b877de96dcd410ea91816eb06b3bf541fa2e`.
 
 The capability-v2 qualification bundle is
 `runs/refactor-059/o59-capability-v2.hal`, SHA-256

@@ -308,10 +308,10 @@
     }
   ],
   "limits": [
-    "Real production 2048\u21922049 and 4096\u21924097 update resume checks are pending.",
+    "The one representative production 8192\u21928193 next-batch and next-update resume comparison is pending.",
     "Matched three-trial loader/training throughput and GPU/netplay hardware qualifications are pending.",
     "Remote publication covers a small full-MDS fixture, not the published 44-source packed v8 corpus.",
-    "All-44 v8 audit_dataset row scan has not run; inventory validates markers and object listings only."
+    "The user accepted representative v8 row-audit coverage on 2026-09-27; 33 sources passed, and the remaining 11 scans were stopped and are no longer required."
   ],
   "loader_memory_preflight": {
     "benchmark_sha256": "e45510ef27c266fd0376afc54aab1101b2897d9e32cc50ed0d4a864781f3ae40",
@@ -327,7 +327,7 @@
   "loader_resume": {
     "control_candidate_sha256": "f0f80015a1e83a5abdfe5a2a8f67dfc116e198ec4b727802054efd457e30b236",
     "fixture": "tests/fixtures/o59/loader_resume_fingerprint.py",
-    "scope": "synthetic schema-3 committed cursor after 37 batches and 20 batches after restore; real 2048/4096 checkpoint update gates remain outstanding"
+    "scope": "synthetic schema-3 committed cursor after 37 batches and 20 batches after restore; the representative production 8192\u21928193 resume comparison remains outstanding"
   },
   "parity_helper_sha256": {
     "tests/fixtures/o59/loader_resume_fingerprint.py": "7b55bbed07563f5dd7f9204c414870145a889f9ec22d743769a3edf9a7ccaa58",
@@ -385,7 +385,7 @@
       "train": 604,
       "val": 3
     },
-    "scope": "Read-only full row, metadata, checksum, and statistics audit of one draft-exception corpus; 43 other published corpora remain unaudited at row level.",
+    "scope": "Read-only full row, metadata, checksum, and statistics audit of one draft-exception corpus; the completed multi-source audit is recorded under v8_representative_rows.",
     "source_manifest_sha256": "31e0ee64a551c5dffb23ad8dca7a18ff713fe011fb7f55d5b8b6e347479048cc"
   },
   "v8_metadata_rapm": {
@@ -453,6 +453,64 @@
       "professional-uhhei-policy-world-v8",
       "professional-ycz-policy-world-v8",
       "professional-zain-policy-world-v8"
+    ]
+  },
+  "v8_representative_rows": {
+    "completed_count": 33,
+    "completed_names": [
+      "professional-aklo-policy-world-v8",
+      "professional-amsa-policy-world-v8",
+      "professional-axe-policy-world-v8",
+      "professional-billybopeep-policy-world-v8",
+      "professional-bobbybigballz-policy-world-v8",
+      "professional-daniel-policy-world-v8",
+      "professional-desertsnoopy-policy-world-v8",
+      "professional-druggedfox-policy-world-v8",
+      "professional-fknsilver-policy-world-v8",
+      "professional-franz-policy-world-v8",
+      "professional-frenzy-policy-world-v8",
+      "professional-friend-policy-world-v8",
+      "professional-ginger-policy-world-v8",
+      "professional-gosu-policy-world-v8",
+      "professional-grab2win-policy-world-v8",
+      "professional-iliketurtles-policy-world-v8",
+      "professional-isdsar-policy-world-v8",
+      "professional-jchu-policy-world-v8",
+      "professional-kjh-policy-world-v8",
+      "professional-kodorin-policy-world-v8",
+      "professional-krudo-policy-world-v8",
+      "professional-m2k-policy-world-v8",
+      "professional-mof-policy-world-v8",
+      "professional-monotheon-policy-world-v8",
+      "professional-nicki-policy-world-v8",
+      "professional-rapm-policy-world-v8",
+      "professional-redx-policy-world-v8",
+      "professional-siddward-policy-world-v8",
+      "professional-technospider-policy-world-v8",
+      "professional-trif-policy-world-v8",
+      "professional-uhhei-policy-world-v8",
+      "professional-ycz-policy-world-v8",
+      "professional-zain-policy-world-v8"
+    ],
+    "execution": "Driver session 35056 interrupted with SIGINT (exit 130); no audit or scratch-download processes remain.",
+    "inventory_count": 44,
+    "scope_decision": "Representative completed row audits; remaining full scans waived by user on 2026-09-27.",
+    "scratch_cleaned": true,
+    "status": "passed_revised_scope",
+    "summary": "runs/refactor-059/v8-full-audit/summary-user-stop.json",
+    "summary_sha256": "9ba71666335148b12480b47fea18b877de96dcd410ea91816eb06b3bf541fa2e",
+    "unscanned_names": [
+      "ranked-anonymized-1-policy-world-v8",
+      "ranked-anonymized-2-policy-world-v8",
+      "ranked-anonymized-3-policy-world-v8",
+      "ranked-anonymized-4-policy-world-v8",
+      "ranked-anonymized-5-policy-world-v8",
+      "ranked-anonymized-6-policy-world-v8",
+      "professional-cody-policy-world-v8",
+      "professional-cookbook-policy-world-v8",
+      "professional-jahridin-policy-world-v8",
+      "professional-mang0-policy-world-v8",
+      "professional-solobattle-policy-world-v8"
     ]
   },
   "validation_cohort": {
