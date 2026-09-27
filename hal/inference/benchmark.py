@@ -197,6 +197,7 @@ def measure_prediction_shape(
             for sequence in range(WARMUP_CALLS + MEASURED_CALLS):
                 if sequence == WARMUP_CALLS:
                     worker.forbid_compilation = True
+                    freeze_inference_runtime()
                 source = policy.context_frames + sequence * request_interval
                 observation_count = policy.context_frames if sequence == 0 else request_interval
                 for slot, client in enumerate(clients):

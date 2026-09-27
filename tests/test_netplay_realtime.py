@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import melee
 import pytest
 
+import hal.inference.benchmark as benchmark
 from hal.controller import NEUTRAL_CONTROLLER_ACTION as NEUTRAL
 from hal.controller import ControllerAction
 from hal.eval.scheduling import ActionScheduler
@@ -220,7 +221,7 @@ def test_calibrated_health_requires_five_affected_and_five_clean_seconds() -> No
     assert SlotStatus.from_payload(record.to_payload()) == record
 
 
-def test_incremental_benchmark_uses_one_declared_prefix_shape() -> None:
+def test_incremental_benchmark_uses_one_declared_prefix_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     from hal.inference.api import RuntimeConfig
     from hal.inference.benchmark import measure_prediction_shape
 
@@ -232,6 +233,7 @@ def test_incremental_benchmark_uses_one_declared_prefix_shape() -> None:
         context_frames = 4
         supported_horizons = (8,)
         calls = 0
+        freezes = 0
         resets = 0
         prefixes = set()
         sources = []
@@ -251,6 +253,10 @@ def test_incremental_benchmark_uses_one_declared_prefix_shape() -> None:
         def reset_prediction(self):
             self.resets += 1
 
+        def freeze_after_warmup(self) -> None:
+            assert self.calls == 2 * benchmark.WARMUP_CALLS
+            self.freezes += 1
+
         def predict(self, requests):
             self.calls += len(requests)
             self.prefixes.update(len(request.fixed_actions) for request in requests)
@@ -263,8 +269,10 @@ def test_incremental_benchmark_uses_one_declared_prefix_shape() -> None:
             pass
 
     policy = Policy()
+    monkeypatch.setattr(benchmark, "freeze_inference_runtime", policy.freeze_after_warmup)
     result = measure_prediction_shape(policy, RuntimeConfig(2, (3,), replan_interval_frames=1), 8, 5, 0.0005)
     assert policy.calls == 2 * (20 + 200)
+    assert policy.freezes == 1
     assert len(result.seconds) == 200
     assert policy.prefixes == {5}
     assert policy.sources[:3] == [4, 5, 6]

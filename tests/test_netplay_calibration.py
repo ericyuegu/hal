@@ -92,8 +92,19 @@ def test_selected_shape_must_pass_independent_qualification() -> None:
     policy = Mock(spec=PredictionPolicy)
     policy.supported_horizons = (12,)
     measure = Mock(side_effect=(LatencyMeasurement(12, 3, (0.010,)), LatencyMeasurement(12, 3, (0.020,))))
-    with pytest.raises(RuntimeError, match="failed final qualification"):
+    with pytest.raises(RuntimeError, match="failed final qualification") as failure:
         check_realtime_budget(cast(PredictionPolicy, policy), RuntimeConfig(1, (2,)), 0.0005, measure=measure)
+    assert "delay=2 horizon=12 fixed_prefix=3 p99=20.000ms allowance=16.667ms samples=1" in str(failure.value)
+
+
+def test_second_delay_failure_reports_measured_profile() -> None:
+    policy = Mock(spec=PredictionPolicy)
+    policy.supported_horizons = (8,)
+    measure = Mock(side_effect=(LatencyMeasurement(8, 4, (0.010,)), LatencyMeasurement(8, 3, (0.020,))))
+    runtime = RuntimeConfig(1, (2, 3), replan_interval_frames=4)
+    with pytest.raises(RuntimeError, match="failed independent qualification") as failure:
+        check_realtime_budget(cast(PredictionPolicy, policy), runtime, 0.0005, shape=(8, 4), measure=measure)
+    assert "delay=2 horizon=8 fixed_prefix=3 p99=20.000ms allowance=16.667ms samples=1" in str(failure.value)
 
 
 def test_unusable_horizons_fail_without_compiling() -> None:

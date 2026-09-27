@@ -27,6 +27,18 @@ def _candidate_order(candidate: tuple[int, int]) -> tuple[int, int]:
     return candidate[0], -candidate[1]
 
 
+def _failed_budget_message(timing: FrameTiming, measurement: LatencyMeasurement, reason: str) -> str:
+    return (
+        f"server unavailable: {reason}: "
+        f"delay={timing.physical_delay_frames} "
+        f"horizon={timing.prediction_horizon_frames} "
+        f"fixed_prefix={timing.fixed_prefix_frames} "
+        f"p99={measurement.p99_seconds * 1000:.3f}ms "
+        f"allowance={timing.inference_allowance_frames * 1000 / 60:.3f}ms "
+        f"samples={len(measurement.seconds)}"
+    )
+
+
 def latency_frames(seconds: float) -> int:
     if not math.isfinite(seconds) or seconds < 0:
         raise ValueError("latency must be finite and non-negative")
@@ -126,7 +138,7 @@ def check_realtime_budget(
         raise ValueError("latency measurement shape differs from the requested prediction shape")
     measurements.append(result)
     if latency_frames(result.p99_seconds) > selected.inference_allowance_frames:
-        raise RuntimeError("server unavailable: selected schedule failed final qualification")
+        raise RuntimeError(_failed_budget_message(selected, result, "selected schedule failed final qualification"))
     timings = tuple(
         FrameTiming(
             delay,
@@ -154,8 +166,6 @@ def check_realtime_budget(
             raise ValueError("latency measurement shape differs from the requested prediction shape")
         measurements.append(result)
         if latency_frames(result.p99_seconds) > timing.inference_allowance_frames:
-            raise RuntimeError(
-                f"server unavailable: delay {timing.physical_delay_frames} failed independent qualification"
-            )
+            raise RuntimeError(_failed_budget_message(timing, result, "delay failed independent qualification"))
     policy.reset_prediction()
     return RealtimeBudgetCheck(timings, tuple(measurements))
