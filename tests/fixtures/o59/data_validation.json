@@ -1,0 +1,468 @@
+{
+  "candidate_state": "uncommitted working tree; file hashes below identify the tested files at record creation",
+  "checks": [
+    {
+      "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=/tmp/hal-059-control-d7454f9 /home/ericgu/src/hal/.venv/bin/python -m pytest -q tests/test_physical_shard_loader.py tests/test_dataloader.py tests/test_rematerialize_policy_world_v8.py tests/test_prepare_professional.py tests/test_index.py",
+      "name": "control-data-baseline",
+      "result": "131 passed, 2 Mosaic warnings in 17.91s"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_buffered_mds_replay_loader.py tests/test_replay_windows.py tests/test_validation_replay_loader.py tests/test_streaming_compat.py tests/test_index.py tests/test_prepare_professional.py tests/test_rematerialize_policy_world_v8.py tests/test_policy_world_schema.py tests/test_archive_streaming.py -m 'not integration'",
+      "name": "candidate-data-loader",
+      "result": "98 passed in 52.71s"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_player_identity.py tests/test_feature_stats.py tests/test_streams.py tests/test_returns.py tests/test_policy_schema.py tests/test_trajectory.py -m 'not integration'",
+      "name": "candidate-identity-stats-returns",
+      "result": "65 passed in 3.01s"
+    },
+    {
+      "command": "HAL_REQUIRE_INTEGRATION=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration",
+      "name": "required-dolphin-integration-sandbox",
+      "result": "7 failed, 2 deselected: sandbox denied ENet host creation and write to ~/.config/SlippiOnline/Config/Dolphin.ini"
+    },
+    {
+      "command": "HAL_REQUIRE_INTEGRATION=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration",
+      "execution": "outside filesystem/network sandbox with local emulator access",
+      "name": "required-dolphin-integration-escalated",
+      "result": "7 passed, 2 deselected, 7 fork deprecation warnings in 53.14s"
+    },
+    {
+      "command": "npm ci --offline --ignore-scripts",
+      "name": "frontend-lock-install",
+      "result": "passed; 481 packages installed, 0 vulnerabilities"
+    },
+    {
+      "command": "npm run lint",
+      "name": "frontend-lint",
+      "result": "passed"
+    },
+    {
+      "command": "npx tsc --noEmit",
+      "name": "frontend-typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "npm run build",
+      "name": "frontend-build-sandbox",
+      "result": "failed: prerender localhost bind denied with EPERM 127.0.0.1"
+    },
+    {
+      "command": "npm run build",
+      "execution": "outside socket sandbox",
+      "name": "frontend-build-escalated",
+      "result": "passed; 2 routes prerendered"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_netplay_queue.py tests/test_netplay_api.py -m 'not integration'",
+      "execution": "outside socket sandbox; TestClient hung inside sandbox",
+      "name": "queue-api-smoke",
+      "result": "26 passed, 1 Starlette deprecation warning in 2.87s"
+    },
+    {
+      "command": "uv lock --offline",
+      "name": "python-lock",
+      "result": "passed; zero version changes among retained packages"
+    }
+  ],
+  "fd_leak_diagnosis": {
+    "cause": "Direct StreamingDataset readers omitted patch_streaming; each non-owning shared-memory prefix probe retained two descriptors until exit.",
+    "control": "36 targeted tests passed but descriptors rose from 88 to 808; successive direct reads added 48, 60, 72, 84, 96, 108, 120, and 132 descriptors.",
+    "control_trace": "runs/refactor-059/fd-trace-narrow.log",
+    "control_trace_sha256": "7c8161211ced4c75ccda6f77751c6afe934f648b1bbc14799546d4b8b0edd7bd",
+    "dependency": "mosaicml-streaming==0.13.0 on Python 3.14",
+    "fix": "Call patch_streaming explicitly at every maintained direct-reader boundary; keep the pinned Mosaic workaround and add a subprocess reader regression.",
+    "regression_command": "HAL_FD_TRACE_FILE=runs/refactor-059/fd-trace-fixed.log PYTHONPATH=/tmp UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q -p hal059_fd_probe tests/test_archive_streaming.py tests/test_policy_schema.py tests/test_policy_world_schema.py tests/test_streaming_compat.py -m 'not integration'",
+    "regression_result": "42 passed in 46.41s at the default 1024-descriptor limit; the same direct-reader sequence ended at 160 open descriptors, with 12 own registrations per new dataset and no retained probe attachments.",
+    "regression_trace": "runs/refactor-059/fd-trace-fixed.log",
+    "regression_trace_sha256": "e1d6d6d7ed5319a17f52f37af43715cc77fd2a09b6c24c6f03cbfd106ce571eb",
+    "reproduction_command": "HAL_FD_TRACE_FILE=<new trace path> PYTHONPATH=tests/fixtures/o59 UV_CACHE_DIR=/tmp/hal-uv-cache uv run pytest -q -p fd_trace tests/test_archive_streaming.py tests/test_policy_schema.py tests/test_policy_world_schema.py tests/test_streaming_compat.py -m 'not integration'",
+    "tested_file_sha256": {
+      "hal/data/streaming_compat.py": "1016227fdec5f588578f9cbcc07174ff056131220632c98667f5506250f14dce",
+      "hal/scripts/roundtrip.py": "5234dc928bfae7589017a3fa7d1fd92e3624d176ac9f755c1f82028e87600ac7",
+      "notebooks/discretization_roundtrip.py": "108732844420bfc11d232b3c8e64a21f48c96dcb9ee57e24d5a00b8ef52659e2",
+      "tests/test_archive_streaming.py": "ba58e77e1f62872661b5e25cadc3bcb9910b8e98e1856317f1f10b85da696305",
+      "tests/test_policy_schema.py": "39c0b475da0e8aa2c19953b54024c703f73c05cc1bf860490759c5f61b31e345",
+      "tests/test_policy_world_schema.py": "24c192af7ce64981f013c8937fbb2fe54ded29520dba36ed22521df5157360c2",
+      "tests/test_streaming_compat.py": "24e6ca48d3554a69318fa6ed5e5d2fd90a572c2234eb62bb98fa04919cbbfb06"
+    },
+    "trace_helper": "tests/fixtures/o59/fd_trace.py",
+    "trace_helper_sha256": "d8a2eb1c0ed7166a7427ab8941c359613880adfe9e3aa759083c7f3d50b97869"
+  },
+  "file_sha256": {
+    "hal/data/feature_stats.py": "fa2927b906fc17cd74bdf7d3a11a5531dd27b570f0d687959695325d0273682c",
+    "hal/data/index_builder.py": "95d6a390cb50cce519efdc61b3b1274e68547abe8199d8e712922803c45f2896",
+    "hal/data/mds_materialization.py": "fab155a8500cd78615bd2b4bb1a10c5d468ac024e136960f5cb61bfde925fb6d",
+    "hal/data/mds_publication.py": "a81e930a81101644262946033f16ff4e73995c21903fc8cb00453c11df311c09",
+    "hal/data/player_identity.py": "1a7691614b192ecca46abe0773386fa46b0e14b56c1d5051192ac1c699ebeab9",
+    "hal/data/policy_world_v8.py": "df3eca9a08f9845595c96636745bdc197d6f52a3c7a9bfedc25a3f6c4e24f69c",
+    "hal/data/professional_replays.py": "b8b6dccbf723581fe2f72ba64b2bed53dd90eac1bd3d21db1434777de33922ed",
+    "hal/data/replay_selection.py": "3a41f5b3501592ee9965737693e0926d9860e26ce0080f12fa894c81f1124c13",
+    "hal/representation/features.py": "da5d7c969f738511589ab397560a9e71c739e0096cdae0c0bd02431b9ac9e942",
+    "hal/representation/player_identity.py": "d4fda79c8b1cc6c406d7dfb3d1e1962fa49f33c626fec46e990f879d57113a78",
+    "hal/training/buffered_mds_replay_loader.py": "7c2782149caa7dbfc1aedc0bff95d0858a442ab42b3d9bb39476aa74e31ce293",
+    "hal/training/physical_shard_loader.py": "bc3210d0fc6ecd6978ad1f1fe155fed6e5a5ad55490a8203b4a4b7e4bdee9a3b",
+    "hal/training/replay_windows.py": "228d817f52e3172f66dd6e38634a56242e712535054d824385197bf8c4dd891e",
+    "hal/training/validation_replay_loader.py": "6d85e4a85bc4a9a60d636b154357172fc8fa5672caf7d74af07bcdbdd13ab731",
+    "pyproject.toml": "449dae1c7128d62b7bce02a2ce6d595f21a4fac0ab59961cbdca8b215747a4ee",
+    "tests/fixtures/o59/validation_cohort.json": "a4488bbaf76ce325cc7a687087e8c13ba96c1ea5abe711c30a0b66faba528c8c",
+    "uv.lock": "622bce18d51c97e50d9fcc6722950b94689b3f4c59dd35db6628aa697fa9fe57",
+    "web/netplay/package-lock.json": "02d2cd193d44db645771a2a2b27ea3c0774b2b4fe9dc2eda9c4cf8a74afdc720",
+    "web/netplay/package.json": "af627e26dca1d00dce0712af1c558c523cba513ea7c767b4eaa34797156681b1"
+  },
+  "followup_checks": [
+    {
+      "changed_file_sha256": {
+        "hal/data/archive.py": "71d04f2b898bc42e3dc152d9e27a10f52e7266a68694e733cb7e60e57ed0da2e",
+        "hal/data/behavior.py": "200568748cbc841b09e9ff9ee4121baab1c1f4b9eb94b026f37f60ae4a737281",
+        "hal/data/conversions.py": "3a23b54ffc047ecda587ae4a48b56e7b404c95b09c26d80045c60543c9aa0cce",
+        "hal/data/index.py": "aa6865ce80f34c7dab54ef51a7d1cbcc950505b1b553fc1e4147058a57a75aa3",
+        "hal/data/player_identity.py": "6461c9310e4cd13fe3335cf2b55533ef876140ee56c727357a8f6b185275c364",
+        "hal/data/policy_schema.py": "8e24e8e47b5199dbd129794ce469d6dc97deba2c15a56f503fc384eeccd73361",
+        "hal/data/policy_world_schema.py": "346b88a6867f3b0bd10c916df3dfd1a2d393bf5fdb4c86ef87867c761fe45446",
+        "hal/data/policy_world_v8.py": "d6705e1c047b891e9f64721831eea1f956bc731103ad919dbb5dddf4dc1c1786",
+        "hal/data/replay_stats.py": "5fd8d10394e28cf814cd55de3706de471401028f7722400f895c8b2e5418ea94",
+        "hal/training/buffered_mds_replay_loader.py": "33de0c6e015c5b58f8d4e28beeea47f1282be8a6141f005c37ebc4a2a577f301"
+      },
+      "name": "module-scope-callback-audit",
+      "result": "AST audit found zero nested functions or lambdas after extraction",
+      "scope": "all maintained hal/data Python modules and buffered/validation replay loader modules"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q -x tests/test_archive_backpressure.py tests/test_archive_streaming.py tests/test_archive_zip.py tests/test_policy_schema.py tests/test_policy_world_schema.py tests/test_player_identity.py tests/test_index.py tests/test_replay_stats.py tests/test_behavior_rows.py tests/test_behavior.py tests/test_conversions.py tests/test_buffered_mds_replay_loader.py tests/test_validation_replay_loader.py tests/test_replay_windows.py -m 'not integration'",
+      "name": "post-callback-data-parity",
+      "result": "238 passed in 52.45s; initial concurrent attempt hit process FD limit, isolated subsets and serial full rerun passed"
+    },
+    {
+      "command": "uv run ruff format --check hal/data hal/training/buffered_mds_replay_loader.py hal/training/replay_windows.py hal/training/validation_replay_loader.py; uv run ruff check [same paths]; uv run ty check --python-version 3.14 --error-on-warning [same paths]",
+      "name": "post-callback-style-and-types",
+      "result": "all passed"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_extract.py tests/test_wire_bridges.py tests/test_roundtrip.py -m 'not integration'",
+      "name": "post-callback-extraction-wire-roundtrip",
+      "result": "55 passed, 5 integration tests deselected in 3.31s"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_feature_stats.py tests/test_streams.py tests/test_validation_replay_loader.py -m 'not integration'",
+      "name": "strict-stats-record-regressions",
+      "result": "26 passed in 2.76s"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_archive_streaming.py::test_process_replays_archive_byte_equal -m 'not integration' --basetemp=/tmp/hal059-publication-audit",
+      "name": "full-slp-to-local-audit",
+      "prior_failures": "first attempt exposed audit requiring projection.json for full MDS; a repeat hit shared /tmp quota during fixture extraction; owned temporary directories were removed before successful rerun",
+      "result": "1 passed in 29.89s; fixture includes index, selection, full-MDS materialization, stored-schema check, and local rclone audit"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache uv lock --offline",
+      "name": "torch-pin",
+      "result": "passed; 221 packages resolved; torch remains at 2.11.0"
+    },
+    {
+      "callback_audit": "AST found zero nested functions or lambdas in API, replays, replay selection, and Modal v8 command",
+      "changed_file_sha256": {
+        "hal/data/replay_selection.py": "3a41f5b3501592ee9965737693e0926d9860e26ce0080f12fa894c81f1124c13",
+        "hal/netplay_service/api.py": "3aca5b2feb6bdc5811ab69775ffc3f7ba26f9833c5db5b2001f299f0a82f766f",
+        "hal/netplay_service/replays.py": "b27cd3e99eba384167ee56c786744b6491c97e117e7e0e996a7029029aaff213",
+        "scripts/rematerialize_policy_world_v8_modal.py": "f70db94636dc8c415fdfe2a2207ca1a6413d5f4940593413269da116dc76306e"
+      },
+      "command": "UV_NO_SYNC=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_netplay_api.py tests/test_netplay_queue.py tests/test_netplay_replays.py tests/test_rematerialize_policy_world_v8.py",
+      "execution": "outside socket sandbox; sandbox run stalled before reporting and was interrupted",
+      "name": "netplay-api-callback-parity",
+      "result": "54 passed, 1 Starlette deprecation warning in 5.80s"
+    },
+    {
+      "changed_file_sha256": {
+        "hal/data/schema.py": "9bbfc67cca08aaa8930c3c4afa76c7d5c0971d42e2bcd7c2e4666df0e94121a6"
+      },
+      "command": "UV_NO_SYNC=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_player_identity.py tests/test_feature_stats.py tests/test_streams.py tests/test_returns.py tests/test_policy_schema.py tests/test_trajectory.py tests/test_netplay_realtime.py -m 'not integration'",
+      "name": "legacy-representation-module-retirement",
+      "result": "89 passed in 5.19s; zero maintained imports of removed training.features/canonical/player_identity/ego_stats"
+    },
+    {
+      "changed_file_sha256": {
+        "hal/training/muon.py": "bf259451c4a5244ef7b6ff6ba510decc1f7bf0848634d085b3c26d540c5e8ff3"
+      },
+      "command": "UV_NO_SYNC=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_muon.py -k 'not cuda'",
+      "gpu_command": "UV_NO_SYNC=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_muon.py::test_batched_muon_matches_scalar_cuda_update",
+      "gpu_result": "sandbox 1 skipped because CUDA hidden; escalated local-GPU rerun 1 passed in 1.64s",
+      "name": "muon-retirement-parity",
+      "result": "10 passed, 1 CUDA deselected in 1.31s; baseline was also 10 passed"
+    },
+    {
+      "changed_file_sha256": {
+        ".pre-commit-config.yaml": "51592d321ab1540a43cb26a4cceffa109353027034985e01fd3302fc7b3532c4",
+        "hal/data/replay_selection.py": "3a41f5b3501592ee9965737693e0926d9860e26ce0080f12fa894c81f1124c13",
+        "hal/data/schema.py": "9bbfc67cca08aaa8930c3c4afa76c7d5c0971d42e2bcd7c2e4666df0e94121a6",
+        "hal/netplay_service/api.py": "3aca5b2feb6bdc5811ab69775ffc3f7ba26f9833c5db5b2001f299f0a82f766f",
+        "hal/netplay_service/replays.py": "b27cd3e99eba384167ee56c786744b6491c97e117e7e0e996a7029029aaff213",
+        "hal/training/muon.py": "bf259451c4a5244ef7b6ff6ba510decc1f7bf0848634d085b3c26d540c5e8ff3",
+        "scripts/rematerialize_policy_world_v8_modal.py": "f70db94636dc8c415fdfe2a2207ca1a6413d5f4940593413269da116dc76306e"
+      },
+      "command": "UV_NO_SYNC=1 uv run ruff format --check [six changed Python files]; UV_NO_SYNC=1 uv run ruff check [same]; UV_NO_SYNC=1 uv run ty check --python-version 3.14 --error-on-warning [same]; .venv/bin/pre-commit validate-config",
+      "name": "owned-final-style-types-and-upload-exclusion",
+      "result": "all passed; archive and outputs excluded from pre-commit and existing Docker/Modal upload filters"
+    },
+    {
+      "command": "plain uv run after pyproject metadata change",
+      "name": "uv-editable-rebuild-sandbox",
+      "result": "environment failure: editable rebuild could not download wheel because sandbox DNS/network is restricted; focused follow-up checks used UV_NO_SYNC=1 against the existing 2.11.0 environment; root owns final locked sync"
+    },
+    {
+      "command": ".venv/bin/pre-commit run ruff-format --files archive/notebooks/eval_stress.py",
+      "name": "pre-commit-research-archive-exclusion",
+      "result": "passed; hook reports no files to check (skipped)"
+    },
+    {
+      "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=<matching checkout> .venv/bin/python tests/fixtures/o59/loader_resume_fingerprint.py <matching loader test>",
+      "name": "persisted-loader-resume-helper-control-candidate",
+      "result": "control and candidate each printed f0f80015a1e83a5abdfe5a2a8f67dfc116e198ec4b727802054efd457e30b236"
+    },
+    {
+      "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=<matching checkout> .venv/bin/python tests/fixtures/o59/stats_digest.py --repo /home/ericgu/src/hal [--control]",
+      "name": "persisted-44-source-stats-helper-control-candidate",
+      "result": "control and candidate each produced 16 consolidated features and sha256 49b8299b93f6afdae28e876490065299959148e4389d12ac9190893ada39f775"
+    },
+    {
+      "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python tests/fixtures/o59/validation_cohort_parity.py --mode control --repo /home/ericgu/src/hal --control-checkout /tmp/hal-059-control-d7454f9 --output /tmp/hal059_validation_control_repro.json",
+      "execution": "outside socket sandbox with cached published corpus and R2 credentials",
+      "name": "persisted-validation-control-recapture",
+      "result": "2,048 windows from 44 sources; ordered digest ba0dc02f3db51685940a790baac795e48d3bf9c69173cf55c2d9928c92244f7d; JSON payload exactly equals checked-in control fixture; 16.47s capture"
+    },
+    {
+      "candidate_file_sha256": {
+        "experiments/059_muon_action_sequence.py": "8683ff4df68beaf0891cacaf289d949a4930fbd784a20c215fa5c9e0d9fd071a",
+        "hal/representation/features.py": "71707c517008597babe61e084cc3d1a2186eefb2acedb8359103fa363b6784af",
+        "hal/training/validation_replay_loader.py": "6d85e4a85bc4a9a60d636b154357172fc8fa5672caf7d74af07bcdbdd13ab731"
+      },
+      "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python tests/fixtures/o59/validation_cohort_parity.py --mode candidate --repo /home/ericgu/src/hal --output /tmp/hal059_validation_candidate_repro.json",
+      "execution": "outside socket sandbox with cached published corpus and R2 credentials",
+      "name": "persisted-validation-candidate-compare",
+      "result": "2,048 windows; zero identity, window, or tensor-digest mismatches; ordered digest ba0dc02f3db51685940a790baac795e48d3bf9c69173cf55c2d9928c92244f7d; 10.72s comparison"
+    },
+    {
+      "changed_file_sha256": {
+        "hal/data/professional_replays.py": "6993d25980c10d04cc4f971c749c41b4c0f2c679189624035bad2937fda5aea8",
+        "hal/data/replay_selection.py": "9bf5cf1831d3711d277f101fbf12a8a6318b7fe98e4f7378dfb59b7ec6d31aa6",
+        "hal/scripts/filter.py": "c926a357ead7625bfe99f9b8184917f3c9997c5cb38055c7d3ca4181e78fd5db"
+      },
+      "command": "UV_NO_SYNC=1 UV_CACHE_DIR=/tmp/hal-uv-cache OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest -q tests/test_replay_selection.py tests/test_prepare_professional.py tests/test_index.py",
+      "name": "named-replay-selection-api",
+      "result": "14 passed; tyro retains default six stages and explicit empty --stages behavior"
+    },
+    {
+      "commands": [
+        "uv run python -m hal.scripts.build_index --archive data/raw/dev.7z --output runs/refactor-059/publication-fixture-ad9b1822beb2/index.jsonl --workers 4",
+        "uv run python -m hal.scripts.filter --index runs/refactor-059/publication-fixture-ad9b1822beb2/index.jsonl --output runs/refactor-059/publication-fixture-ad9b1822beb2/eligible-paths.txt",
+        "uv run python tests/fixtures/o59/prepare_publication_fixture.py --index runs/refactor-059/publication-fixture-ad9b1822beb2/index.jsonl --eligible-paths runs/refactor-059/publication-fixture-ad9b1822beb2/eligible-paths.txt --output runs/refactor-059/publication-fixture-ad9b1822beb2/paths.txt",
+        "uv run python -m hal.scripts.materialize --paths-file runs/refactor-059/publication-fixture-ad9b1822beb2/paths.txt --index runs/refactor-059/publication-fixture-ad9b1822beb2/index.jsonl --output runs/refactor-059/publication-fixture-ad9b1822beb2/mds --workers 4 --train-split 0.34 --val-split 0.33",
+        "rclone copy [local MDS] [fresh R2 staging] --immutable --checksum",
+        "hal.data.mds_publication.publish_mds(staging, final, purge_staging=False)",
+        "uv run python tests/fixtures/o59/record_publication_fixture.py --run-root runs/refactor-059/publication-fixture-ad9b1822beb2 --output tests/fixtures/o59/publication_fixture.json"
+      ],
+      "evidence_sha256": "56489ce4d1938f2f9fa4811534fa33c546bd2be9dd4dd20b5a2cc327cca13945",
+      "execution": "R2 reads and writes required network escalation; unique prefix was verified empty before upload",
+      "name": "small-full-mds-remote-publication",
+      "result": "105 indexed, 86 filtered, 6 selected/materialized, 0 failures; local and staging audits 2+2+2 rows, 3 shards, 9 objects, 842904 bytes; final audit adds only _SUCCESS; all object MD5/size checks passed"
+    },
+    {
+      "command": "uv run python scripts/benchmark_replay_loader.py --estimate-only --output runs/refactor-059/loader-preflight-default-v2.json",
+      "evidence_sha256": "8e5414a933e80eb0e8e40241a205658e15866616ae7f87ae79f3a326f6df61cb",
+      "name": "production-geometry-loader-memory-preflight",
+      "result": "safe_to_start=false; 76,964,032,512-byte lower bound vs 23,223,349,248 bytes available; no production-geometry throughput run attempted"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache uv run python scripts/benchmark_replay_loader.py --estimate-only --output runs/refactor-059/loader-preflight-default-v3.json",
+      "evidence_sha256": "8ecbe583303dfeb7a1802670aaab408aa3b76bb0c256af548a8f885e4fdac466",
+      "name": "final-loader-benchmark-source-preflight",
+      "result": "safe_to_start=false; final benchmark script hash captured after source-checkout metadata fix; production geometry was not allocated"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache uv run python tests/fixtures/o59/audit_published_v8.py --mode inventory --output runs/refactor-059/v8-published-inventory.json",
+      "evidence_sha256": "25897a43560290e1e7233351246c55ddebb0d34f342eaedd830df093ea7a5f34",
+      "execution": "outside network sandbox with private R2 credentials; GET/LIST only",
+      "name": "read-only-44-source-v8-published-object-inventory",
+      "result": "44 published markers and object listings match their stated count and bytes; 172490094626 compressed bytes, 1295370 train rows, two original full-MDS marker formats and four draft exceptions; no shard row audit was performed"
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/hal-uv-cache uv run python tests/fixtures/o59/audit_published_v8.py --mode metadata --corpus professional-rapm-policy-world-v8 --output runs/refactor-059/v8-metadata-rapm.json",
+      "evidence_sha256": "ec50065e486e146de2c4a32464b2dade74481306ace05796422760624ec97a6a",
+      "execution": "outside network sandbox; GET/LIST only",
+      "name": "v8-draft-metadata-pilot",
+      "result": "source inspection and retained selection matched the immutable RapM draft publication marker; no v8 shard rows read"
+    }
+  ],
+  "full_cpu_attempts_after_fd_fix": [
+    {
+      "log": "runs/refactor-059/repository-cpu-fd-fixed.log",
+      "result": "Interrupted after 54%: sandbox-local FastAPI TestClient stalled; FD count was 82. The three owned orphan test processes were terminated and verified absent."
+    },
+    {
+      "log": "runs/refactor-059/repository-cpu-pass-3.log",
+      "result": "Interrupted at 12% because escalation made CUDA visible and this run was intended as a CPU-only check; GPU tests started, so it cannot be the matched CPU suite."
+    },
+    {
+      "log": "runs/refactor-059/repository-cpu-pass-4.log",
+      "result": "Inconclusive: per-user /tmp tmpfs quota was reached; multiple early failures and lost sys.stderr aborted the runner at 18%. FD trace remained at 61. The task-owned pytest directories were moved intact to NVMe, freeing quota. Final CPU suite must use NVMe TMPDIR, CUDA_VISIBLE_DEVICES='', and local socket access."
+    }
+  ],
+  "limits": [
+    "Real production 2048\u21922049 and 4096\u21924097 update resume checks are pending.",
+    "Matched three-trial loader/training throughput and GPU/netplay hardware qualifications are pending.",
+    "Remote publication covers a small full-MDS fixture, not the published 44-source packed v8 corpus.",
+    "All-44 v8 audit_dataset row scan has not run; inventory validates markers and object listings only."
+  ],
+  "loader_memory_preflight": {
+    "benchmark_sha256": "e45510ef27c266fd0376afc54aab1101b2897d9e32cc50ed0d4a864781f3ae40",
+    "central_buffer_bytes": 72670511104,
+    "decoded_slot_bytes": 554432,
+    "estimated_peak_lower_bound_bytes": 76964032512,
+    "evidence": "runs/refactor-059/loader-preflight-default-v3.json",
+    "evidence_sha256": "8ecbe583303dfeb7a1802670aaab408aa3b76bb0c256af548a8f885e4fdac466",
+    "host_available_bytes_before_start": 22341423104,
+    "safe_to_start": false,
+    "scope": "loader-core 61-column projection at production 512/131072/24 geometry; full 059 representation uses more columns"
+  },
+  "loader_resume": {
+    "control_candidate_sha256": "f0f80015a1e83a5abdfe5a2a8f67dfc116e198ec4b727802054efd457e30b236",
+    "fixture": "tests/fixtures/o59/loader_resume_fingerprint.py",
+    "scope": "synthetic schema-3 committed cursor after 37 batches and 20 batches after restore; real 2048/4096 checkpoint update gates remain outstanding"
+  },
+  "parity_helper_sha256": {
+    "tests/fixtures/o59/loader_resume_fingerprint.py": "7b55bbed07563f5dd7f9204c414870145a889f9ec22d743769a3edf9a7ccaa58",
+    "tests/fixtures/o59/stats_digest.py": "25e5d32ebbd142abf7e7babd04f844ec65efbc75f23fdd5dd8e76a71a2b5e8c7",
+    "tests/fixtures/o59/validation_cohort_parity.py": "dc1844a4c584f535c87aed0b423c7b58095726d372e43c6c60741b6d5b03edd6"
+  },
+  "publication_fixture": {
+    "evidence": "tests/fixtures/o59/publication_fixture.json",
+    "evidence_sha256": "56489ce4d1938f2f9fa4811534fa33c546bd2be9dd4dd20b5a2cc327cca13945",
+    "failures": 0,
+    "final_prefix": "r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2/final",
+    "local_staging_final_objects_match": true,
+    "rows": {
+      "test": 2,
+      "train": 2,
+      "val": 2
+    },
+    "scope": "small .slp-derived full-MDS publication fixture; not the 44-source 059 corpus",
+    "shards": 3,
+    "source_archive_sha256": "6c3a1815bc78f44786b91a366195b0b506e81105f998c15b47c48946488622eb",
+    "staging_prefix": "r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2/staging",
+    "success_marker_sha256": "d1e02492bac7e6a3ba7a32c140de7b0b3052e6b6137e65a0ea0910ba70c4ee87"
+  },
+  "published_stats": {
+    "consolidated_features": 16,
+    "control_candidate_sha256": "49b8299b93f6afdae28e876490065299959148e4389d12ac9190893ada39f775",
+    "script": "tests/fixtures/o59/stats_digest.py",
+    "sources": 44
+  },
+  "schema_version": 1,
+  "source_git_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
+  "stats_record_audit": {
+    "current_v8_sources": 44,
+    "local_stats_files": 44,
+    "nonempty_records": 1544,
+    "post_validation_consolidated_sha256": "49b8299b93f6afdae28e876490065299959148e4389d12ac9190893ada39f775",
+    "rules": "stats schema 1, MDS schema 7, train split, exact feature count; nonempty finite mean/m2/min/max with m2>=0 and min<=mean<=max; zero count has (0,0,+inf,-inf)",
+    "source_manifest": "tests/fixtures/o59/validation_cohort.json:sources",
+    "sufficient_records": 1584,
+    "violations": 0,
+    "zero_count_sentinels": 40
+  },
+  "v8_full_rapm": {
+    "command": "TMPDIR=/home/ericgu/src/hal/runs/refactor-059/tmp PYTHONPATH=/home/ericgu/src/hal OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python tests/fixtures/o59/audit_published_v8.py --mode full --corpus professional-rapm-policy-world-v8 --scratch-root runs/refactor-059/v8-audit-scratch --output runs/refactor-059/v8-full-rapm.json",
+    "compressed_bytes": 79506116,
+    "corpus": "professional-rapm-policy-world-v8",
+    "data_objects": 15,
+    "evidence": "runs/refactor-059/v8-full-rapm.json",
+    "evidence_sha256": "9864fd0ce10cd650f4a36b03702338f377b5c21781531e1427ca495f0c3164f7",
+    "helper_sha256": "c5dcc43b953b5501ac87c0dcc0795ba0340b6bc2bc9d7f67763ebb1ec1fd9a53",
+    "published_marker_sha256": "36030e304dae352ca1a0636364d8dacead455c749dabdf9d33ebc56c6402d57a",
+    "result": "passed in 17.47s; recomputed audit exactly equals immutable publication marker",
+    "rows": {
+      "test": 8,
+      "train": 604,
+      "val": 3
+    },
+    "scope": "Read-only full row, metadata, checksum, and statistics audit of one draft-exception corpus; 43 other published corpora remain unaudited at row level.",
+    "source_manifest_sha256": "31e0ee64a551c5dffb23ad8dca7a18ff713fe011fb7f55d5b8b6e347479048cc"
+  },
+  "v8_metadata_rapm": {
+    "corpus": "professional-rapm-policy-world-v8",
+    "draft_exception": true,
+    "evidence": "runs/refactor-059/v8-metadata-rapm.json",
+    "evidence_sha256": "ec50065e486e146de2c4a32464b2dade74481306ace05796422760624ec97a6a",
+    "helper_sha256": "396afb77599a16036ed948d2cef6f1fbb9820184e13ccef4ac2723fbf4699d81",
+    "published_marker_sha256": "36030e304dae352ca1a0636364d8dacead455c749dabdf9d33ebc56c6402d57a",
+    "scope": "read-only publication marker/object inventory and source inspection; no v8 shard rows were downloaded",
+    "selection_rejections": 1
+  },
+  "v8_published_inventory": {
+    "compressed_bytes": 172490094626,
+    "draft_exception_count": 4,
+    "evidence": "runs/refactor-059/v8-published-inventory.json",
+    "evidence_sha256": "25897a43560290e1e7233351246c55ddebb0d34f342eaedd830df093ea7a5f34",
+    "helper_sha256": "d02c815773ebee005f23d5a8bea92fdcb2edadac9d2d2476368c6135c9975564",
+    "original_full_mds_marker_count": 2,
+    "published_train_rows": 1295370,
+    "scope": "read-only publication marker/object inventory and source inspection; no v8 shard rows were downloaded",
+    "source_count": 44,
+    "source_order": [
+      "ranked-anonymized-1-policy-world-v8",
+      "ranked-anonymized-2-policy-world-v8",
+      "ranked-anonymized-3-policy-world-v8",
+      "ranked-anonymized-4-policy-world-v8",
+      "ranked-anonymized-5-policy-world-v8",
+      "ranked-anonymized-6-policy-world-v8",
+      "professional-aklo-policy-world-v8",
+      "professional-amsa-policy-world-v8",
+      "professional-axe-policy-world-v8",
+      "professional-billybopeep-policy-world-v8",
+      "professional-bobbybigballz-policy-world-v8",
+      "professional-cody-policy-world-v8",
+      "professional-cookbook-policy-world-v8",
+      "professional-daniel-policy-world-v8",
+      "professional-desertsnoopy-policy-world-v8",
+      "professional-druggedfox-policy-world-v8",
+      "professional-fknsilver-policy-world-v8",
+      "professional-franz-policy-world-v8",
+      "professional-frenzy-policy-world-v8",
+      "professional-friend-policy-world-v8",
+      "professional-ginger-policy-world-v8",
+      "professional-gosu-policy-world-v8",
+      "professional-grab2win-policy-world-v8",
+      "professional-iliketurtles-policy-world-v8",
+      "professional-isdsar-policy-world-v8",
+      "professional-jchu-policy-world-v8",
+      "professional-jahridin-policy-world-v8",
+      "professional-kjh-policy-world-v8",
+      "professional-kodorin-policy-world-v8",
+      "professional-krudo-policy-world-v8",
+      "professional-m2k-policy-world-v8",
+      "professional-mang0-policy-world-v8",
+      "professional-mof-policy-world-v8",
+      "professional-monotheon-policy-world-v8",
+      "professional-nicki-policy-world-v8",
+      "professional-rapm-policy-world-v8",
+      "professional-redx-policy-world-v8",
+      "professional-siddward-policy-world-v8",
+      "professional-solobattle-policy-world-v8",
+      "professional-technospider-policy-world-v8",
+      "professional-trif-policy-world-v8",
+      "professional-uhhei-policy-world-v8",
+      "professional-ycz-policy-world-v8",
+      "professional-zain-policy-world-v8"
+    ]
+  },
+  "validation_cohort": {
+    "capture_boundary": "before validation collation discards replay ID, start, and ego side",
+    "control_candidate_identity_and_tensor_mismatches": 0,
+    "fixture": "tests/fixtures/o59/validation_cohort.json",
+    "ordered_entry_sha256": "ba0dc02f3db51685940a790baac795e48d3bf9c69173cf55c2d9928c92244f7d",
+    "parity_helper": "tests/fixtures/o59/validation_cohort_parity.py",
+    "reproduced_control_payload_exactly": true,
+    "sources": 44,
+    "windows": 2048
+  }
+}

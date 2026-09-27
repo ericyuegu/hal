@@ -1,0 +1,13 @@
+{
+  "alignment": "sum(k=1..60, gamma**(k-1)*r[t+k])",
+  "availability": "full observed horizon or known terminal with zero rewards thereafter",
+  "calibration_windows": 65536,
+  "dropout": "independent CPU generator, per context position",
+  "evaluation": "positive p90 at every replan; separate unconditioned comparison",
+  "gamma": 0.99855,
+  "horizon": 60,
+  "modulation": "per-block RMSNorm affine, 128-wide SiLU, biased zero-initialized projections",
+  "reward": "damage_opp-damage_ego+120*(stock_loss_opp-stock_loss_ego)+50*(last_stock_opp-last_stock_ego)",
+  "scale": 120.0,
+  "version": 1
+}

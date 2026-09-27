@@ -1,0 +1,106 @@
+{
+  "audit_after_marker": {
+    "bytes": 843249,
+    "failures": 0,
+    "objects": 10,
+    "rows": {
+      "test": 2,
+      "train": 2,
+      "val": 2
+    },
+    "shards": 3
+  },
+  "audit_before_marker": {
+    "bytes": 842904,
+    "failures": 0,
+    "objects": 9,
+    "rows": {
+      "test": 2,
+      "train": 2,
+      "val": 2
+    },
+    "shards": 3
+  },
+  "candidate_module_sha256": {
+    "hal/data/index_builder.py": "95d6a390cb50cce519efdc61b3b1274e68547abe8199d8e712922803c45f2896",
+    "hal/data/mds_materialization.py": "fab155a8500cd78615bd2b4bb1a10c5d468ac024e136960f5cb61bfde925fb6d",
+    "hal/data/mds_publication.py": "612de4dee64915290484b2b790c0f75e312b48845131296bcb859e633aa01566",
+    "hal/data/replay_selection.py": "9bf5cf1831d3711d277f101fbf12a8a6318b7fe98e4f7378dfb59b7ec6d31aa6",
+    "tests/fixtures/o59/prepare_publication_fixture.py": "3a96927010b9535b2d9a53ff4a56c799f724ee123d5b0d2350e1ae3ac71c87f6"
+  },
+  "final_object_count": 10,
+  "final_prefix": "r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2/final",
+  "local_objects": {
+    "failures.materialize.jsonl": {
+      "bytes": 0,
+      "md5": "d41d8cd98f00b204e9800998ecf8427e",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "manifest.jsonl": {
+      "bytes": 6489,
+      "md5": "b2edfcfa2535ab4304023c7260cb71a0",
+      "sha256": "130c3ac0891e7fa81b60ddf347b4e4e5c62022f7cb0cd95eaefaad7baeaf4ea3"
+    },
+    "stats.json": {
+      "bytes": 12706,
+      "md5": "ebfe075f6adc88a02437e9c6af58cd20",
+      "sha256": "38682d3728ff9d624ff92cd248b508b78fe3ea12a4041facfa3389ebaaa12c3b"
+    },
+    "test/index.json": {
+      "bytes": 7861,
+      "md5": "087392cc1730f9137a1df0e9ee8c0d98",
+      "sha256": "9a8a82d0629c83650e2f5bf49b683b419edb399efa6c52e48d52f584cfb8c33c"
+    },
+    "test/shard.00000.mds.zstd": {
+      "bytes": 300715,
+      "md5": "122c5bc621a292fbf7e80b5d5cf99a69",
+      "sha256": "1fe4dbfa82b3a73fbc3172edb5e47b4c60adfbd511787f08e917fb8f65888026"
+    },
+    "train/index.json": {
+      "bytes": 7861,
+      "md5": "1f0d014d64581d2b2e8b58d228337b63",
+      "sha256": "8c10fc1a4abfc95d4c38d151935cba8801ad83b75b08d7ba6c9a8f94219058f8"
+    },
+    "train/shard.00000.mds.zstd": {
+      "bytes": 296431,
+      "md5": "90ea903245d8211191b2c4cdf5a82586",
+      "sha256": "c3b49c6faf66e38df6d543e5a919c0dba82dba489314ef84968d2fedb4f74f15"
+    },
+    "val/index.json": {
+      "bytes": 7861,
+      "md5": "54ac81d0aebe9d04dc1f61b9ab2dca92",
+      "sha256": "7c02bb3d03c9d390c499c76a20d124f76721e744ffd230a5bbdf1fab725fba14"
+    },
+    "val/shard.00000.mds.zstd": {
+      "bytes": 202980,
+      "md5": "6287adf510a5abeffdacc1044fe0d571",
+      "sha256": "67bf15ddbb0537e9b14f091db369cc74cc79d5b4a23fffe1f85119fb95be60d5"
+    }
+  },
+  "purpose": "small .slp-derived full-MDS publication fixture; not the 44-source 059 corpus",
+  "source_file_sha256": {
+    "eligible_paths": "fbfd018efa1d284ccf681a0f28c8294632ec09932048f27a29cbf3c9b67603f9",
+    "index": "ea0d589d711ce0ee1a1bda155502d2a9ccb662f72a7fef223bc98b7e8223ca04",
+    "selected_paths": "8dc7ec67dd2aba0f448dcb336d02c8f364a4d16a98c6d086a140941fd09794d3",
+    "selected_replays": "706619e9ec29f08d6fa4a3b33bfb9a0c0b8db7671cb75ae53b1cea69e7930259",
+    "source_archive": "6c3a1815bc78f44786b91a366195b0b506e81105f998c15b47c48946488622eb"
+  },
+  "source_git_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
+  "staging_object_count": 9,
+  "staging_prefix": "r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2/staging",
+  "success_marker": {
+    "bytes": 842904,
+    "failures": 0,
+    "final": "r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2/final",
+    "objects": 9,
+    "published_at": "2026-09-27T08:15:55.593103+00:00",
+    "rows": {
+      "test": 2,
+      "train": 2,
+      "val": 2
+    },
+    "shards": 3,
+    "staging": "r2:hal/runs/refactor-059/publication-fixture-ad9b1822beb2/staging"
+  },
+  "success_marker_sha256": "d1e02492bac7e6a3ba7a32c140de7b0b3052e6b6137e65a0ea0910ba70c4ee87"
+}
