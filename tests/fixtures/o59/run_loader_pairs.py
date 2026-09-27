@@ -6,10 +6,13 @@ import json
 import os
 import statistics
 import subprocess
+import time
+from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from typing import Final
 from typing import cast
 
@@ -21,6 +24,8 @@ MEASURED_BATCHES: Final[int] = 500
 BATCH_SIZE: Final[int] = 64
 REPLAY_SLOTS: Final[int] = 1600
 NUM_WORKERS: Final[int] = 2
+CORPUS_INDEX: Final[Path] = Path("data/processed/professional/aklo/mds-policy-world-v8/train/index.json")
+MANIFEST_SHA: Final[str] = "1ae04b2ffd57fe0bb1bac86933f61b4fbad151bfe7956f607f6ff19521895f64"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +34,39 @@ class Args:
     control: Path
     output_root: Path
     rclone_config: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PageCachePreparation:
+    raw_shard_count: int
+    raw_bytes: int
+    seconds: float
+
+
+def _prepare_page_cache(index_path: Path, control_index_path: Path, *, expected_sha256: str) -> PageCachePreparation:
+    if not index_path.samefile(control_index_path):
+        raise ValueError("control and candidate must use the same local corpus cache")
+    payload = index_path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ValueError("local corpus manifest differs from the pinned comparison")
+    manifest = cast(dict[str, Any], json.loads(payload))
+    started = time.perf_counter()
+    total_bytes = 0
+    shards = cast(list[dict[str, Any]], manifest["shards"])
+    for shard in shards:
+        raw = cast(dict[str, Any], shard["raw_data"])
+        name = cast(str, raw["basename"])
+        if Path(name).name != name:
+            raise ValueError("raw shard name must stay inside the corpus directory")
+        with (index_path.parent / name).open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size != raw["bytes"]:
+                raise ValueError(f"incomplete local raw shard: {name}")
+            # This only advises eviction of the selected clean files. It does not
+            # change their contents or drop unrelated system caches.
+            os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            total_bytes += size
+    return PageCachePreparation(len(shards), total_bytes, time.perf_counter() - started)
 
 
 def _sha256(path: Path) -> str:
@@ -81,8 +119,6 @@ def _run_trial(
         str(REPLAY_SLOTS),
         "--num-workers",
         str(NUM_WORKERS),
-        "--local-repo",
-        str(args.repo),
         "--rclone-config",
         str(args.rclone_config),
         "--label",
@@ -90,6 +126,14 @@ def _run_trial(
         "--output",
         str(output),
     ]
+    cache = _prepare_page_cache(
+        args.repo / CORPUS_INDEX,
+        args.control / CORPUS_INDEX,
+        expected_sha256=MANIFEST_SHA,
+    )
+    cache_path = args.output_root / f"{label}-cache.json"
+    with cache_path.open("x") as handle:
+        handle.write(json.dumps(asdict(cache), indent=2, sort_keys=True) + "\n")
     with log.open("x") as handle:
         subprocess.run(command, cwd=args.repo, env=env, stdout=handle, stderr=subprocess.STDOUT, check=True)
     result = cast(dict[str, object], json.loads(output.read_text()))
@@ -105,6 +149,9 @@ def _run_trial(
     ):
         raise ValueError(f"{label}: measured geometry or corpus differs from the declared reduced comparison")
     print(f"{label}: {result['samples_per_second']:.1f} samples/s", flush=True)
+    result["cache_preparation"] = asdict(cache)
+    result["cache_record"] = str(cache_path)
+    result["cache_record_sha256"] = _sha256(cache_path)
     return output, result
 
 
@@ -203,6 +250,9 @@ def main(args: Args) -> None:
                     "measurement_disk_read_bytes": result["measurement_disk_read_bytes"],
                     "measurement_disk_write_bytes": result["measurement_disk_write_bytes"],
                     "process_tree_peak_rss_upper_bound_bytes": result["process_tree_peak_rss_upper_bound_bytes"],
+                    "cache_preparation": result["cache_preparation"],
+                    "cache_record": result["cache_record"],
+                    "cache_record_sha256": result["cache_record_sha256"],
                 }
             )
         paired_ratios.append(
@@ -228,6 +278,7 @@ def main(args: Args) -> None:
             "replay_slots": REPLAY_SLOTS,
             "num_workers": NUM_WORKERS,
         },
+        "cache_protocol": "complete shared raw cache; POSIX_FADV_DONTNEED on each selected shard before each trial, then 200 warm batches",
         "candidate_benchmark_sha256": candidate_benchmark_sha,
         "control_benchmark_sha256": control_benchmark_sha,
         "trials": trials,

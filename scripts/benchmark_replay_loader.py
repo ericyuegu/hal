@@ -61,7 +61,6 @@ class Args:
     hash_batches: bool = False
     label: str = "loader-core"
     output: Path | None = None
-    local_repo: Path | None = None
     rclone_config: Path | None = None
     estimate_only: bool = False
     cache_status_only: bool = False
@@ -313,8 +312,6 @@ def measure(
 def main(args: Args) -> None:
     if sum((args.estimate_only, args.cache_status_only, args.materialize_only)) > 1:
         raise ValueError("estimate-only, cache-status-only, and materialize-only are mutually exclusive")
-    if args.local_repo is not None:
-        streams.REPO_DIR = str(args.local_repo.resolve())
     _configure_r2(args.rclone_config)
     if len(set(args.sources)) != len(args.sources) or not args.sources:
         raise ValueError("sources must be non-empty and unique")
