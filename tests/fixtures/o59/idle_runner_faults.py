@@ -5,9 +5,9 @@ import json
 import multiprocessing as mp
 import os
 import platform
+import re
 import signal
 import sqlite3
-import subprocess
 import sys
 import time
 from collections.abc import Mapping
@@ -92,18 +92,26 @@ def _live_owned(owned: Mapping[int, int]) -> tuple[int, ...]:
     )
 
 
-def _compute_pids() -> set[int]:
-    output = subprocess.check_output(
-        ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
-        text=True,
-        timeout=3,
-    )
-    return {int(value.strip()) for value in output.splitlines() if value.strip().isdigit()}
+def _has_gpu_device(pid: int, proc_root: Path = Path("/proc")) -> bool:
+    # Modal's gVisor reports GPU PIDs in a different namespace from /proc.
+    # Open device handles identify the owner inside the runner's process tree.
+    try:
+        descriptors = tuple((proc_root / str(pid) / "fd").iterdir())
+    except FileNotFoundError:
+        return False
+    for descriptor in descriptors:
+        try:
+            target = descriptor.readlink()
+        except FileNotFoundError:
+            continue
+        if re.fullmatch(r"/dev/nvidia\d+", str(target)):
+            return True
+    return False
 
 
 def _gpu_child(root_pid: int, owned: dict[int, int]) -> int | None:
     _remember_descendants(root_pid, owned)
-    candidates = set(_proc_tree(root_pid)) & _compute_pids()
+    candidates = {pid for pid in _proc_tree(root_pid) if _has_gpu_device(pid)}
     if len(candidates) > 1:
         raise RuntimeError(f"runner owns multiple simultaneous GPU processes: {sorted(candidates)}")
     return next(iter(candidates), None)

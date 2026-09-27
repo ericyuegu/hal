@@ -1,0 +1,76 @@
+{
+  "gpu_process_identity_probe": {
+    "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
+    "container_id": "ta-01M3HX1E9G51KKPAC8J2GVTDFR",
+    "container_pid": 94,
+    "local_gpu_device": "/dev/nvidia1",
+    "nvidia_reported_pid": 1,
+    "scope": "one-element CUDA tensor during replay-cache preparation; process exited before any measurement"
+  },
+  "inference": {
+    "app_id": "ap-3xo8e25IHA0uoFFiQNkapU",
+    "archive_sha256": "d3331a8e8d82669f7a5ffe390b67c6b041241514531f0847664f3612956eecee",
+    "cpu": 8,
+    "failure": "RuntimeError: qualification command failed: sparse-1",
+    "function_call_id": "fc-01M3HWBVM1MGXYBPSVF638BWXV",
+    "git_sha": "a67857255e80fdc307be009a11fd320738d6027a",
+    "gpu": "RTX-PRO-6000",
+    "memory_limit_gib": 64,
+    "passed": [
+      "210 GPU tests reused from the prior job after 135 source hashes matched",
+      "7 required emulator tests",
+      "capacity-2 prepared delay-2 and delay-3 profiles",
+      "production BF16 conditional KL before and after eviction",
+      "first complete-path serial and batched pair"
+    ],
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-rtx-pro-6000-continue-20260927-164855",
+    "result_sha256": {
+      "batched-1/results.json": "9d282068b17a642c920795af3bc5e27e3bed54e7153087f7a95eec9847fb9b47",
+      "conditional-kl.json": "359f101c5dd562198cc49af104148cddcf78d9e91c20c8e7589d2531aa854390",
+      "emulator-tests.log": "cd9211d706d8b4a3a51ae7921e34ce988d1c98248499f04533e13231cf1e5642",
+      "prepared-profiles.json": "3e39766c5695430fc60b34790708452f3fd53bcf198f8426f443d1b202cc53d3",
+      "report.json": "5804b16364369d8eb40143b985d54816c811b7d25f33c17fff1432f51be3df04",
+      "serial-1/results.json": "b6fe6d095335ca0e522cb28de40a264134b6693a00a198f770a7f20f31ebf9cc",
+      "sparse-1.log": "e1b8ccdea835eeefd1fa063d1ecc9eb0861c15bebb66fbcd8a424525774cc2ad"
+    },
+    "status": "failed",
+    "unfinished": [
+      "32-admitted/two-ready benchmark and remaining pairs",
+      "shared/distinct-checkpoint H2H",
+      "idle recovery",
+      "three paired 96-boot dense evaluations"
+    ]
+  },
+  "limitations": [
+    "RTX PRO 6000 Blackwell Server Edition is not RTX 6000 Ada",
+    "one completed timing pair does not qualify three-trial performance",
+    "no live netplay or long soak claim",
+    "production resume remains open until capture and exact comparison finish"
+  ],
+  "recorded_at": "2026-09-27T17:13:00.171177+00:00",
+  "schema_version": 1,
+  "training": {
+    "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
+    "archive_sha256": "d3331a8e8d82669f7a5ffe390b67c6b041241514531f0847664f3612956eecee",
+    "control_identity": {
+      "archive_sha256": "81ff16d46775731afaa77f4a7b54610be2d6bb02709b4f308cc1bd0b16a9156a",
+      "git_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379"
+    },
+    "cpu": 32,
+    "disk_gib": 2560,
+    "function_call_id": "fc-01M3HX1DZVGMFF9QF66629260N",
+    "git_sha": "a67857255e80fdc307be009a11fd320738d6027a",
+    "gpu": "B200",
+    "memory_limit_gib": 192,
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-b200-resume-and-performance-20260927-170043",
+    "retries": 0,
+    "source_transition": {
+      "new_source_sha": "a67857255e80fdc307be009a11fd320738d6027a",
+      "old_source_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379",
+      "parent_checkpoint_sha256": "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+      "parity_report_sha256": "ce7b8fd6e2705000bb9da0cf574b3d4a4bea6cb6e900ac1b659a5334a5d59b76"
+    },
+    "status": "running; strict control/candidate preflight passed; no next-update result yet",
+    "timeout_seconds": 21600
+  }
+}

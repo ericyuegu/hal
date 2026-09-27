@@ -61,6 +61,7 @@ source tree. No repository or global hook configuration was changed.
 | `0234ce36` | Prepare and test the single production next-update comparison |
 | `d5d07391` | Use pinned source identity when cloud images omit Git metadata |
 | `149a46d0` | Measure production training after the exact resumed update capture |
+| `a6785725` | Replace the stale development MDS fixture and enforce its schema |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -308,6 +309,33 @@ contracts and lineage, without a fixed W&B run identifier.
 
 Every unchecked row remains required. Missing inputs are failures, not skips that
 satisfy a gate. Raw large results belong in the existing run/artifact store.
+
+The [cloud qualification record](../tests/fixtures/o59/modal_qualification.json)
+pins completed results and active job identities. On the RTX PRO 6000 Blackwell,
+all seven emulator cases pass and production BF16 conditional KL passes before
+and after eviction (overall mean 3.423e-5 nats, p99 5.114e-4). Prepared capacity-2
+delay-2/3 profiles measure 8.078/7.579 ms p95 over 200 requests each. The first
+serial/batched delivery pair measures 16.608/8.989 ms median, with an actual
+batch size of two. These are partial results, not complete service qualification.
+
+That job stopped when preparation for 32 admitted streams exceeded the benchmark's
+300-second limit. No sparse-load timing was produced. The benchmark now accepts
+an explicit preparation limit and kills an unresponsive child after termination
+fails; request and production recovery bounds remain unchanged. Review also found
+that Modal's NVIDIA process IDs differ from container PIDs. The idle fault fixture
+now selects GPU owners by their device handles within the owned process tree.
+The follow-up passes global Ruff format/lint, the maintained Ty target, and
+1,235 CPU tests (22 CUDA/opt-in skips, 18 integration deselections, nine warnings,
+99.83 s). Its focused test also verifies cleanup of a child that ignores SIGTERM.
+Logs are under `runs/refactor-059/cloud-qualification-fixes-*`.
+
+The separate B200 job uses the saved training environment, source `a6785725`,
+the original checkpoint source `f05d4150`, and update 8192. Both strict provenance
+preflights pass. It prepares the published replay cache, then runs three paired
+loader and training measurements with exact update-8193 captures. Its hard limits
+are one GPU, 32 CPUs, 192 GiB RAM, 2.5 TiB disk, six hours, and zero retries.
+The disk allocation preserves the saved 256 GiB free-space requirement. This job
+does not run a corpus audit, publish production checkpoints, or create a W&B run.
 
 | Gate | Required evidence | Current status |
 |---|---|---|

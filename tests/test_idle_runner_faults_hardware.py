@@ -30,6 +30,17 @@ def test_status_poll_waits_for_absent_file_but_rejects_corruption(tmp_path: Path
         _MODULE._ready(path)
 
 
+def test_gpu_owner_uses_local_device_handles(tmp_path: Path) -> None:
+    descriptors = tmp_path / "123" / "fd"
+    descriptors.mkdir(parents=True)
+    (descriptors / "3").symlink_to("/dev/nvidiactl")
+    (descriptors / "4").symlink_to("/dev/nvidia-caps/nvidia-cap1")
+    assert not _MODULE._has_gpu_device(123, tmp_path)
+    (descriptors / "5").symlink_to("/dev/nvidia0")
+    assert _MODULE._has_gpu_device(123, tmp_path)
+    assert not _MODULE._has_gpu_device(456, tmp_path)
+
+
 @pytest.mark.integration
 def test_idle_runner_detects_hang_recovers_once_then_stays_unavailable() -> None:
     if os.environ.get("HAL_REQUIRE_IDLE_NETPLAY_FAULTS") != "1":

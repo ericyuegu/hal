@@ -54,6 +54,7 @@ def main() -> None:
     parser.add_argument("--serial-requests", action="store_true")
     parser.add_argument("--warmup-calls", type=int, default=20)
     parser.add_argument("--measured-calls", type=int, default=200)
+    parser.add_argument("--preparation-timeout-seconds", type=float, default=300.0)
     args = parser.parse_args()
     if (
         args.replan_interval < 1
@@ -96,6 +97,7 @@ def main() -> None:
             concurrent=not args.serial_requests,
             warmup_calls=args.warmup_calls,
             measured_calls=args.measured_calls,
+            preparation_timeout_seconds=args.preparation_timeout_seconds,
         )
         result = {
             **measurement,

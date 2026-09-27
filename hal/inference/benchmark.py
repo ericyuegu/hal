@@ -323,10 +323,13 @@ def measure_process_ready_pair(
     concurrent: bool,
     warmup_calls: int = 20,
     measured_calls: int = 200,
+    preparation_timeout_seconds: float = 300.0,
 ) -> dict[str, object]:
     """Measure two serial or concurrent ready responses through a spawned engine."""
     if capacity < 2 or warmup_calls < 1 or measured_calls < 1:
         raise ValueError("batching benchmark needs two rows and positive warmup and measurement counts")
+    if not math.isfinite(preparation_timeout_seconds) or preparation_timeout_seconds <= 0:
+        raise ValueError("benchmark preparation timeout must be finite and positive")
     if len(frames) < 4 * (warmup_calls + measured_calls):
         raise ValueError("replay does not contain the requested benchmark frames")
     context = mp.get_context("spawn")
@@ -348,7 +351,7 @@ def measure_process_ready_pair(
         for parent, _ in pairs:
             parent.close()
         status_child.close()
-        ready = _receive_process_status(process, status_parent, 300.0)
+        ready = _receive_process_status(process, status_parent, preparation_timeout_seconds)
         if not isinstance(ready, _BenchmarkReady):
             raise RuntimeError(f"inference benchmark preparation failed: {ready}")
         profile = PreparedInferenceProfile(
@@ -401,6 +404,7 @@ def measure_process_ready_pair(
             "concurrent": concurrent,
             "warmup_calls": warmup_calls,
             "measured_calls": measured_calls,
+            "preparation_timeout_seconds": preparation_timeout_seconds,
             "preparation_seconds": ready.preparation_seconds,
             "startup_seconds": startup_seconds,
             "peak_allocated_mib": ready.peak_allocated_mib,
@@ -426,4 +430,7 @@ def measure_process_ready_pair(
             process.join(timeout=2.0)
             if process.is_alive():
                 process.terminate()
+                process.join(timeout=2.0)
+            if process.is_alive():
+                process.kill()
                 process.join(timeout=2.0)
