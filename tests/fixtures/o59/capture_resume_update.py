@@ -1,8 +1,9 @@
-"""Capture one production resume update in the checkpoint's original environment.
+"""Capture a production resume update in the checkpoint's original environment.
 
 Run control and candidate in separate processes and checkouts. This calls each
 checkout's existing loader, prefetcher, loss, optimizer, and compile functions.
-It does not run evaluations, create W&B runs, or publish a training checkpoint.
+An optional throughput window continues from the captured update. Neither path
+runs evaluations, creates W&B runs, or publishes a training checkpoint.
 """
 
 import argparse
@@ -16,6 +17,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +108,7 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--source-transition", type=Path)
+    parser.add_argument("--measure-training", action="store_true")
     args = parser.parse_args()
     args.root = args.root.resolve()
     args.checkpoint = args.checkpoint.resolve()
@@ -285,6 +288,31 @@ def main() -> None:
         }
         (args.output / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        if args.measure_training:
+            from measure_training_updates import measure_training_updates
+
+            hook.remove()
+            loader.batch_transform = raw_capture.transform
+            del state, snapshot, gradients, raw_capture, batch, positions, expected_prefix
+            performance = measure_training_updates(
+                prefetch,
+                partial(
+                    experiment.train_step,
+                    model=model,
+                    cfg=cfg,
+                    trunk_fn=trunk_fn,
+                    temporal_fn=temporal_fn,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    prefix_sampler=prefix,
+                ),
+                next_step=step + 1,
+                batch_size=cfg.batch_size,
+                warm_updates=100,
+                measured_updates=200,
+            )
+            (args.output / "performance.json").write_text(json.dumps(performance, indent=2, sort_keys=True) + "\n")
+            print(json.dumps(performance, indent=2, sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":

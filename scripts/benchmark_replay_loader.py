@@ -15,7 +15,6 @@ import json
 import os
 import platform
 import statistics
-import subprocess
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -39,6 +38,7 @@ from hal.training.buffered_mds_replay_loader import SourceManifest
 from hal.training.buffered_mds_replay_loader import SourceRowSelection
 from hal.training.buffered_mds_replay_loader import build_shard_plan
 from hal.training.buffered_mds_replay_loader import estimate_host_memory
+from hal.training.runs import source_git_sha
 from hal.training.system_metrics import process_tree_pids
 from hal.training.system_metrics import read_process_tree_memory
 
@@ -189,11 +189,8 @@ def _source_metadata() -> dict[str, object]:
     source_file = Path(__file__).resolve()
     loader_file = Path(inspect.getfile(BufferedMDSReplayLoader)).resolve()
     checkout = loader_file.parents[2]
-    source_sha = subprocess.run(
-        ["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
     return {
-        "source_git_sha": source_sha,
+        "source_git_sha": source_git_sha(checkout),
         "benchmark_sha256": hashlib.sha256(source_file.read_bytes()).hexdigest(),
         "loader_sha256": hashlib.sha256(loader_file.read_bytes()).hexdigest(),
         "python_version": platform.python_version(),

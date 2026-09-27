@@ -1,7 +1,10 @@
 """Adapt the common loader measurement code to the immutable pre-refactor API."""
 
 import argparse
+import inspect
 from pathlib import Path
+
+from hal.training.runs import source_git_sha
 
 
 def main(source: Path, output: Path) -> None:
@@ -14,11 +17,16 @@ def main(source: Path, output: Path) -> None:
             "from hal.training.physical_shard_loader import PhysicalShardReplayLoader as BufferedMDSReplayLoader"
         ),
         "from hal.training.buffered_mds_replay_loader import ": "from hal.training.physical_shard_loader import ",
+        "from hal.training.runs import source_git_sha\n": "",
     }
     for old, new in replacements.items():
         if old not in code:
             raise ValueError(f"control benchmark adaptation is stale: {old}")
         code = code.replace(old, new)
+    # Only the measurement program needs the current archive identity helper;
+    # the immutable control's training package stays untouched.
+    code = code.replace("import platform\n", "import platform\nimport re\nimport subprocess\n")
+    code = code.replace("def _source_metadata()", inspect.getsource(source_git_sha) + "\n\ndef _source_metadata()")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x") as handle:
         handle.write(code)

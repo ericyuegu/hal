@@ -793,6 +793,7 @@
     "tests/fixtures/o59/loader_performance.md",
     "tests/fixtures/o59/loader_resume_fingerprint.py",
     "tests/fixtures/o59/make_loader_control_benchmark.py",
+    "tests/fixtures/o59/measure_training_updates.py",
     "tests/fixtures/o59/model_proxy_parity.json",
     "tests/fixtures/o59/model_proxy_parity.md",
     "tests/fixtures/o59/netplay_ready_3060.md",

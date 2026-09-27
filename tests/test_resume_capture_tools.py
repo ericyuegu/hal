@@ -24,6 +24,7 @@ def _load_tool(name: str) -> ModuleType:
 
 capture = _load_tool("capture_resume_update")
 comparison = _load_tool("compare_resume_updates")
+performance = _load_tool("measure_training_updates")
 
 
 def test_resume_capture_comparison_checks_nested_scientific_records() -> None:
@@ -116,3 +117,64 @@ def test_resume_raw_capture_records_selected_slots_and_rejects_extra_batch() -> 
     ]
     with pytest.raises(RuntimeError, match="more than the single boundary batch"):
         recorder(replay_ids, columns)
+
+
+class _CountingPrefetch:
+    def __init__(self) -> None:
+        self.queued = 0
+        self.staged = False
+        self.loaded = 0
+        self.consumed = 0
+
+    @property
+    def drained(self) -> bool:
+        return self.queued == 0 and not self.staged
+
+    def fill_lookahead(self, limit: int) -> None:
+        assert not self.staged and self.queued <= limit
+        target = min(4, limit)
+        self.loaded += target - self.queued
+        self.queued = target
+
+    def stage_next(self) -> None:
+        assert self.queued > 0 and not self.staged
+        self.queued -= 1
+        self.staged = True
+
+    def next(self) -> tuple[int, int]:
+        assert self.staged
+        self.staged = False
+        self.consumed += 1
+        return self.consumed, 32
+
+
+@pytest.mark.parametrize("count", (1, 3, 4, 7))
+def test_training_measurement_preserves_update_numbers_and_drains_prefetch(count: int) -> None:
+    prefetch = _CountingPrefetch()
+    calls = []
+
+    def train_step(**values: object) -> SimpleNamespace:
+        calls.append(values)
+        return SimpleNamespace(nll_sum=torch.tensor(float(values["update"])))
+
+    losses = performance._run_updates(prefetch, train_step, start_step=8193, count=count)
+    assert prefetch.drained
+    assert prefetch.loaded == prefetch.consumed == count
+    assert [call["step"] for call in calls] == list(range(8193, 8193 + count))
+    assert [call["update"] for call in calls] == list(range(8194, 8194 + count))
+    assert all(call["valid_prefixes"] == 32 and call["prefix_validated_on_cpu"] is True for call in calls)
+    assert [float(loss) for loss in losses] == list(range(8194, 8194 + count))
+
+
+def test_training_measurement_rejects_undrained_prefetch() -> None:
+    prefetch = _CountingPrefetch()
+    prefetch.fill_lookahead(1)
+    with pytest.raises(ValueError, match="start drained"):
+        performance._run_updates(prefetch, None, start_step=8193, count=2)
+
+
+def test_training_measurement_rejects_short_qualification_window() -> None:
+    with pytest.raises(ValueError, match="100 warm and 200 measured"):
+        performance.measure_training_updates(
+            None, None, next_step=8193, batch_size=512, warm_updates=99, measured_updates=200
+        )
