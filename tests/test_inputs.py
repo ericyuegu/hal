@@ -7,16 +7,33 @@ side changes, these tests are the first tripwire before the emulator sweep.
 """
 
 import math
+from dataclasses import replace
+from typing import cast
 
 import melee
 import numpy as np
 import pytest
 
-from hal.sim.inputs import ControllerInputsValue
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
+from hal.controller import ControllerAction
+from hal.controller import validate_controller_action
 from hal.sim.inputs import apply_inputs
 from hal.sim.sources import MDSControllerSource
 from hal.wire import ACTION_CHANNELS
 from hal.wire import BUTTON_BITS
+
+
+@pytest.mark.parametrize("value", (None, {}, "neutral"))
+def test_malformed_action_record_is_a_protocol_value_error(value: object) -> None:
+    with pytest.raises(ValueError, match="ControllerAction"):
+        validate_controller_action(cast(ControllerAction, value))
+
+
+@pytest.mark.parametrize("value", (None, "0", True, float("nan"), float("inf"), 2.0))
+def test_malformed_action_analog_is_a_protocol_value_error(value: object) -> None:
+    action = replace(NEUTRAL_CONTROLLER_ACTION, main_x=cast(float, value))
+    with pytest.raises(ValueError, match="main_x"):
+        validate_controller_action(action)
 
 
 def _dolphin_trigger_byte(wire: float) -> int:
@@ -101,7 +118,7 @@ class _RecordingSink:
 
 def test_apply_inputs_converts_logical_to_wire_and_dispatches_buttons() -> None:
     sink = _RecordingSink()
-    src = ControllerInputsValue(
+    src = ControllerAction(
         main_x=0.5,
         main_y=-0.25,
         c_x=1.0,
@@ -124,7 +141,7 @@ def test_apply_inputs_converts_logical_to_wire_and_dispatches_buttons() -> None:
 
 def test_apply_inputs_rejects_start_and_unknown_buttons() -> None:
     sink = _RecordingSink()
-    src = ControllerInputsValue(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, BUTTON_BITS["start"])
+    src = ControllerAction(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, BUTTON_BITS["start"])
     with pytest.raises(ValueError, match="unsupported button bits"):
         apply_inputs(sink, src)
 
@@ -132,7 +149,7 @@ def test_apply_inputs_rejects_start_and_unknown_buttons() -> None:
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_apply_inputs_rejects_nonfinite_analog_values(value: float) -> None:
     sink = _RecordingSink()
-    src = ControllerInputsValue(value, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+    src = ControllerAction(value, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
 
     with pytest.raises(ValueError, match="controller input main_x must be finite"):
         apply_inputs(sink, src)

@@ -190,6 +190,10 @@ class _PlayerColumns:
     post: Any  # SimpleNamespace with percent, stock
 
 
+def _columns_port(columns: _PlayerColumns) -> int:
+    return columns.libmelee_port
+
+
 def _player_stats(self_cols: _PlayerColumns, opp_cols: _PlayerColumns) -> PlayerStats:
     return PlayerStats(
         port=self_cols.libmelee_port,
@@ -231,7 +235,7 @@ def compute_replay_stats(g: Game) -> ReplayStats | None:
                 ),
             )
         )
-    by_port.sort(key=lambda c: c.libmelee_port)
+    by_port.sort(key=_columns_port)
 
     a, b = by_port
     return ReplayStats(players=(_player_stats(a, b), _player_stats(b, a)))

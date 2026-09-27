@@ -196,6 +196,10 @@ class StockLoss:
     direction: StockDirection
 
 
+def _stock_loss_order(loss: StockLoss) -> tuple[int, int]:
+    return loss.frame, loss.port
+
+
 @dataclass(frozen=True, slots=True)
 class InputCounts:
     buttons: int
@@ -471,7 +475,7 @@ def compute_stock_losses(m: BehaviorFrames) -> tuple[StockLoss, ...]:
                     direction=_DIRECTION_BY_SIDE[side] if side is not None else "unknown",
                 )
             )
-    out.sort(key=lambda s: (s.frame, s.port))
+    out.sort(key=_stock_loss_order)
     return tuple(out)
 
 
@@ -515,6 +519,19 @@ def _joystick_region(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     )
 
 
+def _stick_edges(x: np.ndarray, y: np.ndarray, countable: np.ndarray) -> int:
+    region = _joystick_region(x, y)
+    changed = np.zeros(region.size, dtype=bool)
+    changed[1:] = region[1:] != region[:-1]
+    return int((changed & (region != 0) & countable).sum())
+
+
+def _trigger_edges(trigger: np.ndarray, countable: np.ndarray) -> int:
+    crossed = np.zeros(trigger.size, dtype=bool)
+    crossed[1:] = (trigger[:-1] < TRIGGER_PRESS_THRESHOLD) & (trigger[1:] >= TRIGGER_PRESS_THRESHOLD)
+    return int((crossed & countable).sum())
+
+
 def count_inputs(p: PlayerBehaviorFrames, frame_id: np.ndarray) -> InputCounts:
     """slippi-js ``InputComputer`` over one port's controller columns.
 
@@ -540,28 +557,23 @@ def count_inputs(p: PlayerBehaviorFrames, frame_id: np.ndarray) -> InputCounts:
     pressed[1:] = ~buttons[:-1] & buttons[1:] & INPUT_BUTTON_MASK
     bit_counts = np.unpackbits(pressed.astype(np.uint16).view(np.uint8).reshape(n, 2), axis=1).sum(axis=1)
 
-    def _stick_edges(x: np.ndarray, y: np.ndarray) -> int:
-        region = _joystick_region(x, y)
-        changed = np.zeros(n, dtype=bool)
-        changed[1:] = region[1:] != region[:-1]
-        return int((changed & (region != 0) & countable).sum())
-
-    def _trigger_edges(t: np.ndarray) -> int:
-        crossed = np.zeros(n, dtype=bool)
-        crossed[1:] = (t[:-1] < TRIGGER_PRESS_THRESHOLD) & (t[1:] >= TRIGGER_PRESS_THRESHOLD)
-        return int((crossed & countable).sum())
-
     return InputCounts(
         buttons=int(bit_counts[countable].sum()),
-        joystick=_stick_edges(p.main_stick_x, p.main_stick_y),
-        cstick=_stick_edges(p.c_stick_x, p.c_stick_y),
-        triggers=_trigger_edges(p.trigger_l) + _trigger_edges(p.trigger_r),
+        joystick=_stick_edges(p.main_stick_x, p.main_stick_y, countable),
+        cstick=_stick_edges(p.c_stick_x, p.c_stick_y, countable),
+        triggers=_trigger_edges(p.trigger_l, countable) + _trigger_edges(p.trigger_r, countable),
     )
 
 
 # ---------------------------------------------------------------------------
 # Overall ratios
 # ---------------------------------------------------------------------------
+
+
+def _opening_ratio(conversions: Sequence[Conversion], port: int, opponent_port: int, opening: Opening) -> Ratio:
+    ours = sum(1 for c in conversions if c.moves and c.attacker_port == port and c.opening == opening)
+    theirs = sum(1 for c in conversions if c.moves and c.attacker_port == opponent_port and c.opening == opening)
+    return Ratio(count=ours, total=ours + theirs)
 
 
 def overall_ratios(conversions: Sequence[Conversion], *, port: int, opponent_port: int) -> OverallRatios:
@@ -577,13 +589,6 @@ def overall_ratios(conversions: Sequence[Conversion], *, port: int, opponent_por
     successful = sum(1 for c in mine if len(c.moves) > 1 and c.attacker_port == port)
     total_damage = float(sum(mv.damage for c in mine for mv in c.moves))
 
-    def _openings(attacker: int, opening: Opening) -> int:
-        return sum(1 for c in conversions if c.moves and c.attacker_port == attacker and c.opening == opening)
-
-    def _opening_ratio(opening: Opening) -> Ratio:
-        ours, theirs = _openings(port, opening), _openings(opponent_port, opening)
-        return Ratio(count=ours, total=ours + theirs)
-
     return OverallRatios(
         port=port,
         conversion_count=len(mine),
@@ -592,6 +597,6 @@ def overall_ratios(conversions: Sequence[Conversion], *, port: int, opponent_por
         successful_conversion_ratio=Ratio(count=successful, total=len(mine)),
         openings_per_kill=Ratio(count=len(mine), total=kill_count),
         damage_per_opening=Ratio(count=total_damage, total=len(mine)),
-        neutral_win_ratio=_opening_ratio("neutral-win"),
-        counter_hit_ratio=_opening_ratio("counter-attack"),
+        neutral_win_ratio=_opening_ratio(conversions, port, opponent_port, "neutral-win"),
+        counter_hit_ratio=_opening_ratio(conversions, port, opponent_port, "counter-attack"),
     )

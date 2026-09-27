@@ -34,6 +34,8 @@ from hal.data.policy_schema import FLOAT_STATE_SUFFIXES
 from hal.data.policy_schema import PACKED_STATE_SUFFIXES
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import rank_from_player_name
+from hal.data.slippi import slp_character_to_libmelee
+from hal.data.slippi import slp_stage_to_libmelee
 from hal.wire import BUTTON_BITS
 from hal.wire import GAME_START_FRAME
 from hal.wire import ITEM_FIELD_PATHS
@@ -48,8 +50,6 @@ from hal.wire import item_owner_to_libmelee_port
 from hal.wire import mask_value
 from hal.wire import peppi_port_to_libmelee
 from hal.wire import post_field_path
-from hal.wire import slp_character_to_libmelee
-from hal.wire import slp_stage_to_libmelee
 
 
 def _arr_to_np(arr: Any, dtype: DTypeLike, length: int) -> np.ndarray:

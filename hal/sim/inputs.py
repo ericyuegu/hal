@@ -1,7 +1,7 @@
 """Per-frame controller-input value objects + libmelee setter dispatch.
 
-``ControllerInputs`` is the structural contract. ``ControllerInputsValue``
-and the stateful MDS source both satisfy it. ``apply_inputs`` uses the protocol.
+``ControllerAction`` and the stateful MDS source both satisfy the
+``ControllerInputs`` contract used by ``apply_inputs``.
 
 All values are logical (game-causal): sticks in [-1, 1], triggers in [0, 1],
 buttons a wire-bitmask. ``fix_analog_stick_signed`` / ``fix_analog_trigger``
@@ -11,6 +11,8 @@ See ``hal.wire`` for the controller data model.
 """
 
 import math
+from collections import deque
+from collections.abc import Iterable
 from collections.abc import Mapping
 from numbers import Integral
 from numbers import Real
@@ -19,15 +21,13 @@ from typing import cast
 from typing import runtime_checkable
 
 import melee
-import numpy as np
 
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.controller import ControllerInputs
 from hal.wire import ACTION_CHANNELS
-from hal.wire import ACTION_DIM
 from hal.wire import BUTTON_BITS
-from hal.wire import slp_button_to_melee
 
 # Pre-resolved (bit, libmelee enum) pairs for the per-frame press/release
 # dispatch. Derived from wire.BUTTON_BITS so MDS columns and live punches
@@ -35,7 +35,7 @@ from hal.wire import slp_button_to_melee
 # press_button / release_button are commutative within a frame.
 _POLICY_BUTTON_NAMES = tuple(channel.removeprefix("button_") for channel in ACTION_CHANNELS[6:])
 _BUTTON_DISPATCH: tuple[tuple[int, melee.enums.Button], ...] = tuple(
-    (BUTTON_BITS[name], slp_button_to_melee(name)) for name in _POLICY_BUTTON_NAMES
+    (BUTTON_BITS[name], melee.enums.Button[f"BUTTON_{name.upper()}"]) for name in _POLICY_BUTTON_NAMES
 )
 if sum(bit for bit, _button in _BUTTON_DISPATCH) != POLICY_BUTTON_MASK:
     raise RuntimeError("controller action schema and Slippi button wire disagree")
@@ -53,35 +53,60 @@ class ControllerSink(Protocol):
     def press_shoulder(self, button: melee.enums.Button, amount: float) -> None: ...
 
 
-# Historical simulator name. New policy code uses ``ControllerAction`` directly.
-ControllerInputsValue = ControllerAction
+class ActionTransport:
+    """Apply a physical controller delay to submitted logical actions."""
+
+    def __init__(self, delay_frames: int) -> None:
+        if not isinstance(delay_frames, int) or isinstance(delay_frames, bool) or delay_frames < 0:
+            raise ValueError("delay_frames must be a non-negative integer")
+        self.delay_frames = delay_frames
+        self._pending: deque[ControllerAction] = deque()
+        self.reset()
+
+    @property
+    def pending(self) -> tuple[ControllerAction, ...]:
+        return tuple(self._pending)
+
+    def reset(self, actions: Iterable[ControllerAction] | None = None) -> None:
+        values = tuple(actions) if actions is not None else (NEUTRAL_CONTROLLER_ACTION,) * self.delay_frames
+        if len(values) != self.delay_frames:
+            raise ValueError(f"transport reset needs {self.delay_frames} actions, got {len(values)}")
+        self._pending = deque(values)
+
+    def submit(self, action: ControllerAction) -> ControllerAction:
+        """Commit one output and return the action due in the next state."""
+        if not self.delay_frames:
+            return action
+        due = self._pending.popleft()
+        self._pending.append(action)
+        return due
+
+
+def _read_canonical_pair(pre: Mapping[str, object], name: str, first: str, second: str) -> tuple[float, float]:
+    value = pre[name]
+    if not isinstance(value, Mapping):
+        raise ValueError(f"canonical pre.{name} must be an object")
+    fields = cast(Mapping[str, object], value)
+    try:
+        first_value = fields[first]
+        second_value = fields[second]
+    except KeyError as error:
+        raise ValueError(f"canonical pre.{name} must contain numeric {first} and {second}") from error
+    if (
+        not isinstance(first_value, Real)
+        or isinstance(first_value, bool)
+        or not isinstance(second_value, Real)
+        or isinstance(second_value, bool)
+    ):
+        raise ValueError(f"canonical pre.{name} must contain numeric {first} and {second}")
+    return float(first_value), float(second_value)
 
 
 def canonical_pre_to_action(pre: Mapping[str, object]) -> ControllerAction:
     """Read the controller state recorded on one canonical Slippi frame."""
-
-    def pair(name: str, first: str, second: str) -> tuple[float, float]:
-        value = pre[name]
-        if not isinstance(value, Mapping):
-            raise ValueError(f"canonical pre.{name} must be an object")
-        fields = cast(Mapping[str, object], value)
-        try:
-            first_value = fields[first]
-            second_value = fields[second]
-        except KeyError as error:
-            raise ValueError(f"canonical pre.{name} must contain numeric {first} and {second}") from error
-        if (
-            not isinstance(first_value, Real)
-            or isinstance(first_value, bool)
-            or not isinstance(second_value, Real)
-            or isinstance(second_value, bool)
-        ):
-            raise ValueError(f"canonical pre.{name} must contain numeric {first} and {second}")
-        return float(first_value), float(second_value)
-
-    main_x, main_y = pair("joystick", "x", "y")
-    c_x, c_y = pair("cstick", "x", "y")
-    trigger_l, trigger_r = pair("triggers_physical", "l", "r")
+    main_x, main_y = _read_canonical_pair(pre, "joystick", "x", "y")
+    c_x, c_y = _read_canonical_pair(pre, "cstick", "x", "y")
+    trigger_l, trigger_r = _read_canonical_pair(pre, "triggers_physical", "l", "r")
     try:
         buttons_value = pre["buttons_physical"]
     except KeyError as error:
@@ -107,48 +132,6 @@ def controller_actions_match(
         and abs(expected.trigger_l - actual.trigger_l) <= analog_tolerance
         and abs(expected.trigger_r - actual.trigger_r) <= analog_tolerance
         and expected.buttons == actual.buttons
-    )
-
-
-def controller_to_action_vec(action: ControllerInputs) -> np.ndarray:
-    """Encode logical inputs in canonical policy channel order."""
-    return np.asarray(
-        [
-            action.main_x,
-            action.main_y,
-            action.c_x,
-            action.c_y,
-            action.trigger_l,
-            action.trigger_r,
-            *(float(bool(action.buttons & BUTTON_BITS[name.removeprefix("button_")])) for name in ACTION_CHANNELS[6:]),
-        ],
-        dtype=np.float64,
-    )
-
-
-def action_vec_to_controller(action: np.ndarray) -> ControllerInputsValue:
-    """Convert one canonical policy action vector to logical controller inputs.
-
-    This codec is simulator-side and Torch-free so spawned Session workers do
-    not import the training program.  ``hal.wire.ACTION_CHANNELS`` defines the
-    channel order; START is intentionally absent from that wire.
-    """
-    values = np.asarray(action).reshape(-1)
-    if values.shape != (ACTION_DIM,):
-        raise ValueError(f"action has shape {values.shape}, expected {(ACTION_DIM,)}")
-    buttons = 0
-    for offset, channel in enumerate(ACTION_CHANNELS[6:]):
-        name = channel.removeprefix("button_")
-        if values[6 + offset] > 0.5:
-            buttons |= BUTTON_BITS[name]
-    return ControllerInputsValue(
-        main_x=float(np.clip(values[0], -1.0, 1.0)),
-        main_y=float(np.clip(values[1], -1.0, 1.0)),
-        c_x=float(np.clip(values[2], -1.0, 1.0)),
-        c_y=float(np.clip(values[3], -1.0, 1.0)),
-        trigger_l=float(np.clip(values[4], 0.0, 1.0)),
-        trigger_r=float(np.clip(values[5], 0.0, 1.0)),
-        buttons=int(buttons),
     )
 
 

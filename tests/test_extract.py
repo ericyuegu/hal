@@ -290,7 +290,7 @@ def test_extract_matches_canonical_flatten_column_for_column(dev_slp: str, dev_s
     """
     import peppi_py
 
-    from hal.training.canonical import flatten_canonical_frame
+    from hal.representation.observations import flatten_canonical_frame
 
     frames = peppi_py.read_frame_dicts(dev_slp)
     row_of_frame_id = {int(f): i for i, f in enumerate(dev_sample["frame"])}

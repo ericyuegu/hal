@@ -71,7 +71,7 @@ def test_flatten_leader_matches_capture_post_fields() -> None:
     from_capture — the drift guard for the shared accessor. flatten additionally emits a nana
     follower block (gamestate-only) that from_capture does not carry; it mirrors the same suffixes
     and is masked (NaN) when there's no follower (non-Ice-Climbers)."""
-    from hal.training.canonical import flatten_canonical_frame
+    from hal.representation.observations import flatten_canonical_frame
     from hal.wire import POST_FIELD_SUFFIXES
 
     frame = _frame(-123, {1: _post(), 2: _post()})
@@ -87,7 +87,7 @@ def test_flatten_leader_matches_capture_post_fields() -> None:
 def test_flatten_emits_the_global_item_block() -> None:
     """Items are global (unprefixed) columns and every slot is emitted every frame,
     masked when empty — so the closed-loop obs column set matches the MDS exactly."""
-    from hal.training.canonical import flatten_canonical_frame
+    from hal.representation.observations import flatten_canonical_frame
     from hal.wire import ITEM_FIELD_SUFFIXES
     from hal.wire import ITEM_SLOTS
     from hal.wire import item_column
@@ -100,7 +100,7 @@ def test_flatten_emits_the_global_item_block() -> None:
 
 def test_flatten_emits_real_nana_when_follower_present() -> None:
     """Ice Climbers: a follower in the canonical frame yields real (unmasked) nana gamestate."""
-    from hal.training.canonical import flatten_canonical_frame
+    from hal.representation.observations import flatten_canonical_frame
 
     frame = _frame(-123, {1: _post()})
     frame["ports"][1]["follower"] = {"post": _post(percent=88.0)}

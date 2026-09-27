@@ -34,13 +34,13 @@ from peppi_py.frame import Post
 from peppi_py.game import Game
 
 from hal.data.replay_stats import cumulative_damage
+from hal.data.slippi import slp_stage_to_libmelee
 from hal.policy import INCLUDED_STAGES
 from hal.wire import BUTTON_BITS
 from hal.wire import GAME_START_FRAME
 from hal.wire import TRIGGER_DEADZONE
 from hal.wire import dedupe_keep_idx
 from hal.wire import peppi_port_to_libmelee
-from hal.wire import slp_stage_to_libmelee
 
 FPS: Final[float] = 60.0
 STARTING_STOCKS: Final[int] = 4
@@ -238,6 +238,10 @@ class PlayerBehaviorFrames:
     trigger_r: np.ndarray  # float32
 
 
+def _player_port(player: PlayerBehaviorFrames) -> int:
+    return player.port
+
+
 @dataclass(frozen=True, slots=True)
 class BehaviorFrames:
     """One 1v1 replay's deduped in-game frames plus its stage geometry."""
@@ -394,7 +398,7 @@ def behavior_frames(g: Game) -> BehaviorFrames | None:
                 trigger_r=_trigger(pre.triggers_physical.r if pre.triggers_physical is not None else None, keep),
             )
         )
-    players.sort(key=lambda p: p.port)
+    players.sort(key=_player_port)
     return BehaviorFrames(
         stage=stage,
         edge_x=EDGE_X[stage],

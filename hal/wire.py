@@ -9,13 +9,16 @@ See AGENTS.md for the offline/live representation boundary.
 """
 
 from collections.abc import Sequence
+from operator import itemgetter
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Final
 
-import melee
 import numpy as np
-import peppi_py.game
 from numpy.typing import DTypeLike
+
+if TYPE_CHECKING:
+    import peppi_py.game
 
 # ---------------------------------------------------------------------------
 # Policy action wire
@@ -111,11 +114,6 @@ BUTTON_BITS: Final[dict[str, int]] = {
 }
 
 
-def slp_button_to_melee(name: str) -> melee.enums.Button:
-    """Map an MDS button column suffix (a, b, ..., d_up) to libmelee's enum."""
-    return getattr(melee.enums.Button, f"BUTTON_{name.upper()}")
-
-
 # ---------------------------------------------------------------------------
 # Mask sentinels (per-dtype "field unavailable" values)
 # ---------------------------------------------------------------------------
@@ -171,18 +169,6 @@ TRIGGER_DEADZONE: Final[float] = 43.0 / 140.0
 # ---------------------------------------------------------------------------
 
 
-def slp_stage_to_libmelee(slp_stage_id: int) -> melee.Stage:
-    """slp-native stage id -> ``melee.Stage`` enum.
-
-    Footgun: the two value spaces disagree (e.g. Fountain of Dreams is slp 2
-    but ``melee.Stage.FOUNTAIN_OF_DREAMS.value`` = 8). Always go through this.
-    """
-    stage = melee.enums.to_internal_stage(slp_stage_id)
-    if stage is melee.Stage.NO_STAGE:
-        raise ValueError(f"unknown slp stage id {slp_stage_id}")
-    return stage
-
-
 # slp "External Character ID" (game-start block) -> libmelee internal Character.
 # Two distinct id spaces: the slp start block stores Melee's external (character-
 # select) id (Fox=2, Falco=20); libmelee's Character enum is the internal/in-game
@@ -193,47 +179,6 @@ def slp_stage_to_libmelee(slp_stage_id: int) -> melee.Stage:
 # ``extract_index_entry``) into the internal Character value the index, MDS,
 # model, filter, and sim all speak. Anchors verified against post-frame internal
 # ids in real replays; the full table is Melee's canonical external id list.
-_SLP_EXTERNAL_TO_CHARACTER: Final[dict[int, melee.Character]] = {
-    0: melee.Character.CPTFALCON,
-    1: melee.Character.DK,
-    2: melee.Character.FOX,
-    3: melee.Character.GAMEANDWATCH,
-    4: melee.Character.KIRBY,
-    5: melee.Character.BOWSER,
-    6: melee.Character.LINK,
-    7: melee.Character.LUIGI,
-    8: melee.Character.MARIO,
-    9: melee.Character.MARTH,
-    10: melee.Character.MEWTWO,
-    11: melee.Character.NESS,
-    12: melee.Character.PEACH,
-    13: melee.Character.PIKACHU,
-    14: melee.Character.POPO,  # Ice Climbers; Nana is the follower and has no external id
-    15: melee.Character.JIGGLYPUFF,
-    16: melee.Character.SAMUS,
-    17: melee.Character.YOSHI,
-    18: melee.Character.ZELDA,
-    19: melee.Character.SHEIK,
-    20: melee.Character.FALCO,
-    21: melee.Character.YLINK,
-    22: melee.Character.DOC,
-    23: melee.Character.ROY,
-    24: melee.Character.PICHU,
-    25: melee.Character.GANONDORF,
-}
-
-
-def slp_character_to_libmelee(slp_character_id: int) -> melee.Character:
-    """slp external (character-select) character id -> ``melee.Character`` enum.
-
-    The only external→internal conversion site. Applied at the two peppi reads so
-    everything downstream (index, MDS, model, filter, sim) speaks the internal
-    Character value.
-    """
-    char = _SLP_EXTERNAL_TO_CHARACTER.get(slp_character_id)
-    if char is None:
-        raise ValueError(f"unknown slp character id {slp_character_id}")
-    return char
 
 
 # Character name -> libmelee internal Character value (the id space the index/MDS
@@ -242,7 +187,6 @@ def slp_character_to_libmelee(slp_character_id: int) -> melee.Character:
 # never a start-block character) and non-playable enum members (wireframes, Giga
 # Bowser, sandbag, unknown) are excluded. Used by the filter CLI to resolve
 # ``--characters FOX`` against the stored internal ids.
-CHARACTERS_BY_NAME: Final[dict[str, int]] = {c.name: int(c.value) for c in _SLP_EXTERNAL_TO_CHARACTER.values()}
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +270,7 @@ def canonical_post_field(post: dict, suffix: str) -> float:
     ``MASK_FLOAT`` (NaN), the same mask convention ``Trajectory.from_slp`` uses.
 
     Shared by ``sim.trajectory.from_capture`` and
-    ``training.canonical.flatten_canonical_frame`` so the two never drift.
+    ``representation.observations.flatten_canonical_frame`` so the two never drift.
     """
     value: Any = post
     for step in post_field_path(suffix):
@@ -414,7 +358,7 @@ def canonical_item_columns(items: Sequence[dict] | None) -> dict[str, float]:
     out = {item_column(slot, s): MASK_FLOAT for slot in range(ITEM_SLOTS) for s in ITEM_FIELD_SUFFIXES}
     if not items:
         return out
-    live = sorted(items, key=lambda it: it[ITEM_SPAWN_ID_FIELD])[:ITEM_SLOTS]
+    live = sorted(items, key=itemgetter(ITEM_SPAWN_ID_FIELD))[:ITEM_SLOTS]
     for slot, item in enumerate(live):
         for suffix in ITEM_FIELD_SUFFIXES:
             out[item_column(slot, suffix)] = canonical_item_field(item, suffix)
