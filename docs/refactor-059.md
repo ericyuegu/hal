@@ -55,6 +55,9 @@ source tree. No repository or global hook configuration was changed.
 | `e67a51ea` | Match loader file-cache preparation and remove the benchmark's module-global path override |
 | `90046957` | Record the cache-controlled loader comparison and verified evidence archive |
 | `99b6244d` | Retire unused dense GPU observation buffers after measuring the maintained staging path |
+| `22554be2` | Record the failed dense evaluation attempt and service recovery status |
+| `9a68b8ac` | Limit real resume qualification to one production checkpoint |
+| `587bbac0` | Stop corpus scanning after representative coverage at the user's request |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -272,6 +275,23 @@ next-update resume comparison, where AWR is active and the learning rate is
 nonzero. Keep the existing synthetic coverage before and after AWR activation.
 Do not continue searching for the original update-2048 and update-4096 fixtures.
 
+The update-8192 fixture is downloaded and its configuration and conditioning
+records validate. Its SHA-256 is
+`eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f`.
+The fixture records source `f05d41502a429b399fe9b64d534c442d1a9a6379`, a B200,
+Python 3.14.3, Torch 2.11.0+cu130, and the production batch-512/131,072-slot
+loader. [The fixture manifest](../tests/fixtures/o59/artifacts.json) records
+its R2 location and environment. The next-update comparison has not run.
+
+`tests/fixtures/o59/capture_resume_update.py` invokes each checkout's existing
+loader, prefetcher, training loss, optimizer, and scheduler for update 8193.
+It records raw window identity, transformed and masked batches, prefixes,
+clipped gradients, updated parameters, and saved optimizer/loader/RNG/calibration
+state. `compare_resume_updates.py` verifies capture hashes and compares every
+saved field exactly. Capture requires the checkpoint's environment and the
+candidate's explicit source transition. It rejects a host memory limit below
+100 GiB before constructing the production loader.
+
 Existing version-1 bundles retain delay 2. A new capability version declares the
 new local and netplay profiles. Export accepts supported 059 descendants based on
 contracts and lineage, without a fixed W&B run identifier.
@@ -285,7 +305,7 @@ satisfy a gate. Raw large results belong in the existing run/artifact store.
 |---|---|---|
 | A Ownership | Final tree, one model/loader/scheduler/process driver, import boundaries, typed code, protected edits | Runtime retirement and import-boundary tests pass; final inventory/checks in progress. |
 | B Data | `.slp` full path/parity, 44-source metadata and representative row audits, hashes, 2048 validation identities/tensors, sampler/resume geometry | Pass for the revised scope: cohort and statistics match exactly; synthetic loader resume and `.slp`→MDS→R2 publication pass; 33 v8 row audits reproduce the publication records. The user waived the remaining 11 row scans on 2026-09-27. |
-| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy exact, synthetic boundary resume, and default count pass. The retained update-8192 checkpoint is selected for the production comparison; that run remains open. |
+| C Model/resume | Count/order/init/groups; one representative production next-batch/update comparison including non-unit AWR and all state | Proxy exact, synthetic boundary resume, and default count pass. Update 8192 is downloaded and its saved configuration validates. Capture/comparison tools are prepared; the real update-8193 comparison remains open. |
 | D Artifacts | Old artifacts, descendants, new profiles, identity rejection | Actual update-131072 checkpoint validates without changing caller RNG, and re-exports as capability v2 with its checkpoint hash preserved. Artifact contract suite passes on CPU; qualified new profiles remain open. |
 | E Cache | B1/2/4/8/16/32, Q1/2/4/decomposition, wraps, sparse/permutation/reset/identity/temp/prefix0/2/3/4, dummy rows, one weights copy | Focused CPU/CUDA independence tests and real-checkpoint B2 BF16 conditional KL pass. Complete capacity/profile matrix remains open. |
 | F Scheduling | Exact deadlines, wire prefix, whole-plan rejection, consumed cursor, malformed replies, fallback counters | Focused scheduler/client/engine tests pass. Official intended-action chunk trace matches control. Live qualification remains open. |
@@ -294,7 +314,7 @@ satisfy a gate. Raw large results belong in the existing run/artifact store.
 | I Batching | Ada B2 delivery≥5% faster than two serial B1 calls; 32-admitted/2-ready p95≤105% of2/2; capacity sweep | Real spawned-process 3060 B2 and sparse-load measurements pass these numerical limits. Required Ada measurement remains open. |
 | J Real time | 3060 p95≤12ms,p99<16.67ms, matched p95≤105%; Ada≥2 sessions; three2400-frame trials minus300; both30min and10matches/rematches | Direct calls and short process benchmarks are evidence only. Complete-path trials, hardware capacity, and both soaks remain open. |
 | K Gameplay | 96×7200-frame CPU protocol,p90,allboots complete,NSM regression≤.2,paired uncertainty; shared/separate weights H2H; separate new-profile results | Maintained commands/profiles are in place. Full matched gameplay runs and H2H qualification remain open. |
-| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,201 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
+| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,211 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
 
 Cache FP32 tolerances remain trunk/history `atol=2e-6,rtol=2e-5` and decoder
 `atol=2e-5,rtol=2e-4`. CUDA BF16 conditional KL limits are mean ≤5e-4 nats and
@@ -431,6 +451,7 @@ Do not merge different revisions into a single claim of full qualification.
 | Netplay soak assessment | The harness now rejects malformed or mismatched match evidence, slow steady delivery/gameplay, skipped submissions, and plan exhaustion. Its version-2 result distinguishes measured checks from unmeasured qualification gates. Resource sampling finishes before cleanup/reporting. Focused tests: **21 passed**. Full CPU suite: **1,198 passed, 22 skipped, 18 deselected**, nine warnings, 93.96 s. Global Ruff format/lint and the maintained Ty target pass. Initial lint found an omitted `zip(strict=...)`; Ty found two return annotations that needed explicit narrowing. Both were fixed before the passing runs. Logs: `runs/refactor-059/soak-assessment-{focused,cpu,format,lint,types,types-fixed}.log`. This tool change does not substitute for a live soak. |
 | Loader measurement follow-up | Five cache-preparation tests pass. Global Ruff format/lint and the maintained Ty target pass. The complete CPU suite has **1,203 passed, 22 skipped, 18 deselected**, nine warnings, in 95.26 s; skip categories are unchanged. Logs: `runs/refactor-059/loader-cache-preparation-tests.log` and `runs/refactor-059/loader-followup-{cpu,format,lint,types}.log`. The selected R2 loader evidence archive passed download verification: 52 matching files, zero differences. Protected user-file hashes remain unchanged, and the accounting now contains 105 new maintained paths. |
 | Unused dense GPU storage retirement | The two retired helpers had no maintained caller. Their two implementation-only tests are removed; cached update tests now compare directly with the canonical CPU window representation. The retained cached buffer definitions have identical syntax trees. Focused GPU tests: **22 passed** in 9.70 s. Full CPU suite: **1,201 passed, 22 skipped, 18 deselected**, nine warnings, in 95.17 s. The maintained Ty target passes. Logs: `runs/refactor-059/window-retirement-{gpu,cpu,types}.log`. |
+| Production resume capture preparation | Ten new CPU cases verify nested state comparison, tensor shape/dtype rejection, capture hash checks, selected replay identity, and pre-update clipped gradients. Global Ruff format/lint and Ty pass. The full CPU suite has **1,211 passed, 22 skipped, 18 deselected**, nine warnings, in 93.95 s. Skips remain 20 CUDA and two opt-in hardware cases. Logs: `runs/refactor-059/resume-capture-{format,lint,types,cpu}.log`. Initial helper lint required an explicit `zip(strict=False)`; this was corrected before the passing checks. The downloaded checkpoint's first metadata inspection incorrectly treated derived `replay_slots` as a saved config field; parsing `TrainConfig` corrected it. Neither these tool tests nor configuration validation substitute for the real next-update run. |
 | Dense B32 GPU preflight | The production checkpoint prepared the official dense B32/context-256/prefix-2/horizon-4 decoder in both checkouts. Each completed 40 finite-output calls, with the last 32 measured under `fail_on_recompile`. Peak allocated GPU memory was 3,184,207,872 bytes for control and 3,184,206,848 for candidate. Synthetic-call medians were 135.817/134.083 ms. This is one preparation diagnostic, excluding history, IPC, and Dolphin; it does not qualify throughput. Two earlier capture attempts failed on a removed neutral-action import and a mismatched `inference_mode` context; the successful helper uses the official `no_grad` context. All attempts remain in `runs/refactor-059/dense-32-preflight-*`. |
 | Dense B32 emulator attempt and host memory failure | The 32-Dolphin diagnostic on local host `eric-gu-sff` exhausted host memory during startup and exited 137. Kernel logs confirm global OOM kills, including the pre-existing netplay runner PID 2982847 and desktop processes. The capture's resource sampler also failed on a child's inaccessible I/O counters, so no complete memory/throughput report exists. This attempt failed and does not qualify local evaluation. All diagnostic Dolphins exited and the reported shared memory/semaphore objects were removed. The local API on port 8080 stopped; the frontend on port 3000 remained. There were no active reservations. Evidence: `runs/refactor-059/dense-evaluation-diagnostics.json`, `dense-local-32-candidate-smoke-1.log`, and `dense-local-32-memory-failure.log`. |
 
@@ -468,6 +489,10 @@ scratch directory was empty. The interrupted source is not counted as passed.
 Individual reports and attempt logs remain under
 `runs/refactor-059/v8-full-audit/`. The summary is `summary-user-stop.json`,
 SHA-256 `9ba71666335148b12480b47fea18b877de96dcd410ea91816eb06b3bf541fa2e`.
+The reports and interrupted-attempt log are preserved at
+`r2://hal/runs/refactor-059/evidence/v8-audit-71e8e2339ae24f3aedc5ce5d9c0e22ff9272c2fa7d3d9bb2c416a9e13527d552/`.
+Download verification found 72 matching files and zero differences; its log is
+`runs/refactor-059/v8-audit-evidence-verification.log`.
 
 The capability-v2 qualification bundle is
 `runs/refactor-059/o59-capability-v2.hal`, SHA-256
@@ -830,7 +855,9 @@ The exact per-file archive/deletion/addition ledger is
 │   │       ├── cached_timeline_control.json
 │   │       ├── capture_model_proxy.py
 │   │       ├── capture_netplay_ready.py
+│   │       ├── capture_resume_update.py
 │   │       ├── checkpoint_config.json
+│   │       ├── compare_resume_updates.py
 │   │       ├── conditioning_protocol.json
 │   │       ├── cuda_functional_3060.md
 │   │       ├── data_validation.json

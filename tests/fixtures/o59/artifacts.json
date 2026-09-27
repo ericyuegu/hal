@@ -492,8 +492,30 @@
     "path": "runs/netplay/selfplay-o59-20260924-retry1/replays-a/Game_20260924T152607.slp",
     "sha256": "81af02a949c3c436d5e527b5dd83600d42338887d4445de4dc515e489e6cbe94"
   },
-  "required_resume_checkpoints": {
-    "update_8192": "available in R2; next-batch and next-update comparison not run"
+  "resume_checkpoint": {
+    "batch_size": 512,
+    "bytes": 2009905953,
+    "capture_tool": "tests/fixtures/o59/capture_resume_update.py",
+    "comparison_tool": "tests/fixtures/o59/compare_resume_updates.py",
+    "environment": {
+      "cuda": "13.0",
+      "device": "cuda",
+      "gpu": "NVIDIA B200",
+      "numpy": "2.1.3",
+      "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.39",
+      "python": "3.14.3 (main, Mar 20 2026, 00:34:32) [Clang 22.1.1 ]",
+      "torch": "2.11.0+cu130"
+    },
+    "inspection": "runs/refactor-059/resume/checkpoint-identity.json",
+    "loader_schema": 3,
+    "next_update": 8193,
+    "replay_slots": 131072,
+    "sha256": "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+    "source_count": 44,
+    "source_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379",
+    "status": "downloaded; configuration and conditioning validated; next-batch/next-update comparison not run",
+    "update": 8192,
+    "uri": "r2://hal/runs/260921-012642_059_muon_history_decoder_o59v5-d1024-L12-h16-c256-t1024x6-ff4096-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__v5-b512/checkpoints/step-0008192.pt"
   },
   "schema_version": 1,
   "validation_cohort": "tests/fixtures/o59/validation_cohort.json"

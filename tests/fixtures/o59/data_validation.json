@@ -456,6 +456,14 @@
     ]
   },
   "v8_representative_rows": {
+    "archive": {
+      "bytes": 251470,
+      "files": 72,
+      "manifest_sha256": "71e8e2339ae24f3aedc5ce5d9c0e22ff9272c2fa7d3d9bb2c416a9e13527d552",
+      "source": "runs/refactor-059/v8-audit-evidence",
+      "uri": "r2://hal/runs/refactor-059/evidence/v8-audit-71e8e2339ae24f3aedc5ce5d9c0e22ff9272c2fa7d3d9bb2c416a9e13527d552/"
+    },
+    "archive_verification": "rclone check --download: 72 matching files, zero differences; runs/refactor-059/v8-audit-evidence-verification.log",
     "completed_count": 33,
     "completed_names": [
       "professional-aklo-policy-world-v8",

@@ -781,7 +781,9 @@
     "tests/fixtures/o59/cached_timeline_control.json",
     "tests/fixtures/o59/capture_model_proxy.py",
     "tests/fixtures/o59/capture_netplay_ready.py",
+    "tests/fixtures/o59/capture_resume_update.py",
     "tests/fixtures/o59/checkpoint_config.json",
+    "tests/fixtures/o59/compare_resume_updates.py",
     "tests/fixtures/o59/conditioning_protocol.json",
     "tests/fixtures/o59/cuda_functional_3060.md",
     "tests/fixtures/o59/data_validation.json",
@@ -834,6 +836,7 @@
     "tests/test_qualify_netplay_059.py",
     "tests/test_replay_selection.py",
     "tests/test_replay_windows.py",
+    "tests/test_resume_capture_tools.py",
     "tests/test_streaming_compat.py",
     "tests/test_validation_replay_loader.py",
     "tests/test_window_policy_preparation.py"
