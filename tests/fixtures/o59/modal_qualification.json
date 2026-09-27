@@ -1,4 +1,85 @@
 {
+  "dense_continuation": {
+    "app_id": "ap-8UEh60S0Vp1tB6GiHtqeDr",
+    "archive_sha256": "c35a596d0936a5ea6b46e056e325aad4c7ec7aec5799399222eda5e8e1850453",
+    "container_id": "ta-01M3J4C30440DJV5DQTMGVKFQR",
+    "control_identity": {
+      "archive_sha256": "c63d8d0b1b409aebe45cb4f4fbe6202005b942e8296c80346e21fb1c28890cdc",
+      "git_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf"
+    },
+    "cpu": 8,
+    "dense_command_timeout_seconds": 6000,
+    "disk_gib": 512,
+    "function_call_id": "fc-01M3J4BMRZRCPZ1SB4HAPEMT60",
+    "git_sha": "572a0e6167230db97e6defe105fb81d41b930662",
+    "gpu": "RTX-PRO-6000",
+    "idle_recovery_failure": {
+      "log_sha256": "5de5cd9ef1c58a89ff6b04713521257e903126c375eb1d9fa834f776ed704ea3",
+      "reason": "selected prefix-3 schedule failed final real-time qualification before readiness; the old error omitted measured latency values",
+      "report": {
+        "cleanup": {
+          "forced_descendants": [],
+          "forced_runner": false,
+          "remaining_descendants": [],
+          "seconds": 0.002627028999995673
+        },
+        "ended_at": "2026-09-27T19:12:02.780036+00:00",
+        "failure": "RuntimeError: isolated runner exited during preparation: 1",
+        "measurements": {},
+        "runner_exitcode": 1,
+        "schema_version": 1,
+        "source_files_unchanged": true,
+        "status_file_exists": false
+      },
+      "report_sha256": "0279483932cbfe2bcdc86820a7040e438be23f3296826bc1c09310dabd11d9eb"
+    },
+    "image_id": "im-FUoxrf3AmBpQKW5rFd2hEj",
+    "maximum_dolphin_processes": 4,
+    "memory_limit_gib": 64,
+    "qualification_sources": {
+      "bytes": 3375446,
+      "files": [
+        "source.tar",
+        "control.tar",
+        "launch.py",
+        "run_qualification.py",
+        "prepare_runtime.py",
+        "capture_dense_cloud.py",
+        "review_driver.py",
+        "source-identity.json",
+        "control-identity.json",
+        "launch.json",
+        "preflight-review.json",
+        "fixture-manifest.json"
+      ],
+      "r2_key": "runs/refactor-059/modal/hal-o59-rtx-pro-6000-dense-20260927-190827/qualification-sources-67246410899b5adb4e6d690428fc8f48e107a127310d49063c9e753b8524230a.tar.zst",
+      "sha256": "67246410899b5adb4e6d690428fc8f48e107a127310d49063c9e753b8524230a"
+    },
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-rtx-pro-6000-dense-20260927-190827",
+    "readiness_measurement_followup": {
+      "change": "Freeze long-lived GC objects after warmup and before measured calls, matching production admission. Include actual latency and profile in timing failures.",
+      "scope": "CPU regression checks passed; not a diagnosis of the prior hardware failure or a new cloud recovery pass. Active dense job remains pinned to its original source.",
+      "source_sha": "5b5008f71b76d0a5f080a4fc76baf056f1b9b745"
+    },
+    "recovery_bound_seconds": 120,
+    "retries": 0,
+    "review_sha256": "4dd38cbc096930493e1a692e3010512396f08efd95ef35870ec914b1eb3a875f",
+    "status": "running dense-control-1 after initial idle preparation rejected prefix-3 measured p99; no fault injected",
+    "supplemental_review": {
+      "control_source_sha": "d7454f9d1a136f7c745d2d4478af22e19cd65faf",
+      "memory_observer_sha256": "106bba203c9fbe6cf900a88c0a7265dea9eb3c72507c2781ad074d4f7f448df0",
+      "memory_scope": "Capture peak host RSS begins after model load and compilation and covers the sweep. The supplemental 0.25-second container memory observer starts partway through control 1; only later stages have complete loading, compilation, and sweep coverage. Sampled maxima are not kernel high-water counters.",
+      "recorded_at": "2026-09-27T19:21:30.344761+00:00",
+      "required_result_checks": [
+        "Exactly 24 runtime_specs and no failed-wave or retry warnings before claiming unchanged per-wave sampling seeds.",
+        "All 96 boots contain 7,200 frames.",
+        "Character-matched uncertainty does not establish common game randomness."
+      ],
+      "scope": "Four-worker matched control/candidate comparison; no claim about a 32-worker workload.",
+      "source_sha": "572a0e6167230db97e6defe105fb81d41b930662"
+    },
+    "timeout_seconds": 28800
+  },
   "gpu_process_identity_probe": {
     "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
     "container_id": "ta-01M3HX1E9G51KKPAC8J2GVTDFR",
@@ -44,8 +125,26 @@
   "inference_continuation": {
     "app_id": "ap-bo830wm2lbOqwD6dRRDveO",
     "archive_sha256": "90eaedf654e195f645c612a78ba6cacfee58505b06c25e45150bbf319610a654",
+    "cancellation": {
+      "action": "stopped detached app after preserving completed stage records",
+      "app_id": "ap-bo830wm2lbOqwD6dRRDveO",
+      "dense_results": "no completed dense report; partial log/replays retained without a pass claim",
+      "function_call_id": "fc-01M3HYFJYGTQD327M5BYV798JJ",
+      "last_completed_stage": "dense-control-1 (timeout)",
+      "reason": "first 96-boot dense control reached the 2400-second command timeout; remaining commands inherited the same insufficient timeout",
+      "recorded_at": "2026-09-27T19:04:45.344888+00:00",
+      "replacement_plan": "same four-worker control/candidate workload, six alternating runs, 6000-second stage limits and one eight-hour Modal job",
+      "source_sha": "3148a5aee0451a75f7bbb8619fc269297735ee04",
+      "stop_command_exit_code": 0
+    },
     "container_id": "ta-01M3HYFK3XE658KKBK7MGHH4QR",
     "cpu": 8,
+    "dense_timeout": {
+      "command": "dense-control-1",
+      "elapsed_seconds": 2402.9828875349995,
+      "result": "no completed dense report; partial logs/replays only",
+      "timeout_seconds": 2400
+    },
     "function_call_id": "fc-01M3HYFJYGTQD327M5BYV798JJ",
     "git_sha": "3148a5aee0451a75f7bbb8619fc269297735ee04",
     "gpu": "RTX PRO 6000 Blackwell Server Edition 96 GB",
@@ -195,7 +294,7 @@
       "sparse-2/results.json": "1a404ce78cee5e95650889de0cd9a621d742af23818a52fc6ad72045c326e754",
       "sparse-3/results.json": "d4b7fe448357129a3e180af620554b56f17e19dffd823da480828dc536be797f"
     },
-    "status": "running: three batching trials and shared/distinct H2H passed; idle recovery failed cold preparation; dense pairs continue",
+    "status": "stopped after the first dense control reached its 2400-second limit; completed batching/H2H records retained",
     "trials": [
       {
         "actual_maximum_batch": 2,
@@ -235,8 +334,14 @@
     "production resume remains open until capture and exact comparison finish",
     "the first production loader pair lacks a peak-memory counter; end-of-run RSS does not substitute for a peak"
   ],
-  "recorded_at": "2026-09-27T18:29:26.823200+00:00",
+  "recorded_at": "2026-09-27T19:38:20.403122+00:00",
   "schema_version": 1,
+  "supplemental_sources": {
+    "bytes": 20480,
+    "download_sha256_verified": true,
+    "r2_key": "runs/refactor-059/supplemental-review/sources-6d76b32889a6cb7e225c1a7f668f7d0b746efd247a43918ab8f89356128f7ae8.tar",
+    "sha256": "6d76b32889a6cb7e225c1a7f668f7d0b746efd247a43918ab8f89356128f7ae8"
+  },
   "training": {
     "app_id": "ap-vKsQMl1NtzaW1VrDrccdo3",
     "archive_sha256": "d3331a8e8d82669f7a5ffe390b67c6b041241514531f0847664f3612956eecee",
@@ -340,6 +445,284 @@
       "parity_report_sha256": "ce7b8fd6e2705000bb9da0cf574b3d4a4bea6cb6e900ac1b659a5334a5d59b76"
     },
     "status": "failed after saving the control update-8193 capture; candidate comparison and paired performance remain open",
+    "timeout_seconds": 21600
+  },
+  "training_retry_1": {
+    "app_id": "ap-MCRhN3ZwRdEc8OH3cylHtR",
+    "archive_sha256": "891ba7886726b4b5ba28337a8c99ebab9f8d128390a96237bf479a5dc1ba798d",
+    "control_identity": {
+      "archive_sha256": "81ff16d46775731afaa77f4a7b54610be2d6bb02709b4f308cc1bd0b16a9156a",
+      "git_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379"
+    },
+    "cpu": 32,
+    "disk_gib": 2560,
+    "function_call_id": "fc-01M3J2FNJ3FKYHY6E6TECZBW34",
+    "git_sha": "24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+    "gpu": "B200",
+    "image_id": "im-KtNiPf82i66xyUOx1ptBD1",
+    "memory_limit_gib": 192,
+    "qualification_sources": {
+      "bytes": 3351364,
+      "files": [
+        "source.tar",
+        "control.tar",
+        "launch.py",
+        "run_training_qualification.py",
+        "preflight_training.py",
+        "prefetch_compressed_shards.py",
+        "control-loader-benchmark.py",
+        "source-identity.json",
+        "control-identity.json",
+        "source-transition.json",
+        "source-transition-basis.json",
+        "preflight-review.json",
+        "review_driver.py",
+        "launch.json"
+      ],
+      "r2_key": "runs/refactor-059/modal/hal-o59-b200-resume-retry-20260927-183531/qualification-sources-1a0f6cda4decf2b47eddf773151e4650db6b0218234e19846cd3226e89dc6580.tar.zst",
+      "sha256": "1a0f6cda4decf2b47eddf773151e4650db6b0218234e19846cd3226e89dc6580"
+    },
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-b200-resume-retry-20260927-183531",
+    "result_sha256": "7eb73653d5ce54cba9d05d0159a4758eeffbced05063e86329d9b29dce7f1a37",
+    "retries": 0,
+    "review_sha256": "1019fa76c1e866c7e8f842df01bb1b8699d96e083991667c7bf1fcfd012eea18",
+    "status": "failed before shard prefetch: the new cache had no train/index.json; no training executed",
+    "steps": [
+      {
+        "elapsed_seconds": 8.692658147,
+        "exit_code": 0,
+        "name": "preflight-control"
+      },
+      {
+        "elapsed_seconds": 6.303380266,
+        "exit_code": 0,
+        "name": "preflight-candidate"
+      },
+      {
+        "elapsed_seconds": 0.3705343499999998,
+        "exit_code": 1,
+        "name": "prefetch-compressed-shards"
+      }
+    ],
+    "timeout_seconds": 21600
+  },
+  "training_retry_2": {
+    "app_id": "ap-o46Vlw8gOBHUmUgIxSzjax",
+    "archive_sha256": "891ba7886726b4b5ba28337a8c99ebab9f8d128390a96237bf479a5dc1ba798d",
+    "control_identity": {
+      "archive_sha256": "81ff16d46775731afaa77f4a7b54610be2d6bb02709b4f308cc1bd0b16a9156a",
+      "git_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379"
+    },
+    "control_resume_trial_1": {
+      "performance": {
+        "batch_size": 512,
+        "cgroup_memory": {
+          "system/cgroup/current_gib": 132.87190628051758,
+          "system/cgroup/limit_gib": 192.0,
+          "system/cgroup/usage_fraction": 0.6920411785443624,
+          "system/cgroup/version": 1.0
+        },
+        "first_measured_update": 8294,
+        "last_measured_update": 8493,
+        "measured_updates": 200,
+        "measurement_counters": {
+          "cpu_seconds": 256.30999999999995,
+          "disk_read_bytes": 0.0,
+          "disk_write_bytes": 0.0
+        },
+        "measurement_seconds": 80.12128091900013,
+        "peak_gpu_allocated_bytes": 3382683136,
+        "peak_gpu_reserved_bytes": 137319415808,
+        "process_tree_memory": {
+          "system/process_tree/anonymous_gib": 130.21509170532227,
+          "system/process_tree/main_pss_gib": 107.85303115844727,
+          "system/process_tree/max_child_pss_gib": 4.088714599609375,
+          "system/process_tree/private_dirty_gib": 138.46318817138672,
+          "system/process_tree/process_count": 26.0,
+          "system/process_tree/pss_gib": 204.8569564819336,
+          "system/process_tree/rss_gib": 204.8569564819336
+        },
+        "process_tree_peak_rss_upper_bound_bytes": null,
+        "protocol": "o59-production-resume-prefetch-training",
+        "samples_per_second": 1278.0624426551904,
+        "updates_per_second": 2.4962157083109187,
+        "warm_seconds": 63.99082668200026,
+        "warm_updates": 100
+      },
+      "report": {
+        "awr_weight_max": 3.3823556900024414,
+        "capture_sha256": "8258a4b26ec696a8f85cc3947e9762d2742708ebbce355f7f2a7092c6b94d7c6",
+        "cgroup_memory": {
+          "system/cgroup/current_gib": 133.07640075683594,
+          "system/cgroup/limit_gib": 192.0,
+          "system/cgroup/usage_fraction": 0.6931062539418539,
+          "system/cgroup/version": 1.0
+        },
+        "checkpoint_sha256": "eb968c0598d314d836c22bf16c976084e7d5bbc00ab28c19fd0e8b340ca98c1f",
+        "environment": {
+          "cuda": "13.0",
+          "device": "cuda",
+          "gpu": "NVIDIA B200",
+          "numpy": "2.1.3",
+          "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.39",
+          "python": "3.14.3 (main, Mar 20 2026, 00:34:32) [Clang 22.1.1 ]",
+          "torch": "2.11.0+cu130"
+        },
+        "mode": "control",
+        "raw_columns_sha256": "f5c4ccfc25f958ca937b8348906e42f40d90ef34ffa89b606ffcb4a25f1145a4",
+        "snapshot_sha256": "728d46883eef231fed3c43dd3010558bc236b2578a716877dde8eede6c29a7b3",
+        "source_sha": "f05d41502a429b399fe9b64d534c442d1a9a6379",
+        "update": 8193
+      },
+      "result_sha256": {
+        "performance.json": "3e7f8c3c1725435a1a25143e9fc0ef10d897d7ec2e701ed257ac45777eb5a21c",
+        "report.json": "a1164a46637cbde432dbfb4698319b882a57a2805aad370db77d037c4fe0081d"
+      },
+      "status": "completed; candidate and exact comparison still running"
+    },
+    "cpu": 32,
+    "disk_gib": 2560,
+    "function_call_id": "fc-01M3J2RR522H7GWYA55GD6XPF7",
+    "git_sha": "24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+    "gpu": "B200",
+    "image_id": "im-FJFZHA7kVqjDidwfY4zcOt",
+    "index_initialization": "existing benchmark --cache-status-only initializes adapter metadata before compressed-shard prefetch",
+    "loader_trial_1": {
+      "candidate": {
+        "process_tree_peak_rss_upper_bound_bytes": null,
+        "process_tree_rss_gib_at_end": 156.98734283447266,
+        "samples_per_second": 20232.176805991483,
+        "startup_seconds_total": 64.17971027300018
+      },
+      "control": {
+        "process_tree_peak_rss_upper_bound_bytes": null,
+        "process_tree_rss_gib_at_end": 159.42148208618164,
+        "samples_per_second": 18013.317595691784,
+        "startup_seconds_total": 66.89141834200018
+      },
+      "throughput_ratio": 1.123178820254098
+    },
+    "memory_limit_gib": 192,
+    "memory_scope": "0.25-second sampled cgroup current-usage maxima; kernel peak counters remain unavailable",
+    "qualification_sources": {
+      "bytes": 3351420,
+      "files": [
+        "source.tar",
+        "control.tar",
+        "launch.py",
+        "run_training_qualification.py",
+        "preflight_training.py",
+        "prefetch_compressed_shards.py",
+        "control-loader-benchmark.py",
+        "source-identity.json",
+        "control-identity.json",
+        "source-transition.json",
+        "source-transition-basis.json",
+        "preflight-review.json",
+        "review_driver.py",
+        "launch.json"
+      ],
+      "r2_key": "runs/refactor-059/modal/hal-o59-b200-resume-retry-20260927-184104/qualification-sources-a46cc6bc538d266d0f06f7a772d47e3ed13cee92a06538befa2fee1f70a32ab7.tar.zst",
+      "sha256": "a46cc6bc538d266d0f06f7a772d47e3ed13cee92a06538befa2fee1f70a32ab7"
+    },
+    "r2_prefix": "runs/refactor-059/modal/hal-o59-b200-resume-retry-20260927-184104",
+    "retries": 0,
+    "review_sha256": "6f3fd69f3b5abe386ec47f44fa085cf7b9f95c0aad1d9713a1f6cf8d95389030",
+    "source_transition_review": {
+      "basis_source_sha": "a67857255e80fdc307be009a11fd320738d6027a",
+      "candidate_source_sha": "24bf25ec66aef6e535b10d5cbfb9add0ab33767f",
+      "interpretation": "The prior mechanical basis applies to this unchanged scientific code. The active production comparison, not the prior basis, must establish real update 8193 parity. Capture deliberately drains prefetch at that update boundary; the later 300 throughput updates are not a numerical parity test.",
+      "recorded_at": "2026-09-27T19:21:30.344520+00:00",
+      "unchanged_scientific_source": [
+        {
+          "git_object": "ddf67c37b03f9763ed11336605528f010beac67a",
+          "path": "experiments/059_muon_action_sequence.py"
+        },
+        {
+          "git_object": "e882d3ef17eccbef5cea2a1bc72ada75bb154dac",
+          "path": "hal/models"
+        },
+        {
+          "git_object": "8a374a9e53e1aff9b78f52d74248b1bfb5f8dbf9",
+          "path": "hal/representation"
+        },
+        {
+          "git_object": "d21afe5e2bf045c83819051f1f88ef3ea287c689",
+          "path": "hal/data"
+        },
+        {
+          "git_object": "c3ba9d6edd885b62bbfcdc2acab0cf57cc3bdd35",
+          "path": "hal/training"
+        },
+        {
+          "git_object": "63b87c6f34bff0678a0a60ea31742a73088dc9cf",
+          "path": "tests/fixtures/o59/capture_resume_update.py"
+        },
+        {
+          "git_object": "8c3e5b8bcbee8106925304715324db9c62bddc69",
+          "path": "tests/fixtures/o59/compare_resume_updates.py"
+        }
+      ]
+    },
+    "status": "running resume-candidate-1 after first control exact-update capture and throughput measurement completed",
+    "steps": [
+      {
+        "elapsed_seconds": 11.091242221,
+        "exit_code": 0,
+        "memory_samples": 45,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "preflight-control",
+        "sampled_cgroup_peak_gib": 3.6905784606933594
+      },
+      {
+        "elapsed_seconds": 6.870486587,
+        "exit_code": 0,
+        "memory_samples": 28,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "preflight-candidate",
+        "sampled_cgroup_peak_gib": 3.6907615661621094
+      },
+      {
+        "elapsed_seconds": 25.295594160999997,
+        "exit_code": 0,
+        "memory_samples": 101,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "initialize-replay-indexes",
+        "sampled_cgroup_peak_gib": 3.974090576171875
+      },
+      {
+        "elapsed_seconds": 499.02560079200003,
+        "exit_code": 0,
+        "memory_samples": 1987,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "prefetch-compressed-shards",
+        "sampled_cgroup_peak_gib": 0.23589706420898438
+      },
+      {
+        "elapsed_seconds": 850.8897312070001,
+        "exit_code": 0,
+        "memory_samples": 3372,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "materialize-replay-cache",
+        "sampled_cgroup_peak_gib": 3.6870994567871094
+      },
+      {
+        "elapsed_seconds": 172.82111735600006,
+        "exit_code": 0,
+        "memory_samples": 661,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "loader-control-1",
+        "sampled_cgroup_peak_gib": 91.35205841064453
+      },
+      {
+        "elapsed_seconds": 173.0645838280002,
+        "exit_code": 0,
+        "memory_samples": 660,
+        "memory_scope": "sampled total container usage, including file cache; not a kernel high-water counter",
+        "name": "loader-candidate-1",
+        "sampled_cgroup_peak_gib": 90.83793258666992
+      }
+    ],
     "timeout_seconds": 21600
   }
 }

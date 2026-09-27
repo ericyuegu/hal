@@ -62,6 +62,16 @@ source tree. No repository or global hook configuration was changed.
 | `d5d07391` | Use pinned source identity when cloud images omit Git metadata |
 | `149a46d0` | Measure production training after the exact resumed update capture |
 | `a6785725` | Replace the stale development MDS fixture and enforce its schema |
+| `3148a5ae` | Give cloud inference preparation an explicit budget and fix GPU process identification |
+| `0b227002` | Report missing host peak-memory counters explicitly |
+| `89e631e8` | Provide Vulkan in the isolated netplay container |
+| `b0664e19` | Normalize live port IDs and detect failed smoke reservations |
+| `e3016bc2` | Preserve per-head losses when writing training measurement reports |
+| `24bf25ec` | Record completed cloud batching results and qualification failures |
+| `2ef090f3` | Project direct live observations to the same stored column types as local evaluation |
+| `572a0e61` | Separate initial preparation from the fixed recovery deadline |
+| `c9e014bc` | Report unavailable GPU memory when container and host process identities differ |
+| `5b5008f7` | Apply production GC preparation before readiness timing and report failed measurements |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -168,6 +178,7 @@ are not the final architecture.
 | `eval.policy_sampling.SlotGroupRng` | `inference.sampling.StreamGroupRng`; stream/generation identity is passed explicitly, and release removes its counters. |
 | `training.features.Context` sampling fields | Remove `slot_ids` and `reset`; neural inputs contain features and padding, not inference lifecycle identity. |
 | `ContextHistory`, `ContextWindows`, `push_context_rows`, `stack_context_windows` | `ObservationHistory`, `ObservationWindows`, `push_observation_rows`, `stack_observation_windows` in `inference.observation_history`. Preserve the mirrored ring and prepared layout; remove spatial/V6 support. |
+| Direct live categorical floats and NaNs | `representation.observations.project_observation_columns` applies the existing stored integer types and missing-value sentinel before request construction. Prepared observation storage and inference kernels remain unchanged. |
 | `history_decoder.policy._config_from_state`, `_checkpoint`, `export_o59_policy`, `load_o59_policy` | `action_sequence_artifact.checkpoint_contract`, `read_checkpoint`, `export_action_sequence_policy`, `load_action_sequence_policy`. Validation and model construction are separate from execution. |
 | Backend-specific controller conversions and simulation re-exports | `controller_to_action_vec`, `action_vec_to_controller`, `validate_controller_action`, and wire equality in `hal.controller`. Delete the duplicate `ControllerInputsValue` name. |
 | Historical resume unpickler and compatibility switches | Delete. Add `ResumeLineage`, `checkpoint_resume_lineage`, and `validate_resume_provenance` for the declared source transition only. |
@@ -334,9 +345,31 @@ pairs on one RTX PRO 6000. Batched pair latency improves by 49.2%, 43.1%, and
 42.7%; the corresponding sparse-load p95 ratios are 1.022, 1.043, and 1.038.
 All sparse requests execute as batch two with 32 streams admitted. Shared- and distinct-checkpoint H2H each complete all eight matches without
 crashes. The idle recovery test fails before fault injection because initial
-preparation exceeds 120 seconds; cleanup leaves no descendants. The three paired
-dense evaluations remain in progress. These results do not replace
+preparation exceeds 120 seconds; cleanup leaves no descendants. The first dense
+control then reaches its 2,400-second command limit before completing 96 boots.
+The app is stopped after preserving the partial evidence; the other attempts had
+the same insufficient limit. A new reviewed job at source `572a0e61` bundles
+the six alternating dense runs with 6,000-second command limits and an eight-hour
+total limit, keeping four workers, eight CPUs, and 64 GiB RAM. It also repeats the
+idle recovery check. Initial preparation now has a separate explicit budget;
+the recovery gate remains 120 seconds. These results do not replace
 the required Ada measurement or live netplay soak.
+
+The new idle check also fails before fault injection: measured prefix-3 latency
+exceeds the declared allowance, so the runner correctly stays unavailable. Its
+error omits the measured value. Dense trials continue independently. Before
+interpreting paired sampling, require exactly 24 recorded policy instances and
+no failed-wave/retry warnings; a startup retry advances the factory's seed.
+Review then finds that readiness timing applies production's GC freeze only
+after its measured requests. Commit `5b5008f7` moves it between warmup and
+measurement and includes measured p99, allowance, and sample count in failures.
+This fixes a process-setup mismatch without changing the timing limit; it does
+not establish the cause of the cloud failure. The active dense job keeps its
+pinned source.
+The capture's host-RSS sampler begins after loading and compilation. A separate
+container-memory observer starts during the first control sweep, so only later
+stages have full loading/compile/sweep coverage. Both are sampled maxima, not
+kernel high-water counters.
 
 The separate B200 job uses the saved training environment, source `a6785725`,
 the original checkpoint source `f05d4150`, and update 8192. Both strict provenance
@@ -367,6 +400,30 @@ A separate read-only sampler records current container usage during that attempt
 its sampled maxima do not reconstruct an unavailable kernel high-water counter
 or the missed first loader trial. The cloud job's code remained unchanged.
 
+The first B200 retry passes both provenance checks, then fails before downloading
+shards because a fresh cache has no MDS indexes. The next reviewed driver calls
+the existing cache-status path to initialize adapter metadata before prefetch.
+That job, at source `24bf25ec`, passes both preflights, index initialization,
+compressed prefetch, and cache materialization, then begins the loader trials.
+It samples container memory every 0.25 seconds and labels those maxima as sampled
+current usage. They are not kernel high-water counters. Both retry identities,
+source archives, and the failed attempt are in the cloud qualification record.
+The first new loader pair measures 18,013/20,232 samples per second and sampled
+container peaks of 91.35/90.84 GiB for control/candidate. These are one pair, not
+the completed three-trial gate. The scientific training/model/representation,
+loader, checkpoint, and exact-capture sources are byte-identical between
+`a6785725` and `24bf25ec`; the current real-checkpoint comparison remains the
+required production parity evidence. It checks update 8193 at a deliberately
+drained prefetch boundary, not numerical equality of the later throughput run.
+The first control resume completes with non-unit AWR weights (maximum 3.38236)
+and measures 1,278.06 samples per second over updates 8294–8493 after 100 warmup
+updates. The candidate is running; no paired training or exact-resume result is
+claimed yet.
+
+Supplemental source review, cancellation evidence, and the memory observer are
+preserved in `runs/refactor-059/supplemental-review/` in R2. The content-addressed
+archive and its verified hash are recorded in `modal_qualification.json`.
+
 Local 3060 qualification now uses an isolated Docker container with six CPUs,
 12 GiB RAM, no additional swap, and at most two Dolphins. Preflight verifies
 the enforced limits, CUDA, pinned package versions, and Slippi 3.6.4. It found
@@ -389,6 +446,44 @@ netplay. The tests use a separate queue and ports, without starting the producti
 API or publishing replays. The port and smoke fixes pass 51 focused tests,
 1,251 CPU tests, all seven required emulator integration cases, Ruff, and Ty.
 Logs: `runs/refactor-059/netplay-port-*`.
+
+The next smoke exposes direct live categorical floats/NaNs reaching an integer
+prepared observation layout. Direct netplay now projects those columns to the
+same types and missing sentinel as local shared-memory transport. This passes
+1,260 CPU tests, four live-frame CPU/CUDA cases, and all seven emulator cases,
+plus Ruff and Ty. Logs: `runs/refactor-059/live-observation-projection-*`.
+The subsequent 600-frame smoke reaches gameplay without a policy error and
+records zero controller submission gaps, but averages only 29.56 FPS with
+regular long frame waits. It is incomplete and does not qualify real-time play.
+The induced shutdown failure after stopping the peer is retained separately
+from the gameplay interval. A short GC diagnostic does not reproduce those
+regular waits as garbage-collection pauses; further transport diagnosis is open.
+A separate CPU trace records zero throttling events during 21.9 seconds of
+gameplay, with about 2.8 cores used on average. The six-CPU quota does not explain
+that run's stalls. Earlier GPU-memory samples incorrectly report zero because
+NVIDIA exposes host PIDs while `/proc` exposes container PIDs; those zeros are
+not memory evidence. The sampler now reports unavailable for an unmatched
+nonempty process list or an incomplete counter.
+
+A timestamped transport probe at `5b5008f7` records 42 bot and 41 peer gameplay
+waits above 100 ms. All 42 bot waits end when the next ENet observation arrives;
+41 overlap a peer wait. Median receive-to-pipe time is 0.064 ms and median
+pipe-to-frame time is 0.580 ms for the bot. This places the recurring delay before
+ENet delivery, not in the measured pipe or consumer handling. It does not yet
+distinguish Dolphin packet production from network or ENet delay. Logs and traces
+are under `runs/refactor-059/docker-3060/`; this diagnostic is not a timing pass.
+
+Separating cold preparation from recovery passes 70 focused tests and the full
+CPU suite: 1,270 passed, 24 CUDA/opt-in skips, 18 integration deselections, nine
+warnings, 100.29 seconds. Global Ruff format/lint and the maintained Ty target
+also pass. Logs: `runs/refactor-059/cold-preparation-*`. Initial preparation
+defaults to 1,800 seconds; no stream is admitted before readiness. The 120-second
+replacement-engine deadline is unchanged.
+
+The subsequent readiness-measurement change passes 73 focused tests and the full
+CPU suite: 1,279 passed, 24 CUDA/opt-in skips, 18 integration deselections, nine
+warnings, 100.57 seconds. Global Ruff format/lint and the maintained Ty target
+also pass. Logs: `runs/refactor-059/readiness-measurement-*`.
 
 The memory-reporting fix passes global Ruff format/lint, the maintained Ty
 target, and **1,241 CPU tests** (22 CUDA/opt-in skips, 18 integration deselections,
