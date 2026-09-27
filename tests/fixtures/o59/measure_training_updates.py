@@ -126,5 +126,5 @@ def measure_training_updates(
         "process_tree_memory": read_process_tree_memory(os.getpid()),
         "process_tree_peak_rss_upper_bound_bytes": _peak_process_tree_rss(),
         "cgroup_memory": read_cgroup_memory(),
-        "nll_sums": [float(loss) for loss in losses],
+        "nll_sums": torch.stack(losses).cpu().tolist(),
     }

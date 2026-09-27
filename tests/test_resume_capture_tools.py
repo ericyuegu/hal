@@ -2,6 +2,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
@@ -178,3 +179,30 @@ def test_training_measurement_rejects_short_qualification_window() -> None:
         performance.measure_training_updates(
             None, None, next_step=8193, batch_size=512, warm_updates=99, measured_updates=200
         )
+
+
+def test_training_measurement_serializes_every_prediction_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    prefetch = _CountingPrefetch()
+    head_losses = torch.arange(64, dtype=torch.float32).reshape(16, 4)
+
+    def train_step(**values: object) -> SimpleNamespace:
+        return SimpleNamespace(nll_sum=head_losses + int(values["update"]))
+
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 128)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 256)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda stance: nullcontext())
+    monkeypatch.setattr(performance, "_process_counters", lambda: {"cpu_seconds": 0.0})
+    monkeypatch.setattr(performance, "_peak_process_tree_rss", lambda: None)
+    monkeypatch.setattr(performance, "read_process_tree_memory", lambda pid: {})
+    monkeypatch.setattr(performance, "read_cgroup_memory", lambda: {})
+    report = performance.measure_training_updates(
+        prefetch, train_step, next_step=8193, batch_size=512, warm_updates=100, measured_updates=200
+    )
+    saved = json.loads(json.dumps(report, allow_nan=False))
+    assert prefetch.drained
+    assert prefetch.loaded == prefetch.consumed == 300
+    assert (saved["first_measured_update"], saved["last_measured_update"]) == (8294, 8493)
+    assert saved["nll_sums"] == [(head_losses + update).tolist() for update in range(8294, 8494)]
+    assert saved["process_tree_peak_rss_upper_bound_bytes"] is None
