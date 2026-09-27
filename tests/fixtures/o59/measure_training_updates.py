@@ -30,18 +30,24 @@ def _process_counters() -> dict[str, float]:
     return counters
 
 
-def _peak_process_tree_rss() -> int:
+def _peak_process_tree_rss(proc_root: Path = Path("/proc")) -> int | None:
     peak_bytes = 0
-    for pid in process_tree_pids(os.getpid()):
+    for pid in process_tree_pids(os.getpid(), proc_root):
         try:
-            lines = (Path("/proc") / str(pid) / "status").read_text().splitlines()
+            lines = (proc_root / str(pid) / "status").read_text().splitlines()
         except FileNotFoundError, ProcessLookupError:
-            continue
+            return None
         for line in lines:
             if line.startswith("VmHWM:"):
-                peak_bytes += int(line.split()[1]) * 1024
+                process_peak_bytes = int(line.split()[1]) * 1024
+                if process_peak_bytes <= 0:
+                    return None
+                peak_bytes += process_peak_bytes
                 break
-    return peak_bytes
+        else:
+            # gVisor exposes current RSS but omits the high-water counter.
+            return None
+    return peak_bytes or None
 
 
 def _run_updates(

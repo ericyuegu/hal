@@ -258,10 +258,17 @@ def main(args: Args) -> None:
         paired_ratios.append(
             cast(float, candidate_result["samples_per_second"]) / cast(float, control_result["samples_per_second"])
         )
-        peak_memory_ratios.append(
-            cast(int, candidate_result["process_tree_peak_rss_upper_bound_bytes"])
-            / cast(int, control_result["process_tree_peak_rss_upper_bound_bytes"])
-        )
+        control_peak = control_result["process_tree_peak_rss_upper_bound_bytes"]
+        candidate_peak = candidate_result["process_tree_peak_rss_upper_bound_bytes"]
+        if (
+            not isinstance(control_peak, int)
+            or not isinstance(candidate_peak, int)
+            or min(control_peak, candidate_peak) <= 0
+        ):
+            raise ValueError(
+                "peak memory is unavailable; the saved throughput measurements do not qualify memory parity"
+            )
+        peak_memory_ratios.append(candidate_peak / control_peak)
 
     report = {
         "scope": "matched reduced loader-core comparison; not production 131072-slot or transformed-training parity",

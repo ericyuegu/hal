@@ -3,17 +3,44 @@ import importlib.util
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-_SPEC = importlib.util.spec_from_file_location(
-    "hal_loader_pairs", Path(__file__).parent / "fixtures" / "o59" / "run_loader_pairs.py"
+
+def _load_tool(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "o59"
+loader_pairs = _load_tool("hal_loader_pairs", _FIXTURES / "run_loader_pairs.py")
+training_measurement = _load_tool("hal_training_measurement", _FIXTURES / "measure_training_updates.py")
+replay_benchmark = _load_tool(
+    "hal_replay_benchmark", Path(__file__).resolve().parents[1] / "scripts/benchmark_replay_loader.py"
 )
-assert _SPEC is not None and _SPEC.loader is not None
-loader_pairs = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = loader_pairs
-_SPEC.loader.exec_module(loader_pairs)
+
+
+@pytest.mark.parametrize(
+    "measure", [replay_benchmark._process_tree_high_water_rss_bytes, training_measurement._peak_process_tree_rss]
+)
+@pytest.mark.parametrize("child_peak", ["VmHWM:\t4096 kB\n", "", "VmHWM:\t0 kB\n"])
+def test_peak_memory_requires_high_water_counters_for_every_process(
+    tmp_path: Path, measure: Callable[[Path], int | None], child_peak: str
+) -> None:
+    parent = tmp_path / str(os.getpid())
+    child = tmp_path / str(os.getpid() + 1)
+    parent.mkdir()
+    child.mkdir()
+    (parent / "status").write_text("PPid:\t0\nVmHWM:\t2048 kB\nVmRSS:\t1024 kB\n")
+    (child / "status").write_text(f"PPid:\t{os.getpid()}\nVmRSS:\t1024 kB\n{child_peak}")
+    assert measure(tmp_path) == (6144 * 1024 if "4096" in child_peak else None)
 
 
 def _corpus_index(root: Path) -> tuple[Path, str]:

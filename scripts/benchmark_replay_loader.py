@@ -172,17 +172,23 @@ def _process_tree_counters() -> dict[str, float | int]:
     }
 
 
-def _process_tree_high_water_rss_bytes() -> int:
+def _process_tree_high_water_rss_bytes(proc_root: Path = Path("/proc")) -> int | None:
     total = 0
-    for pid in process_tree_pids(os.getpid()):
+    for pid in process_tree_pids(os.getpid(), proc_root):
         try:
-            for line in (Path("/proc") / str(pid) / "status").read_text().splitlines():
+            for line in (proc_root / str(pid) / "status").read_text().splitlines():
                 if line.startswith("VmHWM:"):
-                    total += int(line.split()[1]) * 1024
+                    peak_bytes = int(line.split()[1]) * 1024
+                    if peak_bytes <= 0:
+                        return None
+                    total += peak_bytes
                     break
+            else:
+                # gVisor exposes current RSS but omits the high-water counter.
+                return None
         except FileNotFoundError, ProcessLookupError:
-            continue
-    return total
+            return None
+    return total or None
 
 
 def _source_metadata() -> dict[str, object]:
