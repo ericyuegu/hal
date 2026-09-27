@@ -29,6 +29,7 @@ services:
 
   runner:
     <<: *hal-image
+    runtime: nvidia
     command:
       - hal-netplay-runner
       - /run/hal-policy/policy.halpolicy

@@ -28,6 +28,18 @@ docker compose -f compose.yaml -f compose-ada.yaml up --build -d
 
 The override gives the API capacity two and binds two distinct credentials and ports. Do not publish that capacity until the matched Ada timing, failure, and match/rematch gates pass. Both Compose configurations keep queue capacity equal to their Dolphin worker count.
 
+The runner selects the NVIDIA container runtime because Dolphin uses Vulkan.
+CUDA access alone does not ensure that Vulkan's driver and graphics libraries are
+available. Before starting the service, confirm that the runner image sees the
+expected GPU:
+
+```sh
+docker compose run --rm --no-deps --entrypoint vulkaninfo runner --summary
+```
+
+The command must list the NVIDIA device. A missing driver is a deployment failure;
+do not switch to software rendering or another Dolphin backend to hide it.
+
 ## Health and timing
 
 Check `/health/ready` and `/v1/capacity` before admitting users. The runner writes a schema-4 preparation and timing record beside its status file. Slot health uses schema 4; aggregate runner health uses schema 5. A live inference process that stops responding is detected within one second. The supervisor invalidates old streams and prepares one replacement before new admission; failed recovery leaves the service unavailable.
