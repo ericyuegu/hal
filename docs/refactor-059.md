@@ -53,6 +53,8 @@ source tree. No repository or global hook configuration was changed.
 | `590aa57c` | Accounting, controls, and acceptance evidence |
 | `384a732d` | Validate netplay soak measurements and report unmeasured gates |
 | `e67a51ea` | Match loader file-cache preparation and remove the benchmark's module-global path override |
+| `90046957` | Record the cache-controlled loader comparison and verified evidence archive |
+| `99b6244d` | Retire unused dense GPU observation buffers after measuring the maintained staging path |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -421,6 +423,8 @@ Do not merge different revisions into a single claim of full qualification.
 | Netplay soak assessment | The harness now rejects malformed or mismatched match evidence, slow steady delivery/gameplay, skipped submissions, and plan exhaustion. Its version-2 result distinguishes measured checks from unmeasured qualification gates. Resource sampling finishes before cleanup/reporting. Focused tests: **21 passed**. Full CPU suite: **1,198 passed, 22 skipped, 18 deselected**, nine warnings, 93.96 s. Global Ruff format/lint and the maintained Ty target pass. Initial lint found an omitted `zip(strict=...)`; Ty found two return annotations that needed explicit narrowing. Both were fixed before the passing runs. Logs: `runs/refactor-059/soak-assessment-{focused,cpu,format,lint,types,types-fixed}.log`. This tool change does not substitute for a live soak. |
 | Loader measurement follow-up | Five cache-preparation tests pass. Global Ruff format/lint and the maintained Ty target pass. The complete CPU suite has **1,203 passed, 22 skipped, 18 deselected**, nine warnings, in 95.26 s; skip categories are unchanged. Logs: `runs/refactor-059/loader-cache-preparation-tests.log` and `runs/refactor-059/loader-followup-{cpu,format,lint,types}.log`. The selected R2 loader evidence archive passed download verification: 52 matching files, zero differences. Protected user-file hashes remain unchanged, and the accounting now contains 105 new maintained paths. |
 | Unused dense GPU storage retirement | The two retired helpers had no maintained caller. Their two implementation-only tests are removed; cached update tests now compare directly with the canonical CPU window representation. The retained cached buffer definitions have identical syntax trees. Focused GPU tests: **22 passed** in 9.70 s. Full CPU suite: **1,201 passed, 22 skipped, 18 deselected**, nine warnings, in 95.17 s. The maintained Ty target passes. Logs: `runs/refactor-059/window-retirement-{gpu,cpu,types}.log`. |
+| Dense B32 GPU preflight | The production checkpoint prepared the official dense B32/context-256/prefix-2/horizon-4 decoder in both checkouts. Each completed 40 finite-output calls, with the last 32 measured under `fail_on_recompile`. Peak allocated GPU memory was 3,184,207,872 bytes for control and 3,184,206,848 for candidate. Synthetic-call medians were 135.817/134.083 ms. This is one preparation diagnostic, excluding history, IPC, and Dolphin; it does not qualify throughput. Two earlier capture attempts failed on a removed neutral-action import and a mismatched `inference_mode` context; the successful helper uses the official `no_grad` context. All attempts remain in `runs/refactor-059/dense-32-preflight-*`. |
+| Dense B32 emulator attempt and host memory failure | The 32-Dolphin diagnostic on local host `eric-gu-sff` exhausted host memory during startup and exited 137. Kernel logs confirm global OOM kills, including the pre-existing netplay runner PID 2982847 and desktop processes. The capture's resource sampler also failed on a child's inaccessible I/O counters, so no complete memory/throughput report exists. This attempt failed and does not qualify local evaluation. All diagnostic Dolphins exited and the reported shared memory/semaphore objects were removed. The local API on port 8080 stopped; the frontend on port 3000 remained. There were no active reservations. Evidence: `runs/refactor-059/dense-evaluation-diagnostics.json`, `dense-local-32-candidate-smoke-1.log`, and `dense-local-32-memory-failure.log`. |
 
 The remote preprocessing fixture contains six replays from `dev.7z`, two per
 split, with no extraction failures. Its nine staged data objects total 842,904
@@ -541,6 +545,40 @@ Manifest SHA-256 is
 download verification found six matching files and zero differences. The raw
 measurement SHA-256 is
 `ec6b34b5700c1c035eb5a56e99a72329a334efaadcc3a2e94c207ee2fa7f4c9b`.
+
+GPU capacity does not establish host capacity for 32 Dolphin workers. The later
+emulator diagnostic caused global host memory exhaustion, including loss of the
+existing local netplay backend. A subsequent interrupt found the diagnostic
+already killed; this was not a controlled shutdown. No 32-worker retry is
+permitted on this host. The user limits local Dolphin concurrency to six
+physical CPU cores; subsequent local diagnostics use four workers and remain
+separate from the required matched 32-worker qualification on a larger host.
+The diagnostic now rejects more than six workers and refuses to launch without
+a hard memory limit. Both rejection paths were checked before model loading or
+process creation. Further emulator measurements also need a measured
+worker-memory budget.
+The local systemd user bus currently refuses connections, so the attempted
+memory-limited test scope did not start. There is no local Docker test image.
+
+The dense preparation diagnostics, failed emulator capture, original capture
+source, and kernel failure log are preserved at
+`r2://hal/runs/refactor-059/evidence/dense-diagnostic-c421fd2c7f15295e177a0c22351aac88658ddc3b96c29c78dbbc55687547633a/`.
+The manifest SHA-256 is
+`c421fd2c7f15295e177a0c22351aac88658ddc3b96c29c78dbbc55687547633a`.
+Download verification found 12 matching files and zero differences. The original
+capture source is retained separately from the later worker-limit guards.
+
+Recovery of the existing local backend is prepared separately from the refactor
+and awaits user approval. The archived source under
+`runs/netplay/inference-audit/source` imports with the current environment and
+has tree identity
+`96c802323243b2245c4bfe8165693286778b791c4d50da17e6527d1b4a1d5653`.
+The proposed launcher retains the existing 059 bundle, queue, account A, port
+51441, compiled window mode, and recorded sampling seed. The previous health
+record's Git SHA was stale, so this snapshot is not asserted to reconstruct the
+previous in-memory code exactly. Its configuration and launcher syntax were
+validated without starting the backend. The local preparation record is
+`runs/refactor-059/service-recovery/proposal.json`.
 
 ## Repository trees
 
