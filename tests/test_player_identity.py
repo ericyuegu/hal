@@ -8,9 +8,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from hal.data import player_identity as data_player_identity
 from hal.data.policy_schema import policy_replay_identity
 from hal.data.schema import Rank
-from hal.training import player_identity
+from hal.representation import player_identity as representation_player_identity
 
 
 def _write_manifest(path: Path) -> tuple[str, str, str]:
@@ -52,10 +53,10 @@ def test_sidecar_is_deterministic_exact_and_train_only(tmp_path: Path) -> None:
     train_path, missing_path, validation_path = _write_manifest(manifest)
     first = tmp_path / "first.jsonl.gz"
     second = tmp_path / "second.jsonl.gz"
-    source = (player_identity.ManifestInput("fixture", manifest),)
+    source = (data_player_identity.ManifestInput("fixture", manifest),)
 
-    first_summary = player_identity.build_player_identity_sidecar(source, first)
-    second_summary = player_identity.build_player_identity_sidecar(source, second)
+    first_summary = data_player_identity.build_player_identity_sidecar(source, first)
+    second_summary = data_player_identity.build_player_identity_sidecar(source, second)
 
     assert first.read_bytes() == second.read_bytes()
     assert first_summary["sha256"] == second_summary["sha256"]
@@ -64,7 +65,7 @@ def test_sidecar_is_deterministic_exact_and_train_only(tmp_path: Path) -> None:
     assert first_summary["casefold_connect_code_collision_groups_train"] == 1
     assert first_summary["nicknames_are_identity_keys"] is False
 
-    sidecar = player_identity.load_player_identity_sidecar(first, expected_sha256=first_summary["sha256"])
+    sidecar = data_player_identity.load_player_identity_sidecar(first, expected_sha256=first_summary["sha256"])
     assert sidecar.vocabulary.codes == ("AA#1", "BB#2", "aa#1")
     assert sidecar.vocabulary.id_for_code(" AA#1 ") != sidecar.vocabulary.id_for_code("aa#1")
     with pytest.raises(KeyError, match="absent"):
@@ -82,7 +83,7 @@ def test_sidecar_is_deterministic_exact_and_train_only(tmp_path: Path) -> None:
 
 
 def test_replay_lookup_uses_professional_ids_or_rank_aggregates() -> None:
-    lookup = player_identity.ReplayPlayerLookup({"a" * 32: (7, 8)})
+    lookup = data_player_identity.ReplayPlayerLookup({"a" * 32: (7, 8)})
 
     professional = lookup({"replay_id": "a" * 32, "num_frames": 3})
     assert professional["p1_player_id"].tolist() == [7, 7, 7]
@@ -117,11 +118,11 @@ def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
     manifest = tmp_path / "manifest.jsonl"
     _write_manifest(manifest)
     source = tmp_path / "source.jsonl.gz"
-    summary = player_identity.build_player_identity_sidecar(
-        (player_identity.ManifestInput("fixture", manifest),),
+    summary = data_player_identity.build_player_identity_sidecar(
+        (data_player_identity.ManifestInput("fixture", manifest),),
         source,
     )
-    expected = player_identity.load_player_identity_sidecar(source)
+    expected = data_player_identity.load_player_identity_sidecar(source)
     destination = tmp_path / "downloaded" / "sidecar.jsonl.gz"
     downloads: list[tuple[str, str, str]] = []
 
@@ -130,8 +131,8 @@ def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
             downloads.append((bucket, key, path))
             Path(path).write_bytes(source.read_bytes())
 
-    monkeypatch.setattr(player_identity.r2, "client", lambda: Client())
-    sidecar = player_identity.load_player_identity_artifact(
+    monkeypatch.setattr(data_player_identity.r2, "client", lambda: Client())
+    sidecar = data_player_identity.load_player_identity_artifact(
         destination,
         remote="s3://hal/identity/sidecar.jsonl.gz",
         expected_sha256=summary["sha256"],
@@ -143,7 +144,7 @@ def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
     assert destination.read_bytes() == source.read_bytes()
     assert downloads[0][:2] == ("hal", "identity/sidecar.jsonl.gz")
     with pytest.raises(ValueError, match="vocabulary"):
-        player_identity.load_player_identity_artifact(
+        data_player_identity.load_player_identity_artifact(
             destination,
             remote="s3://hal/identity/sidecar.jsonl.gz",
             expected_sha256=summary["sha256"],
@@ -151,13 +152,13 @@ def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
             expected_vocabulary_sha256=expected.vocabulary.sha256,
         )
     with pytest.raises(ValueError, match="SHA-256"):
-        player_identity.load_player_identity_sidecar(destination, expected_sha256="0" * 64)
+        data_player_identity.load_player_identity_sidecar(destination, expected_sha256="0" * 64)
 
 
 def test_rank_ids_and_checkpoint_vocabulary_round_trip() -> None:
-    vocabulary = player_identity.PlayerVocabulary(("AA#1", "aa#1"))
-    encoded = player_identity.vocabulary_buffer(vocabulary)
-    restored = player_identity.vocabulary_from_checkpoint_buffer(encoded)
+    vocabulary = representation_player_identity.PlayerVocabulary(("AA#1", "aa#1"))
+    encoded = representation_player_identity.vocabulary_buffer(vocabulary)
+    restored = representation_player_identity.vocabulary_from_checkpoint_buffer(encoded)
 
     assert restored == vocabulary
     assert restored.id_for_rank(Rank.PLATINUM) == 1

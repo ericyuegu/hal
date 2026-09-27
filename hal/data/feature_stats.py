@@ -27,10 +27,15 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
+from typing import cast
 
 import fsspec
 import numpy as np
 from numpy.typing import DTypeLike
+
+from hal import streams
+from hal.wire import ITEM_SLOTS
 
 # Bump on breaking changes to the on-disk JSON schema (field add/remove/rename,
 # semantics change). Independent of ``hal.data.schema.SCHEMA_VERSION``, which
@@ -178,27 +183,23 @@ def _sufficient_to_json(block: FeatureStatsSufficient) -> dict[str, float | int]
     }
 
 
-def _sufficient_from_json(blob: dict[str, float | int]) -> FeatureStatsSufficient:
-    return FeatureStatsSufficient(
-        count=int(blob["count"]),
-        mean=float(blob["mean"]),
-        m2=float(blob["m2"]),
-        min=float(blob["min"]),
-        max=float(blob["max"]),
-    )
-
-
-def _finalized_to_json(block: FeatureStats) -> dict[str, float]:
-    return {"mean": block.mean, "std": block.std, "min": block.min, "max": block.max}
-
-
-def _finalized_from_json(blob: dict[str, float]) -> FeatureStats:
-    return FeatureStats(
-        mean=float(blob["mean"]),
-        std=float(blob["std"]),
-        min=float(blob["min"]),
-        max=float(blob["max"]),
-    )
+def _sufficient_from_json(blob: object, *, where: str) -> FeatureStatsSufficient:
+    if not isinstance(blob, dict) or set(blob) != {"count", "mean", "m2", "min", "max"}:
+        raise ValueError(f"{where}: invalid sufficient-stat fields")
+    fields = cast(dict[str, object], blob)
+    count = fields["count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError(f"{where}: invalid sufficient-stat count {count!r}")
+    values = (fields["mean"], fields["m2"], fields["min"], fields["max"])
+    if any(isinstance(value, bool) or not isinstance(value, int | float) for value in values):
+        raise ValueError(f"{where}: invalid sufficient-stat numeric fields")
+    mean, m2, minimum, maximum = (float(cast(int | float, value)) for value in values)
+    if count == 0:
+        if (mean, m2, minimum, maximum) != (0.0, 0.0, math.inf, -math.inf):
+            raise ValueError(f"{where}: invalid zero-count sufficient-stat sentinel")
+    elif not (all(map(math.isfinite, (mean, m2, minimum, maximum))) and m2 >= 0 and minimum <= mean <= maximum):
+        raise ValueError(f"{where}: invalid sufficient-stat values for nonempty record")
+    return FeatureStatsSufficient(count=count, mean=mean, m2=m2, min=minimum, max=maximum)
 
 
 def dump_sufficient_stats(
@@ -221,25 +222,6 @@ def dump_sufficient_stats(
         f.write(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def dump_finalized_stats(
-    path: str | Path,
-    blocks: dict[str, FeatureStats],
-    *,
-    mds_schema_version: int,
-) -> None:
-    """Write finalized stats as ``stats.json``. Used at training launch to
-    snapshot the resolved mixture next to the model checkpoint."""
-    payload = {
-        "schema_version": STATS_SCHEMA_VERSION,
-        "mds_schema_version": mds_schema_version,
-        "split": "mixture",
-        "feature_count": len(blocks),
-        "finalized": {name: _finalized_to_json(block) for name, block in blocks.items()},
-    }
-    with fsspec.open(str(path), "w") as f:
-        f.write(json.dumps(payload, indent=2, sort_keys=True))
-
-
 def _read_stats_file(path: Path, expected_mds_schema_version: int | None) -> dict:
     payload = json.loads(Path(path).read_text())
     if payload.get("schema_version") != STATS_SCHEMA_VERSION:
@@ -257,94 +239,14 @@ def load_sufficient_stats(
     path: Path, *, expected_mds_schema_version: int | None = None
 ) -> dict[str, FeatureStatsSufficient]:
     payload = _read_stats_file(path, expected_mds_schema_version)
-    if "sufficient" not in payload:
+    blocks = payload.get("sufficient")
+    if not isinstance(blocks, dict):
         raise ValueError(f"{path}: missing 'sufficient' block (got keys {sorted(payload)})")
-    return {name: _sufficient_from_json(blob) for name, blob in payload["sufficient"].items()}
-
-
-def load_dataset_stats(path: Path, *, expected_mds_schema_version: int | None = None) -> dict[str, FeatureStats]:
-    """Load a single dataset's stats and finalize. Accepts either a
-    'sufficient' file (Stage 3 output) or a 'finalized' file (training-launch
-    snapshot)."""
-    payload = _read_stats_file(path, expected_mds_schema_version)
-    if "finalized" in payload:
-        return {name: _finalized_from_json(blob) for name, blob in payload["finalized"].items()}
-    if "sufficient" in payload:
-        blocks = {name: _sufficient_from_json(blob) for name, blob in payload["sufficient"].items()}
-        return {name: block.finalize() for name, block in blocks.items()}
-    raise ValueError(f"{path}: stats file has neither 'sufficient' nor 'finalized' block")
-
-
-def load_and_merge_stats(
-    stream_stats_paths: Sequence[Path],
-    proportions: Sequence[float] | None,
-    *,
-    expected_mds_schema_version: int | None = None,
-) -> dict[str, FeatureStats]:
-    """Merge per-stream sufficient stats into a single mixture distribution.
-
-    ``proportions=None``: Welford merge over the union (correct when streams
-    are sampled proportional to their size).
-
-    ``proportions`` given: mixture-weighted (correct when ``Stream.proportion``
-    re-weights streams away from natural sizes). ``p_s`` is renormalized so
-    ``sum(p) == 1``; matches Mosaic Streaming, which normalizes ``proportion``
-    automatically. Strictly generalizes the unweighted case
-    (reduces to it under ``p_s = n_s / sum(n)``).
-    """
-    if not stream_stats_paths:
-        raise ValueError("load_and_merge_stats called with empty stream_stats_paths")
-
-    per_stream = [
-        load_sufficient_stats(Path(p), expected_mds_schema_version=expected_mds_schema_version)
-        for p in stream_stats_paths
-    ]
-
-    feature_names = list(per_stream[0].keys())
-    for path, blocks in zip(stream_stats_paths, per_stream, strict=True):
-        if list(blocks.keys()) != feature_names:
-            raise ValueError(f"{path}: feature set differs from {stream_stats_paths[0]}; cannot merge")
-
-    if proportions is None:
-        merged = StatsAccumulator.from_sufficient(per_stream[0])
-        for blocks in per_stream[1:]:
-            merged = merged.merge(StatsAccumulator.from_sufficient(blocks))
-        return merged.finalize()
-
-    if len(proportions) != len(stream_stats_paths):
-        raise ValueError(f"proportions length {len(proportions)} != stream count {len(stream_stats_paths)}")
-    if any(p < 0 for p in proportions):
-        raise ValueError("proportions must be non-negative")
-    total = sum(proportions)
-    if total <= 0:
-        raise ValueError("proportions must sum to a positive value")
-    weights = [p / total for p in proportions]
-
-    result: dict[str, FeatureStats] = {}
-    for name in feature_names:
-        per = [stream[name] for stream in per_stream]
-        # Restrict mixture to streams that actually observed this feature.
-        # If no stream has it, fall through to the unit-Gaussian placeholder
-        # (same convention as FeatureStatsSufficient.finalize).
-        active = [(w, s) for w, s in zip(weights, per, strict=True) if s.count > 0]
-        if not active:
-            result[name] = FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
-            continue
-        active_total = sum(w for w, _ in active)
-        active_weights = [w / active_total for w, _ in active]
-        active_stats = [s for _, s in active]
-        mean_mix = sum(w * s.mean for w, s in zip(active_weights, active_stats, strict=True))
-        # Var_mix = sum_s w_s · (Var_s + (mean_s - mean_mix)^2)
-        var_mix = sum(
-            w * (s.m2 / s.count + (s.mean - mean_mix) ** 2) for w, s in zip(active_weights, active_stats, strict=True)
-        )
-        result[name] = FeatureStats(
-            mean=mean_mix,
-            std=math.sqrt(var_mix),
-            min=min(s.min for s in active_stats),
-            max=max(s.max for s in active_stats),
-        )
-    return result
+    if payload.get("feature_count") != len(blocks):
+        raise ValueError(f"{path}: feature_count does not match the sufficient-stat block")
+    if any(not isinstance(name, str) for name in blocks):
+        raise ValueError(f"{path}: sufficient-stat names must be strings")
+    return {name: _sufficient_from_json(blob, where=f"{path}:{name}") for name, blob in blocks.items()}
 
 
 def float_feature_names(mds_dtypes: Mapping[str, DTypeLike]) -> list[str]:
@@ -355,3 +257,85 @@ def float_feature_names(mds_dtypes: Mapping[str, DTypeLike]) -> list[str]:
     via embeddings or int32 casts.
     """
     return [name for name, dtype in mds_dtypes.items() if np.issubdtype(np.dtype(dtype), np.floating)]
+
+
+_DIRECTION_STATS = FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
+
+
+_SCHEMA_IMPLIED_STATS = {
+    "direction": _DIRECTION_STATS,
+    "nana_direction": _DIRECTION_STATS,
+}
+
+
+_ITEM_PREFIXES: Final[tuple[str, ...]] = tuple(f"item{slot}_" for slot in range(ITEM_SLOTS))
+
+
+def consolidate_key(name: str) -> str:
+    """Strip ``p1_`` / ``p2_`` / ``ego_`` / ``opp_`` and fold the four item slots onto one key."""
+    for pre in ("p1_", "p2_", "ego_", "opp_"):
+        if name.startswith(pre):
+            return name[len(pre) :]
+    for pre in _ITEM_PREFIXES:
+        if name.startswith(pre):
+            return f"item_{name[len(pre) :]}"
+    return name
+
+
+def load_consolidated_mixture_stats(
+    paths: Sequence[Path],
+    proportions: Sequence[float],
+    *,
+    expected_mds_schema_version: int,
+) -> dict[str, FeatureStats]:
+    """Load an ego-symmetric, replay-weighted mixture of dataset statistics."""
+    if not paths:
+        raise ValueError("mixture statistics need at least one source")
+    if len(paths) != len(proportions):
+        raise ValueError(f"proportions length {len(proportions)} != source count {len(paths)}")
+    if any(not math.isfinite(value) or value < 0 for value in proportions):
+        raise ValueError("mixture proportions must be finite and non-negative")
+    total = sum(proportions)
+    if total <= 0:
+        raise ValueError("mixture proportions must sum to a positive value")
+    weights = [value / total for value in proportions]
+
+    per_source: list[dict[str, FeatureStatsSufficient]] = []
+    for path in paths:
+        consolidated: dict[str, FeatureStatsSufficient] = {}
+        selected = streams.ensure_stats(path)
+        for name, block in load_sufficient_stats(
+            selected, expected_mds_schema_version=expected_mds_schema_version
+        ).items():
+            key = consolidate_key(name)
+            consolidated[key] = merge_sufficient(consolidated[key], block) if key in consolidated else block
+        per_source.append(consolidated)
+
+    feature_names = set(per_source[0])
+    for path, source in zip(paths, per_source, strict=True):
+        if set(source) != feature_names:
+            raise ValueError(f"{path}: consolidated feature set differs from {paths[0]}; cannot merge")
+
+    result: dict[str, FeatureStats] = {}
+    for name in sorted(feature_names):
+        active = [
+            (weight, source[name])
+            for weight, source in zip(weights, per_source, strict=True)
+            if weight > 0 and source[name].count > 0
+        ]
+        if not active:
+            result[name] = FeatureStats(mean=0.0, std=1.0, min=-1.0, max=1.0)
+            continue
+        active_total = sum(weight for weight, _ in active)
+        normalized = [(weight / active_total, block) for weight, block in active]
+        mean = sum(weight * block.mean for weight, block in normalized)
+        variance = sum(weight * (block.m2 / block.count + (block.mean - mean) ** 2) for weight, block in normalized)
+        result[name] = FeatureStats(
+            mean=mean,
+            std=math.sqrt(max(variance, 0.0)),
+            min=min(block.min for _, block in normalized),
+            max=max(block.max for _, block in normalized),
+        )
+    for name, stats in _SCHEMA_IMPLIED_STATS.items():
+        result.setdefault(name, stats)
+    return result

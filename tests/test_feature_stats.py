@@ -6,6 +6,7 @@ contract (JSON round-trip, NaN masking), and the key consolidation that decides
 which on-disk entries share one scale at train time.
 """
 
+import json
 import math
 
 import numpy as np
@@ -14,10 +15,9 @@ import pytest
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import FeatureStatsSufficient
 from hal.data.feature_stats import StatsAccumulator
+from hal.data.feature_stats import consolidate_key
 from hal.data.feature_stats import dump_sufficient_stats
-from hal.data.feature_stats import load_and_merge_stats
 from hal.data.feature_stats import load_sufficient_stats
-from hal.training.ego_stats import consolidate_key
 
 FEATURE = "x"
 TOL = 1e-9
@@ -90,6 +90,66 @@ def test_schema_version_mismatch_raises(tmp_path) -> None:
         load_sufficient_stats(path, expected_mds_schema_version=99)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("count", -1),
+        ("count", 1.5),
+        ("m2", -1.0),
+        ("mean", math.nan),
+        ("mean", 3.0),
+        ("min", math.inf),
+    ],
+)
+def test_invalid_sufficient_record_fails(tmp_path, field: str, value: float) -> None:
+    path = tmp_path / "stats.json"
+    dump_sufficient_stats(
+        path,
+        {FEATURE: FeatureStatsSufficient(1, 1.0, 0.0, 0.0, 2.0)},
+        split="train",
+        mds_schema_version=7,
+    )
+    payload = json.loads(path.read_text())
+    payload["sufficient"][FEATURE][field] = value
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="invalid sufficient-stat"):
+        load_sufficient_stats(path, expected_mds_schema_version=7)
+
+
+def test_zero_count_sufficient_record_requires_exact_sentinel(tmp_path) -> None:
+    path = tmp_path / "stats.json"
+    dump_sufficient_stats(
+        path,
+        {FEATURE: FeatureStatsSufficient(0, 0.0, 0.0, math.inf, -math.inf)},
+        split="train",
+        mds_schema_version=7,
+    )
+    assert load_sufficient_stats(path, expected_mds_schema_version=7)[FEATURE].count == 0
+    payload = json.loads(path.read_text())
+    payload["sufficient"][FEATURE]["min"] = 0.0
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="invalid zero-count"):
+        load_sufficient_stats(path, expected_mds_schema_version=7)
+
+
+def test_sufficient_feature_count_must_match_records(tmp_path) -> None:
+    path = tmp_path / "stats.json"
+    dump_sufficient_stats(
+        path,
+        {FEATURE: FeatureStatsSufficient(1, 1.0, 0.0, 0.0, 2.0)},
+        split="train",
+        mds_schema_version=7,
+    )
+    payload = json.loads(path.read_text())
+    payload["feature_count"] = 2
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="feature_count"):
+        load_sufficient_stats(path, expected_mds_schema_version=7)
+
+
 def test_nan_mask() -> None:
     rng = np.random.default_rng(3)
     clean = rng.normal(0.0, 1.0, size=1000)
@@ -106,48 +166,6 @@ def test_nan_mask() -> None:
     assert math.isclose(actual.m2, expected.m2, rel_tol=TOL, abs_tol=TOL)
     assert actual.min == expected.min
     assert actual.max == expected.max
-
-
-def test_mixture_math(tmp_path) -> None:
-    """Two streams μ₁=0,σ₁=1 and μ₂=4,σ₂=2 mixed with proportions 0.25 / 0.75.
-
-    Analytic mixture: μ_mix = 0.25·0 + 0.75·4 = 3.0
-    Var_mix = 0.25·(1 + 9) + 0.75·(4 + 1) = 2.5 + 3.75 = 6.25
-    """
-    s1 = {FEATURE: FeatureStatsSufficient(count=1000, mean=0.0, m2=1.0 * 1000, min=-5.0, max=5.0)}
-    s2 = {FEATURE: FeatureStatsSufficient(count=1000, mean=4.0, m2=4.0 * 1000, min=-2.0, max=10.0)}
-
-    p1 = tmp_path / "s1.json"
-    p2 = tmp_path / "s2.json"
-    dump_sufficient_stats(p1, s1, split="train", mds_schema_version=2)
-    dump_sufficient_stats(p2, s2, split="train", mds_schema_version=2)
-
-    merged = load_and_merge_stats([p1, p2], proportions=[0.25, 0.75])
-    result = merged[FEATURE]
-    assert math.isclose(result.mean, 3.0, rel_tol=TOL, abs_tol=TOL)
-    assert math.isclose(result.std, math.sqrt(6.25), rel_tol=TOL, abs_tol=TOL)
-    assert result.min == -5.0
-    assert result.max == 10.0
-
-
-def test_unweighted_merge_reduces_to_welford(tmp_path) -> None:
-    """proportions=None ≡ Welford merge over the union."""
-    rng = np.random.default_rng(4)
-    a = rng.normal(0.0, 1.0, size=1000)
-    b = rng.normal(5.0, 2.0, size=1500)
-    s1 = _acc(FEATURE, a).to_sufficient()
-    s2 = _acc(FEATURE, b).to_sufficient()
-
-    p1 = tmp_path / "s1.json"
-    p2 = tmp_path / "s2.json"
-    dump_sufficient_stats(p1, s1, split="train", mds_schema_version=2)
-    dump_sufficient_stats(p2, s2, split="train", mds_schema_version=2)
-
-    merged = load_and_merge_stats([p1, p2], proportions=None)[FEATURE]
-
-    union = np.concatenate([a, b])
-    assert math.isclose(merged.mean, float(union.mean()), rel_tol=TOL, abs_tol=TOL)
-    assert math.isclose(merged.std, float(union.std(ddof=0)), rel_tol=TOL, abs_tol=TOL)
 
 
 def test_finalize_empty_returns_unit_placeholder() -> None:

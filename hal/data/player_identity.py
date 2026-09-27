@@ -1,11 +1,4 @@
-"""Portable ego-player identities for compact policy training.
-
-Professional identity comes from the exact Slippi connect code stored in each
-canonical manifest. Ranked-anonymous rows use their three public rank labels.
-Nicknames are retained only for reports: they are not identity keys.
-"""
-
-from __future__ import annotations
+"""Player identity sidecars built from published replay manifests."""
 
 import gzip
 import hashlib
@@ -13,6 +6,7 @@ import json
 from collections import Counter
 from collections.abc import Iterable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,12 +16,12 @@ import numpy as np
 
 from hal import r2
 from hal.data.policy_schema import policy_replay_identity
-from hal.data.schema import Rank
+from hal.representation.player_identity import FIRST_CONNECT_CODE_ID
+from hal.representation.player_identity import MASKED_PLAYER_ID
+from hal.representation.player_identity import RANK_PLAYER_IDS
+from hal.representation.player_identity import PlayerVocabulary
 
 PLAYER_IDENTITY_SCHEMA_VERSION: Final[int] = 1
-MASKED_PLAYER_ID: Final[int] = 0
-FIRST_CONNECT_CODE_ID: Final[int] = int(Rank.MASTER) + 1
-RANK_PLAYER_IDS: Final[frozenset[int]] = frozenset({int(Rank.PLATINUM), int(Rank.DIAMOND), int(Rank.MASTER)})
 
 
 def _trimmed(value: object) -> str | None:
@@ -35,63 +29,6 @@ def _trimmed(value: object) -> str | None:
         return None
     value = value.strip()
     return value or None
-
-
-def encode_player_codes(codes: tuple[str, ...]) -> bytes:
-    """Encode the ordered connect-code vocabulary for checkpoint storage."""
-    return json.dumps(codes, ensure_ascii=False, separators=(",", ":")).encode()
-
-
-def decode_player_codes(payload: bytes) -> tuple[str, ...]:
-    """Decode and validate an ordered connect-code vocabulary."""
-    values = json.loads(payload)
-    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
-        raise ValueError("player-code vocabulary must be a list of non-empty strings")
-    codes = tuple(values)
-    if codes != tuple(sorted(set(codes))):
-        raise ValueError("player-code vocabulary must be sorted and unique")
-    return codes
-
-
-def player_code_sha256(codes: tuple[str, ...]) -> str:
-    return hashlib.sha256(encode_player_codes(codes)).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class PlayerVocabulary:
-    """The train-only identity vocabulary embedded in every O49 checkpoint."""
-
-    codes: tuple[str, ...]
-    display_names: tuple[str | None, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.codes != tuple(sorted(set(self.codes))):
-            raise ValueError("connect codes must be sorted and unique")
-        if self.display_names and len(self.display_names) != len(self.codes):
-            raise ValueError("one display name is required per connect code")
-
-    @property
-    def size(self) -> int:
-        return FIRST_CONNECT_CODE_ID + len(self.codes)
-
-    @property
-    def sha256(self) -> str:
-        return player_code_sha256(self.codes)
-
-    def id_for_code(self, connect_code: str) -> int:
-        """Resolve one exact connect code, raising rather than masking an OOV request."""
-        code = _trimmed(connect_code)
-        if code is None:
-            raise ValueError("connect code must be non-empty")
-        try:
-            return FIRST_CONNECT_CODE_ID + self.codes.index(code)
-        except ValueError as error:
-            raise KeyError(f"connect code {code!r} is absent from the training vocabulary") from error
-
-    def id_for_rank(self, rank: Rank) -> int:
-        if int(rank) not in RANK_PLAYER_IDS:
-            raise ValueError(f"rank conditioning requires Platinum, Diamond, or Master; got {rank!r}")
-        return int(rank)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +85,27 @@ class _ManifestRow:
     names: tuple[str | None, str | None]
 
 
+def _manifest_player_port(player: Mapping[str, Any]) -> int:
+    return int(player["port"])
+
+
+def _manifest_input_name(source: ManifestInput) -> str:
+    return source.name
+
+
+def _manifest_row_id(row: _ManifestRow) -> str:
+    return row.replay_id
+
+
+def _sidecar_lines(
+    header: Mapping[str, Any], rows: Sequence[_ManifestRow], code_to_id: Mapping[str, int]
+) -> Iterable[bytes]:
+    yield json.dumps(header, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    for row in sorted(rows, key=_manifest_row_id):
+        ids = [MASKED_PLAYER_ID if code is None else code_to_id.get(code, MASKED_PLAYER_ID) for code in row.codes]
+        yield json.dumps([row.replay_id, *ids], separators=(",", ":")).encode()
+
+
 def _manifest_rows(source: ManifestInput) -> tuple[list[_ManifestRow], str, dict[str, Counter[str]]]:
     rows: list[_ManifestRow] = []
     digest = hashlib.sha256()
@@ -162,7 +120,7 @@ def _manifest_rows(source: ManifestInput) -> tuple[list[_ManifestRow], str, dict
             if annotation is None:
                 continue
             split = str(annotation["split"])
-            players = sorted(raw.get("players", ()), key=lambda player: int(player["port"]))
+            players = sorted(raw.get("players", ()), key=_manifest_player_port)
             if len(players) != 2 or len({int(player["port"]) for player in players}) != 2:
                 raise ValueError(f"{source.path}:{line_number}: expected two distinct occupied ports")
             codes = (_trimmed(players[0].get("code")), _trimmed(players[1].get("code")))
@@ -194,7 +152,7 @@ def _write_gzip_lines(path: Path, lines: Iterable[bytes]) -> None:
 
 def build_player_identity_sidecar(inputs: Iterable[ManifestInput], output: Path) -> dict[str, Any]:
     """Build a deterministic professional replay-to-connect-code sidecar."""
-    sources = tuple(sorted(inputs, key=lambda item: item.name))
+    sources = tuple(sorted(inputs, key=_manifest_input_name))
     if not sources or len({source.name for source in sources}) != len(sources):
         raise ValueError("manifest inputs must be non-empty and have unique names")
 
@@ -252,13 +210,7 @@ def build_player_identity_sidecar(inputs: Iterable[ManifestInput], output: Path)
         "vocabulary_sha256": vocabulary.sha256,
     }
 
-    def lines() -> Iterable[bytes]:
-        yield json.dumps(header, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        for row in sorted(all_rows, key=lambda item: item.replay_id):
-            ids = [MASKED_PLAYER_ID if code is None else code_to_id.get(code, MASKED_PLAYER_ID) for code in row.codes]
-            yield json.dumps([row.replay_id, *ids], separators=(",", ":")).encode()
-
-    _write_gzip_lines(output, lines())
+    _write_gzip_lines(output, _sidecar_lines(header, all_rows, code_to_id))
     return {**header, "output": str(output), "sha256": hashlib.sha256(output.read_bytes()).hexdigest()}
 
 
@@ -339,12 +291,3 @@ def load_player_identity_artifact(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-
-
-def vocabulary_from_checkpoint_buffer(value: np.ndarray | bytes) -> PlayerVocabulary:
-    payload = value if isinstance(value, bytes) else np.asarray(value, dtype=np.uint8).tobytes()
-    return PlayerVocabulary(decode_player_codes(payload))
-
-
-def vocabulary_buffer(vocabulary: PlayerVocabulary) -> np.ndarray:
-    return np.frombuffer(encode_player_codes(vocabulary.codes), dtype=np.uint8).copy()
