@@ -34,11 +34,11 @@ from hal.data.policy_schema import policy_replay_identity
 from hal.data.policy_world_schema import POLICY_WORLD_FLOAT_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.replay_selection import Predicate
+from hal.data.replay_selection import build_predicates
 from hal.data.replay_stats import PlayerStatsMins
 from hal.data.schema import SCHEMA_VERSION
 from hal.policy import INCLUDED_STAGES
-from hal.scripts.filter import Predicate
-from hal.scripts.filter import build_predicates
 
 SPLITS: Final[tuple[Split, ...]] = ("train", "val", "test")
 POLICY_ID: Final[str] = "policy-world-v8"
@@ -166,7 +166,7 @@ def _file_digests(path: Path) -> tuple[str, str, int]:
     sha256 = hashlib.sha256()
     size = 0
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(8 << 20), b""):
+        while chunk := source.read(8 << 20):
             md5.update(chunk)
             sha256.update(chunk)
             size += len(chunk)

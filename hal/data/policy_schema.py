@@ -40,6 +40,13 @@ def policy_replay_identity(path: str) -> str:
     ).hexdigest()
 
 
+def _assign_slice_columns(
+    outs: list[dict[str, np.ndarray | int]], boundaries: np.ndarray, name: str, values: np.ndarray
+) -> None:
+    for out, part in zip(outs, np.split(values, boundaries), strict=True):
+        out[name] = part
+
+
 _FIELDS: Final[dict[str, tuple[int, int, int, int]]] = {
     # Slippi action state is an unsigned 16-bit engine value. Values above the
     # model's 512-row embedding still need to survive the storage round trip.
@@ -377,10 +384,6 @@ def decode_policy_replay_slices(
             out[name] = np.full(length, _scalar_int(source, name), dtype=np.int32)
         outs.append(out)
 
-    def assign(name: str, values: np.ndarray) -> None:
-        for out, part in zip(outs, np.split(values, boundaries), strict=True):
-            out[name] = part
-
     for prefix in PLAYER_PREFIXES:
         present = True
         if prefix.endswith("_nana"):
@@ -391,11 +394,11 @@ def decode_policy_replay_slices(
         for name in FLOAT_STATE_SUFFIXES:
             key = f"{prefix}_{name}"
             values = _select_ranges(np.asarray(source[key], dtype=np.float32), frames, present, key, ranges)
-            assign(key, values)
+            _assign_slice_columns(outs, boundaries, key, values)
         state_key = f"{prefix}_state"
         packed = _select_ranges(np.asarray(source[state_key]), frames, present, state_key, ranges)
         for name, values in unpack_player_state(packed).items():
-            assign(f"{prefix}_{name}", values)
+            _assign_slice_columns(outs, boundaries, f"{prefix}_{name}", values)
 
     for prefix in LEADER_PREFIXES:
         for name in ACTION_CHANNELS[:4]:
@@ -403,20 +406,24 @@ def decode_policy_replay_slices(
             values = np.asarray(source[key])
             if values.shape != (frames,):
                 raise ValueError(f"{key} has shape {values.shape}; expected {(frames,)}")
-            assign(key, unpack_stick(_select_ranges(values, frames, True, key, ranges)))
+            _assign_slice_columns(
+                outs, boundaries, key, unpack_stick(_select_ranges(values, frames, True, key, ranges))
+            )
         for name in ACTION_CHANNELS[4:6]:
             key = f"{prefix}_{name}"
             values = np.asarray(source[key])
             if values.shape != (frames,):
                 raise ValueError(f"{key} has shape {values.shape}; expected {(frames,)}")
-            assign(key, unpack_trigger(_select_ranges(values, frames, True, key, ranges)))
+            _assign_slice_columns(
+                outs, boundaries, key, unpack_trigger(_select_ranges(values, frames, True, key, ranges))
+            )
         button_key = f"{prefix}_buttons"
         packed_buttons = np.asarray(source[button_key])
         if packed_buttons.shape != (frames,):
             raise ValueError(f"{button_key} has shape {packed_buttons.shape}; expected {(frames,)}")
         selected_buttons = _select_ranges(packed_buttons, frames, True, button_key, ranges)
         for name, values in unpack_buttons(selected_buttons).items():
-            assign(f"{prefix}_button_{name}", values)
+            _assign_slice_columns(outs, boundaries, f"{prefix}_button_{name}", values)
     return tuple(outs)
 
 

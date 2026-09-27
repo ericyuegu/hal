@@ -8,8 +8,8 @@ from pathlib import Path
 import tyro
 
 from hal import streams
-from hal.training.player_identity import ManifestInput
-from hal.training.player_identity import build_player_identity_sidecar
+from hal.data.player_identity import ManifestInput
+from hal.data.player_identity import build_player_identity_sidecar
 
 
 def build(

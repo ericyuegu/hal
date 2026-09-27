@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from streaming import MDSWriter
 
-import hal.scripts.rematerialize_policy_world_v8 as rematerialize
+import hal.data.policy_world_v8 as rematerialize
 from hal.data.feature_stats import StatsAccumulator
 from hal.data.feature_stats import dump_sufficient_stats
 from hal.data.index import PlayerEntry
@@ -24,18 +24,18 @@ from hal.data.policy_schema import policy_replay_identity
 from hal.data.policy_world_schema import POLICY_WORLD_FLOAT_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_MDS_COLUMNS
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.policy_world_v8 import Boto3ObjectStore
+from hal.data.policy_world_v8 import CorpusJob
+from hal.data.policy_world_v8 import DirectoryObjectStore
+from hal.data.policy_world_v8 import StoredObject
+from hal.data.policy_world_v8 import inspect_source
+from hal.data.policy_world_v8 import publish_dataset
+from hal.data.policy_world_v8 import rematerialize_corpus
+from hal.data.policy_world_v8 import select_manifest
+from hal.data.replay_selection import build_predicates
 from hal.data.replay_stats import PlayerStats
 from hal.data.replay_stats import ReplayStats
 from hal.data.schema import SCHEMA_VERSION
-from hal.scripts.filter import build_predicates
-from hal.scripts.rematerialize_policy_world_v8 import Boto3ObjectStore
-from hal.scripts.rematerialize_policy_world_v8 import CorpusJob
-from hal.scripts.rematerialize_policy_world_v8 import DirectoryObjectStore
-from hal.scripts.rematerialize_policy_world_v8 import StoredObject
-from hal.scripts.rematerialize_policy_world_v8 import inspect_source
-from hal.scripts.rematerialize_policy_world_v8 import publish_dataset
-from hal.scripts.rematerialize_policy_world_v8 import rematerialize_corpus
-from hal.scripts.rematerialize_policy_world_v8 import select_manifest
 
 _LAUNCHER_SPEC = importlib.util.spec_from_file_location(
     "hal_rematerialize_policy_world_v8_modal",

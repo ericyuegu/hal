@@ -206,6 +206,13 @@ def _select(values: np.ndarray, frames: int, name: str, ranges: tuple[tuple[int,
     return np.concatenate([values[start:stop] for start, stop in ranges])
 
 
+def _assign_slice_columns(
+    outs: list[dict[str, np.ndarray | int]], boundaries: np.ndarray, name: str, values: np.ndarray
+) -> None:
+    for out, part in zip(outs, np.split(values, boundaries), strict=True):
+        out[name] = part
+
+
 def decode_policy_world_replay_slices(
     source: Mapping[str, object], ranges: tuple[tuple[int, int], ...]
 ) -> tuple[dict[str, np.ndarray | int], ...]:
@@ -215,10 +222,6 @@ def decode_policy_world_replay_slices(
         return ()
     lengths = [stop - start for start, stop in ranges]
     boundaries = np.cumsum(lengths)[:-1]
-
-    def assign(name: str, values: np.ndarray) -> None:
-        for out, part in zip(outs, np.split(values, boundaries), strict=True):
-            out[name] = part
 
     for prefix in ("p1", "p2"):
         rank = _scalar_int(source, f"{prefix}_rank")
@@ -237,13 +240,13 @@ def decode_policy_world_replay_slices(
         meta_name = f"item{slot}_meta"
         meta = _select(np.asarray(source[meta_name]), frames, meta_name, ranges)
         for suffix, values in _unpack_item_meta(meta, present).items():
-            assign(item_column(slot, suffix), values)
+            _assign_slice_columns(outs, boundaries, item_column(slot, suffix), values)
         for suffix in ITEM_FLOAT_SUFFIXES:
             name = item_column(slot, suffix)
             values = _select(np.asarray(source[name], dtype=np.float32), frames, name, ranges)
             if (~present & ~np.isnan(values)).any():
                 raise ValueError(f"{name} is populated for an absent item slot")
-            assign(name, values)
+            _assign_slice_columns(outs, boundaries, name, values)
     return tuple(outs)
 
 

@@ -39,11 +39,11 @@ from hal.data.extract import netplay_name
 from hal.data.replay_stats import ReplayStats
 from hal.data.replay_stats import compute_replay_stats
 from hal.data.schema import SCHEMA_VERSION
+from hal.data.slippi import slp_character_to_libmelee
 from hal.paths import REPO_DIR
 from hal.paths import repo_relative
 from hal.wire import VALID_LIBMELEE_PORTS
 from hal.wire import peppi_port_to_libmelee as _peppi_port_to_libmelee
-from hal.wire import slp_character_to_libmelee
 
 # slp Player.type values. EMPTY (unused port slot) is filtered out before
 # PlayerEntry is constructed, so it is not reachable here. Slip kept loose
@@ -153,6 +153,10 @@ class PlayerEntry:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PlayerEntry:
         return cls(**data)
+
+
+def _player_port(player: PlayerEntry) -> int:
+    return player.port
 
 
 @dataclass(frozen=True)
@@ -329,7 +333,7 @@ def extract_index_entry(
                 name=name,
             )
         )
-    players.sort(key=lambda p: p.port)
+    players.sort(key=_player_port)
 
     outcome: GameOutcome | None = None
     end = g.end
@@ -423,9 +427,8 @@ def read_jsonl(path: Path, *, verify_schema_version: bool = True) -> Iterator[Re
             if verify_schema_version and entry.schema_version != SCHEMA_VERSION:
                 raise ValueError(
                     f"index {path} entry schema_version={entry.schema_version} != "
-                    f"SCHEMA_VERSION={SCHEMA_VERSION}. Rebuild an index.jsonl "
-                    f"(`python -m hal.scripts.build_index ...`), or upgrade an MDS dataset and its "
-                    f"manifest.jsonl (`python -m hal.scripts.upgrade_mds --src <mds> --out <mds>`). "
+                    f"SCHEMA_VERSION={SCHEMA_VERSION}. Rebuild the index with "
+                    f"`python -m hal.scripts.build_index` and materialize a new MDS dataset. "
                     f"A stale index reads the wrong column set into the current code."
                 )
             yield entry

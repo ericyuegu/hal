@@ -23,6 +23,9 @@ from streaming import StreamingDataset
 from hal.data.archive import archive_member_path
 from hal.data.archive import iter_archive_members
 from hal.data.archive import parse_archive_member_path
+from hal.data.mds_publication import audit
+from hal.data.schema import check_schema_version
+from hal.data.streaming_compat import patch_streaming
 from hal.paths import DEV_ARCHIVE_PATH
 from hal.paths import repo_relative
 
@@ -227,6 +230,9 @@ def test_process_replays_archive_byte_equal(tmp_path: Path, tmpfs: Path) -> None
     m_arc = _by_basename(mds_arc / "manifest.jsonl")
     m_disk = _by_basename(mds_disk / "manifest.jsonl")
     assert set(m_arc) == set(m_disk)
+    for mds_dir, manifest in ((mds_arc, m_arc), (mds_disk, m_disk)):
+        audited = audit(str(mds_dir))
+        assert sum(audited["rows"].values()) == len(manifest)
 
     # Note: synthetic path != filesystem path → different replay_uuid →
     # the same .slp can land in different splits across the two modes.
@@ -238,12 +244,15 @@ def test_process_replays_archive_byte_equal(tmp_path: Path, tmpfs: Path) -> None
             for split in used
         }
 
+    patch_streaming()
     ds_arc = _open_splits(mds_arc, m_arc)
     ds_disk = _open_splits(mds_disk, m_disk)
     for name, a_entry in m_arc.items():
         a = ds_arc[a_entry["annotation"]["split"]][a_entry["annotation"]["mds_row_idx"]]
         d_entry = m_disk[name]
         d = ds_disk[d_entry["annotation"]["split"]][d_entry["annotation"]["mds_row_idx"]]
+        check_schema_version(a)
+        check_schema_version(d)
         for col in set(a) | set(d):
             assert _col_equal(a.get(col), d.get(col)), f"{name} {col}"
 

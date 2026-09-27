@@ -16,8 +16,7 @@ from hal.data.policy_world_schema import decode_policy_world_replay_slice
 from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.data.policy_world_schema import policy_row_from_world
 from hal.data.schema import Rank
-from hal.training.features import FeatureProjection
-from hal.training.replay_reservoir import PolicyReplayPackDataset
+from hal.data.streaming_compat import patch_streaming
 from hal.wire import ITEM_FIELD_SUFFIXES
 from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
@@ -25,6 +24,11 @@ from hal.wire import item_column
 _V7_TRAIN = (
     Path(__file__).resolve().parents[1] / "data" / "processed" / "ranked-anonymized-1" / "mds-v7-sub4" / "train"
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _prepare_streaming() -> None:
+    patch_streaming()
 
 
 @functools.lru_cache(maxsize=1)
@@ -93,28 +97,11 @@ def test_decoder_rejects_reserved_presence_and_metadata_bits() -> None:
         decode_policy_world_replay(encoded)
 
 
-def test_replay_reservoir_slice_decoder_exposes_rank_and_items() -> None:
+def test_world_slice_decoder_exposes_rank_and_items() -> None:
     encoded = encode_policy_world_replay(_source(), "ranked-0")
-    projection = FeatureProjection(
-        frozenset({"ego_rank", "item0_type", "item0_pos_x", "ego_main_stick_x"}),
-        derive_spatial=False,
-    )
-    packs = PolicyReplayPackDataset(
-        [encoded],
-        32,
-        2,
-        seed=7,
-        windows_per_replay=2,
-        schema_version=7,
-        projection=projection,
-        replay_format="policy-world",
-    )
-    pack = next(iter(packs))
-    assert pack.replay_id == "ranked-0"
-    assert pack.windows
-    for window in pack.windows:
-        assert {"ego_rank", "item0_type", "item0_pos_x", "ego_main_stick_x", "ctx_pad"} == window.keys()
-        assert len(window["item0_type"]) == 34
+    window = decode_policy_world_replay_slice(encoded, 0, 34)
+    assert {"p1_rank", "item0_type", "item0_pos_x", "p1_main_stick_x"} <= window.keys()
+    assert len(window["item0_type"]) == 34
 
     encoded = encode_policy_world_replay(_source(), "ranked-0")
     encoded["item0_meta"] = np.asarray(encoded["item0_meta"]).copy()

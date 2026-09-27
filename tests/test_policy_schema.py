@@ -25,10 +25,16 @@ from hal.data.policy_schema import unpack_player_state
 from hal.data.policy_schema import unpack_player_stock
 from hal.data.policy_schema import unpack_stick
 from hal.data.policy_schema import unpack_trigger
-from hal.training.features import ACTION_CHANNELS
+from hal.data.streaming_compat import patch_streaming
+from hal.representation.features import ACTION_CHANNELS
 from hal.wire import MASK_INT32
 
 _DEV_TRAIN = Path(__file__).resolve().parents[1] / "data" / "processed" / "dev" / "mds" / "train"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _prepare_streaming() -> None:
+    patch_streaming()
 
 
 def _bits(values: np.ndarray) -> np.ndarray:

@@ -5,15 +5,15 @@ from pathlib import Path
 from hal.data.index import PlayerEntry
 from hal.data.index import ReplayIndexEntry
 from hal.data.index import write_jsonl
+from hal.data.professional_replays import dedupe_index
+from hal.data.professional_replays import write_corpus_rank_overrides
+from hal.data.professional_replays import write_filterable_index
+from hal.data.professional_replays import write_owner_rank_overrides
+from hal.data.replay_selection import filter_index
 from hal.data.replay_stats import PlayerStats
 from hal.data.replay_stats import ReplayStats
 from hal.data.schema import SCHEMA_VERSION
 from hal.data.schema import Rank
-from hal.scripts.filter import filter_index
-from hal.scripts.prepare_professional import dedupe_index
-from hal.scripts.prepare_professional import write_corpus_rank_overrides
-from hal.scripts.prepare_professional import write_filterable_index
-from hal.scripts.prepare_professional import write_owner_rank_overrides
 
 
 def _entry(path: str, sha1: str, players: list[PlayerEntry]) -> ReplayIndexEntry:

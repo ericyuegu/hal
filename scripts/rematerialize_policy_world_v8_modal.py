@@ -19,11 +19,11 @@ import modal
 import tyro
 
 from hal import streams
-from hal.scripts.rematerialize_policy_world_v8 import POLICY_ID
-from hal.scripts.rematerialize_policy_world_v8 import Boto3ObjectStore
-from hal.scripts.rematerialize_policy_world_v8 import CorpusJob
-from hal.scripts.rematerialize_policy_world_v8 import independent_manifest_counts
-from hal.scripts.rematerialize_policy_world_v8 import rematerialize_corpus
+from hal.data.policy_world_v8 import POLICY_ID
+from hal.data.policy_world_v8 import Boto3ObjectStore
+from hal.data.policy_world_v8 import CorpusJob
+from hal.data.policy_world_v8 import independent_manifest_counts
+from hal.data.policy_world_v8 import rematerialize_corpus
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 REMOTE_ROOT: Final[Path] = Path("/opt/hal")
@@ -196,7 +196,11 @@ def _select_status_record(
             candidates = audited
     if not candidates:
         return None
-    return max(candidates, key=lambda candidate: str(candidate[1].get("updated_at", "")))
+    return max(candidates, key=_status_updated_at)
+
+
+def _status_updated_at(candidate: tuple[str, dict[str, object]]) -> str:
+    return str(candidate[1].get("updated_at", ""))
 
 
 def _record_from_success_marker(payload: dict[str, object], query: StatusQuery) -> dict[str, object]:
@@ -273,6 +277,20 @@ def _queries(jobs: tuple[CorpusJob, ...], run_id: str | None) -> tuple[StatusQue
     return tuple(StatusQuery(job.name, job.final_prefix, run_id) for job in jobs)
 
 
+def _audit_count(audit: dict[str, object], name: str) -> int:
+    value = audit.get(name)
+    if not isinstance(value, int):
+        raise ValueError(f"status audit has invalid {name}")
+    return value
+
+
+def _train_replays(audit: dict[str, object]) -> int:
+    raw_rows = audit.get("rows")
+    if not isinstance(raw_rows, dict):
+        raise ValueError("status audit has invalid rows")
+    return _audit_count(cast(dict[str, object], raw_rows), "train")
+
+
 def _status_summary(results: list[dict[str, object]]) -> dict[str, object]:
     states: Counter[str] = Counter()
     sources: dict[str, dict[str, object]] = {}
@@ -287,22 +305,10 @@ def _status_summary(results: list[dict[str, object]]) -> dict[str, object]:
         if isinstance(raw_audit, dict):
             sources[str(result["corpus"])] = cast(dict[str, object], raw_audit)
 
-    def audit_count(audit: dict[str, object], name: str) -> int:
-        value = audit.get(name)
-        if not isinstance(value, int):
-            raise ValueError(f"status audit has invalid {name}")
-        return value
-
-    def train_replays(audit: dict[str, object]) -> int:
-        raw_rows = audit.get("rows")
-        if not isinstance(raw_rows, dict):
-            raise ValueError("status audit has invalid rows")
-        return audit_count(cast(dict[str, object], raw_rows), "train")
-
     published = sum(bool(result["published"]) for result in results)
-    retained = sum(audit_count(audit, "retained") for audit in sources.values())
-    train_rows = sum(train_replays(audit) for audit in sources.values())
-    rejections = sum(audit_count(audit, "rejections") for audit in sources.values())
+    retained = sum(_audit_count(audit, "retained") for audit in sources.values())
+    train_rows = sum(_train_replays(audit) for audit in sources.values())
+    rejections = sum(_audit_count(audit, "rejections") for audit in sources.values())
     complete = len(results) == published == len(sources) == EXPECTED_CORPORA
     observed = {
         "rejections": rejections,
@@ -325,7 +331,7 @@ def _status_summary(results: list[dict[str, object]]) -> dict[str, object]:
         "retained": retained,
         "train_replays": train_rows,
         "rejections": rejections,
-        "train_frames": sum(audit_count(audit, "train_frames") for audit in sources.values()),
+        "train_frames": sum(_audit_count(audit, "train_frames") for audit in sources.values()),
         "sources": sources,
     }
 
