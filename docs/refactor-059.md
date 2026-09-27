@@ -102,7 +102,7 @@ individual archive moves and deletions.
 | `backends/history_decoder/policy.py` | `action_sequence_artifact.py`, `action_sequence_policy.py` |
 | `HistoryDecoderPolicy` | `ActionSequencePolicy` |
 | `backends/history_decoder/kv_cache.py` | `inference/kv_cache.py`, independent rows and prepared scratch buckets |
-| `GpuTokenHistory`, `GpuContextHistory` | `GpuObservationUpdates`, `GpuObservationWindow` in `gpu_observations.py` |
+| `GpuTokenHistory`, `GpuContextHistory` | `GpuObservationUpdates` retains cached update storage in `gpu_observations.py`. Delete unused dense GPU window helpers; the canonical dense executor retains bulk CPU window collation and transfer. |
 | `training/context_history.py` | `inference/observation_history.py`: `ObservationHistory` |
 | 059 `BF16Inference` | `inference/window_policy.py` |
 | `inference/worker.py` | `inference/engine.py`, `inference/client.py` |
@@ -169,7 +169,7 @@ are not the final architecture.
 | Control owner and symbol | Maintained owner and disposition |
 |---|---|
 | `HistoryDecoderPolicy` | `ActionSequencePolicy`; one stream record owns observation history, cache row, generation, consumed frame, and sampling identity. |
-| `GpuTokenHistory`, `GpuContextHistory` | `GpuObservationUpdates`, `GpuObservationWindow`; cached inference reuses prepared update storage. Dense GPU-window integration remains open, as described below. |
+| `GpuTokenHistory`, `GpuContextHistory` | `GpuObservationUpdates` retains cached update storage. Delete `GpuObservationWindow` and `GpuObservationWindowBatch` after the staging comparison below; the canonical dense executor keeps its existing bulk transfer path. |
 | Batch-one `KVCache` | Retain bounded rings and attention math; add `KVCachePool` for prepared rows and batch scratch. Only real rows are scattered back. |
 | 059 `BF16Inference` | `WindowPolicy`; `DenseWindowPredictionPolicy` supplies request/history ownership around the same dense executor. |
 | `RecedingHorizon` and `_SlotState` | Delete after moving history and fault capture into inference and timing into `ActionScheduler`. `PolicyBatchAdapter` is the sole bridge into the process harness. |
@@ -281,11 +281,11 @@ satisfy a gate. Raw large results belong in the existing run/artifact store.
 | E Cache | B1/2/4/8/16/32, Q1/2/4/decomposition, wraps, sparse/permutation/reset/identity/temp/prefix0/2/3/4, dummy rows, one weights copy | Focused CPU/CUDA independence tests and real-checkpoint B2 BF16 conditional KL pass. Complete capacity/profile matrix remains open. |
 | F Scheduling | Exact deadlines, wire prefix, whole-plan rejection, consumed cursor, malformed replies, fallback counters | Focused scheduler/client/engine tests pass. Official intended-action chunk trace matches control. Live qualification remains open. |
 | G Recovery | Exit/hang/brokenIPC/malformed/late/stalls/disconnect/rematch/partial-init; bounded detection, cleanup, restart | Focused lifecycle tests and real idle-process hang/exit recovery pass. The stopped GPU child terminates in 1.957 s, replacement readiness takes 31.081 s, and a second failure leaves the service unavailable. Live-match failure injection remains open. |
-| H Mechanical speed | Three alternating trials; loader warm200/measure500, training warm100/measure200, matched local concurrency/stride; throughput≥95%, memory≤105% | Final direct cached 3060 pairs pass throughput/memory limits. Loader, training, and dense-local measurements remain open. |
+| H Mechanical speed | Three alternating trials; loader warm200/measure500, training warm100/measure200, matched local concurrency/stride; throughput≥95%, memory≤105% | Final direct cached 3060 pairs and the reduced loader-core comparison pass throughput/memory limits. Production loader, training, and dense-local measurements remain open. |
 | I Batching | Ada B2 delivery≥5% faster than two serial B1 calls; 32-admitted/2-ready p95≤105% of2/2; capacity sweep | Real spawned-process 3060 B2 and sparse-load measurements pass these numerical limits. Required Ada measurement remains open. |
 | J Real time | 3060 p95≤12ms,p99<16.67ms, matched p95≤105%; Ada≥2 sessions; three2400-frame trials minus300; both30min and10matches/rematches | Direct calls and short process benchmarks are evidence only. Complete-path trials, hardware capacity, and both soaks remain open. |
 | K Gameplay | 96×7200-frame CPU protocol,p90,allboots complete,NSM regression≤.2,paired uncertainty; shared/separate weights H2H; separate new-profile results | Maintained commands/profiles are in place. Full matched gameplay runs and H2H qualification remain open. |
-| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,180 CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
+| L Repository | Ruff, ty, all maintained CPU tests, required emulator tests, GPU/service tests; frontend lock install/lint/type/build/queueAPI | Ruff, ty, all 1,201 current CPU tests, all seven required emulator cases, and frontend checks pass. Opt-in GPU checks pass at their recorded source revisions; complete service/hardware qualification remains open. |
 
 Cache FP32 tolerances remain trunk/history `atol=2e-6,rtol=2e-5` and decoder
 `atol=2e-5,rtol=2e-4`. CUDA BF16 conditional KL limits are mean ≤5e-4 nats and
@@ -420,6 +420,7 @@ Do not merge different revisions into a single claim of full qualification.
 | Cached local action timeline | The new scheduler matches the frozen delay-2 local transport at exact controller wire precision over startup, eight replans, and the final scheduled actions. The control record and capture-source digests are checked by `tests/test_cached_timeline_parity.py`; the capture helper is in the research archive. This establishes action timing, not matched emulator throughput. |
 | Netplay soak assessment | The harness now rejects malformed or mismatched match evidence, slow steady delivery/gameplay, skipped submissions, and plan exhaustion. Its version-2 result distinguishes measured checks from unmeasured qualification gates. Resource sampling finishes before cleanup/reporting. Focused tests: **21 passed**. Full CPU suite: **1,198 passed, 22 skipped, 18 deselected**, nine warnings, 93.96 s. Global Ruff format/lint and the maintained Ty target pass. Initial lint found an omitted `zip(strict=...)`; Ty found two return annotations that needed explicit narrowing. Both were fixed before the passing runs. Logs: `runs/refactor-059/soak-assessment-{focused,cpu,format,lint,types,types-fixed}.log`. This tool change does not substitute for a live soak. |
 | Loader measurement follow-up | Five cache-preparation tests pass. Global Ruff format/lint and the maintained Ty target pass. The complete CPU suite has **1,203 passed, 22 skipped, 18 deselected**, nine warnings, in 95.26 s; skip categories are unchanged. Logs: `runs/refactor-059/loader-cache-preparation-tests.log` and `runs/refactor-059/loader-followup-{cpu,format,lint,types}.log`. The selected R2 loader evidence archive passed download verification: 52 matching files, zero differences. Protected user-file hashes remain unchanged, and the accounting now contains 105 new maintained paths. |
+| Unused dense GPU storage retirement | The two retired helpers had no maintained caller. Their two implementation-only tests are removed; cached update tests now compare directly with the canonical CPU window representation. The retained cached buffer definitions have identical syntax trees. Focused GPU tests: **22 passed** in 9.70 s. Full CPU suite: **1,201 passed, 22 skipped, 18 deselected**, nine warnings, in 95.17 s. The maintained Ty target passes. Logs: `runs/refactor-059/window-retirement-{gpu,cpu,types}.log`. |
 
 The remote preprocessing fixture contains six replays from `dev.7z`, two per
 split, with no extraction failures. Its nine staged data objects total 842,904
@@ -508,12 +509,38 @@ limits for the reduced loader-core workload only. The
 [full report](../tests/fixtures/o59/loader_performance.md) includes every trial,
 startup, CPU, I/O, memory, source identity, and the selected R2 evidence archive.
 
-Dense storage ownership still needs work: `GpuObservationWindow` and its batch
-gather exist and have parity tests, but `DenseWindowPredictionPolicy` currently
-uses CPU window collation and transfer. Compare the complete dense path at the
-same concurrency before selecting the applicable storage path. The retained
-GPU helper alone is not evidence that the planned integration is complete or
-that it improves performance. Gates A and H remain open for this item.
+The canonical dense executor retains `ObservationHistory`, bulk CPU window
+collation, and transfer. `GpuObservationWindow` and `GpuObservationWindowBatch`
+had no maintained runtime caller and are removed. Cached inference still uses
+its prepared GPU update buffers; their retained definitions are unchanged.
+
+This differs from the proposed dense GPU-window integration. A staging-only
+comparison at source `90046957145317f4659c863dfb4da984669f5f06` used the full
+126-feature schema, context 256, two-frame updates, current 059 statistics and
+codebooks, and an RTX 3060. Three alternating pairs each warmed 144 updates and
+measured 128. Median staging times were:
+
+| Ready streams | Existing bulk CPU path | Mirrored GPU windows |
+|---|---:|---:|
+| 1 | 0.628 ms | 1.426 ms |
+| 32 | 2.939 ms | 42.912 ms |
+
+Feature and controller-token digests matched exactly across all trials. The
+mirrored path issued many small per-stream copies and quantization operations;
+it did not include the CPU fault-snapshot work an integration would also need.
+Retaining the working bulk path avoids that added cost and ownership. This
+diagnostic uses synthetic observations, excludes neural computation and IPC,
+and ran while a read-only corpus audit and an idle resident service existed.
+It does not close the full dense-local throughput gate H.
+
+The six-file evidence archive contains the capture script, all raw timings,
+statistics, syntax-tree comparison, and a hash manifest:
+`r2://hal/runs/refactor-059/evidence/window-storage-1afaf83f849a4870d5e030b334dc15d39ba3ce7108943b4ac6afeaf5baabc7c7/`.
+Manifest SHA-256 is
+`1afaf83f849a4870d5e030b334dc15d39ba3ce7108943b4ac6afeaf5baabc7c7`;
+download verification found six matching files and zero differences. The raw
+measurement SHA-256 is
+`ec6b34b5700c1c035eb5a56e99a72329a334efaadcc3a2e94c207ee2fa7f4c9b`.
 
 ## Repository trees
 
