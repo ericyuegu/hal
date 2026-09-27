@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import multiprocessing as mp
 import os
 import platform
@@ -26,15 +27,18 @@ from datetime import UTC
 from datetime import datetime
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from typing import cast
 
 import melee
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
+from hal.eval.scheduling import FrameTiming
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobCredentials
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.domain import validate_player_code
+from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import RunnerState
 from hal.netplay_service.health import read_runner_status
 from hal.netplay_service.queue import QueueStore
@@ -88,6 +92,183 @@ class ShutdownResult:
     forced_runner: bool
     forced_descendants: tuple[int, ...]
     remaining_descendants: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MatchAssessment:
+    measurement: str
+    measurement_sha256: str
+    gameplay_seconds: float
+    steady_start_frame: int
+    steady_frame_count: int
+    steady_game_fps: float
+    steady_inference_count: int
+    steady_inference_p95_ms: float
+    steady_inference_p99_ms: float
+    startup_count_by_event: dict[str, int]
+    steady_count_by_event: dict[str, int]
+    failures: tuple[str, ...]
+
+
+_STEADY_START_FRAME = 300
+_SCHEDULE_COUNTERS = (
+    "deadline_misses",
+    "prefix_mismatches",
+    "exhausted_chunks",
+    "neutral_fallback_frames",
+    "submission_gaps",
+    "transport_corrections",
+)
+_UNMEASURED_GATES = (
+    "Post-preparation compilation and CUDA graph capture counts",
+    "Accepted-plan validity traces (rejection counters do not prove this)",
+    "Process, thread, and memory stability across rematches",
+    "Three same-day matched control/candidate delivery trials",
+)
+
+
+def _mapping(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{name} must be an object")
+    return cast(Mapping[str, object], value)
+
+
+def _integer(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def _number(value: object, name: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return float(value)
+
+
+def _array(value: object, name: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be an array")
+    return cast(list[object], value)
+
+
+def _assess_match(
+    path: Path,
+    *,
+    reservation_id: str,
+    game_number: int,
+    delay: int,
+    desired_return: float,
+    bundle_sha256: str,
+    source_git_sha: str,
+) -> MatchAssessment:
+    payload = _mapping(json.loads(path.read_text()), "match measurement")
+    timing = FrameTiming(delay, 1, delay + 1, 4, 8)
+    expected = {
+        "schema_version": 1,
+        "reservation_id": reservation_id,
+        "game_number": game_number,
+        "policy_bundle_sha256": bundle_sha256,
+        "source_git_sha": source_git_sha,
+        "desired_return": desired_return,
+        "observation_mode": "first_seen_speculative",
+        "timing": asdict(timing),
+    }
+    if any(payload.get(key) != value for key, value in expected.items()) or "failure" in payload:
+        raise ValueError(f"{path}: match identity or timing profile differs from the qualification run")
+    health = ChunkHealth.from_payload(payload.get("schedule"))
+    if health.schedule != timing:
+        raise ValueError(f"{path}: scheduling counters use a different timing profile")
+    frames = tuple(_integer(value, "frame ID") for value in _array(payload.get("frame_ids"), "frame_ids"))
+    intervals = tuple(
+        _number(value, "frame interval")
+        for value in _array(payload.get("frame_interval_seconds"), "frame_interval_seconds")
+    )
+    # The last capture is the menu frame that ends play, not another gameplay frame.
+    if len(frames) != len(intervals) + 1 or len(frames) < 3 or frames[:-1] != tuple(range(len(frames) - 1)):
+        raise ValueError(f"{path}: frame intervals do not cover consecutive gameplay observations")
+    inference_frames = tuple(
+        _integer(value, "inference source frame")
+        for value in _array(payload.get("inference_source_frames"), "inference_source_frames")
+    )
+    inference_seconds = tuple(
+        _number(value, "inference seconds") for value in _array(payload.get("inference_seconds"), "inference_seconds")
+    )
+    if len(inference_frames) != len(inference_seconds) or any(
+        following <= previous for previous, following in zip(inference_frames, inference_frames[1:], strict=False)
+    ):
+        raise ValueError(f"{path}: inference timings have missing or repeated source frames")
+    if any(frame > frames[-2] for frame in inference_frames):
+        raise ValueError(f"{path}: inference source frame follows the last controller choice")
+
+    startup_counts = dict.fromkeys(_SCHEDULE_COUNTERS, 0)
+    previous_counts = startup_counts.copy()
+    previous_frame: int | None = None
+    events = _array(payload.get("schedule_events"), "schedule_events")
+    if not events:
+        raise ValueError(f"{path}: missing scheduling events")
+    inference_failed = False
+    for raw in events:
+        event = _mapping(raw, "schedule event")
+        frame = _integer(event.get("choice_frame"), "choice frame")
+        if previous_frame is not None and frame <= previous_frame:
+            raise ValueError(f"{path}: scheduling event frames are not increasing")
+        if event.get("phase") != ("countdown" if frame < 0 else "gameplay"):
+            raise ValueError(f"{path}: scheduling event has an incorrect phase")
+        if event.get("target_frame") != frame + delay + 1 or frame > frames[-2]:
+            raise ValueError(f"{path}: scheduling event has an incorrect controller target")
+        counts = {name: _integer(event.get(name), name) for name in _SCHEDULE_COUNTERS}
+        if any(counts[name] < previous_counts[name] for name in _SCHEDULE_COUNTERS):
+            raise ValueError(f"{path}: scheduling counters decreased")
+        if not isinstance(event.get("inference_failed"), bool):
+            raise ValueError(f"{path}: missing inference failure status")
+        inference_failed = inference_failed or event["inference_failed"] is True
+        if frame < _STEADY_START_FRAME:
+            startup_counts = counts
+        previous_counts = counts
+        previous_frame = frame
+    if previous_counts != {name: getattr(health, name) for name in _SCHEDULE_COUNTERS}:
+        raise ValueError(f"{path}: final scheduling counters differ from the event trace")
+    if payload.get("controller_submission_gaps") != health.submission_gaps:
+        raise ValueError(f"{path}: submission gap totals differ")
+    steady_counts = {name: previous_counts[name] - startup_counts[name] for name in _SCHEDULE_COUNTERS}
+    steady_intervals = intervals[_STEADY_START_FRAME:-1]
+    steady_inference = sorted(
+        seconds
+        for frame, seconds in zip(inference_frames, inference_seconds, strict=True)
+        if frame >= _STEADY_START_FRAME
+    )
+    if not steady_intervals or sum(steady_intervals) <= 0 or not steady_inference:
+        raise ValueError(f"{path}: no steady gameplay or inference measurements after frame {_STEADY_START_FRAME}")
+    fps = len(steady_intervals) / sum(steady_intervals)
+    p95 = steady_inference[math.ceil(0.95 * len(steady_inference)) - 1]
+    p99 = steady_inference[math.ceil(0.99 * len(steady_inference)) - 1]
+    failures = []
+    if fps < 59.5:
+        failures.append("steady gameplay below 59.5 FPS")
+    if delay == 2 and p95 > 0.012:
+        failures.append("steady inference delivery p95 exceeds 12 ms")
+    if p99 >= 1 / 60:
+        failures.append("steady inference delivery p99 reaches the one-frame allowance")
+    if health.submission_gaps:
+        failures.append("controller submission frames were skipped")
+    if steady_counts["exhausted_chunks"] or steady_counts["neutral_fallback_frames"]:
+        failures.append("action plans were exhausted or neutral fallback occurred after startup")
+    if inference_failed:
+        failures.append("inference failed during the match")
+    return MatchAssessment(
+        str(path),
+        _sha256(path),
+        _number(payload.get("gameplay_seconds"), "gameplay seconds"),
+        _STEADY_START_FRAME,
+        len(steady_intervals),
+        fps,
+        len(steady_inference),
+        p95 * 1000,
+        p99 * 1000,
+        startup_counts,
+        steady_counts,
+        tuple(failures),
+    )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -201,7 +382,10 @@ class _ResourceSampler:
 
     def __exit__(self, *_exc: object) -> None:
         self.stop.set()
-        self.thread.join(timeout=2)
+        # A GPU sample can be inside the three-second nvidia-smi timeout.
+        self.thread.join(timeout=4)
+        if self.thread.is_alive():
+            raise RuntimeError("qualification resource sampler did not stop")
 
     def _collect(self) -> None:
         while not self.stop.is_set():
@@ -389,6 +573,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
     )
     process = mp.get_context("spawn").Process(target=run_netplay_service, args=(runner,), name="hal-059-qualification")
     games: list[PeerGame] = []
+    assessments: list[MatchAssessment] = []
     startup_seconds: float | None = None
     failure: str | None = None
     primary_error: BaseException | None = None
@@ -419,19 +604,30 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                 ) as peer:
                     setup = NetplaySetup(melee.Character.FOX, bot_code, costume=1)
                     first = peer.start_match(setup)
+                    game_number = 1
                     while True:
-                        game_number = len(games) + 1
                         game = _play_peer_game(peer, first, credentials, game_number, config.smoke_frames)
                         games.append(game)
-                        _write_json(config.output / f"peer-game-{game_number:03d}.json", asdict(game))
+                        _write_json(config.output / f"peer-game-{len(games):03d}.json", asdict(game))
                         if not game.ended:
-                            return {"smoke": True, "frames": game.frames, "startup_seconds": startup_seconds}
+                            break
                         job = _wait_job(store, credentials, process, 60)
                         if job.status not in (JobStatus.REMATCH_WAIT, JobStatus.COMPLETE):
                             raise RuntimeError(f"reservation ended as {job.status.value}: {job.error_code}")
                         measurement = config.output / "match-measurements" / f"{job.id}-game-{job.game_count}.json"
-                        payload = json.loads(measurement.read_text())
-                        gameplay_seconds += float(payload["gameplay_seconds"])
+                        assessment = _assess_match(
+                            measurement,
+                            reservation_id=job.id,
+                            game_number=game_number,
+                            delay=config.delay,
+                            desired_return=config.desired_return,
+                            bundle_sha256=bundle_sha256,
+                            source_git_sha=source_sha,
+                        )
+                        assessments.append(assessment)
+                        gameplay_seconds += assessment.gameplay_seconds
+                        if assessment.failures:
+                            raise RuntimeError(f"match failed measured qualification checks: {assessment.failures}")
                         if job.status is JobStatus.COMPLETE:
                             break
                         assert job.actual_stage is not None
@@ -445,15 +641,13 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                         setup = NetplaySetup(
                             melee.Character.FOX, bot_code, costume=1, stage=melee.Stage[job.actual_stage]
                         )
+                        game_number = job.game_count + 1
                         first = peer.start_rematch(setup)
-                if len(games) >= config.minimum_games and gameplay_seconds >= config.minimum_gameplay_seconds:
+                is_complete = (
+                    len(games) >= config.minimum_games and gameplay_seconds >= config.minimum_gameplay_seconds
+                )
+                if config.smoke_frames is not None or is_complete:
                     break
-            return {
-                "smoke": False,
-                "games": len(games),
-                "gameplay_seconds": gameplay_seconds,
-                "startup_seconds": startup_seconds,
-            }
     except BaseException as error:
         primary_error = error
         failure = f"{type(error).__name__}: {error}"
@@ -461,33 +655,47 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
     finally:
         observed_processes = {} if sampler is None else sampler.owned_processes
         shutdown = _terminate(process, observed_processes)
-        cleanup_error: RuntimeError | None = None
+        finalization_error: RuntimeError | None = None
+        sources_unchanged = _source_hashes() == source_hashes
         if shutdown.remaining_descendants:
-            cleanup_error = RuntimeError(f"qualification descendants remain alive: {shutdown.remaining_descendants}")
+            finalization_error = RuntimeError(
+                f"qualification descendants remain alive: {shutdown.remaining_descendants}"
+            )
+        elif not sources_unchanged:
+            finalization_error = RuntimeError("runtime sources changed during qualification")
+        if finalization_error is not None:
             if failure is None:
-                failure = str(cleanup_error)
+                failure = str(finalization_error)
             elif primary_error is not None:
-                primary_error.add_note(str(cleanup_error))
+                primary_error.add_note(str(finalization_error))
         if sampler is not None:
             sampler.sample()
         samples = [] if sampler is None else [asdict(sample) for sample in sampler.samples]
         _write_json(config.output / "resources.json", samples)
-        _write_json(
-            config.output / "run-result.json",
-            {
-                "schema_version": 1,
-                "ended_at": datetime.now(UTC).isoformat(),
-                "games_observed": len(games),
-                "gameplay_seconds": gameplay_seconds,
-                "startup_seconds": startup_seconds,
-                "failure": failure,
-                "runner_exitcode": process.exitcode,
-                "shutdown": asdict(shutdown),
-                "source_files_unchanged": _source_hashes() == source_hashes,
-            },
-        )
-        if cleanup_error is not None and primary_error is None:
-            raise cleanup_error
+        has_soak_duration = len(assessments) >= 10 and gameplay_seconds >= 1800
+        report: dict[str, object] = {
+            "schema_version": 2,
+            "qualification_status": "failed" if failure is not None else "incomplete",
+            "smoke": config.smoke_frames is not None,
+            "measured_checks_passed": failure is None and config.smoke_frames is None and has_soak_duration,
+            "unmeasured_gates": [
+                *_UNMEASURED_GATES,
+                *([] if has_soak_duration else ["At least ten completed matches and 1800 gameplay seconds"]),
+            ],
+            "match_assessments": [asdict(assessment) for assessment in assessments],
+            "ended_at": datetime.now(UTC).isoformat(),
+            "games_observed": len(games),
+            "gameplay_seconds": gameplay_seconds,
+            "startup_seconds": startup_seconds,
+            "failure": failure,
+            "runner_exitcode": process.exitcode,
+            "shutdown": asdict(shutdown),
+            "source_files_unchanged": sources_unchanged,
+        }
+        _write_json(config.output / "run-result.json", report)
+        if finalization_error is not None and primary_error is None:
+            raise finalization_error
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> None:

@@ -137,3 +137,23 @@ The original KV-cache and runtime measurements remain in
 [KV-cache evidence](kv-cache.md) and [runtime validation](runtime-validation.md)
 with their recorded hardware and protocol labels. The current acceptance
 record is [refactor-059.md](refactor-059.md).
+
+`scripts/qualify_netplay_059.py` runs a separate service and a neutral-input
+peer with two explicit Slippi accounts and separate ports. Run it under an X
+display (for example, `xvfb-run -a`); accounts must not belong to another live
+runner. The default workload requires ten completed matches and 1,800 gameplay
+seconds. It retains local replays and does not publish them.
+
+The harness validates each match's bundle, source revision, timing profile,
+frame sequence, latency samples, and scheduling counters. It excludes the first
+300 frames and the terminal menu interval from steady measurements. Missing or
+malformed evidence fails the run. Delivery p99 must remain below one frame;
+delay-2 p95 must be at most 12 ms. Steady gameplay must reach 59.5 FPS, with no
+skipped controller submissions or action-plan exhaustion after startup.
+
+The version-2 `run-result.json` reports measured failures and lists gates still
+unmeasured. Its overall qualification status remains incomplete until separate
+evidence establishes compilation/capture counts, accepted-plan validity,
+resource stability, and the matched control trials. Deadline and prefix
+rejection counts are reported separately; they do not mean invalid plans were
+accepted. A short `--smoke-frames` run cannot pass the soak checks.

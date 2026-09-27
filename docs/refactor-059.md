@@ -50,7 +50,7 @@ source tree. No repository or global hook configuration was changed.
 | `6e22bf91` | Frontend dependency cleanup |
 | `da58c965` | Reproducible qualification capture and comparison tools |
 | `537a0fa2` | Generated controls and measured parity evidence |
-| Final documentation commit | Accounting, controls, and acceptance evidence |
+| `590aa57c` | Accounting, controls, and acceptance evidence |
 
 The protected user edits are outside this series. The commits do not indicate
 that the remaining hardware, artifact, gameplay, or soak gates have passed.
@@ -416,6 +416,7 @@ Do not merge different revisions into a single claim of full qualification.
 | Process and arena cleanup | The 42-test IPC/process sequence passed. Additional process construction/start failure cases, including interruption, passed; they are included in the final complete CPU suite. Current float arena sizes remain 156,352, 9,408, and 472,448 bytes for the three recorded control geometries. `transport-retirement-tests.log` and `worker-initialization-cleanup.log` under `runs/refactor-059/`. |
 | Commit-series validation | Explicit Ruff format/lint and the full maintained Ty target pass. `uv run pytest -q -ra -m "not integration"` passed **1,180 tests**, with 22 CUDA/opt-in skips, 18 integration deselections, and nine warnings, in 93.75 s. The required replay/cleanup integration command passed **seven tests**, with two non-integration deselections and six fork warnings, in 55.95 s. Logs are under `runs/refactor-059/commit-series/`. The initial format check found one extra blank line in a test; the corrected check passed. |
 | Cached local action timeline | The new scheduler matches the frozen delay-2 local transport at exact controller wire precision over startup, eight replans, and the final scheduled actions. The control record and capture-source digests are checked by `tests/test_cached_timeline_parity.py`; the capture helper is in the research archive. This establishes action timing, not matched emulator throughput. |
+| Netplay soak assessment | The harness now rejects malformed or mismatched match evidence, slow steady delivery/gameplay, skipped submissions, and plan exhaustion. Its version-2 result distinguishes measured checks from unmeasured qualification gates. Resource sampling finishes before cleanup/reporting. Focused tests: **21 passed**. Full CPU suite: **1,198 passed, 22 skipped, 18 deselected**, nine warnings, 93.96 s. Global Ruff format/lint and the maintained Ty target pass. Initial lint found an omitted `zip(strict=...)`; Ty found two return annotations that needed explicit narrowing. Both were fixed before the passing runs. Logs: `runs/refactor-059/soak-assessment-{focused,cpu,format,lint,types,types-fixed}.log`. This tool change does not substitute for a live soak. |
 
 The remote preprocessing fixture contains six replays from `dev.7z`, two per
 split, with no extraction failures. Its nine staged data objects total 842,904
