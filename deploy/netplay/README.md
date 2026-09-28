@@ -44,8 +44,12 @@ One-time Cloudflare setup:
 
 1. The `20xx.xyz` zone is on the account. `wrangler.jsonc` routes `20xx.xyz/v1/*`
    to this Worker.
-2. Create two Cloudflare Access applications: `20xx.xyz/v1/runner/*` with one
-   service token per GPU box, and `20xx.xyz/v1/admin/*` for the owner's login.
+2. Create two Cloudflare Access applications:
+   - `20xx.xyz/v1/runner/*` with a Service Auth policy and one service token per GPU box.
+   - `20xx.xyz/v1/admin/*` with two policies: the owner's login, for the browser, and Service Auth for
+     one `hal-netplay-admin` service token, for the CLI. Put that token in `.env` as
+     `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET`, beside
+     `HAL_NETPLAY_ADMIN_TOKEN`. Runners never receive it.
 3. Store the token digests:
 
    ```sh

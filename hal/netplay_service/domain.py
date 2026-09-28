@@ -1,9 +1,11 @@
 """Validated values shared by the netplay API and runner."""
 
+import json
 import math
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Final
 from typing import cast
 
@@ -346,3 +348,17 @@ def _choices(value: object, name: str) -> tuple[Choice, ...]:
         entry = cast(dict[str, object], item)
         choices.append(Choice(_text(entry["value"], name), _text(entry["label"], name)))
     return tuple(choices)
+
+
+def account_connect_code(path: Path) -> str:
+    """Read the connect code from a Slippi user.json without falling back to defaults."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read Slippi account JSON {path}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"Slippi account JSON {path} must contain an object")
+    value = payload.get("connectCode")
+    if not isinstance(value, str):
+        raise ValueError(f"Slippi account JSON {path} has no connectCode")
+    return validate_player_code(value)

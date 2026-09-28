@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from hal.netplay_service.domain import CHARACTERS
@@ -5,6 +8,7 @@ from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Choice
 from hal.netplay_service.domain import PolicyConfig
+from hal.netplay_service.domain import account_connect_code
 
 
 def _config() -> PolicyConfig:
@@ -63,3 +67,15 @@ def test_policy_config_rejects_duplicate_choices() -> None:
 def _fields() -> dict[str, object]:
     config = _config()
     return {name: getattr(config, name) for name in PolicyConfig.__dataclass_fields__}
+
+
+def test_account_connect_code_is_read_without_fallback(tmp_path: Path) -> None:
+    account = tmp_path / "user.json"
+    account.write_text(json.dumps({"connectCode": "HAL#1", "playKey": "secret"}))
+    assert account_connect_code(account) == "HAL#1"
+    account.write_text(json.dumps({"connectCode": "hal#1"}))
+    with pytest.raises(ValueError, match="exact uppercase"):
+        account_connect_code(account)
+    account.write_text("[]")
+    with pytest.raises(ValueError, match="must contain an object"):
+        account_connect_code(account)
