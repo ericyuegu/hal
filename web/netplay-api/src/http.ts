@@ -141,6 +141,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       if (method === "POST" && path === "/v1/runner/sessions") {
         return respond(await queue.startSession(await readBody(request)));
       }
+      if (method === "GET" && path === "/v1/runner/policy") return respond(await queue.activePolicy());
       const session = path.match(/^\/v1\/runner\/sessions\/([^/]+)(\/status|\/claim|\/drain)?$/);
       if (session) {
         const [, id, suffix] = session as [string, string, string | undefined];

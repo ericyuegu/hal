@@ -241,6 +241,10 @@ export class Queue extends DurableObject<Env> {
 
   // Runner routes
 
+  async activePolicy(): Promise<ApiResult> {
+    return this.run(() => this.requirePolicy());
+  }
+
   async startSession(raw: unknown): Promise<ApiResult> {
     const id = randomToken(12);
     return this.run(() => {
