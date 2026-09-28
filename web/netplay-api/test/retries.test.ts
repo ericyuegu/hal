@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { CREATE, POLICY, START as T0, call, publish, report, resetQueue, runAlarm, seedAccounts, setClock } from "./helpers";
 
 const SESSION = "retry-session-0001";
-const START = { session_id: SESSION, host: "box", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 2, stream: false };
+const START = { protocol_version: 1, session_id: SESSION, host: "box", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 2, stream: false };
 
 beforeEach(async () => {
   await resetQueue();
@@ -34,6 +34,16 @@ describe("retried runner calls", () => {
     await call("DELETE", `/v1/runner/sessions/${SESSION}`, { runner: true });
     expect(await start()).toMatchObject({ status: 410, body: { detail: "session has ended" } });
     expect((await start({ ...START, session_id: "short" })).status).toBe(422);
+  });
+
+  it("refuses another runner protocol before creating or repeating a session", async () => {
+    const refused = { status: 409, body: { detail: "runner protocol 2 is not the Worker's 1" } };
+    expect(await start({ ...START, protocol_version: 2 })).toMatchObject(refused);
+    expect((await call("GET", "/v1/admin/status", { admin: true })).body.sessions).toHaveLength(0);
+    await start();
+    expect(await start({ ...START, protocol_version: 2 })).toMatchObject(refused);
+    const { protocol_version: _, ...unversioned } = START;
+    expect((await start(unversioned)).status).toBe(422);
   });
 
   it("returns the slot's leased job when a claim is repeated", async () => {

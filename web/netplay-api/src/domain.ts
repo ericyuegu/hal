@@ -10,6 +10,10 @@ export const SESSION_LIVE_SECONDS = 5;
 export const EVENT_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 export const QUEUE_CAP = 20;
 export const MAX_BODY_BYTES = 16 * 1024;
+// The runner parses job bodies strictly, so any change to a runner route's
+// request or response shape bumps this with RUNNER_PROTOCOL_VERSION in
+// hal/netplay_service/queue_client.py.
+export const RUNNER_PROTOCOL_VERSION = 1;
 
 export type JobStatus =
   | "queued"

@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   HttpError,
   QUEUE_CAP,
+  RUNNER_PROTOCOL_VERSION,
   TERMINAL_STATUSES,
   randomToken,
   sha256Hex,
@@ -277,8 +278,13 @@ export class Queue extends DurableObject<Env> {
 
   async startSession(raw: unknown): Promise<ApiResult> {
     return this.run(() => {
-      const names = ["session_id", "host", "bundle_sha256", "git_sha", "slots", "stream"];
+      const names = ["protocol_version", "session_id", "host", "bundle_sha256", "git_sha", "slots", "stream"];
       const value = fields(raw, names, names);
+      // Checked before the repeat-start path, so no session ever runs a different protocol.
+      const protocol = int(value.protocol_version, "protocol_version");
+      if (protocol !== RUNNER_PROTOCOL_VERSION) {
+        throw new HttpError(409, `runner protocol ${protocol} is not the Worker's ${RUNNER_PROTOCOL_VERSION}`);
+      }
       const id = str(value.session_id, "session_id");
       if (!SESSION_ID.test(id)) throw new HttpError(422, "session_id must be 16 to 64 URL-safe characters");
       const input: StartRequest = {

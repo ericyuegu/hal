@@ -2,6 +2,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -18,6 +19,7 @@ from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import aggregate_runner_status
 from hal.netplay_service.queue_client import RETRY_DELAYS_SECONDS
+from hal.netplay_service.queue_client import RUNNER_PROTOCOL_VERSION
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
 from hal.netplay_service.queue_client import QueueEndpoint
@@ -284,6 +286,7 @@ def test_start_session_reads_policy_and_one_account_per_slot() -> None:
     assert started.session_id == "session-00000001" and started.policy == POLICY
     assert started.accounts[0].connect_code == "BOT0#1"
     assert json.loads(script.requests[0].content) == {
+        "protocol_version": RUNNER_PROTOCOL_VERSION,
         "session_id": "session-00000001",
         "host": "box",
         "bundle_sha256": "a" * 64,
@@ -291,6 +294,11 @@ def test_start_session_reads_policy_and_one_account_per_slot() -> None:
         "slots": 1,
         "stream": False,
     }
+
+
+def test_runner_protocol_matches_the_worker() -> None:
+    domain = (Path(__file__).parents[1] / "web/netplay-api/src/domain.ts").read_text()
+    assert f"export const RUNNER_PROTOCOL_VERSION = {RUNNER_PROTOCOL_VERSION};" in domain
 
 
 def test_start_session_rejects_a_missing_or_misnumbered_account() -> None:

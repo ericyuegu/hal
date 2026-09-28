@@ -123,7 +123,7 @@ describe("golden transcripts from the Python service", () => {
       for (const [alias, slots] of needed) {
         const started = await call("POST", "/v1/runner/sessions", {
           runner: true,
-          body: { session_id: crypto.randomUUID(), host: alias, bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots, stream: false },
+          body: { protocol_version: 1, session_id: crypto.randomUUID(), host: alias, bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots, stream: false },
         });
         sessions.set(alias, started.body.session_id);
         await report(started.body.session_id, slots);
@@ -131,7 +131,7 @@ describe("golden transcripts from the Python service", () => {
       if (needed.size === 0) {
         const started = await call("POST", "/v1/runner/sessions", {
           runner: true,
-          body: { session_id: crypto.randomUUID(), host: "capacity", bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots: 1, stream: false },
+          body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "capacity", bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots: 1, stream: false },
         });
         sessions.set("capacity", started.body.session_id);
         await report(started.body.session_id, 1);

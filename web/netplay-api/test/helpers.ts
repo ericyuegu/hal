@@ -131,7 +131,7 @@ export async function report(session: string, slots: number, healthy = slots): P
 export async function startSession(slots = 2): Promise<string> {
   const result = await call("POST", "/v1/runner/sessions", {
     runner: true,
-    body: { session_id: crypto.randomUUID(), host: "test-box", bundle_sha256: POLICY.bundle_sha256, git_sha: "abc123", slots, stream: false },
+    body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "test-box", bundle_sha256: POLICY.bundle_sha256, git_sha: "abc123", slots, stream: false },
   });
   if (result.status !== 201) throw new Error(`session failed: ${JSON.stringify(result.body)}`);
   await report(result.body.session_id, slots);

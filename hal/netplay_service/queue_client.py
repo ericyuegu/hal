@@ -31,6 +31,10 @@ from hal.netplay_service.queue_contract import SessionEndedError
 
 # Every runner and admin route is idempotent at the Worker (a repeat after a lost
 # response returns the first result), so any request may be retried. A 4xx is final.
+# Must equal RUNNER_PROTOCOL_VERSION in web/netplay-api/src/domain.ts; the two change
+# together with any change to a runner route's request or response shape, because
+# parse_job refuses a job body with any field added or removed.
+RUNNER_PROTOCOL_VERSION: Final = 1
 RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0, 2.0, 4.0)
 _TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(10.0, connect=5.0)
 # The bearer token travels in the clear over http, so http is only for a Worker on this machine.
@@ -442,6 +446,7 @@ class RunnerClient:
         self, *, session_id: str, host: str, bundle_sha256: str, git_sha: str, slots: int, wants_stream: bool
     ) -> StartedSession:
         body = {
+            "protocol_version": RUNNER_PROTOCOL_VERSION,
             "session_id": session_id,
             "host": host,
             "bundle_sha256": bundle_sha256,
