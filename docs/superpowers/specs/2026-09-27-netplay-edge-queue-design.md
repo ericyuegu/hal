@@ -39,6 +39,10 @@ nothing is lost between the two.
 | Box configuration | Three secrets plus `--slots N`; everything else is fetched and hash-checked |
 | Bot Slippi accounts | Leased to sessions by the queue |
 | Hosts | This machine (RTX 3060) and Google Cloud G4 (1x RTX PRO 6000 Blackwell); Modal later |
+| Twitch stream | One stream at a time, leased by the queue to one session, which streams its slot 0 |
+| Stream idle behavior | New reservations go to the streamed slot first; an idle card shows between games |
+| Stream consent | Every game on the streamed slot is broadcast; the page says so; the overlay never shows a connect code |
+| Stream audio | Game audio on the streamed slot only; other slots stay silent and headless |
 
 ## Architecture
 
@@ -46,11 +50,12 @@ nothing is lost between the two.
 browser ─▶ 20xx.xyz/*     page Worker (web/netplay, vinext, static client)
         ─▶ 20xx.xyz/v1/*  API Worker (web/netplay-api, TypeScript)
                             └─▶ Durable Object "queue" (single instance, SQLite)
-                                  jobs · games · sessions · accounts · policy · events
+                                  jobs · games · sessions · accounts · stream · policy · events
 
 GPU box: hal-netplay-runner ── outbound HTTPS + WebSocket ──▶ 20xx.xyz/v1/runner/*
          downloads policy, ISO, emulator, account JSON from private R2
          uploads replays, measurements, audit records to private R2
+         stream holder only: ffmpeg ── RTMP ──▶ twitch.tv
 ```
 
 The page and API share an origin, so the API sends no CORS headers and the page
@@ -80,8 +85,10 @@ Tables (schema version 1 of the new store; no migrations):
 - `jobs`, `games`: the same columns and meanings as the current
   `hal/netplay_service/queue.py` v3 schema.
 - `sessions`: `id`, `host` (free text from the runner), `bundle_sha256`,
-  `git_sha`, `slots`, `started_at`, `last_seen_at`, `draining`, latest
-  `RunnerStatus` payload, `ended_at`.
+  `git_sha`, `slots`, `wants_stream`, `started_at`, `last_seen_at`, `draining`,
+  latest `RunnerStatus` payload, `ended_at`.
+- `stream`: exactly one row: `session_id` (null when free), `slot` (always 0),
+  `granted_at`. See "Streaming".
 - `accounts`: `connect_code`, `r2_key`, `sha256`, `session_id` (null when free),
   `slot`, `leased_at`.
 - `policy`: exactly one row. It holds the published policy config (see
@@ -132,9 +139,9 @@ has its own token.
 
 | Route | Purpose | Replaces |
 | --- | --- | --- |
-| `POST /v1/runner/sessions` | Start a session: `{host, bundle_sha256, git_sha, slots}`. Returns the session ID, the policy config, and one leased account per slot. `409` if the bundle is not the active policy; `409` if too few accounts are free. | runner startup and per-box account config |
-| `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. | status files read by the API |
-| `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Refused while the session is draining. | `claim_next` |
+| `POST /v1/runner/sessions` | Start a session: `{host, bundle_sha256, git_sha, slots, stream}`. Returns the session ID, the policy config, and one leased account per slot. `409` if the bundle is not the active policy; `409` if too few accounts are free. | runner startup and per-box account config |
+| `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. The response says whether this session holds the stream lease and, when it does, carries the stream key. | status files read by the API |
+| `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Refused while the session is draining. Applies the stream-slot preference (see "Streaming"). | `claim_next` |
 | `POST /v1/runner/sessions/{sid}/drain` | Stop claiming; keep current sets. | local stop flag |
 | `DELETE /v1/runner/sessions/{sid}` | End the session: fail its remaining leases with the current generation-abort codes and free its accounts. | `fail_worker_generation` |
 | `POST /v1/runner/jobs/{id}/heartbeat` | Extend the job lease. | `heartbeat` |
@@ -250,6 +257,75 @@ Replays upload to R2 as today, and each upload is then reported with
 uploaded to R2 next to the replays, so a lost box does not lose them. The
 Prometheus metrics endpoint moves into the runner on a local port.
 
+## Streaming
+
+One slot streams to Twitch at all times. Dolphin always runs on the same box as
+the GPU and model.
+
+### Stream lease
+
+- The Durable Object holds one stream lease. Sessions ask for it with
+  `stream: true` at start; every box asks by default (`--no-stream` opts out).
+- When the lease is free, the next status response to a live, non-draining
+  session that asked for it grants it. The lease is freed when the holder's
+  session ends by drain, `DELETE`, or 30 s of silence. A replacement box
+  therefore takes over the stream without configuration.
+- The grant carries the Twitch stream key, which is held only as the Worker
+  secret `TWITCH_STREAM_KEY`. Boxes keep three secrets.
+- The holder streams its slot 0. `/v1/admin/status` shows the holder.
+
+### Claim preference
+
+- A claim from any slot other than the stream slot returns `204` while the
+  stream slot is live (its session reported status within 5 s and is not
+  draining) and has no job. The stream slot's next claim, at most one claim
+  interval later, takes the job.
+- When no session holds the stream, or the stream slot has a job, claims work as
+  before.
+- FIFO order is unchanged. The added wait is at most one claim interval.
+
+### Displays and audio
+
+- The runner no longer runs under one `xvfb-run` wrapper. It starts one Xvfb per
+  slot and passes that slot's `DISPLAY` to its Dolphin.
+- Headless slots: 640×480 display, audio disabled, native EFB scale. This is
+  today's behavior.
+- Stream slot: 1280×720×24 display, EFB scale 2, render window sized and
+  placed to fill the display, audio backend PulseAudio routed to the null sink
+  `hal_stream` with `PULSE_SINK`.
+- The runner starts one PulseAudio daemon per box (`--exit-idle-time=-1`) that
+  provides the null sink.
+- Window geometry and audio backend are written to Dolphin's config with the
+  same boundary workaround as `set_dolphin_internal_resolution` in
+  `hal/sim/session.py`, including a removal note naming the libmelee version.
+
+### Stream process
+
+`hal/netplay_service/stream.py` supervises ffmpeg while the session holds the
+lease:
+
+- Inputs: `x11grab` of the stream display at 60 fps, and `pulse` from
+  `hal_stream.monitor`.
+- Overlay: `drawtext` from a text file with `reload=1`. The runner writes one
+  line, for example "HAL · Master-rank Falco · difficulty 25 · Game 2 of 5 ·
+  play at 20xx.xyz". The line is built only from HAL's settings and the game
+  count. It never contains a connect code.
+- Encoding: `h264_nvenc`, CBR 6 Mb/s, keyframe every 2 s, AAC 160 kb/s.
+- Output: FLV to `rtmp://live.twitch.tv/app/<key>`.
+- Restart with backoff from 1 s to 30 s when ffmpeg exits. Stop on lease loss
+  and on shutdown.
+
+Between games, the stream display's root background is an idle card ("Play HAL
+at 20xx.xyz" and the queue depth), so the stream never goes black when Dolphin
+exits. The runner refreshes the card when the queue depth changes.
+
+### Performance
+
+Before and after on the RTX 3060 and on the first G4, with streaming on and off,
+for the stream slot and one headless slot: game FPS, frame-interval p95, Dolphin
+step p95, and policy round-trip p95. `check_realtime_budget` still gates
+startup. Results go in `deploy/netplay/README.md`.
+
 ## Publishing a policy
 
 `hal-netplay-admin publish-policy runs/policies/X.halpolicy`:
@@ -278,7 +354,9 @@ Other admin commands:
 
 One image, `hal-netplay-runner:<git-sha>`, built from `deploy/netplay/Dockerfile`
 and pushed to a registry, runs everywhere. It contains code, dependencies, and
-system libraries, but no ISO, bundle, or account files.
+system libraries, but no ISO, bundle, or account files. For streaming it adds
+ffmpeg with NVENC, PulseAudio, and a tool to set the X root background.
+Containers need `NVIDIA_DRIVER_CAPABILITIES` to include `video` for NVENC.
 
 | Host | Command |
 | --- | --- |
@@ -300,6 +378,7 @@ To verify on the first G4 bring-up, and record in `deploy/netplay/README.md`:
   standard data-center driver is enough.
 - Slippi direct connect succeeds from the VM's external IP (UDP hole punching).
 - The realtime budget passes at the configured slot count.
+- NVENC streaming runs next to the model without breaking the realtime budget.
 
 For player latency, the zone matters more than the GPU. Choose the zone nearest
 the expected players.
@@ -318,9 +397,12 @@ the expected players.
   `slot`, `job`, `game`, and `event`. Logged events: each download with key and
   hash, session start, account lease, claim, connect, game start, game end with
   result, each applied settings revision, replay upload, drain, and exit. Errors
-  log the exception and the job's last known state.
+  log the exception and the job's last known state. Stream events: lease
+  granted and lost, ffmpeg start and exit with its code, restart count, and
+  bitrate and dropped-frame figures sampled from ffmpeg's progress output.
 - **Durable Object:** the `events` table records every job transition, session
-  start and end, lease expiry, account lease and release, policy publish, and
+  start and end, lease expiry, account lease and release, stream lease grant and
+  release, policy publish, and
   every refused runner or admin call with its reason. Retained for 30 days.
 - **Worker:** Cloudflare Workers Logs and `wrangler tail`.
 
@@ -334,6 +416,10 @@ the expected players.
 - No CORS headers. Auth uses headers, not cookies.
 - GPU boxes accept no inbound connections.
 - ISO, bundles, and account files live only in the private R2 bucket.
+- The Twitch stream key lives only as a Worker secret and is sent only to the
+  current stream holder.
+- The stream overlay is built from HAL's settings and the game count; it never
+  includes a player's connect code.
 
 ## Testing
 
@@ -348,15 +434,25 @@ the expected players.
    must match exactly.
 3. **New tests** for each deliberate change: session silence, lease grace,
    idempotent transitions, policy and account checks, rate limit, cap, pause,
-   the alarm schedule, and the settings WebSocket.
+   the alarm schedule, and the settings WebSocket. Streaming: the stream lease
+   has at most one holder; it is freed on drain, `DELETE`, and silence; the key
+   goes only to the holder; a non-stream claim gets `204` while the stream slot
+   is live and idle, and gets the job otherwise.
 4. **Python tests** for `RemoteQueue` (retry policy, error mapping) and for
    runner startup (hash verification, qualification failure, drain on first
-   signal, forfeit on second).
+   signal, forfeit on second). Streaming: the ffmpeg command; the overlay text
+   never contains a connect code; restart backoff; per-slot `DISPLAY` and
+   `PULSE_SINK`; the stream slot's Dolphin config writes.
 5. **Integration** (`-m integration`): `RemoteQueue` against a local
    `wrangler dev`, driving one slot with a fake game through claim, connect,
    play, finish, and release, including a retried call and a session that stops
    reporting.
-6. The AGENTS handoff checks: ruff format and check, ty, pytest, and the listed
+6. **Manual stream check** on this machine: one stream slot and one headless
+   slot against local `wrangler dev`, pushing to Twitch with
+   `?bandwidthtest=true` appended to the key so nothing goes live. Confirm video,
+   audio, overlay, the idle card between games, and recovery after killing
+   ffmpeg. Record the performance figures from "Streaming".
+7. The AGENTS handoff checks: ruff format and check, ty, pytest, and the listed
    integration tests.
 
 ## Removed
@@ -364,7 +460,8 @@ the expected players.
 - `hal/netplay_service/api.py`, `hal/netplay_service/queue.py`, and their tests
   (their behavior is preserved in the transcripts).
 - The `hal-netplay-api` entry point.
-- The `api`, `tunnel`, and `state` Compose services; `cloudflared` in `run-host.sh`.
+- The `api`, `tunnel`, and `state` Compose services; `cloudflared` and
+  `xvfb-run` in `run-host.sh` (the runner starts its own displays).
 - `deploy/netplay/deploy-frontend.sh`, replaced by `deploy/netplay/deploy-web.sh`.
 - `NEXT_PUBLIC_HAL_API_URL` in the page.
 - Environment keys `HAL_NETPLAY_ALLOWED_ORIGINS`, `HAL_NETPLAY_ALLOWED_HOSTS`,
@@ -387,6 +484,8 @@ still hash-checked.
   image, and UDP hole punching from Google Cloud are unverified.
 - **Cloudflare dependency.** The queue is unavailable if Cloudflare is. The page
   already depends on it.
+- **Stream load.** Rendering at EFB scale 2, `x11grab`, and NVENC share the box
+  with inference. The stream slot's latency must be measured, not assumed.
 
 ## Spec 2 (page redesign), recorded decisions
 
@@ -420,6 +519,8 @@ against the API above.
   schema 4 with a `policy_settings` timeline; browser prefs move to a new key
   storing raw `desired_return`.
 - **How-to:** a "How do I play?" popover linking to https://slippi.gg/netplay.
+- **Streaming notice:** one line near Play: "Games may be streamed live on
+  twitch.tv/<channel>." with a link.
 - **Open:** character-select portraits extracted from the ISO or stock icons
   first; whether to add vitest to the page project (Spec 1 already adds it to
   the API Worker).
