@@ -103,7 +103,7 @@ markers = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["hal"]
-known-third-party = ["docker", "libmelee", "slippi-Ishiiruka"]
+known-third-party = ["docker", "libmelee", "slippi-Ishiiruka", "wandb"]
 force-single-line = true
 
 [tool.ty.environment]
