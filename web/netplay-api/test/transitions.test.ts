@@ -171,6 +171,21 @@ describe("runner transitions", () => {
       expect(store.row("j1")).toMatchObject({ status: "leased", lease_owner: "w1" });
     }));
 
+  it("refuses a fail retry from a worker that no longer applied the last change", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", "AAAA#1", CHOICES);
+      store.claimNext("w0");
+      expect(store.fail("j1", "w0", "dolphin_crash", true).status).toBe("queued");
+      store.claimNext("w1");
+      expect(store.fail("j1", "w1", "dolphin_crash", true)).toMatchObject({ status: "failed", attempt: 2 });
+      expect(store.row("j1")).toMatchObject({ lease_owner: null, last_worker: "w1" });
+      expect(refused(() => store.fail("j1", "w0", "dolphin_crash", true))).toEqual({
+        status: 409,
+        detail: "worker does not own this job",
+      });
+      expect(store.row("j1")).toMatchObject({ status: "failed", last_worker: "w1" });
+    }));
+
   it("completes after a cancel during play", () =>
     withStore((store) => {
       playing(store);
