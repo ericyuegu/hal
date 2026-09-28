@@ -1,4 +1,14 @@
-import { HttpError, type JobStatus, TERMINAL_STATUSES, sameDigest } from "./domain";
+import {
+  HttpError,
+  IDLE_TIMEOUT_SECONDS,
+  type JobStatus,
+  LEASE_SECONDS,
+  MAX_ATTEMPTS,
+  MAX_GAMES,
+  PLAYING_LEASE_SECONDS,
+  TERMINAL_STATUSES,
+  sameDigest,
+} from "./domain";
 
 export type Row = Record<string, SqlStorageValue>;
 
@@ -248,5 +258,305 @@ export class JobStore {
 
   activeCount(): number {
     return Number(this.first(`SELECT COUNT(*) AS n FROM jobs WHERE status IN (${IN_SERVICE})`)?.n);
+  }
+
+  private owned(id: string, worker: string, expected: readonly JobStatus[]): Row {
+    const row = this.row(id);
+    if (row === null || row.lease_owner !== worker) throw new HttpError(409, "worker does not own this job");
+    if (!expected.includes(row.status as JobStatus)) {
+      throw new HttpError(409, `job status '${row.status}' is not valid for this operation`);
+    }
+    return row;
+  }
+
+  // A runner retries a call whose response it lost. When this worker already
+  // applied the change, the retry returns the current job instead of a 409.
+  private applied(id: string, worker: string, done: (row: Row) => boolean): JobResponse | null {
+    const row = this.row(id);
+    return row !== null && row.last_worker === worker && done(row) ? this.response(row) : null;
+  }
+
+  private leaseSeconds(status: string): number {
+    return status === "playing" ? PLAYING_LEASE_SECONDS : LEASE_SECONDS;
+  }
+
+  workerJob(id: string, worker: string): JobResponse {
+    const row = this.row(id);
+    if (row === null || row.lease_owner !== worker) throw new HttpError(409, "worker does not own this job");
+    return this.response(row);
+  }
+
+  claimNext(worker: string): JobResponse | null {
+    const now = this.time();
+    const row = this.first("SELECT id FROM jobs WHERE status = 'queued' ORDER BY retry_front DESC, queue_seq ASC LIMIT 1");
+    if (row === null) return null;
+    this.exec(
+      `UPDATE jobs SET status = 'leased', retry_front = 0, attempt = attempt + 1, lease_owner = ?,
+         last_worker = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?`,
+      worker,
+      worker,
+      now + LEASE_SECONDS,
+      now,
+      row.id as string,
+    );
+    return this.response(this.reload(row.id as string));
+  }
+
+  heartbeat(id: string, worker: string): JobResponse {
+    const now = this.time();
+    const row = this.row(id);
+    if (row === null || row.lease_owner !== worker || TERMINAL_STATUSES.has(row.status as string)) {
+      throw new HttpError(409, "worker does not own an active job lease");
+    }
+    this.exec(
+      "UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?",
+      now + this.leaseSeconds(row.status as string),
+      now,
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  markConnecting(id: string, worker: string, connectCode: string): JobResponse {
+    const done = this.applied(id, worker, (row) => row.status === "connecting" && row.connect_code === connectCode);
+    if (done) return done;
+    this.owned(id, worker, ["leased"]);
+    const now = this.time();
+    this.exec(
+      "UPDATE jobs SET status = 'connecting', connect_code = ?, connect_deadline = ?, updated_at = ? WHERE id = ?",
+      connectCode,
+      now + IDLE_TIMEOUT_SECONDS,
+      now,
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  markPlaying(id: string, worker: string): JobResponse {
+    const done = this.applied(id, worker, (row) => row.status === "playing" && row.lease_owner === worker);
+    if (done) return done;
+    this.owned(id, worker, ["connecting", "rematch_ready"]);
+    const now = this.time();
+    this.exec(
+      `UPDATE jobs SET status = 'playing', connect_deadline = NULL, rematch_deadline = NULL,
+         lease_expires_at = ?, updated_at = ? WHERE id = ?`,
+      now + PLAYING_LEASE_SECONDS,
+      now,
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  markNoShow(id: string, worker: string): JobResponse {
+    const done = this.applied(id, worker, (row) => row.status === "no_show");
+    if (done) return done;
+    this.owned(id, worker, ["connecting"]);
+    this.exec(
+      `UPDATE jobs SET status = 'no_show', connect_deadline = NULL, lease_owner = NULL,
+         lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+      this.time(),
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  markNoContest(id: string, worker: string): JobResponse {
+    const done = this.applied(id, worker, (row) => row.status === "canceled" && row.lease_owner === null);
+    if (done) return done;
+    this.owned(id, worker, ["playing"]);
+    this.exec(
+      `UPDATE jobs SET status = 'canceled', connect_deadline = NULL, rematch_deadline = NULL,
+         lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+      this.time(),
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  finishGame(id: string, worker: string, gameNumber: number, stage: string, result: string): JobResponse {
+    if (!result) throw new HttpError(422, "game result must be non-empty");
+    const recorded = this.first("SELECT actual_stage, result FROM games WHERE job_id = ? AND game_number = ?", id, gameNumber);
+    if (recorded !== null && this.row(id)?.last_worker === worker) {
+      if (recorded.actual_stage === stage && recorded.result === result) return this.response(this.reload(id));
+      throw new HttpError(409, "game already recorded with a different result");
+    }
+    const row = this.owned(id, worker, ["playing"]);
+    const played = row.game_count as number;
+    if (gameNumber !== played + 1) throw new HttpError(409, `game_number ${gameNumber} does not follow game ${played}`);
+    const now = this.time();
+    const terminal = gameNumber >= MAX_GAMES || row.cancel_after_game === 1;
+    this.exec(
+      `UPDATE jobs SET status = ?, game_count = ?, actual_stage = ?, last_result = ?, rematch_deadline = ?,
+         lease_owner = CASE WHEN ? THEN NULL ELSE lease_owner END,
+         lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END, updated_at = ?
+       WHERE id = ?`,
+      terminal ? "complete" : "rematch_wait",
+      gameNumber,
+      stage,
+      result,
+      terminal ? null : now + IDLE_TIMEOUT_SECONDS,
+      terminal ? 1 : 0,
+      terminal ? 1 : 0,
+      now,
+      id,
+    );
+    this.exec(
+      "INSERT INTO games(job_id, game_number, actual_stage, result, created_at) VALUES (?, ?, ?, ?, ?)",
+      id,
+      gameNumber,
+      stage,
+      result,
+      now,
+    );
+    return this.response(this.reload(id));
+  }
+
+  fail(id: string, worker: string, errorCode: string, retryable: boolean): JobResponse {
+    if (!errorCode) throw new HttpError(422, "error_code must be non-empty");
+    const done = this.applied(
+      id,
+      worker,
+      (row) => row.lease_owner === null && row.error_code === errorCode && (row.status === "queued" || row.status === "failed"),
+    );
+    if (done) return done;
+    const row = this.owned(id, worker, ["leased", "connecting", "playing", "rematch_wait", "rematch_ready"]);
+    const retry = retryable && (row.attempt as number) < MAX_ATTEMPTS;
+    this.exec(
+      `UPDATE jobs SET status = ?, retry_front = ?, error_code = ?, lease_owner = NULL, lease_expires_at = NULL,
+         connect_deadline = NULL, rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
+      retry ? "queued" : "failed",
+      retry ? 1 : 0,
+      errorCode,
+      this.time(),
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  forfeit(id: string, worker: string): JobResponse {
+    const done = this.applied(
+      id,
+      worker,
+      (row) => row.status === "failed" && row.error_code === "service_failure_bot_forfeit",
+    );
+    if (done) return done;
+    this.owned(id, worker, ["connecting", "playing"]);
+    this.exec(
+      `UPDATE jobs SET status = 'failed', last_result = 'win', error_code = 'service_failure_bot_forfeit',
+         lease_owner = NULL, lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL,
+         updated_at = ? WHERE id = ?`,
+      this.time(),
+      id,
+    );
+    return this.response(this.reload(id));
+  }
+
+  recordReplay(id: string, gameNumber: number, key: string, sha256: string, size: number, etag: string): JobResponse {
+    const game = this.first(
+      "SELECT replay_key, replay_sha256, replay_size, replay_etag FROM games WHERE job_id = ? AND game_number = ?",
+      id,
+      gameNumber,
+    );
+    if (game === null) throw new HttpError(409, "game is absent");
+    const same =
+      game.replay_key === key && game.replay_sha256 === sha256 && game.replay_size === size && game.replay_etag === etag;
+    if (!same) {
+      if (game.replay_key !== null) throw new HttpError(409, "game already has a different replay");
+      this.exec(
+        `UPDATE games SET replay_key = ?, replay_sha256 = ?, replay_size = ?, replay_etag = ?
+         WHERE job_id = ? AND game_number = ? AND replay_key IS NULL`,
+        key,
+        sha256,
+        size,
+        etag,
+        id,
+        gameNumber,
+      );
+    }
+    return this.response(this.reload(id));
+  }
+
+  // Returns the IDs of jobs whose leases were closed.
+  failWorkers(workers: readonly string[]): string[] {
+    if (workers.length === 0) return [];
+    const marks = workers.map(() => "?").join(",");
+    const ids = this.sql
+      .exec<Row>(
+        `SELECT id FROM jobs WHERE lease_owner IN (${marks})
+           AND status IN ('leased','connecting','playing','rematch_wait','rematch_ready') ORDER BY queue_seq`,
+        ...workers,
+      )
+      .toArray()
+      .map((row) => row.id as string);
+    this.exec(
+      `UPDATE jobs SET status = 'failed',
+         last_result = CASE WHEN status IN ('connecting','playing') THEN 'win' ELSE last_result END,
+         error_code = CASE WHEN status IN ('connecting','playing')
+           THEN 'service_failure_bot_forfeit' ELSE 'service_generation_aborted' END,
+         lease_owner = NULL, lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL,
+         updated_at = ?
+       WHERE lease_owner IN (${marks})
+         AND status IN ('leased','connecting','playing','rematch_wait','rematch_ready')`,
+      this.time(),
+      ...workers,
+    );
+    return ids;
+  }
+
+  // Returns the IDs of jobs that changed.
+  reapExpired(): string[] {
+    const now = this.time();
+    const changed: string[] = [];
+    const ids = (query: string): string[] =>
+      this.sql.exec<Row>(query, now).toArray().map((row) => row.id as string);
+    for (const id of ids("SELECT id FROM jobs WHERE status = 'connecting' AND connect_deadline <= ?")) {
+      this.exec(
+        `UPDATE jobs SET status = 'no_show', lease_owner = NULL, lease_expires_at = NULL,
+           connect_deadline = NULL, updated_at = ? WHERE id = ?`,
+        now,
+        id,
+      );
+      changed.push(id);
+    }
+    for (const id of ids("SELECT id FROM jobs WHERE status = 'rematch_wait' AND rematch_deadline <= ?")) {
+      this.exec(
+        `UPDATE jobs SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL,
+           rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
+        now,
+        id,
+      );
+      changed.push(id);
+    }
+    const expired = this.sql
+      .exec<Row>(
+        `SELECT id, attempt FROM jobs WHERE lease_owner IS NOT NULL AND lease_expires_at <= ?
+           AND status NOT IN (${TERMINAL})`,
+        now,
+      )
+      .toArray();
+    for (const row of expired) {
+      const retry = (row.attempt as number) < MAX_ATTEMPTS;
+      this.exec(
+        `UPDATE jobs SET status = ?, retry_front = ?, error_code = 'lease_expired', lease_owner = NULL,
+           lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
+        retry ? "queued" : "failed",
+        retry ? 1 : 0,
+        now,
+        row.id as string,
+      );
+      changed.push(row.id as string);
+    }
+    return changed;
+  }
+
+  nextDeadline(): number | null {
+    const row = this.first(
+      `SELECT MIN(t) AS t FROM (
+         SELECT connect_deadline AS t FROM jobs WHERE status = 'connecting' AND connect_deadline IS NOT NULL
+         UNION ALL SELECT rematch_deadline FROM jobs WHERE status = 'rematch_wait' AND rematch_deadline IS NOT NULL
+         UNION ALL SELECT lease_expires_at FROM jobs
+           WHERE lease_owner IS NOT NULL AND status NOT IN (${TERMINAL}))`,
+    );
+    return (row?.t as number | null) ?? null;
   }
 }
