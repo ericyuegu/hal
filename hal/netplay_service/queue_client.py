@@ -459,6 +459,11 @@ class RunnerClient:
             policy = PolicyConfig.from_payload(payload["policy"])
         except ValueError as error:
             raise QueueProtocolError(f"session start contains invalid values: {error}") from error
+        # A repeated start returns the policy active now, which may be a newer bundle than this runner loaded.
+        if policy.bundle_sha256 != bundle_sha256:
+            raise QueueProtocolError(
+                f"session start returned policy bundle {policy.bundle_sha256}, not the requested {bundle_sha256}"
+            )
         return StartedSession(session_id, policy, grants)
 
     def report_status(self, session_id: str, status: RunnerStatus) -> SessionState:
@@ -509,7 +514,7 @@ class SessionReporter:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._state: SessionState | None = None
-        self._error: QueueError | None = None
+        self._error: Exception | None = None
         self._thread = threading.Thread(target=self._run, name=f"session-{session_id}", daemon=True)
 
     def __enter__(self) -> SessionReporter:
@@ -537,7 +542,9 @@ class SessionReporter:
             # The Worker tolerates 30 s of silence; the next tick tries again.
             logger.bind(event="session_status").warning("session status report failed: {}", error)
             return
-        except QueueError as error:
+        except Exception as error:
+            # Hand the failure to the owner thread, which re-raises it from state(); a daemon
+            # thread that died here would otherwise leave state() returning a stale state.
             with self._lock:
                 self._error = error
             self._stop.set()

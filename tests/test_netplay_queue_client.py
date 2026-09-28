@@ -313,8 +313,19 @@ def test_reporter_keeps_reporting_through_outages_and_stops_on_session_end() -> 
         client=httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)),
         sleep=lambda _: None,
     )
-    with SessionReporter(client, "sess", _runner_status, interval_seconds=0.01) as reporter:
+    # Hold the first background report until the entry state has been checked.
+    first_state_checked = threading.Event()
+    calls: list[None] = []
+
+    def status() -> RunnerStatus:
+        calls.append(None)
+        if len(calls) > 1:
+            assert first_state_checked.wait(5)
+        return _runner_status()
+
+    with SessionReporter(client, "sess", status, interval_seconds=0.01) as reporter:
         assert reporter.state() == SessionState(draining=False)
+        first_state_checked.set()
 
         def ended() -> bool:
             try:
@@ -326,6 +337,45 @@ def test_reporter_keeps_reporting_through_outages_and_stops_on_session_end() -> 
         # One report retries through six 503s, the next sees the drain, the last sees the end.
         _wait_for(ended)
     assert len(script.requests) == 9
+
+
+def test_reporter_hands_a_status_failure_to_the_owner() -> None:
+    script = _Script(httpx.Response(200, json={"draining": False, "stream": None}))
+    calls: list[None] = []
+
+    def status() -> RunnerStatus:
+        calls.append(None)
+        if len(calls) > 1:
+            raise RuntimeError("slot status is unreadable")
+        return _runner_status()
+
+    with SessionReporter(_runner(script), "sess", status, interval_seconds=0.01) as reporter:
+
+        def failed() -> bool:
+            try:
+                reporter.state()
+            except RuntimeError:
+                return True
+            return False
+
+        _wait_for(failed)
+        with pytest.raises(RuntimeError, match="slot status is unreadable"):
+            reporter.state()
+    assert len(script.requests) == 1 and len(calls) == 2
+
+
+def test_start_session_rejects_a_different_policy_bundle() -> None:
+    grant = {"slot": 0, "connect_code": "BOT0#1", "r2_key": "netplay/accounts/x.json", "sha256": "c" * 64}
+    body = {"session_id": "session-00000001", "accounts": [grant], "policy": POLICY.to_payload()}
+    with pytest.raises(QueueProtocolError, match=f"policy bundle {'a' * 64}, not the requested {'e' * 64}"):
+        _runner(_Script(httpx.Response(201, json=body))).start_session(
+            session_id="session-00000001",
+            host="box",
+            bundle_sha256="e" * 64,
+            git_sha="d" * 40,
+            slots=1,
+            wants_stream=False,
+        )
 
 
 def test_active_policy_drain_and_end() -> None:
