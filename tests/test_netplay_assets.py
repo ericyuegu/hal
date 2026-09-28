@@ -120,3 +120,17 @@ def test_ensure_uploaded_refuses_a_truncated_object_with_matching_metadata(tmp_p
     with pytest.raises(AssetError, match="3 bytes; expected 6"):
         ensure_uploaded(bucket, "hal", path, "netplay/policies/x.halpolicy", _digest(b"bundle"))
     assert bucket.puts == 0
+
+
+def test_manifest_rejects_a_key_that_is_not_content_addressed(tmp_path: Path) -> None:
+    manifest = AssetManifest(
+        PinnedAsset(pinned_asset_key("a" * 64, "ssbm.ciso"), "a" * 64),
+        PinnedAsset(pinned_asset_key("b" * 64, "Slippi.AppImage"), "b" * 64, executable=True),
+    )
+    path = tmp_path / "assets.json"
+    manifest.write(path)
+    payload = json.loads(path.read_text())
+    payload["iso"]["key"] = pinned_asset_key("b" * 64, "ssbm.ciso")
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="iso key must be"):
+        AssetManifest.read(path)

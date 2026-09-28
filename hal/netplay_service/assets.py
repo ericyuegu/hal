@@ -2,9 +2,9 @@
 
 import hashlib
 import json
-import os
 import re
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,7 +65,10 @@ def _pinned(payload: object, name: str, *, executable: bool) -> PinnedAsset:
     key, digest = fields["key"], fields["sha256"]
     if not isinstance(key, str) or not isinstance(digest, str):
         raise ValueError(f"asset manifest {name} values must be strings")
-    return PinnedAsset(key, digest, executable)
+    asset = PinnedAsset(key, digest, executable)
+    if asset.key != pinned_asset_key(asset.sha256, asset.name):
+        raise ValueError(f"asset manifest {name} key must be {pinned_asset_key(asset.sha256, asset.name)}")
+    return asset
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,10 +147,10 @@ class AssetCache:
                 path.chmod(mode)
                 log.info("asset {} sha256={} verified in cache", asset.key, asset.sha256)
                 return path
+            # Another slot may be replacing this file; the atomic replace below overwrites it.
             log.warning("cached asset {} failed verification; fetching it again", path)
-            path.unlink()
         directory.mkdir(parents=True, exist_ok=True)
-        partial = directory / f".{asset.name}.{os.getpid()}.partial"
+        partial = directory / f".{asset.name}.{uuid.uuid4().hex}.partial"
         try:
             self._source.fetch(asset.key, partial)
             actual = sha256_file(partial)
