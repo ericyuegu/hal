@@ -213,7 +213,7 @@ export class SessionStore {
   }
 
   // Liveness uses the time this report arrived, never the runner's clock.
-  // Plan D replaces the null stream with the session's stream grant.
+  // Plan 5 replaces the null stream with the session's stream grant.
   report(id: string, raw: unknown): { draining: boolean; stream: null } {
     const row = this.live(id);
     const status = parseRunnerStatus(raw, row.slots as number);

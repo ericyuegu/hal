@@ -1,4 +1,4 @@
-# Netplay Edge Queue — Plan A: API Worker and Durable Object
+# Netplay Edge Queue — Plan 1: API Worker and Durable Object
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-27-netplay-edge-queue-design.md`
 
-This is Plan A of four. Plan B moves the runner onto this API and deletes the Python service. Plan C adds host bring-up (image, `gce-up.sh`). Plan D adds Twitch streaming (stream lease, claim preference, displays, ffmpeg). Plan A adds no stream lease; Plan D extends the tables and claim logic built here.
+The program has five plans, listed in the spec's "Plans" section: 1 the Worker, 2 the runner and admin clients, 3 the runner cutover, 4 host bring-up, 5 Twitch streaming. This is Plan 1. It adds no stream lease; Plan 5 extends the tables and claim logic built here.
 
 ## Global Constraints
 
@@ -69,8 +69,8 @@ web/netplay-api/
     live.test.ts
     transcripts.test.ts
     transcripts/          *.json recorded from the Python service, policy.json
-scripts/record_netplay_transcripts.py   recorder (deleted in Plan B)
-tests/test_netplay_transcripts.py       drift check (deleted in Plan B)
+scripts/record_netplay_transcripts.py   recorder (deleted in Plan 3)
+tests/test_netplay_transcripts.py       drift check (deleted in Plan 3)
 ```
 
 ---
@@ -4378,7 +4378,7 @@ Add to `deploy/netplay/README.md`, before "## Hosted run":
 ## API Worker
 
 `web/netplay-api` is the netplay queue: a Cloudflare Worker with one Durable
-Object. It replaces `hal-netplay-api` once Plan B moves the runner onto it.
+Object. It replaces `hal-netplay-api` once Plan 3 moves the runner onto it.
 
 Local development:
 
@@ -4423,7 +4423,7 @@ uv run pytest -q -m "not integration"
 
 Expected: all pass. Report each command's result, including any skip.
 
-This plan does not touch replay extraction, wire format, controller input, session stepping, or offline/live parity, so the integration suite is not required here; Plan B runs it.
+This plan does not touch replay extraction, wire format, controller input, session stepping, or offline/live parity, so the integration suite is not required here; Plan 3 runs it.
 
 - [ ] **Step 4: Commit**
 

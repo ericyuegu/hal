@@ -1,18 +1,18 @@
-# Netplay Edge Queue — Plan B1: Runner and Admin Clients
+# Netplay Edge Queue — Plan 2: Runner and Admin Clients
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give Python everything it needs to talk to the Plan A queue Worker: a retrying runner client, a live-settings socket, a session heartbeat, an admin client and CLI, pinned and hash-checked assets, and a local `wrangler dev` harness. Make every runner route safe to retry, and give the runner one typed queue interface that both the SQLite store and the remote client implement.
+**Goal:** Give Python everything it needs to talk to the Plan 1 queue Worker: a retrying runner client, a live-settings socket, a session heartbeat, an admin client and CLI, pinned and hash-checked assets, and a local `wrangler dev` harness. Make every runner route safe to retry, and give the runner one typed queue interface that both the SQLite store and the remote client implement.
 
 **Architecture:** The Worker makes session start, claim, and session end idempotent, and it checks that a replay comes from the worker that played the game. `hal/netplay_service/queue_contract.py` holds the shared queue errors and the `RunnerQueue` protocol. `QueueStore` and `RemoteQueue` both implement that protocol, and the runner is typed against it. `hal/netplay_service/queue_client.py` wraps one `httpx.Client` per process with bounded retries. It maps Worker status codes to exceptions. `RemoteQueue` implements `RunnerQueue`, `RunnerClient` covers the session routes, `SessionReporter` sends the session heartbeat, and `AdminClient` covers the admin routes. `hal/netplay_service/assets.py` pins the ISO and emulator in `deploy/netplay/assets.json` and keeps verified copies under `~/.cache/hal-netplay/<sha256>/`. `hal-netplay-admin` publishes policies, accounts, and asset pins. `hal/netplay_service/local_worker.py` runs the Worker under `wrangler dev` for the integration test.
 
-**Tech Stack:** Python 3.14 (uv), httpx 0.28.1, websockets 17.1 (sync client), boto3 (R2), loguru, pytest; TypeScript Worker from Plan A (vitest, wrangler 4.124).
+**Tech Stack:** Python 3.14 (uv), httpx 0.28.1, websockets 17.1 (sync client), boto3 (R2), loguru, pytest; TypeScript Worker from Plan 1 (vitest, wrangler 4.124).
 
 **Spec:** `docs/superpowers/specs/2026-09-27-netplay-edge-queue-design.md`
 
-The program has four plans. Plan A built the Worker. Plan B moves the runner onto it, in two parts. Plan C adds host bring-up. Plan D adds Twitch streaming. B1 is this plan. It changes the Worker's runner routes, adds the Python clients and tools, and makes `QueueStore` and `runner.py` conform to the shared `RunnerQueue` protocol. The runner still constructs `QueueStore` and runs on SQLite. B2 is not written yet. It will move the runner onto `RemoteQueue`, port the qualification harnesses, delete the Python service, and update the page and deploy scripts. The section "Decisions carried into Plan B2" at the end lists what B2 must implement. Plan A must be complete before B1 starts, and B1 must be complete before B2 starts.
+The program has five plans, listed in the spec's "Plans" section: 1 the Worker, 2 the runner and admin clients, 3 the runner cutover, 4 host bring-up, 5 Twitch streaming. This is Plan 2. It changes the Worker's runner routes, adds the Python clients and tools, and makes `QueueStore` and `runner.py` conform to the shared `RunnerQueue` protocol. The runner still constructs `QueueStore` and runs on SQLite. Plan 3 is not written yet. It will move the runner onto `RemoteQueue`, port the qualification harnesses, delete the Python service, and update the page and deploy scripts. The section "Decisions carried into Plan 3" at the end lists what Plan 3 must implement. Plan 1 must be complete before Plan 2 starts, and Plan 2 must be complete before Plan 3 starts.
 
-**Streaming is Plan D.** B1 implements no stream lease. The session API is forward compatible. `start_session` sends `stream` from its `wants_stream` argument. Every status response has the shape `{"draining": bool, "stream": null}`. The client parses it into a `SessionState` value and refuses a non-null `stream`, because no B1 runner asks for the lease. Plan D defines the grant, adds it to `SessionState`, and fills `stream`. The routes and the call sites stay as they are.
+**Streaming is Plan 5.** Plan 2 implements no stream lease. The session API is forward compatible. `start_session` sends `stream` from its `wants_stream` argument. Every status response has the shape `{"draining": bool, "stream": null}`. The client parses it into a `SessionState` value and refuses a non-null `stream`, because no Plan 2 runner asks for the lease. Plan 5 defines the grant, adds it to `SessionState`, and fills `stream`. The routes and the call sites stay as they are.
 
 ## Global Constraints
 
@@ -20,7 +20,7 @@ The program has four plans. Plan A built the Worker. Plan B moves the runner ont
   - A session start carries a client-chosen `session_id`. A repeat with identical fields returns the same session and accounts.
   - A claim returns the slot's existing `leased` job before it takes another job.
   - A repeated session end returns the result of the first end.
-  - Transitions are idempotent from Plan A. Heartbeat, status, drain, the admin `PUT`s, pause, and resume are naturally idempotent.
+  - Transitions are idempotent from Plan 1. Heartbeat, status, drain, the admin `PUT`s, pause, and resume are naturally idempotent.
   - Any new route must meet this rule, or the client must be changed not to retry it.
 - Retries: exponential backoff 0.25 s, 0.5 s, 1 s, 2 s, 4 s (six attempts) on connection errors and `5xx`; no retry on `4xx`.
 - Status mapping: `409` → `InvalidTransitionError`; `410` → `SessionEndedError` (a subclass of `InvalidTransitionError`); other `4xx` → `QueueRejectedError`; retries exhausted → `QueueUnavailableError`; a malformed body → `QueueProtocolError`. `QueueError`, `InvalidTransitionError`, and `SessionEndedError` live in `queue_contract.py`, and `queue.py` raises the same classes.
@@ -79,7 +79,7 @@ tests/test_netplay_queue_integration.py         RemoteQueue against wrangler dev
 
 ### Task 0: Green baseline
 
-The branch does not pass the handoff checks before B1 starts:
+The branch does not pass the handoff checks before Plan 2 starts:
 
 - `ruff check` reports I001 (unsorted imports) in `experiments/059_muon_action_sequence.py` and `scripts/eval_kv_cache.py`. Both came from `main`.
 - `tests/test_netplay_deploy.py::test_local_launcher_waits_for_host_cleanup` times out in any checkout without `web/netplay/node_modules`. In that case `run-local.sh` runs `npm ci` in the foreground. The test's `npm` stub loops forever, and bash defers the SIGINT trap until the foreground child exits. The test passes on the main checkout only because that checkout has `node_modules`.
@@ -125,7 +125,7 @@ git commit -m "Sort imports and make the launcher test hermetic"
 
 ### Task 1: Serve the active policy to runners
 
-A runner must name its bundle's SHA-256 when it starts a session, but it learns which bundle is active only from the queue. Plan A has no runner route that returns the active policy (`/v1/options` omits the hash and bundle key). This task adds `GET /v1/runner/policy`.
+A runner must name its bundle's SHA-256 when it starts a session, but it learns which bundle is active only from the queue. Plan 1 has no runner route that returns the active policy (`/v1/options` omits the hash and bundle key). This task adds `GET /v1/runner/policy`.
 
 **Files:**
 - Modify: `web/netplay-api/src/queue.ts` (add `activePolicy` beside `startSession`)
@@ -133,7 +133,7 @@ A runner must name its bundle's SHA-256 when it starts a session, but it learns 
 - Test: `web/netplay-api/test/runner-policy.test.ts`
 
 **Interfaces:**
-- Consumes: Plan A `Queue.run`, `Queue.requirePolicy`, test helpers `call`, `publish`, `resetQueue`, `POLICY`.
+- Consumes: Plan 1 `Queue.run`, `Queue.requirePolicy`, test helpers `call`, `publish`, `resetQueue`, `POLICY`.
 - Produces: `GET /v1/runner/policy` → `200` with the published `PolicyConfig`, `503 {"detail": "no policy has been published"}` when none, `401` without a runner token.
 
 - [ ] **Step 1: Write the failing test**
@@ -202,7 +202,7 @@ git commit -m "Serve the active policy to runners"
 
 ### Task 2: Make session start, claim, and session end safe to retry
 
-Plan A made job transitions idempotent, but three runner routes are not:
+Plan 1 made job transitions idempotent, but three runner routes are not:
 
 - `startSession` generates a new ID and leases accounts on every call. If a response is lost, the retry leaves an orphan session that holds accounts until the 30 s silence alarm.
 - `claimNext` always leases the next queued job. If a response is lost, the retry gives the same slot a second job, and the first job then expires as `lease_expired`.
@@ -227,7 +227,7 @@ The client retries every route (Global Constraints), so the Worker must make the
   - If the worker holds a job in any other in-service status, the claim returns `409 {"detail": "slot already holds job <id>"}`.
   - Otherwise the claim behaves as before.
 - `DELETE /v1/runner/sessions/{sid}` on an ended session: `200 {"failed": <count from the first end>}`. An unknown session still gets `404`. A session that the silence alarm ended reports the alarm's count.
-- `POST /v1/runner/sessions/{sid}/status` → `200 {"draining": bool, "stream": null}`. Plan D fills `stream`.
+- `POST /v1/runner/sessions/{sid}/status` → `200 {"draining": bool, "stream": null}`. Plan 5 fills `stream`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -355,7 +355,7 @@ At the top of `start`, before the policy check, add the repeat path:
     }
 ```
 
-Change `report` to return the forward-compatible shape. Plan D replaces `null` with the grant:
+Change `report` to return the forward-compatible shape. Plan 5 replaces `null` with the grant:
 
 ```ts
   report(id: string, raw: unknown): { draining: boolean; stream: null } {
@@ -630,9 +630,9 @@ The runner catches `hal.netplay_service.queue.InvalidTransitionError`. A remote 
   - `get_worker_job(job_id: str, worker_id: str) -> Job`
 - `queue.py` keeps `AuthenticationError` and `ActiveJobError` (player-route errors, subclasses of the contract's `QueueError`). It stops defining `QueueError` and `InvalidTransitionError`.
 - `QueueStore.finish_game` raises `InvalidTransitionError("game_number N does not follow game M")` when `game_number != game_count + 1`. This is the Worker's rule and message.
-- `QueueStore.record_replay` accepts `worker_id` and does not check it. The SQLite store serves one runner process whose slots are the only workers, so a replay from another worker's session cannot occur. A comment states this invariant. The store is deleted in B2.
+- `QueueStore.record_replay` accepts `worker_id` and does not check it. The SQLite store serves one runner process whose slots are the only workers, so a replay from another worker's session cannot occur. A comment states this invariant. The store is deleted in Plan 3.
 - `QueueStore.claim_next` and `heartbeat` default to `lease_seconds=20.0`. That is the runner's current explicit value and the Worker's `LEASE_SECONDS`. The runner stops passing it. `mark_connecting` keeps its `IDLE_TIMEOUT_SECONDS` default, and the runner stops passing that too.
-- Replay sidecar schema v2 adds `worker_id`. The reader rejects v1 with `pending replay metadata has the wrong schema`, as it rejects any other schema. Per the spec there is no backward compatibility, and a v1 sidecar can exist only on a box running the pre-B1 runner.
+- Replay sidecar schema v2 adds `worker_id`. The reader rejects v1 with `pending replay metadata has the wrong schema`, as it rejects any other schema. Per the spec there is no backward compatibility, and a v1 sidecar can exist only on a box running the pre-Plan 2 runner.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -839,7 +839,7 @@ dependencies = [
 ]
 ```
 
-Change the extra to keep only what `api.py` needs until Plan B2 deletes it:
+Change the extra to keep only what `api.py` needs until Plan 3 deletes it:
 
 ```toml
 [project.optional-dependencies]
@@ -1698,7 +1698,7 @@ git commit -m "Add the netplay queue client"
   - `start_session(*, session_id: str, host: str, bundle_sha256: str, git_sha: str, slots: int, wants_stream: bool) -> StartedSession`.
   - `report_status(session_id: str, status: RunnerStatus) -> SessionState`.
   - `drain(session_id) -> None` and `end_session(session_id) -> int`, which returns the failed lease count.
-- `report_status` requires the response fields to be exactly `draining` and `stream`. In B1, `stream` must be `null`, because no runner asks for the stream and the Worker grants none. A non-null `stream` raises `QueueProtocolError("this client cannot stream; the Worker granted the stream lease")`. Plan D adds a grant field to `SessionState` and parses it. The call sites keep the structured result.
+- `report_status` requires the response fields to be exactly `draining` and `stream`. In Plan 2, `stream` must be `null`, because no runner asks for the stream and the Worker grants none. A non-null `stream` raises `QueueProtocolError("this client cannot stream; the Worker granted the stream lease")`. Plan 5 adds a grant field to `SessionState` and parses it. The call sites keep the structured result.
 - Produces `class SessionReporter(client: RunnerClient, session_id: str, status: Callable[[], RunnerStatus], *, interval_seconds: float = 2.0)`, a context manager:
   - It reports once in `__enter__`, so a bad status or an ended session fails at once. It then reports from a daemon thread every `interval_seconds`.
   - `state() -> SessionState` returns the latest response. After a `QueueError` other than `QueueUnavailableError`, `state()` raises that error, and the thread stops.
@@ -2552,7 +2552,7 @@ git commit -m "Add pinned netplay assets and a verified cache"
 - Consumes: `AdminClient`, `Account`, `admin_endpoint` (Tasks 5–6); `AssetManifest`, `PinnedAsset`, `ensure_uploaded`, key functions, `sha256_file` (Task 7); `read_action_sequence_artifact` (`hal/inference/action_sequence_artifact.py`).
 - Produces (`domain.py`): `account_connect_code(path: Path) -> str`.
 - Produces (`admin.py`): `policy_config(bundle_sha256: str, vocabulary_sha256: str, capability_version: int, supported_delays: tuple[int, ...]) -> PolicyConfig`; `policy_config_for(bundle: Path) -> PolicyConfig`; `publish_policy(bundle: Path, config: PolicyConfig, admin: AdminClient, remote: Any, bucket: str) -> bool`; `upload_accounts(paths: Sequence[Path], admin: AdminClient, remote: Any, bucket: str) -> tuple[Account, ...]`; `pin_assets(iso: Path, emulator: Path, manifest: Path, remote: Any, bucket: str) -> AssetManifest`; `parse_since(value: str, now: float) -> float`; `main(argv: Sequence[str] | None = None) -> None`.
-- Admin auth: `HAL_NETPLAY_ADMIN_TOKEN` plus `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET` (see `admin_endpoint`). The spec protects admin routes with the owner's Access login, which a CLI cannot complete. The admin Access application therefore gets a second policy: Service Auth for one admin service token. The owner's browser login still works. Step 6 documents this, so the CLI works against production at the end of B1.
+- Admin auth: `HAL_NETPLAY_ADMIN_TOKEN` plus `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET` (see `admin_endpoint`). The spec protects admin routes with the owner's Access login, which a CLI cannot complete. The admin Access application therefore gets a second policy: Service Auth for one admin service token. The owner's browser login still works. Step 6 documents this, so the CLI works against production at the end of Plan 2.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2956,9 +2956,9 @@ The test drives the real Worker through the boundaries that unit tests cannot re
 - a session that stays silent past 30 s while another session keeps reporting from `SessionReporter` with a `starting` status, as a box does while it downloads and qualifies.
 
 **Interfaces:**
-- Consumes: Plan A Worker project `web/netplay-api` (with `npm ci` done); Tasks 5–6 clients.
+- Consumes: Plan 1 Worker project `web/netplay-api` (with `npm ci` done); Tasks 5–6 clients.
 - Produces: `DEV_RUNNER_TOKEN = "dev-runner-token"`, `DEV_ADMIN_TOKEN = "dev-admin-token"`, `WORKER_PROJECT: Path`, `class LocalWorkerError(RuntimeError)`, `free_port() -> int`, `@contextmanager local_worker(state_dir: Path, *, port: int, startup_timeout_seconds: float = 90.0) -> Iterator[str]` (yields the base URL).
-- Consumers: this task's integration test, and the qualification ports in Plan B2.
+- Consumers: this task's integration test, and the qualification ports in Plan 3.
 
 - [ ] **Step 1: Write the failing integration test**
 
@@ -3340,22 +3340,22 @@ uv run pytest -q -m "not integration"
 HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration
 ```
 
-Expected: every command passes. Plan B1 does not touch replay extraction, wire format, controller input, session stepping, or offline/live parity. Task 4 changes only the runner's queue types, its lease arguments, and its replay sidecar, so the roundtrip and session-cleanup integration suite is not required here. Plan B2 runs it. Report each command, failure, and skip.
+Expected: every command passes. Plan 2 does not touch replay extraction, wire format, controller input, session stepping, or offline/live parity. Task 4 changes only the runner's queue types, its lease arguments, and its replay sidecar, so the roundtrip and session-cleanup integration suite is not required here. Plan 3 runs it. Report each command, failure, and skip.
 
 ---
 
-## Decisions carried into Plan B2
+## Decisions carried into Plan 3
 
-Plan B2 is not written yet. It must implement these decisions, which B1 depends on:
+Plan 3 is not written yet. It must implement these decisions, which Plan 2 depends on:
 
-1. **Session start.** The runner creates the session ID once with `new_session_id()`. It passes the same ID to any repeated `start_session` call, including one after `QueueUnavailableError`. It passes `wants_stream=False` until Plan D. If `start_session` raises `QueueProtocolError` because the Worker returned a different policy bundle, the runner calls `end_session` for that session ID immediately, and then exits.
+1. **Session start.** The runner creates the session ID once with `new_session_id()`. It passes the same ID to any repeated `start_session` call, including one after `QueueUnavailableError`. It passes `wants_stream=False` until Plan 5. If `start_session` raises `QueueProtocolError` because the Worker returned a different policy bundle, the runner calls `end_session` for that session ID immediately, and then exits.
 2. **Heartbeat from the start.** The runner enters `SessionReporter` immediately after `start_session`, before it downloads the bundle and accounts and before `check_realtime_budget`. Until the slots are ready, the status reports slot state `starting`. When `state()` raises `SessionEndedError`, the runner stops claiming, forfeits active games, and exits non-zero.
 3. **Drain.** `SessionReporter.state().draining` replaces the local stop flag. First signal: `drain`, finish active sets, then `end_session`.
 4. **Claim errors.** Any `409` on a claim stops that slot from claiming, and the slot logs the detail. The three causes are all terminal for the slot: the session is draining, the bundle is no longer active, or the slot holds a job past `leased`. Ending the session fails any held job. `SessionEndedError` (`410`) on any call ends the runner as in item 2.
 5. **Client errors.** `QueueUnavailableError` during a game does not stop Dolphin. Lease grace is 60 s while playing, so the heartbeat thread logs the error and keeps trying. On any other call, it fails the slot through the existing recovery path. The retries of one call can take about 68 s in the worst case, which is longer than both leases (20 s, and 60 s while playing). If an outage lasts longer than the lease, the next transition returns `409`. The slot treats that `409` as a lost lease, not as a recovery.
 6. **Replay sidecars.** Sidecar schema v2 already carries `worker_id` (`<session>/slot-<n>`). A restarted runner uploads a leftover sidecar and records it with that `worker_id`. The runner builds a `RemoteQueue` for the sidecar's session ID, which the Worker accepts after that session ended (Task 3). A `409` for the replay is logged, and the sidecar is kept for inspection. The runner never deletes a sidecar whose replay was refused.
 7. **Live settings.** `_LivePolicySettings` reads `connect_live`. It reconnects with backoff and sets `released` on a `released` message, or when `get_worker_job` raises `InvalidTransitionError` after a reconnect.
-8. **Deletion.** B2 deletes `QueueStore`. The runner's unit tests then need a `RunnerQueue` fake. The simplest is an in-memory port of the store's transitions, or `RemoteQueue` against `local_worker`. B2 chooses between them.
-9. **Asset pins.** `deploy/netplay/assets.json` does not exist yet. Running `hal-netplay-admin assets pin` (Task 8 Step 7) is a B2 prerequisite. The owner does it.
+8. **Deletion.** Plan 3 deletes `QueueStore`. The runner's unit tests then need a `RunnerQueue` fake. The simplest is an in-memory port of the store's transitions, or `RemoteQueue` against `local_worker`. Plan 3 chooses between them.
+9. **Asset pins.** `deploy/netplay/assets.json` does not exist yet. Running `hal-netplay-admin assets pin` (Task 8 Step 7) is a Plan 3 prerequisite. The owner does it.
 
-**Note on session start errors.** A `409` from `start_session` has four causes: the bundle is not the active policy, too few bot accounts are free, the runner protocol version is not the Worker's, or the session ID exists with different settings. Only the detail text tells them apart, so B2 logs the detail.
+**Note on session start errors.** A `409` from `start_session` has four causes: the bundle is not the active policy, too few bot accounts are free, the runner protocol version is not the Worker's, or the session ID exists with different settings. Only the detail text tells them apart, so Plan 3 logs the detail.

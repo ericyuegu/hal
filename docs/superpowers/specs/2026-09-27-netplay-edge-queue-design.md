@@ -10,9 +10,21 @@ that GPU boxes are interchangeable, stateless workers. The site stays up when a
 box crashes or is replaced. Bringing up a replacement box takes one command and
 no per-box configuration.
 
-This is Spec 1 of 2. Spec 2 (the page redesign and live policy settings) builds
-on the API defined here. Its agreed decisions are recorded at the end so that
-nothing is lost between the two.
+A follow-on spec, the page redesign, builds on the API defined here. Its
+agreed decisions are recorded at the end so that nothing is lost between the
+two.
+
+## Plans
+
+| Plan | Scope | Status |
+| --- | --- | --- |
+| 1 | API Worker and Durable Object (`web/netplay-api`), golden transcripts | done |
+| 2 | Runner and admin clients, retry-safe runner routes, shared queue contract | done |
+| 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | not written |
+| 4 | Host bring-up: image, `gce-up.sh`, G4 verification | not written |
+| 5 | Twitch streaming: stream lease, claim preference, displays, ffmpeg | not written |
+
+Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
 
 ## Non-goals
 
@@ -263,7 +275,7 @@ Prometheus metrics endpoint moves into the runner on a local port.
 
 ## Streaming
 
-Streaming is implemented in Plan D. Until then the Worker grants no stream
+Streaming is implemented in Plan 5. Until then the Worker grants no stream
 lease, runners start sessions with `stream: false`, and every status response
 carries `"stream": null`.
 
@@ -342,7 +354,7 @@ startup. Results go in `deploy/netplay/README.md`.
 2. Upload the bundle to `s3://hal/netplay/policies/<sha256>.halpolicy` if absent.
 3. Build the policy config: `schema_version`, `bundle_sha256`, `bundle_r2_key`,
    `vocabulary_sha256`, characters, stages, imitations (the current list until
-   Spec 2 adds the roster), delays, `desired_return_range`, defaults,
+   the page redesign adds the roster), delays, `desired_return_range`, defaults,
    `max_games`, `no_show_seconds`, `rematch_seconds`, and `masked_identity`.
 4. `PUT /v1/admin/policy`.
 
@@ -495,10 +507,10 @@ still hash-checked.
 - **Stream load.** Rendering at EFB scale 2, `x11grab`, and NVENC share the box
   with inference. The stream slot's latency must be measured, not assumed.
 
-## Spec 2 (page redesign), recorded decisions
+## Page redesign (follow-on spec), recorded decisions
 
-These were agreed in the same conversation and are implemented in Spec 2
-against the API above.
+These were agreed in the same conversation and are implemented in the page
+redesign spec against the API above.
 
 - **Page:** the one-sentence design ("I want to play Mang0's Falco at difficulty
   25."), Loud Notebook style (paper, ink, 2px outlines, orange accent, Schibsted
@@ -530,5 +542,5 @@ against the API above.
 - **Streaming notice:** one line near Play: "Games may be streamed live on
   twitch.tv/<channel>." with a link.
 - **Open:** character-select portraits extracted from the ISO or stock icons
-  first; whether to add vitest to the page project (Spec 1 already adds it to
-  the API Worker).
+  first; whether to add vitest to the page project (this spec already adds it
+  to the API Worker).
