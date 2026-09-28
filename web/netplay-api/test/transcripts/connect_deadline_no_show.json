@@ -88,7 +88,503 @@
     },
     {
       "kind": "advance",
-      "seconds": 599
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 19
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "kind": "advance",
+      "seconds": 10
     },
     {
       "body": null,
@@ -102,9 +598,9 @@
           "cancel_after_game": false,
           "character": "FOX",
           "connect_code": "HALBOT#1",
-          "connect_deadline": null,
+          "connect_deadline": 1000600.0,
           "desired_return": 20.0,
-          "error_code": "lease_expired",
+          "error_code": null,
           "game_count": 0,
           "id": "$job1",
           "imitation": "IBDW#0",
@@ -112,10 +608,10 @@
           "online_delay": 2,
           "player_code": "CRYO#610",
           "policy_revision": 0,
-          "queue_position": 1,
+          "queue_position": null,
           "rematch_deadline": null,
           "requested_stage": null,
-          "status": "queued",
+          "status": "connecting",
           "temperature": 1.0
         },
         "status": 200
@@ -140,7 +636,7 @@
           "connect_code": "HALBOT#1",
           "connect_deadline": null,
           "desired_return": 20.0,
-          "error_code": "lease_expired",
+          "error_code": null,
           "game_count": 0,
           "id": "$job1",
           "imitation": "IBDW#0",
@@ -148,10 +644,10 @@
           "online_delay": 2,
           "player_code": "CRYO#610",
           "policy_revision": 0,
-          "queue_position": 1,
+          "queue_position": null,
           "rematch_deadline": null,
           "requested_stage": null,
-          "status": "queued",
+          "status": "no_show",
           "temperature": 1.0
         },
         "status": 200
@@ -184,9 +680,29 @@
       "path": "/v1/jobs",
       "response": {
         "body": {
-          "detail": "player CRYO#610 already has an active reservation"
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job2",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.0,
+          "token": "$token2"
         },
-        "status": 409
+        "status": 201
       },
       "token": null
     }

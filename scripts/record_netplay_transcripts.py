@@ -262,7 +262,11 @@ def connect_deadline_no_show(r: Recorder) -> None:
     job = r.create()
     r.worker("a:0", "claim")
     r.worker("a:0", "connecting", job["id"], connect_code=BOT_CODE)
-    r.advance(599)
+    # Heartbeats keep the 20 s lease alive so the connect deadline is what expires.
+    for _ in range(31):
+        r.advance(19)
+        r.worker("a:0", "heartbeat", job["id"])
+    r.advance(10)
     r.player("GET", f"/v1/jobs/{job['id']}", token=job["token"])
     r.advance(1)
     r.player("GET", f"/v1/jobs/{job['id']}", token=job["token"])
@@ -328,7 +332,11 @@ def rematch_timeout(r: Recorder) -> None:
     job = r.create()
     r.start_game("a:0", job["id"])
     r.worker("a:0", "finish-game", job["id"], game_number=1, actual_stage="BATTLEFIELD", result="win")
-    r.advance(599)
+    # Heartbeats keep the 20 s lease alive so the rematch deadline is what expires.
+    for _ in range(31):
+        r.advance(19)
+        r.worker("a:0", "heartbeat", job["id"])
+    r.advance(10)
     r.player("GET", f"/v1/jobs/{job['id']}", token=job["token"])
     r.advance(1)
     r.player("GET", f"/v1/jobs/{job['id']}", token=job["token"])
