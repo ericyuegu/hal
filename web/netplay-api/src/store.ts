@@ -287,6 +287,12 @@ export class JobStore {
   }
 
   claimNext(worker: string): JobResponse | null {
+    // A repeated claim after a lost response must not give the slot a second job.
+    const held = this.first(`SELECT id, status FROM jobs WHERE lease_owner = ? AND status IN (${IN_SERVICE})`, worker);
+    if (held !== null) {
+      if (held.status === "leased") return this.response(this.reload(held.id as string));
+      throw new HttpError(409, `slot already holds job ${held.id}`);
+    }
     const now = this.time();
     const row = this.first("SELECT id FROM jobs WHERE status = 'queued' ORDER BY retry_front DESC, queue_seq ASC LIMIT 1");
     if (row === null) return null;

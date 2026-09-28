@@ -89,7 +89,7 @@ describe("security and shape", () => {
     const result = await call("POST", "/v1/runner/sessions", {
       runner: true,
       runnerToken: OTHER_RUNNER_TOKEN,
-      body: { host: "b", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 1, stream: false },
+      body: { session_id: crypto.randomUUID(), host: "b", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 1, stream: false },
     });
     expect(result.status).toBe(201);
   });
@@ -184,7 +184,7 @@ describe("runner routes", () => {
     await seedAccounts(2);
     const result = await call("POST", "/v1/runner/sessions", {
       runner: true,
-      body: { host: "b", bundle_sha256: "f".repeat(64), git_sha: "g", slots: 1, stream: false },
+      body: { session_id: crypto.randomUUID(), host: "b", bundle_sha256: "f".repeat(64), git_sha: "g", slots: 1, stream: false },
     });
     expect(result.status).toBe(409);
   });

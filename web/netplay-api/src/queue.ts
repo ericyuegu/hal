@@ -20,6 +20,8 @@ export interface ApiResult {
   headers?: Record<string, string>;
 }
 
+const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
+
 const QUEUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS policy (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -246,9 +248,11 @@ export class Queue extends DurableObject<Env> {
   }
 
   async startSession(raw: unknown): Promise<ApiResult> {
-    const id = randomToken(12);
     return this.run(() => {
-      const value = fields(raw, ["host", "bundle_sha256", "git_sha", "slots", "stream"], ["host", "bundle_sha256", "git_sha", "slots", "stream"]);
+      const names = ["session_id", "host", "bundle_sha256", "git_sha", "slots", "stream"];
+      const value = fields(raw, names, names);
+      const id = str(value.session_id, "session_id");
+      if (!SESSION_ID.test(id)) throw new HttpError(422, "session_id must be 16 to 64 URL-safe characters");
       const input: StartRequest = {
         host: str(value.host, "host"),
         bundle_sha256: str(value.bundle_sha256, "bundle_sha256"),
@@ -258,10 +262,13 @@ export class Queue extends DurableObject<Env> {
       };
       if (input.slots < 1 || input.slots > 8) throw new HttpError(422, "slots must be in [1, 8]");
       return this.tx(() => {
+        const repeated = this.sessions.exists(id);
         const started = this.sessions.start(id, input, this.policy());
-        this.events.log("session_started", { session: id, host: input.host, slots: input.slots, git_sha: input.git_sha });
-        for (const grant of started.accounts) {
-          this.events.log("account_leased", { session: id, slot: grant.slot, connect_code: grant.connect_code });
+        if (!repeated) {
+          this.events.log("session_started", { session: id, host: input.host, slots: input.slots, git_sha: input.git_sha });
+          for (const grant of started.accounts) {
+            this.events.log("account_leased", { session: id, slot: grant.slot, connect_code: grant.connect_code });
+          }
         }
         return { ...started, policy: this.policy() };
       });
@@ -296,6 +303,8 @@ export class Queue extends DurableObject<Env> {
 
   async endSession(sessionId: string): Promise<ApiResult> {
     return this.run(() => {
+      const previous = this.sessions.endedResult(sessionId);
+      if (previous !== null) return { failed: previous };
       const failed = this.tx(() => {
         const ids = this.sessions.end(sessionId, "ended");
         this.events.log("session_ended", { session: sessionId, failed: ids.length });

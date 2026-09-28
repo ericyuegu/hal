@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   draining INTEGER NOT NULL DEFAULT 0,
   status TEXT,
   ended_at REAL,
-  end_reason TEXT
+  end_reason TEXT,
+  failed_jobs INTEGER
 );
 CREATE TABLE IF NOT EXISTS accounts (
   connect_code TEXT PRIMARY KEY,
@@ -138,7 +139,33 @@ export class SessionStore {
     return this.sql.exec<Row>(query, ...params).toArray();
   }
 
+  exists(id: string): boolean {
+    return this.rows("SELECT 1 FROM sessions WHERE id = ?", id).length > 0;
+  }
+
   start(id: string, input: StartRequest, policy: PolicyConfig | null): { session_id: string; accounts: AccountGrant[] } {
+    // A runner repeats a start when it loses the first response; it gets the same accounts.
+    const existing = this.rows("SELECT * FROM sessions WHERE id = ?", id)[0];
+    if (existing !== undefined) {
+      if (existing.ended_at !== null) throw new HttpError(410, "session has ended");
+      const same =
+        existing.host === input.host &&
+        existing.bundle_sha256 === input.bundle_sha256 &&
+        existing.git_sha === input.git_sha &&
+        existing.slots === input.slots &&
+        existing.wants_stream === (input.stream ? 1 : 0);
+      if (!same) throw new HttpError(409, `session ${id} exists with different settings`);
+      const accounts = this.rows(
+        "SELECT slot, connect_code, r2_key, sha256 FROM accounts WHERE session_id = ? ORDER BY slot",
+        id,
+      ).map((row) => ({
+        slot: row.slot as number,
+        connect_code: row.connect_code as string,
+        r2_key: row.r2_key as string,
+        sha256: row.sha256 as string,
+      }));
+      return { session_id: id, accounts };
+    }
     if (policy === null) throw new HttpError(503, "no policy has been published");
     if (input.bundle_sha256 !== policy.bundle_sha256) {
       throw new HttpError(409, `bundle ${input.bundle_sha256} is not the active policy ${policy.bundle_sha256}`);
@@ -186,11 +213,12 @@ export class SessionStore {
   }
 
   // Liveness uses the time this report arrived, never the runner's clock.
-  report(id: string, raw: unknown): { draining: boolean } {
+  // Plan D replaces the null stream with the session's stream grant.
+  report(id: string, raw: unknown): { draining: boolean; stream: null } {
     const row = this.live(id);
     const status = parseRunnerStatus(raw, row.slots as number);
     this.sql.exec("UPDATE sessions SET status = ?, last_seen_at = ? WHERE id = ?", JSON.stringify(status), this.now(), id);
-    return { draining: row.draining === 1 };
+    return { draining: row.draining === 1, stream: null };
   }
 
   private slotWorker(row: Row, slot: number): string {
@@ -224,9 +252,22 @@ export class SessionStore {
     const row = this.live(id);
     const workers = Array.from({ length: row.slots as number }, (_, slot) => workerId(id, slot));
     const failed = this.jobs.failWorkers(workers);
-    this.sql.exec("UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?", this.now(), reason, id);
+    this.sql.exec(
+      "UPDATE sessions SET ended_at = ?, end_reason = ?, failed_jobs = ? WHERE id = ?",
+      this.now(),
+      reason,
+      failed.length,
+      id,
+    );
     this.sql.exec("UPDATE accounts SET session_id = NULL, slot = NULL, leased_at = NULL WHERE session_id = ?", id);
     return failed;
+  }
+
+  // A runner repeats DELETE when it loses the first response; it gets the first result.
+  endedResult(id: string): number | null {
+    const row = this.rows("SELECT ended_at, failed_jobs FROM sessions WHERE id = ?", id)[0];
+    if (row === undefined) throw new HttpError(404, "session not found");
+    return row.ended_at === null ? null : (row.failed_jobs as number);
   }
 
   endSilent(): { sessions: string[]; jobs: string[] } {
