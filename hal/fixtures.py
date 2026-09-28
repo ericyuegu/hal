@@ -52,10 +52,13 @@ class Fixture:
     r2_key: str | None = None
     url: str | None = None
     extract: Extract | None = None
+    executable: bool = False
 
     def __post_init__(self) -> None:
         if (self.r2_key is None) == (self.url is None):
             raise ValueError(f"{self.name}: exactly one of r2_key or url must be set")
+        if self.executable and self.extract is not None:
+            raise ValueError(f"{self.name}: executable applies only to unextracted files")
 
 
 DEV_ARCHIVE: Final[Fixture] = Fixture(
@@ -80,6 +83,14 @@ ISO: Final[Fixture] = Fixture(
     size_bytes=1_449_165_376,
     dest=Path("data/emulator/ssbm.ciso"),
 )
+NETPLAY_EMULATOR: Final[Fixture] = Fixture(
+    name="Slippi_Online-x86_64.AppImage",
+    url="https://github.com/project-slippi/Ishiiruka/releases/download/v3.6.4/Slippi_Online-x86_64.AppImage",
+    sha256="e0f984e5bbecb98e3a746da1f173a475b06c3a1ba6b73e2e31bbe85a5f5a5e8a",
+    size_bytes=111_679_992,
+    dest=Path("data/emulator/slippi-3.6.4/Slippi_Online-x86_64.AppImage"),
+    executable=True,
+)
 # Our fork of vladfi1's exi-ai-0.2.0 with stock trigger pipe semantics restored
 # (exi-ai-0.2.1), rebuilt on Ubuntu 24.04 as 0.2.2 so the AppImage's glibc floor
 # (2.39) runs on the cloud training container; 0.2.1 was packaged against glibc
@@ -94,7 +105,7 @@ DOLPHIN_EXIAI: Final[Fixture] = Fixture(
     extract="appimage",
 )
 
-ALL: Final[tuple[Fixture, ...]] = (DEV_ARCHIVE, DEV_MDS, ISO, DOLPHIN_EXIAI)
+ALL: Final[tuple[Fixture, ...]] = (DEV_ARCHIVE, DEV_MDS, ISO, NETPLAY_EMULATOR, DOLPHIN_EXIAI)
 BY_NAME: Final[dict[str, Fixture]] = {f.name: f for f in ALL}
 
 
@@ -204,6 +215,8 @@ def ensure(fix: Fixture) -> Path:
     is_dir = fix.extract is not None
     existing = _written_sha(target, is_dir=is_dir)
     if existing == fix.sha256:
+        if fix.executable:
+            target.chmod(0o755)
         logger.info(f"skip {fix.name} (sha match)")
         return target
 
@@ -233,6 +246,8 @@ def ensure(fix: Fixture) -> Path:
         if target.exists():
             target.unlink()
         shutil.copy2(cache_path, target)
+        if fix.executable:
+            target.chmod(0o755)
 
     logger.info(f"ready {fix.name} -> {target}")
     return target

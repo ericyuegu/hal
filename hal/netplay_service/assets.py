@@ -1,7 +1,6 @@
 """Pinned runner assets: a manifest, a hash-checked cache, and content-addressed uploads."""
 
 import hashlib
-import json
 import re
 import shutil
 import uuid
@@ -10,12 +9,10 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import Protocol
-from typing import cast
 
 from botocore.exceptions import ClientError
 from loguru import logger
 
-ASSET_MANIFEST_VERSION: Final[int] = 1
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 
 
@@ -36,10 +33,6 @@ def account_key(sha256: str) -> str:
     return f"netplay/accounts/{sha256}.json"
 
 
-def pinned_asset_key(sha256: str, name: str) -> str:
-    return f"netplay/assets/{sha256}/{name}"
-
-
 @dataclass(frozen=True, slots=True)
 class PinnedAsset:
     key: str
@@ -56,49 +49,6 @@ class PinnedAsset:
     @property
     def name(self) -> str:
         return self.key.rsplit("/", 1)[-1]
-
-
-def _pinned(payload: object, name: str, *, executable: bool) -> PinnedAsset:
-    if not isinstance(payload, dict) or set(payload) != {"key", "sha256"}:
-        raise ValueError(f"asset manifest {name} needs exactly key and sha256")
-    fields = cast(dict[str, object], payload)
-    key, digest = fields["key"], fields["sha256"]
-    if not isinstance(key, str) or not isinstance(digest, str):
-        raise ValueError(f"asset manifest {name} values must be strings")
-    asset = PinnedAsset(key, digest, executable)
-    if asset.key != pinned_asset_key(asset.sha256, asset.name):
-        raise ValueError(f"asset manifest {name} key must be {pinned_asset_key(asset.sha256, asset.name)}")
-    return asset
-
-
-@dataclass(frozen=True, slots=True)
-class AssetManifest:
-    """The ISO and emulator every runner uses, pinned by R2 key and SHA-256."""
-
-    iso: PinnedAsset
-    emulator: PinnedAsset
-
-    @classmethod
-    def read(cls, path: Path) -> AssetManifest:
-        payload = json.loads(path.read_text())
-        if not isinstance(payload, dict) or set(payload) != {"schema_version", "iso", "emulator"}:
-            raise ValueError(f"asset manifest fields changed: {path}")
-        if payload["schema_version"] != ASSET_MANIFEST_VERSION or isinstance(payload["schema_version"], bool):
-            raise ValueError(f"asset manifest schema_version must be {ASSET_MANIFEST_VERSION}: {path}")
-        return cls(
-            _pinned(payload["iso"], "iso", executable=False),
-            _pinned(payload["emulator"], "emulator", executable=True),
-        )
-
-    def to_payload(self) -> dict[str, object]:
-        return {
-            "schema_version": ASSET_MANIFEST_VERSION,
-            "iso": {"key": self.iso.key, "sha256": self.iso.sha256},
-            "emulator": {"key": self.emulator.key, "sha256": self.emulator.sha256},
-        }
-
-    def write(self, path: Path) -> None:
-        path.write_text(json.dumps(self.to_payload(), indent=2, sort_keys=True) + "\n")
 
 
 class AssetSource(Protocol):

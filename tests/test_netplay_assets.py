@@ -1,5 +1,4 @@
 import hashlib
-import json
 from pathlib import Path
 from typing import BinaryIO
 
@@ -8,11 +7,9 @@ from botocore.exceptions import ClientError
 
 from hal.netplay_service.assets import AssetCache
 from hal.netplay_service.assets import AssetError
-from hal.netplay_service.assets import AssetManifest
 from hal.netplay_service.assets import LocalSource
 from hal.netplay_service.assets import PinnedAsset
 from hal.netplay_service.assets import ensure_uploaded
-from hal.netplay_service.assets import pinned_asset_key
 
 
 def _digest(data: bytes) -> str:
@@ -47,21 +44,6 @@ class _Bucket:
         return {"ETag": '"etag"'}
 
 
-def test_manifest_round_trips_and_rejects_drift(tmp_path: Path) -> None:
-    manifest = AssetManifest(
-        PinnedAsset(pinned_asset_key("a" * 64, "ssbm.ciso"), "a" * 64),
-        PinnedAsset(pinned_asset_key("b" * 64, "Slippi_Online-x86_64.AppImage"), "b" * 64, executable=True),
-    )
-    path = tmp_path / "assets.json"
-    manifest.write(path)
-    assert AssetManifest.read(path) == manifest
-    payload = json.loads(path.read_text())
-    payload["extra"] = 1
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="fields changed"):
-        AssetManifest.read(path)
-
-
 @pytest.mark.parametrize("key", ["", "/abs", "a/../b"])
 def test_pinned_asset_rejects_unsafe_keys(key: str) -> None:
     with pytest.raises(ValueError, match="key"):
@@ -70,7 +52,7 @@ def test_pinned_asset_rejects_unsafe_keys(key: str) -> None:
 
 def test_cache_fetches_verifies_and_marks_executables(tmp_path: Path) -> None:
     data = b"emulator"
-    asset = PinnedAsset(pinned_asset_key(_digest(data), "Slippi.AppImage"), _digest(data), executable=True)
+    asset = PinnedAsset(f"netplay/policies/{_digest(data)}/Slippi.AppImage", _digest(data), executable=True)
     cache = AssetCache(tmp_path / "cache", _mirror(tmp_path, asset.key, data))
     path = cache.get(asset)
     assert path == tmp_path / "cache" / asset.sha256 / "Slippi.AppImage"
@@ -88,7 +70,7 @@ def test_cache_rejects_a_wrong_hash_and_leaves_nothing(tmp_path: Path) -> None:
 
 def test_cache_replaces_a_corrupted_cached_file(tmp_path: Path) -> None:
     data = b"iso bytes"
-    asset = PinnedAsset(pinned_asset_key(_digest(data), "ssbm.ciso"), _digest(data))
+    asset = PinnedAsset(f"netplay/accounts/{_digest(data)}/ssbm.ciso", _digest(data))
     cache = AssetCache(tmp_path / "cache", _mirror(tmp_path, asset.key, data))
     cached = cache.get(asset)
     cached.write_bytes(b"iso")
@@ -120,17 +102,3 @@ def test_ensure_uploaded_refuses_a_truncated_object_with_matching_metadata(tmp_p
     with pytest.raises(AssetError, match="3 bytes; expected 6"):
         ensure_uploaded(bucket, "hal", path, "netplay/policies/x.halpolicy", _digest(b"bundle"))
     assert bucket.puts == 0
-
-
-def test_manifest_rejects_a_key_that_is_not_content_addressed(tmp_path: Path) -> None:
-    manifest = AssetManifest(
-        PinnedAsset(pinned_asset_key("a" * 64, "ssbm.ciso"), "a" * 64),
-        PinnedAsset(pinned_asset_key("b" * 64, "Slippi.AppImage"), "b" * 64, executable=True),
-    )
-    path = tmp_path / "assets.json"
-    manifest.write(path)
-    payload = json.loads(path.read_text())
-    payload["iso"]["key"] = pinned_asset_key("b" * 64, "ssbm.ciso")
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="iso key must be"):
-        AssetManifest.read(path)

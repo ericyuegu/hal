@@ -13,11 +13,8 @@ from typing import Final
 from hal import r2
 from hal.data.schema import Rank
 from hal.inference.action_sequence_artifact import read_action_sequence_artifact
-from hal.netplay_service.assets import AssetManifest
-from hal.netplay_service.assets import PinnedAsset
 from hal.netplay_service.assets import account_key
 from hal.netplay_service.assets import ensure_uploaded
-from hal.netplay_service.assets import pinned_asset_key
 from hal.netplay_service.assets import policy_bundle_key
 from hal.netplay_service.assets import sha256_file
 from hal.netplay_service.domain import CHARACTERS
@@ -112,19 +109,6 @@ def upload_accounts(paths: Sequence[Path], admin: AdminClient, remote: Any, buck
     return uploaded
 
 
-def pin_assets(iso: Path, emulator: Path, manifest: Path, remote: Any, bucket: str) -> AssetManifest:
-    iso_sha256 = sha256_file(iso)
-    emulator_sha256 = sha256_file(emulator)
-    pinned = AssetManifest(
-        PinnedAsset(pinned_asset_key(iso_sha256, iso.name), iso_sha256),
-        PinnedAsset(pinned_asset_key(emulator_sha256, emulator.name), emulator_sha256, executable=True),
-    )
-    ensure_uploaded(remote, bucket, iso, pinned.iso.key, iso_sha256)
-    ensure_uploaded(remote, bucket, emulator, pinned.emulator.key, emulator_sha256)
-    pinned.write(manifest)
-    return pinned
-
-
 def parse_since(value: str, now: float) -> float:
     match = _SINCE.fullmatch(value)
     if match is None:
@@ -146,12 +130,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     account_commands = accounts.add_subparsers(dest="account_command", required=True)
     upload = account_commands.add_parser("upload", help="upload user.json files and replace the account list")
     upload.add_argument("paths", type=Path, nargs="+")
-    assets = commands.add_parser("assets", help="manage the pinned ISO and emulator")
-    asset_commands = assets.add_subparsers(dest="asset_command", required=True)
-    pin = asset_commands.add_parser("pin", help="upload the ISO and emulator and write the pin file")
-    pin.add_argument("--iso", type=Path, required=True)
-    pin.add_argument("--emulator", type=Path, required=True)
-    pin.add_argument("--manifest", type=Path, default=Path("deploy/netplay/assets.json"))
     commands.add_parser("status", help="print sessions, accounts, capacity, and the active policy")
     events = commands.add_parser("events", help="print the event timeline as JSON lines")
     scope = events.add_mutually_exclusive_group()
@@ -164,14 +142,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "install-replay-lifecycle":
         ensure_replay_lifecycle()
-        return
-    if args.command == "assets":
-        remote = r2.client()
-        try:
-            pinned = pin_assets(args.iso, args.emulator, args.manifest, remote, r2.bucket())
-        finally:
-            remote.close()
-        print(json.dumps(pinned.to_payload(), indent=2, sort_keys=True))
         return
     admin = _admin_client()
     try:

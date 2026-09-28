@@ -9,11 +9,9 @@ from botocore.exceptions import ClientError
 
 from hal.netplay_service.admin import check_imitations
 from hal.netplay_service.admin import parse_since
-from hal.netplay_service.admin import pin_assets
 from hal.netplay_service.admin import policy_config
 from hal.netplay_service.admin import publish_policy
 from hal.netplay_service.admin import upload_accounts
-from hal.netplay_service.assets import AssetManifest
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
@@ -95,18 +93,6 @@ def test_accounts_upload_refuses_an_empty_list() -> None:
     with pytest.raises(ValueError, match="at least one account"):
         upload_accounts((), admin, _Bucket(), "hal")
     admin.put_accounts.assert_not_called()
-
-
-def test_pin_assets_uploads_and_writes_the_manifest(tmp_path: Path) -> None:
-    iso = tmp_path / "ssbm.ciso"
-    iso.write_bytes(b"iso")
-    emulator = tmp_path / "Slippi_Online-x86_64.AppImage"
-    emulator.write_bytes(b"emulator")
-    manifest_path = tmp_path / "assets.json"
-    manifest = pin_assets(iso, emulator, manifest_path, _Bucket(), "hal")
-    assert AssetManifest.read(manifest_path) == manifest
-    assert manifest.emulator.executable
-    assert manifest.iso.key == f"netplay/assets/{hashlib.sha256(b'iso').hexdigest()}/ssbm.ciso"
 
 
 @pytest.mark.parametrize(("value", "expected"), [("90s", 910.0), ("15m", 100.0), ("1h", -2600.0), ("2d", -171800.0)])
