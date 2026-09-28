@@ -78,6 +78,15 @@ export type Rematch = {
 
 const API_BASE = process.env.NEXT_PUBLIC_HAL_API_URL ?? 'http://localhost:8080';
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
@@ -89,7 +98,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = (await response.json().catch(() => null)) as {
       detail?: string;
     } | null;
-    throw new Error(body?.detail ?? `Request failed (${response.status})`);
+    throw new ApiError(
+      body?.detail ?? `Request failed (${response.status})`,
+      response.status,
+    );
   }
   return (await response.json()) as T;
 }
@@ -201,6 +213,6 @@ export const fallbackOptions: Options = {
   temperature_range: [0.8, 1.1],
   default_temperature: 1,
   max_games: 5,
-  no_show_seconds: 60,
-  rematch_seconds: 60,
+  no_show_seconds: 600,
+  rematch_seconds: 600,
 };
