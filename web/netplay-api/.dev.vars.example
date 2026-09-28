@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`. Values are SHA-256 hex digests of the dev tokens.
+# echo -n dev-runner-token | sha256sum
+RUNNER_TOKEN_SHA256=<digest of dev-runner-token>
+ADMIN_TOKEN_SHA256=<digest of dev-admin-token>
