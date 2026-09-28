@@ -327,6 +327,41 @@ def test_prepared_observation_layout_rejects_changed_scalar_dtypes() -> None:
     assert policy.predict((request,))[0].stream_id == 42
 
 
+@pytest.mark.parametrize("has_history", [False, True])
+@pytest.mark.parametrize("invalid_index", [0, 1])
+def test_invalid_observation_rejects_complete_batch_without_advancing_streams(
+    has_history: bool, invalid_index: int
+) -> None:
+    policy = _policy(2)
+    control = _policy(2)
+    if has_history:
+        initial = tuple(_request(policy, stream, 1, 2, 0) for stream in (7, 42))
+        policy.predict(initial)
+        control.predict(initial)
+    source = 3 if has_history else 1
+    sequence = 1 if has_history else 0
+    requests = tuple(_request(policy, stream, source, 2, sequence) for stream in (7, 42))
+    observations = list(requests[1].observations)
+    item = observations[invalid_index]
+    observations[invalid_index] = replace(item, observation={**item.observation, "stage": 0.5})
+    invalid = replace(requests[1], observations=tuple(observations))
+    cursors = {
+        stream_id: (stream.last_frame, stream.sequence, stream.history.written)
+        for stream_id, stream in policy._prediction_streams.items()
+    }
+    free_rows = policy._free_rows.copy()
+
+    with pytest.raises(ValueError, match="noncanonical scalar type"):
+        policy.predict((requests[0], invalid))
+
+    assert policy._free_rows == free_rows
+    assert {
+        stream_id: (stream.last_frame, stream.sequence, stream.history.written)
+        for stream_id, stream in policy._prediction_streams.items()
+    } == cursors
+    assert policy.predict(requests) == control.predict(requests)
+
+
 @pytest.mark.parametrize("port", [1, 2])
 @pytest.mark.parametrize(
     "is_compiled",

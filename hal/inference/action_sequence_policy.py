@@ -576,8 +576,8 @@ class ActionSequencePolicy:
             )
             stream = self._prediction_streams.get(request.stream_id)
             generation = None if stream is None else stream.generation
-            if stream is None or generation != request.generation:
-                _validate_prepared_observation(request.observations[0])
+            for observation in request.observations:
+                _validate_prepared_observation(observation)
             if generation is not None and request.generation < generation:
                 raise ValueError("obsolete action sequence prediction generation")
             if stream is not None and generation == request.generation and request.sequence <= stream.sequence:
