@@ -58,12 +58,18 @@ describe("security and shape", () => {
   });
 
   it("requires runner and admin tokens", async () => {
+    await publish();
+    const count = async () => (await call("GET", "/v1/admin/events", { admin: true })).body.events.length as number;
+    const before = await count();
     expect((await call("POST", "/v1/runner/sessions", { body: {} })).status).toBe(401);
     expect((await call("POST", "/v1/runner/sessions", { token: ADMIN_TOKEN, body: {} })).status).toBe(401);
     expect((await call("PUT", "/v1/admin/policy", { runner: true, body: POLICY })).status).toBe(401);
     expect((await call("GET", "/v1/admin/status", { admin: true })).status).toBe(200);
-    const refused = await call("GET", "/v1/admin/events", { admin: true });
-    expect(refused.body.events.map((event: { kind: string }) => event.kind)).toContain("refused");
+    expect(await count()).toBe(before);
+  });
+
+  it("requires a runner token before the live socket reaches the queue", async () => {
+    expect((await call("GET", "/v1/runner/jobs/x/live")).status).toBe(401);
   });
 
   it("validates event query parameters", async () => {

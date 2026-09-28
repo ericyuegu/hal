@@ -427,11 +427,6 @@ export class Queue extends DurableObject<Env> {
     return this.run(() => ({ events: this.events.query(query) }));
   }
 
-  async logRefusal(detail: Record<string, unknown>): Promise<void> {
-    this.tx(() => this.events.log("refused", detail));
-    await this.scheduleAlarm();
-  }
-
   // Test seams, enabled only by the HAL_TEST_CLOCK binding in vitest.config.ts.
 
   async setTestClock(seconds: number): Promise<void> {

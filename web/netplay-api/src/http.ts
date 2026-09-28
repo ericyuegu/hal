@@ -90,6 +90,12 @@ function eventsLimit(raw: string | null): number | undefined {
   return limit;
 }
 
+// Refusals go to Workers logs, not the Durable Object: unauthenticated callers
+// must not be able to grow its storage.
+function logRefusal(scope: string, method: string, path: string): void {
+  console.warn(JSON.stringify({ event: "refused", scope, method, path: path.slice(0, 256) }));
+}
+
 export async function handle(request: Request, env: Env): Promise<Response> {
   const queue = env.QUEUE.get(env.QUEUE.idFromName("global"));
   const url = new URL(request.url);
@@ -110,7 +116,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     const job = path.match(/^\/v1\/jobs\/([^/]+)(\/policy|\/rematch)?$/);
     if (job) {
       const [, id, suffix] = job as [string, string, string | undefined];
-      // FastAPI resolves the bearer dependency before it reads the body.
+      // The bearer dependency is resolved before body validation.
       const token = bearer(request);
       if (method === "PATCH" && suffix === "/policy") {
         if (token === null) return failure(401, "job token is required");
@@ -129,7 +135,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     // Runner routes
     if (path.startsWith("/v1/runner/")) {
       if (!(await tokenMatches(bearer(request), env.RUNNER_TOKEN_SHA256))) {
-        await queue.logRefusal({ scope: "runner", method, path });
+        logRefusal("runner", method, path);
         return failure(401, "runner token is invalid");
       }
       if (method === "POST" && path === "/v1/runner/sessions") {
@@ -158,7 +164,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     // Admin routes
     if (path.startsWith("/v1/admin/")) {
       if (!(await tokenMatches(bearer(request), env.ADMIN_TOKEN_SHA256))) {
-        await queue.logRefusal({ scope: "admin", method, path });
+        logRefusal("admin", method, path);
         return failure(401, "admin token is invalid");
       }
       if (method === "PUT" && path === "/v1/admin/policy") return respond(await queue.putPolicy(await readBody(request)));
