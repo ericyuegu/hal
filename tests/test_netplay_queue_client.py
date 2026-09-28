@@ -189,10 +189,34 @@ def test_endpoint_accepts_http_to_this_machine(url: str) -> None:
     assert QueueEndpoint(url, "t").headers() == {"Authorization": "Bearer t"}
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "token", "access_id", "access_secret"),
+    [
+        (runner_endpoint, "HAL_NETPLAY_RUNNER_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"),
+        (
+            admin_endpoint,
+            "HAL_NETPLAY_ADMIN_TOKEN",
+            "HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID",
+            "HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET",
+        ),
+    ],
+)
+def test_environment_errors_name_the_variables_read(
+    endpoint: Callable[[dict[str, str]], QueueEndpoint], token: str, access_id: str, access_secret: str
+) -> None:
+    both = f"set both {access_id} and {access_secret}, or neither"
+    with pytest.raises(ValueError, match=f"^set {access_secret}$"):
+        endpoint({"HAL_NETPLAY_API_URL": "https://20xx.xyz", token: "t", access_id: "id"})
+    with pytest.raises(ValueError, match=f"^{both}$"):
+        endpoint({"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787", token: "t", access_id: "id"})
+    with pytest.raises(ValueError, match=f"^{both}$"):
+        endpoint({"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787", token: "t", access_secret: "secret"})
+
+
 def test_endpoint_rejects_misconfiguration_and_hides_secrets() -> None:
     with pytest.raises(ValueError, match="trailing slash"):
         QueueEndpoint("https://20xx.xyz/", "t", "id", "secret")
-    with pytest.raises(ValueError, match="both"):
+    with pytest.raises(ValueError, match="both the Access client id and secret"):
         QueueEndpoint("https://20xx.xyz", "t", "id")
     with pytest.raises(ValueError, match="HAL_NETPLAY_RUNNER_TOKEN"):
         runner_endpoint({"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787"})

@@ -96,7 +96,7 @@ class QueueEndpoint:
         if not self.token:
             raise ValueError("the queue bearer token must be non-empty")
         if (self.access_client_id is None) != (self.access_client_secret is None):
-            raise ValueError("set both CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET, or neither")
+            raise ValueError("set both the Access client id and secret, or neither")
         if self.url.startswith("https://") and self.access_client_id is None:
             raise ValueError("a public queue URL needs Cloudflare Access service-token credentials")
 
@@ -115,6 +115,8 @@ def _endpoint(environment: Mapping[str, str], token: str, access_id: str, access
         missing += [name for name in (access_id, access_secret) if not environment.get(name)]
     if missing:
         raise ValueError(f"set {', '.join(missing)}")
+    if bool(environment.get(access_id)) != bool(environment.get(access_secret)):
+        raise ValueError(f"set both {access_id} and {access_secret}, or neither")
     return QueueEndpoint(
         url,
         environment[token],
