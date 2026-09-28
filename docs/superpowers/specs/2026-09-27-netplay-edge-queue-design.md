@@ -139,7 +139,7 @@ has its own token.
 
 | Route | Purpose | Replaces |
 | --- | --- | --- |
-| `POST /v1/runner/sessions` | Start a session: `{session_id, host, bundle_sha256, git_sha, slots, stream}`, with a runner-chosen ID. Returns the session ID, the policy config, and one leased account per slot. A repeat with identical fields returns the same session. `409` if the bundle is not the active policy, if too few accounts are free, or if the ID exists with other fields. | runner startup and per-box account config |
+| `POST /v1/runner/sessions` | Start a session: `{session_id, protocol_version, host, bundle_sha256, git_sha, slots, stream}`, with a runner-chosen ID. Returns the session ID, the policy config, and one leased account per slot. A repeat with identical fields returns the same session. `409` if the runner protocol version differs from the Worker's, if the bundle is not the active policy, if too few accounts are free, or if the ID exists with other fields. | runner startup and per-box account config |
 | `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. The response is `{draining, stream}`: `stream` is `null` unless this session holds the stream lease, and then it carries the stream key. | status files read by the API |
 | `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Returns the slot's `leased` job if it holds one, so a repeat cannot take a second job. Refused while the session is draining, or while the slot holds a job past `leased`. Applies the stream-slot preference (see "Streaming"). | `claim_next` |
 | `POST /v1/runner/sessions/{sid}/drain` | Stop claiming; keep current sets. | local stop flag |
