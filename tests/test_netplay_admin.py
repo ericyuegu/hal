@@ -7,12 +7,14 @@ from unittest.mock import Mock
 import pytest
 from botocore.exceptions import ClientError
 
+from hal.netplay_service.admin import check_imitations
 from hal.netplay_service.admin import parse_since
 from hal.netplay_service.admin import pin_assets
 from hal.netplay_service.admin import policy_config
 from hal.netplay_service.admin import publish_policy
 from hal.netplay_service.admin import upload_accounts
 from hal.netplay_service.assets import AssetManifest
+from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
 
@@ -49,6 +51,14 @@ def test_policy_config_requires_both_netplay_delays() -> None:
         policy_config("a" * 64, "b" * 64, 1, (2,))
 
 
+def test_imitations_must_be_in_the_bundle_vocabulary() -> None:
+    codes = tuple(sorted(choice.value for choice in IMITATIONS if "#" in choice.value))
+    check_imitations(IMITATIONS, codes)
+    missing = tuple(code for code in codes if code not in ("ZAIN#0", "HBOX#1"))
+    with pytest.raises(ValueError, match=r"HBOX#1, ZAIN#0"):
+        check_imitations(IMITATIONS, missing)
+
+
 def test_publish_policy_uploads_then_publishes(tmp_path: Path) -> None:
     bundle = tmp_path / "policy.halpolicy"
     bundle.write_bytes(b"bundle")
@@ -77,6 +87,13 @@ def test_accounts_upload_refuses_duplicate_codes_before_any_upload(tmp_path: Pat
     with pytest.raises(ValueError, match="BOT0#1 appears twice"):
         upload_accounts((first, second), admin, bucket, "hal")
     assert bucket.objects == {}
+    admin.put_accounts.assert_not_called()
+
+
+def test_accounts_upload_refuses_an_empty_list() -> None:
+    admin = Mock(spec=AdminClient)
+    with pytest.raises(ValueError, match="at least one account"):
+        upload_accounts((), admin, _Bucket(), "hal")
     admin.put_accounts.assert_not_called()
 
 

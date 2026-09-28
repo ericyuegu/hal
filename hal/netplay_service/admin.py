@@ -11,6 +11,7 @@ from typing import Any
 from typing import Final
 
 from hal import r2
+from hal.data.schema import Rank
 from hal.inference.action_sequence_artifact import read_action_sequence_artifact
 from hal.netplay_service.assets import AssetManifest
 from hal.netplay_service.assets import PinnedAsset
@@ -22,15 +23,33 @@ from hal.netplay_service.assets import sha256_file
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
+from hal.netplay_service.domain import Choice
 from hal.netplay_service.domain import PolicyConfig
 from hal.netplay_service.domain import account_connect_code
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
 from hal.netplay_service.queue_client import admin_endpoint
 from hal.netplay_service.replays import ensure_replay_lifecycle
+from hal.representation.player_identity import RANK_PLAYER_IDS
 
 _SINCE: Final[re.Pattern[str]] = re.compile(r"([0-9]+)([smhd])")
 _UNIT_SECONDS: Final[dict[str, int]] = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# The policy resolves these imitations without the bundle's connect-code vocabulary.
+_VOCABULARY_FREE_IMITATIONS: Final[frozenset[str]] = frozenset(
+    {"MASKED", *(Rank(player_id).name for player_id in RANK_PLAYER_IDS)}
+)
+
+
+def check_imitations(imitations: tuple[Choice, ...], vocabulary_codes: tuple[str, ...]) -> None:
+    """Reject imitations that the policy would fail to resolve on the runner."""
+    known = frozenset(vocabulary_codes)
+    missing = sorted(
+        choice.value
+        for choice in imitations
+        if choice.value not in _VOCABULARY_FREE_IMITATIONS and choice.value not in known
+    )
+    if missing:
+        raise ValueError(f"the bundle vocabulary lacks imitation codes: {', '.join(missing)}")
 
 
 def policy_config(
@@ -59,12 +78,14 @@ def policy_config(
 def policy_config_for(bundle: Path) -> PolicyConfig:
     """Validate every bundle member and derive the published config from it."""
     artifact = read_action_sequence_artifact(bundle)
-    return policy_config(
+    config = policy_config(
         sha256_file(bundle),
         artifact.vocabulary.sha256,
         artifact.capability_version,
         artifact.spec.supported_transport_delays,
     )
+    check_imitations(config.imitations, artifact.vocabulary.codes)
+    return config
 
 
 def publish_policy(bundle: Path, config: PolicyConfig, admin: AdminClient, remote: Any, bucket: str) -> bool:
@@ -74,6 +95,8 @@ def publish_policy(bundle: Path, config: PolicyConfig, admin: AdminClient, remot
 
 
 def upload_accounts(paths: Sequence[Path], admin: AdminClient, remote: Any, bucket: str) -> tuple[Account, ...]:
+    if not paths:
+        raise ValueError("accounts upload needs at least one account")
     codes = [account_connect_code(path) for path in paths]
     for code in codes:
         if codes.count(code) > 1:
