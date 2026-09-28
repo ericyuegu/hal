@@ -1,0 +1,222 @@
+{
+  "name": "policy_revision",
+  "steps": [
+    {
+      "body": {
+        "character": "FOX",
+        "desired_return": null,
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610",
+        "temperature": 0.9
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": null,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 0.9,
+          "token": "$token1"
+        },
+        "status": 201
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "desired_return": 30
+      },
+      "kind": "player",
+      "method": "PATCH",
+      "path": "/v1/jobs/$job1/policy",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 30.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 1,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 0.9
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "temperature": 1.05
+      },
+      "kind": "player",
+      "method": "PATCH",
+      "path": "/v1/jobs/$job1/policy",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 30.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 2,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.05
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "desired_return": null
+      },
+      "kind": "player",
+      "method": "PATCH",
+      "path": "/v1/jobs/$job1/policy",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": null,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 3,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.05
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {},
+      "kind": "player",
+      "method": "PATCH",
+      "path": "/v1/jobs/$job1/policy",
+      "response": {
+        "body": {
+          "detail": "provide desired_return or temperature"
+        },
+        "status": 422
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "temperature": null
+      },
+      "kind": "player",
+      "method": "PATCH",
+      "path": "/v1/jobs/$job1/policy",
+      "response": {
+        "body": {
+          "detail": "temperature cannot be null"
+        },
+        "status": 422
+      },
+      "token": "$token1"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "DELETE",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": null,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 3,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "canceled",
+          "temperature": 1.05
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "desired_return": 10
+      },
+      "kind": "player",
+      "method": "PATCH",
+      "path": "/v1/jobs/$job1/policy",
+      "response": {
+        "body": {
+          "detail": "cannot update a finished reservation"
+        },
+        "status": 409
+      },
+      "token": "$token1"
+    }
+  ]
+}

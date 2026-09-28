@@ -1,0 +1,199 @@
+{
+  "bundle_r2_key": "netplay/policies/transcripts.halpolicy",
+  "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "characters": [
+    {
+      "label": "Fox",
+      "value": "FOX"
+    },
+    {
+      "label": "Falco",
+      "value": "FALCO"
+    },
+    {
+      "label": "Marth",
+      "value": "MARTH"
+    },
+    {
+      "label": "Sheik",
+      "value": "SHEIK"
+    },
+    {
+      "label": "Jigglypuff",
+      "value": "JIGGLYPUFF"
+    },
+    {
+      "label": "Peach",
+      "value": "PEACH"
+    },
+    {
+      "label": "Captain Falcon",
+      "value": "CPTFALCON"
+    },
+    {
+      "label": "Ice Climbers",
+      "value": "POPO"
+    },
+    {
+      "label": "Pikachu",
+      "value": "PIKACHU"
+    },
+    {
+      "label": "Samus",
+      "value": "SAMUS"
+    },
+    {
+      "label": "Yoshi",
+      "value": "YOSHI"
+    },
+    {
+      "label": "Luigi",
+      "value": "LUIGI"
+    },
+    {
+      "label": "Ganondorf",
+      "value": "GANONDORF"
+    },
+    {
+      "label": "Mario",
+      "value": "MARIO"
+    },
+    {
+      "label": "Dr. Mario",
+      "value": "DOC"
+    },
+    {
+      "label": "Link",
+      "value": "LINK"
+    },
+    {
+      "label": "Young Link",
+      "value": "YOUNG_LINK"
+    },
+    {
+      "label": "Zelda",
+      "value": "ZELDA"
+    },
+    {
+      "label": "Mewtwo",
+      "value": "MEWTWO"
+    },
+    {
+      "label": "Ness",
+      "value": "NESS"
+    },
+    {
+      "label": "Roy",
+      "value": "ROY"
+    },
+    {
+      "label": "Mr. Game & Watch",
+      "value": "GAMEANDWATCH"
+    },
+    {
+      "label": "Pichu",
+      "value": "PICHU"
+    },
+    {
+      "label": "Donkey Kong",
+      "value": "DK"
+    },
+    {
+      "label": "Bowser",
+      "value": "BOWSER"
+    },
+    {
+      "label": "Kirby",
+      "value": "KIRBY"
+    }
+  ],
+  "default_desired_return": 20.0,
+  "default_temperature": 1.0,
+  "desired_return_range": [
+    0.0,
+    40.0
+  ],
+  "imitations": [
+    {
+      "label": "No player identity",
+      "value": "MASKED"
+    },
+    {
+      "label": "iBDW",
+      "value": "IBDW#0"
+    },
+    {
+      "label": "Zain",
+      "value": "ZAIN#0"
+    },
+    {
+      "label": "Mang0",
+      "value": "MANG#0"
+    },
+    {
+      "label": "Leffen",
+      "value": "LEFFEN#0"
+    },
+    {
+      "label": "Pipsqueak",
+      "value": "PIPLUP#0"
+    },
+    {
+      "label": "aMSa",
+      "value": "AMSA#0"
+    },
+    {
+      "label": "Hungrybox",
+      "value": "HBOX#1"
+    },
+    {
+      "label": "Platinum rank",
+      "value": "PLATINUM"
+    },
+    {
+      "label": "Diamond rank",
+      "value": "DIAMOND"
+    },
+    {
+      "label": "Master rank",
+      "value": "MASTER"
+    }
+  ],
+  "masked_identity": false,
+  "online_delays": [
+    2,
+    3
+  ],
+  "schema_version": 1,
+  "stages": [
+    {
+      "label": "Battlefield",
+      "value": "BATTLEFIELD"
+    },
+    {
+      "label": "Final Destination",
+      "value": "FINAL_DESTINATION"
+    },
+    {
+      "label": "Dream Land",
+      "value": "DREAMLAND"
+    },
+    {
+      "label": "Pok\u00e9mon Stadium",
+      "value": "POKEMON_STADIUM"
+    },
+    {
+      "label": "Yoshi's Story",
+      "value": "YOSHIS_STORY"
+    },
+    {
+      "label": "Fountain of Dreams",
+      "value": "FOUNTAIN_OF_DREAMS"
+    }
+  ],
+  "temperature_range": [
+    0.8,
+    1.1
+  ],
+  "vocabulary_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+}

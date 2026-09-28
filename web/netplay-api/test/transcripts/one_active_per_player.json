@@ -1,0 +1,131 @@
+{
+  "name": "one_active_per_player",
+  "steps": [
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.0,
+          "token": "$token1"
+        },
+        "status": 201
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": "player CRYO#610 already has an active reservation"
+        },
+        "status": 409
+      },
+      "token": null
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "DELETE",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "canceled",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job2",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.0,
+          "token": "$token2"
+        },
+        "status": 201
+      },
+      "token": null
+    }
+  ]
+}

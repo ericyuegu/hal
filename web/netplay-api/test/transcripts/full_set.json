@@ -1,0 +1,708 @@
+{
+  "name": "full_set",
+  "steps": [
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.0,
+          "token": "$token1"
+        },
+        "status": 201
+      },
+      "token": null
+    },
+    {
+      "args": {},
+      "compare": "full",
+      "job": null,
+      "kind": "worker",
+      "op": "claim",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "leased",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "connect_code": "HALBOT#1"
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "connecting",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "playing",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "actual_stage": "BATTLEFIELD",
+        "game_number": 1,
+        "result": "loss"
+      },
+      "compare": "status_field",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "finish-game",
+      "response": {
+        "body": {
+          "status": "rematch_wait"
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "etag": "etag-1",
+        "game_number": 1,
+        "key": "replays/1.slp",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1001
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "replay",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "GET",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": "BATTLEFIELD",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 1,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": 1000600.0,
+          "requested_stage": null,
+          "status": "rematch_wait",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "character": "FALCO",
+        "imitation": "ZAIN#0",
+        "stage": "BATTLEFIELD"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs/$job1/rematch",
+      "response": {
+        "body": {
+          "actual_stage": "BATTLEFIELD",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 1,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_ready",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "playing",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "actual_stage": "FINAL_DESTINATION",
+        "game_number": 2,
+        "result": "loss"
+      },
+      "compare": "status_field",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "finish-game",
+      "response": {
+        "body": {
+          "status": "rematch_wait"
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "etag": "etag-2",
+        "game_number": 2,
+        "key": "replays/2.slp",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1002
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "replay",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "GET",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": "FINAL_DESTINATION",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 2,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": 1000600.0,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_wait",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "character": "FALCO",
+        "imitation": "ZAIN#0",
+        "stage": "BATTLEFIELD"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs/$job1/rematch",
+      "response": {
+        "body": {
+          "actual_stage": "FINAL_DESTINATION",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 2,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_ready",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "playing",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "actual_stage": "DREAMLAND",
+        "game_number": 3,
+        "result": "loss"
+      },
+      "compare": "status_field",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "finish-game",
+      "response": {
+        "body": {
+          "status": "rematch_wait"
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "etag": "etag-3",
+        "game_number": 3,
+        "key": "replays/3.slp",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1003
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "replay",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "GET",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": "DREAMLAND",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 3,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": 1000600.0,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_wait",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "character": "FALCO",
+        "imitation": "ZAIN#0",
+        "stage": "BATTLEFIELD"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs/$job1/rematch",
+      "response": {
+        "body": {
+          "actual_stage": "DREAMLAND",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 3,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_ready",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "playing",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "actual_stage": "POKEMON_STADIUM",
+        "game_number": 4,
+        "result": "loss"
+      },
+      "compare": "status_field",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "finish-game",
+      "response": {
+        "body": {
+          "status": "rematch_wait"
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "etag": "etag-4",
+        "game_number": 4,
+        "key": "replays/4.slp",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1004
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "replay",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "GET",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": "POKEMON_STADIUM",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 4,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": 1000600.0,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_wait",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "character": "FALCO",
+        "imitation": "ZAIN#0",
+        "stage": "BATTLEFIELD"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs/$job1/rematch",
+      "response": {
+        "body": {
+          "actual_stage": "POKEMON_STADIUM",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 4,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": "BATTLEFIELD",
+          "status": "rematch_ready",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "playing",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "actual_stage": "YOSHIS_STORY",
+        "game_number": 5,
+        "result": "loss"
+      },
+      "compare": "status_field",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "finish-game",
+      "response": {
+        "body": {
+          "status": "complete"
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "etag": "etag-5",
+        "game_number": 5,
+        "key": "replays/5.slp",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 1005
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "replay",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "GET",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": "YOSHIS_STORY",
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FALCO",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 5,
+          "id": "$job1",
+          "imitation": "ZAIN#0",
+          "last_result": "loss",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": "BATTLEFIELD",
+          "status": "complete",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "args": {},
+      "compare": "full",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "get",
+      "response": {
+        "body": {
+          "detail": "worker does not own this job"
+        },
+        "status": 409
+      },
+      "worker": "a:0"
+    }
+  ]
+}

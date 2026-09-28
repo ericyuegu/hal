@@ -1,0 +1,231 @@
+{
+  "name": "service_forfeit",
+  "steps": [
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.0,
+          "token": "$token1"
+        },
+        "status": 201
+      },
+      "token": null
+    },
+    {
+      "args": {},
+      "compare": "full",
+      "job": null,
+      "kind": "worker",
+      "op": "claim",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "leased",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {
+        "connect_code": "HALBOT#1"
+      },
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "connecting",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "playing",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "forfeit",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "body": null,
+      "kind": "player",
+      "method": "GET",
+      "path": "/v1/jobs/$job1",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": "HALBOT#1",
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": "service_failure_bot_forfeit",
+          "game_count": 0,
+          "id": "$job1",
+          "imitation": "IBDW#0",
+          "last_result": "win",
+          "online_delay": 2,
+          "player_code": "CRYO#610",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "failed",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "token": "$token1"
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "LEASE#2"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 0,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job2",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "LEASE#2",
+          "policy_revision": 0,
+          "queue_position": 1,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "queued",
+          "temperature": 1.0,
+          "token": "$token2"
+        },
+        "status": 201
+      },
+      "token": null
+    },
+    {
+      "args": {},
+      "compare": "full",
+      "job": null,
+      "kind": "worker",
+      "op": "claim",
+      "response": {
+        "body": {
+          "actual_stage": null,
+          "attempt": 1,
+          "cancel_after_game": false,
+          "character": "FOX",
+          "connect_code": null,
+          "connect_deadline": null,
+          "desired_return": 20.0,
+          "error_code": null,
+          "game_count": 0,
+          "id": "$job2",
+          "imitation": "IBDW#0",
+          "last_result": null,
+          "online_delay": 2,
+          "player_code": "LEASE#2",
+          "policy_revision": 0,
+          "queue_position": null,
+          "rematch_deadline": null,
+          "requested_stage": null,
+          "status": "leased",
+          "temperature": 1.0
+        },
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job2",
+      "kind": "worker",
+      "op": "forfeit",
+      "response": {
+        "body": {
+          "detail": "job status 'leased' is not valid for this operation"
+        },
+        "status": 409
+      },
+      "worker": "a:0"
+    }
+  ]
+}

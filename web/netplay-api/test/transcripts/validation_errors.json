@@ -1,0 +1,268 @@
+{
+  "name": "validation_errors",
+  "steps": [
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CR"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": [
+            {
+              "ctx": {
+                "min_length": 3
+              },
+              "input": "CR",
+              "loc": [
+                "body",
+                "player_code"
+              ],
+              "msg": "String should have at least 3 characters",
+              "type": "string_too_short"
+            }
+          ]
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "cryo#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": "player_code must be an exact uppercase Slippi connect code such as CRYO#610"
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "WALUIGI",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": "unsupported character 'WALUIGI'"
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "NOBODY#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": "unsupported imitation 'NOBODY#0'"
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 4,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": "online delay is unsupported by this policy"
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "MASKED",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": "masked identity is unsupported by this policy"
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "desired_return": 50,
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": [
+            {
+              "ctx": {
+                "le": 40.0
+              },
+              "input": 50,
+              "loc": [
+                "body",
+                "desired_return"
+              ],
+              "msg": "Input should be less than or equal to 40",
+              "type": "less_than_equal"
+            }
+          ]
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610",
+        "temperature": 2.0
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": [
+            {
+              "ctx": {
+                "le": 1.1
+              },
+              "input": 2.0,
+              "loc": [
+                "body",
+                "temperature"
+              ],
+              "msg": "Input should be less than or equal to 1.1",
+              "type": "less_than_equal"
+            }
+          ]
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "character": "FOX",
+        "extra": true,
+        "imitation": "IBDW#0",
+        "online_delay": 2,
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": [
+            {
+              "input": true,
+              "loc": [
+                "body",
+                "extra"
+              ],
+              "msg": "Extra inputs are not permitted",
+              "type": "extra_forbidden"
+            }
+          ]
+        },
+        "status": 422
+      },
+      "token": null
+    },
+    {
+      "body": {
+        "player_code": "CRYO#610"
+      },
+      "kind": "player",
+      "method": "POST",
+      "path": "/v1/jobs",
+      "response": {
+        "body": {
+          "detail": [
+            {
+              "input": {
+                "player_code": "CRYO#610"
+              },
+              "loc": [
+                "body",
+                "character"
+              ],
+              "msg": "Field required",
+              "type": "missing"
+            },
+            {
+              "input": {
+                "player_code": "CRYO#610"
+              },
+              "loc": [
+                "body",
+                "imitation"
+              ],
+              "msg": "Field required",
+              "type": "missing"
+            },
+            {
+              "input": {
+                "player_code": "CRYO#610"
+              },
+              "loc": [
+                "body",
+                "online_delay"
+              ],
+              "msg": "Field required",
+              "type": "missing"
+            }
+          ]
+        },
+        "status": 422
+      },
+      "token": null
+    }
+  ]
+}
