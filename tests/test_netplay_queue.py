@@ -8,8 +8,8 @@ from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.queue import ActiveJobError
-from hal.netplay_service.queue import InvalidTransitionError
 from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_contract import InvalidTransitionError
 
 
 class Clock:
@@ -182,7 +182,10 @@ def test_rematch_updates_choices_but_not_delay(tmp_path: Path) -> None:
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
     store.mark_playing(job.id, "slot-0")
-    assert store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="win") is JobStatus.REMATCH_WAIT
+    assert (
+        store.finish_game(job.id, "slot-0", game_number=job.game_count + 1, actual_stage="BATTLEFIELD", result="win")
+        is JobStatus.REMATCH_WAIT
+    )
 
     rematch = store.request_rematch(
         job.id,
@@ -205,7 +208,7 @@ def test_rematch_timeout_completes_reservation(tmp_path: Path) -> None:
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
     store.mark_playing(job.id, "slot-0")
-    store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="loss")
+    store.finish_game(job.id, "slot-0", game_number=job.game_count + 1, actual_stage="BATTLEFIELD", result="loss")
 
     store.heartbeat(job.id, "slot-0", lease_seconds=2 * IDLE_TIMEOUT_SECONDS)
     clock.advance(IDLE_TIMEOUT_SECONDS - 1)
@@ -233,7 +236,10 @@ def test_cancel_during_play_stops_after_game(tmp_path: Path) -> None:
     store.mark_playing(job.id, "slot-0")
 
     assert store.cancel(job.id, credentials.token).cancel_after_game
-    assert store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="win") is JobStatus.COMPLETE
+    assert (
+        store.finish_game(job.id, "slot-0", game_number=job.game_count + 1, actual_stage="BATTLEFIELD", result="win")
+        is JobStatus.COMPLETE
+    )
 
 
 def test_no_contest_cancels_without_recording_a_game(tmp_path: Path) -> None:
@@ -263,13 +269,13 @@ def test_replay_recording_is_idempotent_for_recovery(tmp_path: Path) -> None:
     assert claimed is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
     store.mark_playing(job.id, "slot-0")
-    store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="win")
+    store.finish_game(job.id, "slot-0", game_number=job.game_count + 1, actual_stage="BATTLEFIELD", result="win")
 
     values = {"key": "replay.slp", "sha256": "a" * 64, "size": 10, "etag": "etag"}
-    store.record_replay(job.id, 1, **values)
-    store.record_replay(job.id, 1, **values)
+    store.record_replay(job.id, "slot-0", 1, **values)
+    store.record_replay(job.id, "slot-0", 1, **values)
     with pytest.raises(InvalidTransitionError, match="different replay"):
-        store.record_replay(job.id, 1, key="other.slp", sha256="b" * 64, size=11, etag="other")
+        store.record_replay(job.id, "slot-0", 1, key="other.slp", sha256="b" * 64, size=11, etag="other")
 
 
 def test_service_failure_records_bot_forfeit_without_requeue(tmp_path: Path) -> None:
@@ -300,7 +306,13 @@ def test_stopped_generation_closes_only_its_leases_without_rewriting_completed_g
     store.mark_playing(credentials[0].job.id, owners[0])
     store.mark_connecting(credentials[2].job.id, owners[2], "BOT#1")
     store.mark_playing(credentials[2].job.id, owners[2])
-    store.finish_game(credentials[2].job.id, owners[2], actual_stage="BATTLEFIELD", result="loss")
+    store.finish_game(
+        credentials[2].job.id,
+        owners[2],
+        game_number=credentials[2].job.game_count + 1,
+        actual_stage="BATTLEFIELD",
+        result="loss",
+    )
 
     changed = store.fail_worker_generation(owners[:3])
 

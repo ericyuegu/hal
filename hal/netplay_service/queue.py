@@ -23,21 +23,15 @@ from hal.netplay_service.domain import validate_imitation
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.domain import validate_stage
 from hal.netplay_service.domain import validate_temperature
+from hal.netplay_service.queue_contract import InvalidTransitionError
+from hal.netplay_service.queue_contract import QueueError
 
 _SCHEMA_VERSION: Final[int] = 3
 _ACTIVE_SQL: Final[str] = "'queued','leased','connecting','playing','rematch_wait','rematch_ready'"
 _IN_SERVICE_SQL: Final[str] = "'leased','connecting','playing','rematch_wait','rematch_ready'"
 
 
-class QueueError(RuntimeError):
-    pass
-
-
 class AuthenticationError(QueueError):
-    pass
-
-
-class InvalidTransitionError(QueueError):
     pass
 
 
@@ -276,7 +270,7 @@ class QueueStore:
                 connection.execute(f"SELECT COUNT(*) FROM jobs WHERE status IN ({_IN_SERVICE_SQL})").fetchone()[0]
             )
 
-    def claim_next(self, worker_id: str, *, lease_seconds: float = 15.0) -> Job | None:
+    def claim_next(self, worker_id: str, *, lease_seconds: float = 20.0) -> Job | None:
         if not worker_id:
             raise ValueError("worker_id must be non-empty")
         timestamp = self._now()
@@ -300,7 +294,7 @@ class QueueStore:
             assert claimed is not None
             return self._job(connection, claimed)
 
-    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: float = 15.0) -> None:
+    def heartbeat(self, job_id: str, worker_id: str, *, lease_seconds: float = 20.0) -> None:
         timestamp = self._now()
         with self._transaction() as connection:
             cursor = connection.execute(
@@ -360,14 +354,17 @@ class QueueStore:
                 (timestamp, job_id),
             )
 
-    def finish_game(self, job_id: str, worker_id: str, *, actual_stage: str, result: str) -> JobStatus:
+    def finish_game(
+        self, job_id: str, worker_id: str, *, game_number: int, actual_stage: str, result: str
+    ) -> JobStatus:
         validate_stage(actual_stage)
         if not result:
             raise ValueError("game result must be non-empty")
         timestamp = self._now()
         with self._transaction() as connection:
             row = self._owned_job(connection, job_id, worker_id, (JobStatus.PLAYING,))
-            game_number = int(row["game_count"]) + 1
+            if game_number != int(row["game_count"]) + 1:
+                raise InvalidTransitionError(f"game_number {game_number} does not follow game {row['game_count']}")
             terminal = game_number >= 5 or bool(row["cancel_after_game"])
             next_status = JobStatus.COMPLETE if terminal else JobStatus.REMATCH_WAIT
             rematch_deadline = None if terminal else timestamp + IDLE_TIMEOUT_SECONDS
@@ -549,6 +546,7 @@ class QueueStore:
     def record_replay(
         self,
         job_id: str,
+        worker_id: str,
         game_number: int,
         *,
         key: str,
@@ -556,6 +554,8 @@ class QueueStore:
         size: int,
         etag: str,
     ) -> None:
+        # worker_id is unchecked: this store serves one runner process whose slots
+        # are its only workers, so no other worker's session can record a replay.
         with self._transaction() as connection:
             row = connection.execute(
                 """

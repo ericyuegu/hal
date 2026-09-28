@@ -20,8 +20,8 @@ from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Job
-from hal.netplay_service.queue import InvalidTransitionError
 from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_contract import InvalidTransitionError
 from hal.paths import REPO_DIR
 
 START = 1_000_000.0
@@ -157,9 +157,13 @@ class Recorder:
         elif op == "forfeit":
             self.store.forfeit_service_failure(job, owner)
         elif op == "finish-game":
-            # The Worker requires game_number; the Python service ignores it, so these
-            # transcripts pin only the in-order case.
-            status = self.store.finish_game(job, owner, actual_stage=args["actual_stage"], result=args["result"])
+            status = self.store.finish_game(
+                job,
+                owner,
+                game_number=args["game_number"],
+                actual_stage=args["actual_stage"],
+                result=args["result"],
+            )
             return 200, {"status": status.value}
         elif op == "fail":
             status = self.store.fail(job, owner, args["error_code"], retryable=args["retryable"])
@@ -167,6 +171,7 @@ class Recorder:
         elif op == "replay":
             self.store.record_replay(
                 job,
+                owner,
                 args["game_number"],
                 key=args["key"],
                 sha256=args["sha256"],

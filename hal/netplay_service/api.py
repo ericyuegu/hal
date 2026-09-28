@@ -46,8 +46,8 @@ from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.health import read_runner_status
 from hal.netplay_service.queue import ActiveJobError
 from hal.netplay_service.queue import AuthenticationError
-from hal.netplay_service.queue import InvalidTransitionError
 from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_contract import InvalidTransitionError
 
 
 @dataclass(frozen=True, slots=True)

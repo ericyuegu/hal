@@ -80,8 +80,9 @@ from hal.netplay_service.health import aggregate_runner_status
 from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.health import write_runner_status
 from hal.netplay_service.health import write_slot_status
-from hal.netplay_service.queue import InvalidTransitionError
 from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_contract import InvalidTransitionError
+from hal.netplay_service.queue_contract import RunnerQueue
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
 from hal.paths import ISO_PATH
@@ -713,11 +714,13 @@ def _upload_sidecar(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".upload.json")
 
 
-def _write_pending_upload(path: Path, metadata: ReplayMetadata) -> Path:
+def _write_pending_upload(path: Path, metadata: ReplayMetadata, worker_id: str) -> Path:
     payload = asdict(metadata)
     payload["started_at"] = metadata.started_at.astimezone(UTC).isoformat()
     payload["ended_at"] = metadata.ended_at.astimezone(UTC).isoformat()
-    payload["schema_version"] = 1
+    # The queue accepts a replay only from the worker that played the game.
+    payload["worker_id"] = worker_id
+    payload["schema_version"] = 2
     sidecar = _upload_sidecar(path)
     temporary = sidecar.with_suffix(sidecar.suffix + ".partial")
     temporary.write_text(json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True))
@@ -725,7 +728,7 @@ def _write_pending_upload(path: Path, metadata: ReplayMetadata) -> Path:
     return sidecar
 
 
-def _read_pending_upload(sidecar: Path) -> tuple[Path, ReplayMetadata]:
+def _read_pending_upload(sidecar: Path) -> tuple[Path, ReplayMetadata, str]:
     try:
         payload = json.loads(sidecar.read_text())
     except (OSError, json.JSONDecodeError) as error:
@@ -741,8 +744,9 @@ def _read_pending_upload(sidecar: Path) -> tuple[Path, ReplayMetadata]:
         "schema_version",
         "started_at",
         "actual_stage",
+        "worker_id",
     }
-    if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema_version") != 2:
         raise RuntimeError(f"pending replay metadata has the wrong schema: {sidecar}")
     replay = Path(str(sidecar).removesuffix(".upload.json"))
     try:
@@ -759,14 +763,18 @@ def _read_pending_upload(sidecar: Path) -> tuple[Path, ReplayMetadata]:
         )
     except (TypeError, ValueError) as error:
         raise RuntimeError(f"pending replay metadata contains invalid values: {sidecar}") from error
-    return replay, metadata
+    worker_id = payload["worker_id"]
+    if not isinstance(worker_id, str) or not worker_id:
+        raise RuntimeError(f"pending replay metadata contains invalid values: {sidecar}")
+    return replay, metadata, worker_id
 
 
-def _complete_pending_upload(sidecar: Path, store: QueueStore) -> None:
-    replay, metadata = _read_pending_upload(sidecar)
+def _complete_pending_upload(sidecar: Path, store: RunnerQueue) -> None:
+    replay, metadata, worker_id = _read_pending_upload(sidecar)
     uploaded = upload_replay(replay, metadata)
     store.record_replay(
         metadata.reservation_id,
+        worker_id,
         metadata.game_number,
         key=uploaded.key,
         sha256=uploaded.sha256,
@@ -785,7 +793,7 @@ def _complete_pending_upload(sidecar: Path, store: QueueStore) -> None:
     sidecar.unlink()
 
 
-def _drain_pending_uploads(root: Path, store: QueueStore) -> None:
+def _drain_pending_uploads(root: Path, store: RunnerQueue) -> None:
     for sidecar in sorted(root.rglob("*.slp.upload.json")):
         try:
             _complete_pending_upload(sidecar, store)
@@ -798,7 +806,7 @@ def _drain_pending_uploads(root: Path, store: QueueStore) -> None:
             )
 
 
-def _retry_pending_uploads(root: Path, store: QueueStore, next_attempt: float) -> float:
+def _retry_pending_uploads(root: Path, store: RunnerQueue, next_attempt: float) -> float:
     now = time.monotonic()
     if now < next_attempt:
         return next_attempt
@@ -806,10 +814,10 @@ def _retry_pending_uploads(root: Path, store: QueueStore, next_attempt: float) -
     return now + _PENDING_UPLOAD_RETRY_SECONDS
 
 
-def _heartbeat(store: QueueStore, job_id: str, worker_id: str, stop: threading.Event) -> None:
+def _heartbeat(store: RunnerQueue, job_id: str, worker_id: str, stop: threading.Event) -> None:
     while not stop.wait(5.0):
         try:
-            store.heartbeat(job_id, worker_id, lease_seconds=20.0)
+            store.heartbeat(job_id, worker_id)
         except InvalidTransitionError:
             return
 
@@ -817,7 +825,7 @@ def _heartbeat(store: QueueStore, job_id: str, worker_id: str, stop: threading.E
 class _LivePolicySettings:
     """Poll SQLite off the frame thread; publish one immutable settings tuple."""
 
-    def __init__(self, store: QueueStore, job: Job, worker_id: str) -> None:
+    def __init__(self, store: RunnerQueue, job: Job, worker_id: str) -> None:
         self._store = store
         self._job_id = job.id
         self._worker_id = worker_id
@@ -858,7 +866,7 @@ class _LivePolicySettings:
 class _ReservationLive:
     """Mark a reservation live when the netplay countdown completes."""
 
-    def __init__(self, config: SlotConfig, store: QueueStore, job: Job, health: _SlotHealthReporter) -> None:
+    def __init__(self, config: SlotConfig, store: RunnerQueue, job: Job, health: _SlotHealthReporter) -> None:
         self.config = config
         self.store = store
         self.job = job
@@ -992,7 +1000,7 @@ def _write_match_failure(
 
 def _run_reservation(
     config: SlotConfig,
-    store: QueueStore,
+    store: RunnerQueue,
     policy: InferenceClient,
     runtime: RuntimeConfig,
     job: Job,
@@ -1023,7 +1031,7 @@ def _run_reservation(
         job.game_count + 1,
     )
 
-    store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=IDLE_TIMEOUT_SECONDS)
+    store.mark_connecting(job.id, config.worker_id, config.bot_connect_code)
     health.configure_schedule(timing)
     health.connecting(job.choices.online_delay)
     try:
@@ -1092,6 +1100,7 @@ def _run_reservation(
                 next_status = store.finish_game(
                     job.id,
                     config.worker_id,
+                    game_number=job.game_count + 1,
                     actual_stage=actual_stage,
                     result=human_result,
                 )
@@ -1125,7 +1134,7 @@ def _run_reservation(
                     started_at=started_at,
                     ended_at=ended_at,
                 )
-                sidecar = _write_pending_upload(replay, metadata)
+                sidecar = _write_pending_upload(replay, metadata, config.worker_id)
                 if config.publish_replays:
                     try:
                         _complete_pending_upload(sidecar, store)
@@ -1197,7 +1206,7 @@ def _slot_worker(
                     store,
                     next_upload_attempt,
                 )
-            job = store.claim_next(config.worker_id, lease_seconds=20.0)
+            job = store.claim_next(config.worker_id)
             if job is None:
                 stop.wait(0.25)
                 continue
@@ -1208,7 +1217,7 @@ def _slot_worker(
 
 def _handle_reservation(
     config: SlotConfig,
-    store: QueueStore,
+    store: RunnerQueue,
     policy: InferenceClient,
     runtime: RuntimeConfig,
     job: Job,

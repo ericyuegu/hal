@@ -1036,8 +1036,10 @@ def test_local_qualification_retains_replay_without_publishing(
     )
 
     pending.assert_called_once()
+    assert pending.call_args.args[2] == "slot-0"
     uploaded.assert_not_called()
     store.finish_game.assert_called_once()
+    assert store.finish_game.call_args.kwargs["game_number"] == 1
 
 
 def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1055,7 +1057,7 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
         started_at=now,
         ended_at=now,
     )
-    sidecar = runner._write_pending_upload(replay, metadata)
+    sidecar = runner._write_pending_upload(replay, metadata, "slot-0")
     events: list[str] = []
     uploaded = UploadedReplay("key", "metadata", "c" * 64, 6, "etag")
 
@@ -1066,7 +1068,8 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
         return uploaded
 
     class Store:
-        def record_replay(self, *_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+        def record_replay(self, *args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            assert args[:3] == ("reservation", "slot-0", 1)
             assert replay.exists()
             events.append("record")
 
@@ -1075,6 +1078,37 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
     assert events == ["upload", "record"]
     assert not replay.exists()
     assert not sidecar.exists()
+
+
+def test_pending_replay_sidecar_carries_the_worker(tmp_path: Path) -> None:
+    replay = tmp_path / "game.slp"
+    replay.write_bytes(b"replay")
+    now = datetime.now(UTC)
+    metadata = ReplayMetadata(
+        reservation_id="reservation",
+        player_code="CRYO#610",
+        game_number=1,
+        actual_stage="BATTLEFIELD",
+        result="win",
+        policy_sha256="a" * 64,
+        git_sha="b" * 40,
+        started_at=now,
+        ended_at=now,
+    )
+    sidecar = runner._write_pending_upload(replay, metadata, "sess/slot-1")
+
+    assert runner._read_pending_upload(sidecar) == (replay, metadata, "sess/slot-1")
+
+    payload = json.loads(sidecar.read_text())
+    sidecar.write_text(json.dumps(payload | {"worker_id": ""}))
+    with pytest.raises(RuntimeError, match="invalid values"):
+        runner._read_pending_upload(sidecar)
+
+    del payload["worker_id"]
+    payload["schema_version"] = 1
+    sidecar.write_text(json.dumps(payload))
+    with pytest.raises(RuntimeError, match="wrong schema"):
+        runner._read_pending_upload(sidecar)
 
 
 def test_pending_replay_retry_is_limited_to_once_per_minute(
