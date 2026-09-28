@@ -22,6 +22,12 @@ export interface ApiResult {
 
 const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 
+// Every table is created with CREATE TABLE IF NOT EXISTS, which keeps an older
+// table unchanged. Bump this with any change to a table, and migrate or wipe the
+// store before deploying: a mismatched store refuses every request.
+export const STORE_SCHEMA_VERSION = 1;
+const STORE_TABLES = ["games", "jobs", "sessions", "accounts", "events", "policy", "settings"];
+
 const QUEUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS policy (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -52,14 +58,30 @@ export class Queue extends DurableObject<Env> {
   private readonly jobs: JobStore;
   private readonly sessions: SessionStore;
   private readonly events: EventLog;
+  private readonly schemaError: string | null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const sql = ctx.storage.sql;
-    sql.exec(JOB_SCHEMA);
-    sql.exec(SESSION_SCHEMA);
-    sql.exec(EVENT_SCHEMA);
-    sql.exec(QUEUE_SCHEMA);
+    this.schemaError = ctx.storage.transactionSync(() => {
+      const names = STORE_TABLES.map(() => "?").join(", ");
+      const existing = sql
+        .exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${names})`, ...STORE_TABLES)
+        .toArray()
+        .map((row) => row.name);
+      if (existing.length > 0) {
+        const found = existing.includes("settings") ? this.setting("schema_version") : null;
+        return found === String(STORE_SCHEMA_VERSION)
+          ? null
+          : `queue storage schema version ${found ?? "(missing)"} is not the Worker's ${STORE_SCHEMA_VERSION}`;
+      }
+      sql.exec(JOB_SCHEMA);
+      sql.exec(SESSION_SCHEMA);
+      sql.exec(EVENT_SCHEMA);
+      sql.exec(QUEUE_SCHEMA);
+      this.setSetting("schema_version", String(STORE_SCHEMA_VERSION));
+      return null;
+    });
     const now = () => this.now();
     this.jobs = new JobStore(sql, now);
     this.sessions = new SessionStore(sql, this.jobs, now);
@@ -102,8 +124,13 @@ export class Queue extends DurableObject<Env> {
     return this.ctx.storage.transactionSync(fn);
   }
 
+  private requireSchema(): void {
+    if (this.schemaError !== null) throw new HttpError(503, this.schemaError);
+  }
+
   private async run(fn: () => unknown, okStatus = 200): Promise<ApiResult> {
     try {
+      this.requireSchema();
       const body = await fn();
       await this.scheduleAlarm();
       return body === null || body === undefined ? { status: 204 } : { status: okStatus, body };
@@ -133,6 +160,7 @@ export class Queue extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (this.schemaError !== null) throw new Error(this.schemaError);
     const changed = this.tx(() => {
       const ended = this.sessions.endSilent();
       for (const id of ended.sessions) this.events.log("session_ended", { session: id, reason: "silent" });
@@ -461,9 +489,8 @@ export class Queue extends DurableObject<Env> {
   async resetForTest(): Promise<void> {
     if (this.env.HAL_TEST_CLOCK !== "1") throw new Error("test reset is disabled");
     this.tx(() => {
-      for (const table of ["games", "jobs", "sessions", "accounts", "events", "policy", "settings"]) {
-        this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
-      }
+      for (const table of STORE_TABLES) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
+      this.setSetting("schema_version", String(STORE_SCHEMA_VERSION));
     });
     await this.ctx.storage.deleteAlarm();
   }
@@ -482,6 +509,7 @@ export class Queue extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    if (this.schemaError !== null) return Response.json({ detail: this.schemaError }, { status: 503 });
     const match = new URL(request.url).pathname.match(/^\/v1\/runner\/jobs\/([^/]+)\/live$/);
     if (match === null || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return Response.json({ detail: "not found" }, { status: 404 });
