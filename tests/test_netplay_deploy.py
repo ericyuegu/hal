@@ -103,6 +103,7 @@ def test_page_uses_same_origin_api_and_local_proxy() -> None:
     assert "NEXT_PUBLIC_HAL_API_URL" not in client
     assert "fetch(path" in client
     assert "'/v1': { target: 'http://127.0.0.1:8787' }" in vite
+    assert "routes: [{ pattern: '20xx.xyz/*', zone_name: '20xx.xyz' }]" in vite
 
 
 def test_compose_has_only_a_runner() -> None:
