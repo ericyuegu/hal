@@ -444,9 +444,74 @@ export class Queue extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
   }
 
-  // Live settings (Task 8 fills these in).
+  // Live settings
 
-  private broadcastSettings(_jobId: string): void {}
+  private settingsMessage(jobId: string): string | null {
+    const row = this.jobs.row(jobId);
+    if (row === null) return null;
+    return JSON.stringify({
+      type: "settings",
+      revision: row.policy_revision,
+      desired_return: row.desired_return,
+      temperature: row.temperature,
+    });
+  }
 
-  private release(_jobIds: readonly string[]): void {}
+  async fetch(request: Request): Promise<Response> {
+    const match = new URL(request.url).pathname.match(/^\/v1\/runner\/jobs\/([^/]+)\/live$/);
+    if (match === null || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return Response.json({ detail: "not found" }, { status: 404 });
+    }
+    const jobId = match[1]!;
+    const slot = request.headers.get("X-HAL-Slot");
+    const session = request.headers.get("X-HAL-Session");
+    if (!session || slot === null || !/^\d+$/.test(slot)) {
+      return Response.json({ detail: "X-HAL-Session and X-HAL-Slot headers are required" }, { status: 400 });
+    }
+    let worker: string;
+    try {
+      worker = this.sessions.jobWorker(session, Number(slot));
+    } catch (error) {
+      if (error instanceof HttpError) return Response.json({ detail: error.detail }, { status: error.status });
+      throw error;
+    }
+    const row = this.jobs.row(jobId);
+    if (row === null || row.lease_owner !== worker) {
+      return Response.json({ detail: "worker does not own this job" }, { status: 409 });
+    }
+    const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
+    this.ctx.acceptWebSocket(server, [`job:${jobId}`]);
+    server.serializeAttachment({ jobId, worker });
+    server.send(this.settingsMessage(jobId)!);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private broadcastSettings(jobId: string): void {
+    const message = this.settingsMessage(jobId);
+    if (message === null) return;
+    for (const socket of this.ctx.getWebSockets(`job:${jobId}`)) socket.send(message);
+  }
+
+  // A socket's runner no longer owns its job: tell it, then close.
+  private release(jobIds: readonly string[]): void {
+    for (const jobId of new Set(jobIds)) {
+      const row = this.jobs.row(jobId);
+      for (const socket of this.ctx.getWebSockets(`job:${jobId}`)) {
+        const { worker } = socket.deserializeAttachment() as { jobId: string; worker: string };
+        if (row === null || TERMINAL_STATUSES.has(row.status as string) || row.lease_owner !== worker) {
+          socket.send(JSON.stringify({ type: "released" }));
+          socket.close(1000, "released");
+        }
+      }
+    }
+  }
+
+  async webSocketMessage(_socket: WebSocket, _message: string | ArrayBuffer): Promise<void> {
+    // Runners only listen on this socket.
+  }
+
+  async webSocketClose(socket: WebSocket, code: number): Promise<void> {
+    // 1005, 1006, and 1015 are reserved: a peer reports them but must never send them.
+    socket.close(code === 1005 || code === 1006 || code === 1015 ? 1000 : code, "closed");
+  }
 }
