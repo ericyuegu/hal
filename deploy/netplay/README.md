@@ -33,6 +33,10 @@ page at `127.0.0.1:3000`, and then starts the runner. The page uses same-origin
 `/v1` requests; Vite proxies them to the Worker. Ctrl-C stops all three process
 groups. Local assets still pass the normal SHA-256 checks.
 
+Local development opts out of streaming. Set `HAL_NETPLAY_LOCAL_STREAM=1`,
+`HAL_TWITCH_BANDWIDTH_TEST=1`, and `HAL_NETPLAY_LOCAL_TWITCH_KEY` only for the
+owner-run bandwidth test.
+
 ## Host run
 
 Set the runner URL and token, Cloudflare Access service token, R2 credentials,
@@ -45,6 +49,10 @@ deploy/netplay/run-host.sh
 The first signal drains the remote session. A second signal or the 15 minute
 deadline aborts active games. A hard crash is covered by the Worker's 30 second
 session silence limit.
+
+A direct host run needs Xvfb and `xsetroot`. An opted-in streaming host also
+needs ffmpeg with `h264_nvenc` and PulseAudio. The runner image installs all
+four. The launchers reject a missing command instead of changing behavior.
 
 ## Runner image
 
@@ -149,6 +157,79 @@ owner and was not run during Plan 4.
 
 Plan 4 live G4 result: **not run; owner action required**.
 
+## Twitch stream
+
+Set `TWITCH_STREAM_KEY` as a secret on the API Worker. It does not belong in a
+runner dotenv file, VM metadata, image, or repository:
+
+```sh
+cd web/netplay-api
+npx wrangler secret put TWITCH_STREAM_KEY
+```
+
+Writing the secret and deploying the Worker are owner actions. The Worker gives
+the key only to the live session that holds its one stream lease. That runner
+streams slot 0. `--no-stream` opts a runner out.
+
+The runner starts one Xvfb for every slot. Stream slot 0 uses a 1280×720
+display and PulseAudio. Other slots use 640×480 displays and no audio. ffmpeg
+captures slot 0 at 60 fps, uses NVENC at 6 Mb/s CBR and AAC at 160 kb/s, and
+reloads its overlay from a local text file. The overlay state contains HAL's
+character, imitation, desired return, and game count only. It has no field for
+a player or bot connect code.
+
+### Owner manual stream check
+
+This check is externally visible and must stay in Twitch bandwidth-test mode.
+Set `HAL_TWITCH_BANDWIDTH_TEST=1` in the runner environment before starting it.
+Confirm the ffmpeg target ends in `?bandwidthtest=true` before continuing.
+
+- [ ] Record the full Git SHA, policy SHA, hardware, slot count, delay, stage,
+  peer and region, driver, and ffmpeg version.
+- [ ] Start the runner with `HAL_TWITCH_BANDWIDTH_TEST=1`. Confirm admin status
+  shows one stream holder and that no second session receives the lease.
+- [ ] While slot 0 is idle, confirm the video shows `Play HAL at 20xx.xyz` and
+  the public queue depth. Confirm a waiting job goes to slot 0 before another
+  idle slot.
+- [ ] Play a game on slot 0. Confirm 1280×720 video, game audio, the HAL setting
+  line, and no player or bot connect code anywhere in the picture.
+- [ ] Run `pkill -TERM ffmpeg` inside the runner container. Confirm the
+  supervisor restarts it with bounded backoff and the runner keeps its game.
+- [ ] Drain the holder. Confirm ffmpeg stops, the lease becomes free, and the
+  next opted-in live session takes it on a status report.
+- [ ] Stop every runner. Confirm Xvfb, PulseAudio, Dolphin, and ffmpeg processes
+  are gone.
+
+Plan 5 manual Twitch result: **not run; owner action required**.
+
+### Performance measurement
+
+Use the same Git SHA, policy, peer, stage, delay, slot count, and game length
+for every control and treatment. Capture values during active play:
+
+```sh
+uv run python deploy/netplay/capture-stream-metrics.py \
+  --label rtx3060-stream-off --hardware RTX-3060 --streaming off \
+  --status-path runs/netplay/runner-status.json \
+  --output runs/netplay/measurements/rtx3060-stream-off.json
+```
+
+Repeat with streaming on in bandwidth-test mode. Do the same on the first G4.
+The script refuses a slot without active-game values and records the Git SHA
+with all four required metrics. These runs need a live peer and the manual
+stream check, so their cells remain pending for the owner.
+
+| Hardware | Streaming | Slot role | Game FPS | Frame p95 ms | Dolphin p95 ms | Policy p95 ms |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| RTX 3060 | off | slot 0 control | pending | pending | pending | pending |
+| RTX 3060 | off | headless control | pending | pending | pending | pending |
+| RTX 3060 | on | stream slot 0 | pending | pending | pending | pending |
+| RTX 3060 | on | headless treatment | pending | pending | pending | pending |
+| G4 RTX PRO 6000 | off | slot 0 control | pending | pending | pending | pending |
+| G4 RTX PRO 6000 | off | headless control | pending | pending | pending | pending |
+| G4 RTX PRO 6000 | on | stream slot 0 | pending | pending | pending | pending |
+| G4 RTX PRO 6000 | on | headless treatment | pending | pending | pending | pending |
+
 ## Web deployment
 
 `deploy-web.sh` builds and deploys the page. Running it is an owner action
@@ -194,3 +275,23 @@ Plan 4 checks:
 - `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration`: 3 passed.
 - Docker build and registry push: skipped. The static Dockerfile test passed. Registry push is an owner action.
 - Live G4 creation and verification: skipped because it costs money and is an owner action.
+
+Plan 5 checks:
+
+- `uv run pytest -q tests/test_netplay_runner.py`: 58 passed.
+- `uv run pytest -q tests/test_netplay_stream.py`: 6 passed.
+- `uv run pytest -q tests/test_session.py tests/test_netplay_session.py`: 47 passed.
+- `uv run pytest -q tests/test_netplay_deploy.py`: 9 passed.
+- `uv run pytest -q tests/test_netplay_queue_client.py -k 'stream or queue_depth'`: 10 passed, 34 deselected.
+- `uv run ruff format --check .`: passed, 268 files formatted.
+- `uv run ruff check .`: passed.
+- `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts`: passed.
+- `uv run pytest -q -m "not integration"`: 1,448 passed, 8 skipped, 21 deselected. It emitted 24 upstream Python 3.14, Torch, and multiprocessing warnings.
+- `npm test` in `web/netplay-api`: 105 passed. Workerd logged one closed WebSocket while the suite shut down. `npm run typecheck`: passed.
+- `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration`: 3 passed.
+- `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration`: 7 passed, 6 deselected. It emitted 6 upstream multiprocessing warnings.
+- `bash -n` on the netplay launchers, GCE scripts, and Docker entry point: passed.
+- `uv run python deploy/netplay/capture-stream-metrics.py --help`: passed.
+- Host runtime probe: Xvfb and `xsetroot` are installed. ffmpeg and PulseAudio are absent on this checkout's host. Use the runner image or install them before a direct streaming run.
+- Docker build and image push: skipped. The static package and capability tests passed. Image push is an owner action.
+- Worker deployment, `TWITCH_STREAM_KEY` write, live Twitch bandwidth test, RTX 3060 treatment measurement, and G4 measurement: skipped because they are owner actions. The scripts, local capture helper, checklist, and pending result table are above.

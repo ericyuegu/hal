@@ -51,6 +51,7 @@ DolphinGraphicsBackend = Literal["Vulkan", "OGL"]
 # safety: ``finalize_replay_dir`` repairs an interrupted .slp below.
 _DOLPHIN_TERM_GRACE_SECONDS = 0.25
 _NATIVE_EFB_SCALE = 2
+_DOUBLE_EFB_SCALE = 4
 _DOLPHIN_VERSION_PATCH_LOCK = threading.RLock()
 
 
@@ -165,6 +166,11 @@ _DOLPHIN_INI_KEYS: dict[str, str] = {
         "HLE_BS2",
         "Overclock",
         "OverclockEnable",
+        "RenderWindowAutoSize",
+        "RenderWindowHeight",
+        "RenderWindowWidth",
+        "RenderWindowXPos",
+        "RenderWindowYPos",
         "SIDevice0",
         "SIDevice1",
         "SIDevice2",
@@ -239,6 +245,32 @@ def set_dolphin_internal_resolution(console: melee.Console, scale: int = _NATIVE
     # Pinned libmelee 0.47.0 does not expose EFBScale. Remove this boundary
     # workaround when libmelee can configure the internal resolution directly.
     config.set("Settings", "EFBScale", str(scale))
+    with ini_path.open("w") as output:
+        config.write(output)
+
+
+def set_dolphin_stream_output(console: melee.Console, enabled: bool) -> None:
+    """Write the display and audio settings for a netplay slot."""
+    if type(enabled) is not bool:
+        raise TypeError("Dolphin stream output flag must be a boolean")
+    set_dolphin_internal_resolution(console, _DOUBLE_EFB_SCALE if enabled else _NATIVE_EFB_SCALE)
+    config_path = Path(console._get_dolphin_config_path())
+    ini_path = config_path / "Dolphin.ini"
+    config = _CaseSensitiveConfigParser(interpolation=None)
+    config.read(ini_path)
+    for section in ("Display", "DSP"):
+        if not config.has_section(section):
+            config.add_section(section)
+    config.set("Display", "Fullscreen", "False")
+    config.set("DSP", "Backend", "Pulse" if enabled else "No audio output")
+    if enabled:
+        # Pinned libmelee 0.47.0 does not expose the render-window geometry.
+        # Remove this boundary workaround when libmelee exposes all five fields.
+        config.set("Display", "RenderWindowAutoSize", "False")
+        config.set("Display", "RenderWindowXPos", "0")
+        config.set("Display", "RenderWindowYPos", "0")
+        config.set("Display", "RenderWindowWidth", "1280")
+        config.set("Display", "RenderWindowHeight", "720")
     with ini_path.open("w") as output:
         config.write(output)
 

@@ -28,7 +28,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl xvfb libfuse2t64 libvulkan1 vulkan-tools \
+      ca-certificates curl ffmpeg fonts-dejavu-core procps pulseaudio x11-xserver-utils xvfb \
+      libfuse2t64 libvulkan1 vulkan-tools \
       libasound2t64 libegl1 libgl1 libopengl0 libusb-1.0-0 \
       libgtk-3-0t64 libglib2.0-0t64 libgdk-pixbuf-2.0-0 \
       libpangocairo-1.0-0 libx11-6 libxcursor1 libxi6 libxinerama1 \

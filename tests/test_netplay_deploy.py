@@ -1,7 +1,16 @@
 import fcntl
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+from hal.netplay_service.health import RunnerState
+from hal.netplay_service.health import RunnerStatus
+from hal.netplay_service.health import SlotState
+from hal.netplay_service.health import SlotStatus
+from hal.netplay_service.health import write_runner_status
+from hal.netplay_service.health import write_slot_status
 
 _ROOT = Path(__file__).parents[1]
 _DEPLOY = _ROOT / "deploy" / "netplay"
@@ -31,6 +40,7 @@ def test_host_launcher_runs_only_the_remote_runner(tmp_path: Path) -> None:
                 "HAL_GIT_SHA=" + "a" * 40,
                 "HAL_NETPLAY_API_URL=http://127.0.0.1:8787",
                 "HAL_NETPLAY_RUNNER_TOKEN=token",
+                "HAL_NETPLAY_STREAM=0",
                 "AWS_ENDPOINT_URL=https://example.invalid",
                 "AWS_ACCESS_KEY_ID=test",
                 "AWS_SECRET_ACCESS_KEY=test",
@@ -50,6 +60,7 @@ def test_host_launcher_runs_only_the_remote_runner(tmp_path: Path) -> None:
     recorded = log.read_text()
     assert "sync --locked" in recorded
     assert "run hal-netplay-runner --slots 1" in recorded
+    assert "--display-base 100" in recorded
     assert "hal-netplay-api" not in recorded
     assert "cloudflared" not in _RUN_HOST.read_text()
     assert "xvfb-run" not in _RUN_HOST.read_text()
@@ -99,3 +110,66 @@ def test_compose_has_only_a_runner() -> None:
     assert "  runner:" in compose
     assert "  api:" not in compose
     assert "  tunnel:" not in compose
+    assert "NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility,video" in compose
+
+
+def test_runner_image_contains_stream_runtime_without_an_entrypoint_display() -> None:
+    dockerfile = (_DEPLOY / "Dockerfile").read_text()
+    entrypoint = (_ROOT / "docker" / "entrypoint.sh").read_text()
+    for package in ("ffmpeg", "fonts-dejavu-core", "procps", "pulseaudio", "x11-xserver-utils", "xvfb"):
+        assert package in dockerfile
+    assert "Xvfb" not in entrypoint
+    assert 'exec "$@"' in entrypoint
+
+
+def test_stream_measurement_captures_each_active_slot(tmp_path: Path) -> None:
+    status_path = tmp_path / "runner.json"
+    write_runner_status(
+        status_path,
+        RunnerStatus(
+            RunnerState.READY,
+            "ready",
+            "a" * 64,
+            2,
+            2,
+            60.0,
+            59.9,
+            17.0,
+            5.0,
+            10.0,
+            8.0,
+            0.2,
+            0,
+            100.0,
+        ),
+    )
+    for slot in range(2):
+        write_slot_status(
+            status_path.with_name(f"{status_path.name}.slot-{slot}.json"),
+            SlotStatus(slot, SlotState.PLAYING, 59.9, 17.0, 5.0, 10.0, None, 0, 100.0),
+        )
+    output = tmp_path / "measurement.json"
+
+    subprocess.run(
+        [
+            sys.executable,
+            _DEPLOY / "capture-stream-metrics.py",
+            "--label",
+            "test",
+            "--hardware",
+            "test-gpu",
+            "--streaming",
+            "on",
+            "--status-path",
+            status_path,
+            "--output",
+            output,
+        ],
+        cwd=_ROOT,
+        check=True,
+    )
+
+    payload = json.loads(output.read_text())
+    assert [(slot["slot"], slot["role"]) for slot in payload["slots"]] == [(0, "stream"), (1, "headless")]
+    assert payload["slots"][0]["game_fps"] == 59.9
+    assert payload["git_sha"]

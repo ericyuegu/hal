@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS accounts (
   slot INTEGER,
   leased_at REAL
 );
+CREATE TABLE IF NOT EXISTS stream (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  session_id TEXT,
+  slot INTEGER NOT NULL DEFAULT 0 CHECK (slot = 0),
+  granted_at REAL
+);
+INSERT OR IGNORE INTO stream(id, session_id, slot, granted_at) VALUES (1, NULL, 0, NULL);
 `;
 
 export interface StartRequest {
@@ -212,13 +219,24 @@ export class SessionStore {
     return row;
   }
 
+  wantsStream(id: string): boolean {
+    return this.live(id).wants_stream === 1;
+  }
+
   // Liveness uses the time this report arrived, never the runner's clock.
-  // Plan 5 replaces the null stream with the session's stream grant.
-  report(id: string, raw: unknown): { draining: boolean; stream: null } {
+  report(id: string, raw: unknown): { draining: boolean; streamHolder: boolean; streamGranted: boolean } {
     const row = this.live(id);
     const status = parseRunnerStatus(raw, row.slots as number);
-    this.sql.exec("UPDATE sessions SET status = ?, last_seen_at = ? WHERE id = ?", JSON.stringify(status), this.now(), id);
-    return { draining: row.draining === 1, stream: null };
+    const now = this.now();
+    this.sql.exec("UPDATE sessions SET status = ?, last_seen_at = ? WHERE id = ?", JSON.stringify(status), now, id);
+    let holder = this.rows("SELECT session_id FROM stream WHERE id = 1")[0]?.session_id;
+    let streamGranted = false;
+    if (holder === null && row.wants_stream === 1 && row.draining === 0) {
+      this.sql.exec("UPDATE stream SET session_id = ?, slot = 0, granted_at = ? WHERE id = 1", id, now);
+      holder = id;
+      streamGranted = true;
+    }
+    return { draining: row.draining === 1, streamHolder: holder === id, streamGranted };
   }
 
   private slotWorker(row: Row, slot: number): string {
@@ -238,6 +256,22 @@ export class SessionStore {
     return worker;
   }
 
+  deferToStreamSlot(id: string, slot: number): boolean {
+    const holder = this.rows(
+      `SELECT sessions.id, sessions.last_seen_at FROM stream
+       JOIN sessions ON sessions.id = stream.session_id
+       WHERE stream.id = 1 AND sessions.ended_at IS NULL AND sessions.draining = 0
+         AND sessions.last_seen_at >= ?`,
+      this.now() - SESSION_LIVE_SECONDS,
+    )[0];
+    if (holder === undefined || (holder.id === id && slot === 0)) return false;
+    return !this.jobs.hasLease(workerId(holder.id as string, 0));
+  }
+
+  streamHolder(): string | null {
+    return (this.rows("SELECT session_id FROM stream WHERE id = 1")[0]?.session_id as string | null) ?? null;
+  }
+
   // In-progress transitions stay allowed after a republish or while draining.
   jobWorker(id: string, slot: number): string {
     return this.slotWorker(this.live(id), slot);
@@ -253,6 +287,7 @@ export class SessionStore {
   drain(id: string): void {
     this.live(id);
     this.sql.exec("UPDATE sessions SET draining = 1 WHERE id = ?", id);
+    this.releaseStream(id);
   }
 
   end(id: string, reason: string): string[] {
@@ -267,7 +302,19 @@ export class SessionStore {
       id,
     );
     this.sql.exec("UPDATE accounts SET session_id = NULL, slot = NULL, leased_at = NULL WHERE session_id = ?", id);
+    this.releaseStream(id);
     return failed;
+  }
+
+  private releaseStream(id: string): void {
+    this.sql.exec(
+      "UPDATE stream SET session_id = NULL, granted_at = NULL WHERE id = 1 AND session_id = ?",
+      id,
+    );
+  }
+
+  resetStream(): void {
+    this.sql.exec("INSERT INTO stream(id, session_id, slot, granted_at) VALUES (1, NULL, 0, NULL)");
   }
 
   // A runner repeats DELETE when it loses the first response; it gets the first result.
@@ -373,6 +420,7 @@ export class SessionStore {
   }
 
   summary() {
+    const stream = this.rows("SELECT session_id, slot, granted_at FROM stream WHERE id = 1")[0];
     return {
       sessions: this.rows(
         `SELECT id, host, bundle_sha256, git_sha, slots, wants_stream, started_at, last_seen_at, draining,
@@ -380,6 +428,10 @@ export class SessionStore {
         this.now() - 24 * 60 * 60,
       ),
       accounts: this.rows("SELECT connect_code, session_id, slot, leased_at FROM accounts ORDER BY connect_code"),
+      stream:
+        stream?.session_id == null
+          ? null
+          : { session_id: stream.session_id, slot: stream.slot, granted_at: stream.granted_at },
     };
   }
 }

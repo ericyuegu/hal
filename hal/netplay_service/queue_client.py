@@ -393,8 +393,15 @@ class StartedSession:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamGrant:
+    slot: int
+    key: str
+
+
+@dataclass(frozen=True, slots=True)
 class SessionState:
     draining: bool
+    stream: StreamGrant | None = None
 
 
 def new_session_id() -> str:
@@ -484,12 +491,34 @@ class RunnerClient:
             frozenset(("draining", "stream")),
             "status",
         )
-        if payload["stream"] is not None:
-            raise QueueProtocolError("this client cannot stream; the Worker granted the stream lease")
         try:
-            return SessionState(draining=_boolean(payload["draining"]))
-        except TypeError as error:
+            raw_stream = payload["stream"]
+            stream = None
+            if raw_stream is not None:
+                grant = _object(raw_stream, frozenset(("slot", "key")), "stream grant")
+                slot = _integer(grant["slot"])
+                key = _text(grant["key"])
+                if slot != 0:
+                    raise ValueError("stream grant slot must be 0")
+                if not key:
+                    raise ValueError("stream grant key must be non-empty")
+                stream = StreamGrant(slot, key)
+            return SessionState(draining=_boolean(payload["draining"]), stream=stream)
+        except (TypeError, ValueError) as error:
             raise QueueProtocolError(f"status response is invalid: {error}") from error
+
+    def queue_depth(self) -> int:
+        payload = _json(self._api.request("GET", "/v1/capacity"))
+        if not isinstance(payload, dict):
+            raise QueueProtocolError("capacity response must be an object")
+        capacity = cast(dict[str, object], payload)
+        try:
+            depth = _integer(capacity.get("queued"))
+        except TypeError as error:
+            raise QueueProtocolError(f"capacity response is invalid: {error}") from error
+        if depth < 0:
+            raise QueueProtocolError("capacity queued must be non-negative")
+        return depth
 
     def drain(self, session_id: str) -> None:
         self._api.request("POST", f"/v1/runner/sessions/{session_id}/drain")

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import ExitStack
 from contextlib import closing
 from contextlib import suppress
 from dataclasses import asdict
@@ -107,6 +108,12 @@ from hal.netplay_service.queue_contract import RunnerQueue
 from hal.netplay_service.queue_contract import SessionEndedError
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
+from hal.netplay_service.stream import GameStreamState
+from hal.netplay_service.stream import IdleStreamState
+from hal.netplay_service.stream import PulseAudio
+from hal.netplay_service.stream import StreamSupervisor
+from hal.netplay_service.stream import XvfbGroup
+from hal.netplay_service.stream import write_stream_state
 from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
@@ -159,6 +166,10 @@ class SlotConfig:
     recovery_cooldown_seconds: float = 2.0
     measurement_dir: Path | None = None
     publish_replays: bool = True
+    display: str | None = None
+    stream_output: bool = False
+    stream_state_path: Path | None = None
+    pulse_environment: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.graphics_backend not in ("Vulkan", "OGL"):
@@ -171,6 +182,10 @@ class SlotConfig:
             raise ValueError("slot recovery cooldown must be non-negative")
         if type(self.publish_replays) is not bool:
             raise ValueError("slot replay publication must be a boolean")
+        if type(self.stream_output) is not bool:
+            raise ValueError("slot stream output must be a boolean")
+        if self.stream_output and (self.slot != 0 or self.stream_state_path is None):
+            raise ValueError("only slot 0 can have stream output and it needs a state path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +211,9 @@ class RunnerConfig:
     max_frames: int = 54_000
     measurement_dir: Path | None = None
     publish_replays: bool = True
+    display_base: int | None = None
+    wants_stream: bool = False
+    twitch_bandwidth_test: bool = False
 
     def __post_init__(self) -> None:
         if self.graphics_backend not in ("Vulkan", "OGL"):
@@ -227,6 +245,16 @@ class RunnerConfig:
             raise ValueError("runner preparation timeout must be finite and positive")
         if type(self.publish_replays) is not bool:
             raise ValueError("runner replay publication must be a boolean")
+        if self.display_base is not None and (
+            type(self.display_base) is not int
+            or self.display_base < 0
+            or self.display_base + len(self.user_jsons) > 65_535
+        ):
+            raise ValueError("runner X display range is invalid")
+        if type(self.wants_stream) is not bool or type(self.twitch_bandwidth_test) is not bool:
+            raise ValueError("runner stream flags must be boolean")
+        if self.wants_stream and self.display_base is None:
+            raise ValueError("streaming requires a managed X display")
 
 
 _NETPLAY_TIMINGS = (
@@ -1195,10 +1223,22 @@ def _run_reservation(
                 connect_abandoned=settings.released.is_set,
                 realtime=True,
                 graphics_backend=config.graphics_backend,
+                stream_output=config.stream_output,
             ) as session,
         ):
             rematch = False
             while not stop.is_set():
+                if config.stream_output:
+                    assert config.stream_state_path is not None
+                    write_stream_state(
+                        config.stream_state_path,
+                        GameStreamState(
+                            job.choices.character,
+                            job.choices.imitation,
+                            job.choices.desired_return,
+                            job.game_count + 1,
+                        ),
+                    )
                 previous = frozenset(replay_dir.rglob("*.slp"))
                 started_at = datetime.now(UTC)
                 result = run_netplay_match(
@@ -1316,6 +1356,9 @@ def _run_reservation(
             return
         raise
     finally:
+        if config.stream_output:
+            assert config.stream_state_path is not None
+            write_stream_state(config.stream_state_path, IdleStreamState())
         with suppress(InferenceUnavailable):
             policy.close_match()
         heartbeat_stop.set()
@@ -1336,6 +1379,13 @@ def _slot_worker(
     # The supervisor owns terminal signals. A SIGINT in Event.wait() can kill
     # a spawned worker while it holds the event lock and deadlock shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if config.display is not None:
+        os.environ["DISPLAY"] = config.display
+    if config.stream_output:
+        os.environ.update(dict(config.pulse_environment))
+    else:
+        os.environ.pop("PULSE_SERVER", None)
+        os.environ.pop("PULSE_SINK", None)
     next_upload_attempt = 0.0
     with (
         connection,
@@ -1530,6 +1580,9 @@ def _replace_failed_slot(
         config.worker_id,
     )
     config.status_path.unlink(missing_ok=True)
+    if config.stream_output:
+        assert config.stream_state_path is not None
+        write_stream_state(config.stream_state_path, IdleStreamState())
     if not restart_allowed:
         logger.error("netplay slot {} replacement failed; capacity reduced", config.slot)
         return None
@@ -1665,6 +1718,9 @@ def _run_generation(
     session_client: RunnerClient | None = None,
     reporter: SessionReporter | None = None,
     drain_timeout_seconds: float = 900.0,
+    displays: tuple[str, ...] = (),
+    pulse_environment: tuple[tuple[str, str], ...] = (),
+    stream_supervisor: StreamSupervisor | None = None,
 ) -> None:
     context = mp.get_context("spawn")
     generation_id = secrets.token_hex(8)
@@ -1763,6 +1819,12 @@ def _run_generation(
                 max_frames=config.max_frames,
                 measurement_dir=config.measurement_dir,
                 publish_replays=config.publish_replays,
+                display=displays[slot] if displays else None,
+                stream_output=config.wants_stream and slot == 0,
+                stream_state_path=config.status_path.with_suffix(".stream.json")
+                if config.wants_stream and slot == 0
+                else None,
+                pulse_environment=pulse_environment if config.wants_stream and slot == 0 else (),
             )
             process = _slot_process(context, slot_config, ready, runtime, child_connections[slot], stop, draining)
             processes.append(process)
@@ -1784,7 +1846,10 @@ def _run_generation(
         previous_state: RunnerState | None = None
         drain_deadline: float | None = None
         while True:
-            remote_draining = reporter is not None and reporter.state().draining
+            session_state = reporter.state() if reporter is not None else None
+            if stream_supervisor is not None:
+                stream_supervisor.set_grant(None if session_state is None else session_state.stream)
+            remote_draining = session_state is not None and session_state.draining
             if (shutdown.requested or remote_draining) and not draining.is_set():
                 if shutdown.requested and not remote_draining and session_client is not None:
                     session_client.drain(config.session_id)
@@ -1903,6 +1968,8 @@ def _run_generation(
             config.status_path.unlink(missing_ok=True)
             for path in slot_status_paths:
                 path.unlink(missing_ok=True)
+            if config.wants_stream:
+                write_stream_state(config.status_path.with_suffix(".stream.json"), IdleStreamState())
 
 
 def run(
@@ -1922,26 +1989,56 @@ def run(
     previous_term = signal.signal(signal.SIGTERM, shutdown)
     recovery_deadline: float | None = None
     try:
-        for attempt in range(2):
-            try:
-                _run_generation(
-                    config,
-                    bot_connect_codes,
-                    policy_sha256,
-                    shutdown,
-                    recovery_deadline=recovery_deadline,
-                    session_client=session_client,
-                    reporter=reporter,
-                    drain_timeout_seconds=drain_timeout_seconds,
+        with ExitStack() as resources:
+            displays: tuple[str, ...] = ()
+            pulse_environment: tuple[tuple[str, str], ...] = ()
+            stream_supervisor: StreamSupervisor | None = None
+            if config.display_base is not None:
+                display_group = resources.enter_context(
+                    XvfbGroup(len(config.user_jsons), config.display_base, config.wants_stream)
                 )
-                return
-            except _ShutdownRequested:
-                return
-            except _EngineLost as error:
-                if attempt == 1 or shutdown.requested:
-                    raise RuntimeError("netplay inference recovery failed; service remains unavailable") from error
-                recovery_deadline = time.monotonic() + _ENGINE_RECOVERY_TIMEOUT_SECONDS
-                logger.error("netplay inference lost: {}; preparing one replacement process", error)
+                displays = display_group.displays
+            if config.wants_stream:
+                if session_client is None or reporter is None:
+                    raise ValueError("streaming requires a session client and reporter")
+                state_path = config.status_path.with_suffix(".stream.json")
+                write_stream_state(state_path, IdleStreamState())
+                pulse = resources.enter_context(PulseAudio(config.status_path.parent / "pulse"))
+                pulse_environment = tuple(pulse.environment.items())
+                stream_supervisor = resources.enter_context(
+                    StreamSupervisor(
+                        displays[0],
+                        state_path,
+                        config.status_path.with_suffix(".overlay.txt"),
+                        session_client.queue_depth,
+                        pulse.environment,
+                        bandwidth_test=config.twitch_bandwidth_test,
+                    )
+                )
+                stream_supervisor.set_grant(reporter.state().stream)
+            for attempt in range(2):
+                try:
+                    _run_generation(
+                        config,
+                        bot_connect_codes,
+                        policy_sha256,
+                        shutdown,
+                        recovery_deadline=recovery_deadline,
+                        session_client=session_client,
+                        reporter=reporter,
+                        drain_timeout_seconds=drain_timeout_seconds,
+                        displays=displays,
+                        pulse_environment=pulse_environment,
+                        stream_supervisor=stream_supervisor,
+                    )
+                    return
+                except _ShutdownRequested:
+                    return
+                except _EngineLost as error:
+                    if attempt == 1 or shutdown.requested:
+                        raise RuntimeError("netplay inference recovery failed; service remains unavailable") from error
+                    recovery_deadline = time.monotonic() + _ENGINE_RECOVERY_TIMEOUT_SECONDS
+                    logger.error("netplay inference lost: {}; preparing one replacement process", error)
     finally:
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
@@ -1981,6 +2078,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--local-assets", type=Path)
     parser.add_argument("--drain-timeout", type=float, default=900.0)
     parser.add_argument("--metrics-port", type=int, default=9100)
+    parser.add_argument("--display-base", type=int, default=100)
+    parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--twitch-bandwidth-test", action="store_true")
     parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
     parser.add_argument("--replay-dir", type=Path, default=Path("runs/netplay/replays"))
     parser.add_argument("--status-path", type=Path, default=Path("runs/netplay/runner-status.json"))
@@ -2002,6 +2102,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--slippi-port range is invalid")
     if not 1 <= args.metrics_port <= 65_535:
         parser.error("--metrics-port must be in [1, 65535]")
+    if args.display_base < 0 or args.display_base + args.slots > 65_535:
+        parser.error("--display-base range is invalid")
 
     start_http_server(args.metrics_port, addr="127.0.0.1")
     iso_path = ensure(ISO)
@@ -2020,7 +2122,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         bundle_sha256=policy_config.bundle_sha256,
                         git_sha=args.git_sha,
                         slots=args.slots,
-                        wants_stream=False,
+                        wants_stream=args.stream,
                     )
                     break
                 except QueueUnavailableError:
@@ -2058,6 +2160,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                     batch_wait_seconds=args.batch_wait_ms / 1000,
                     preparation_timeout_seconds=args.preparation_timeout_seconds,
                     max_frames=args.max_frames,
+                    display_base=args.display_base,
+                    wants_stream=args.stream,
+                    twitch_bandwidth_test=args.twitch_bandwidth_test,
                 )
                 run(
                     config,

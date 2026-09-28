@@ -26,8 +26,8 @@ const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 // Every table is created with CREATE TABLE IF NOT EXISTS, which keeps an older
 // table unchanged. Bump this with any change to a table, and migrate or wipe the
 // store before deploying: a mismatched store refuses every request.
-export const STORE_SCHEMA_VERSION = 1;
-const STORE_TABLES = ["games", "jobs", "sessions", "accounts", "events", "policy", "settings"];
+export const STORE_SCHEMA_VERSION = 2;
+const STORE_TABLES = ["games", "jobs", "sessions", "accounts", "stream", "events", "policy", "settings"];
 
 const QUEUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS policy (
@@ -163,9 +163,13 @@ export class Queue extends DurableObject<Env> {
   async alarm(): Promise<void> {
     if (this.schemaError !== null) throw new Error(this.schemaError);
     const changed = this.tx(() => {
+      const streamHolder = this.sessions.streamHolder();
       const ended = this.sessions.endSilent();
       for (const id of ended.sessions) this.events.log("session_ended", { session: id, reason: "silent" });
       for (const id of ended.jobs) this.events.log("job_failed", { job: id, reason: "session_silent" });
+      if (streamHolder !== null && ended.sessions.includes(streamHolder)) {
+        this.events.log("stream_lease_released", { session: streamHolder, reason: "session_silent" });
+      }
       const expired = this.jobs.reapExpired();
       this.events.prune();
       for (const id of expired) this.events.log("job_expired", { job: id, status: this.jobs.row(id)?.status });
@@ -310,7 +314,20 @@ export class Queue extends DurableObject<Env> {
   }
 
   async reportStatus(sessionId: string, raw: unknown): Promise<ApiResult> {
-    return this.run(() => this.tx(() => this.sessions.report(sessionId, raw)));
+    return this.run(() => {
+      if (!this.env.TWITCH_STREAM_KEY && this.sessions.wantsStream(sessionId)) {
+        throw new HttpError(503, "TWITCH_STREAM_KEY is not configured");
+      }
+      const state = this.tx(() => {
+        const reported = this.sessions.report(sessionId, raw);
+        if (reported.streamGranted) this.events.log("stream_lease_granted", { session: sessionId, slot: 0 });
+        return reported;
+      });
+      return {
+        draining: state.draining,
+        stream: state.streamHolder ? { slot: 0, key: this.env.TWITCH_STREAM_KEY } : null,
+      };
+    });
   }
 
   async claim(sessionId: string, raw: unknown): Promise<ApiResult> {
@@ -321,6 +338,7 @@ export class Queue extends DurableObject<Env> {
         const held = this.jobs.heldLease(this.sessions.jobWorker(sessionId, slot));
         if (held !== null) return held;
         const worker = this.sessions.claimWorker(sessionId, slot, this.policy());
+        if (this.sessions.deferToStreamSlot(sessionId, slot)) return null;
         const job = this.jobs.claimNext(worker);
         if (job !== null) this.events.log("job_claimed", { job: job.id, session: sessionId, slot });
         return job;
@@ -331,8 +349,10 @@ export class Queue extends DurableObject<Env> {
   async drain(sessionId: string): Promise<ApiResult> {
     return this.run(() =>
       this.tx(() => {
+        const released = this.sessions.streamHolder() === sessionId;
         this.sessions.drain(sessionId);
         this.events.log("session_draining", { session: sessionId });
+        if (released) this.events.log("stream_lease_released", { session: sessionId, reason: "draining" });
         return { draining: true };
       }),
     );
@@ -343,8 +363,10 @@ export class Queue extends DurableObject<Env> {
       const previous = this.sessions.endedResult(sessionId);
       if (previous !== null) return { failed: previous };
       const failed = this.tx(() => {
+        const released = this.sessions.streamHolder() === sessionId;
         const ids = this.sessions.end(sessionId, "ended");
         this.events.log("session_ended", { session: sessionId, failed: ids.length });
+        if (released) this.events.log("stream_lease_released", { session: sessionId, reason: "ended" });
         return ids;
       });
       this.release(failed);
@@ -497,6 +519,7 @@ export class Queue extends DurableObject<Env> {
     this.tx(() => {
       for (const table of STORE_TABLES) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
       this.setSetting("schema_version", String(STORE_SCHEMA_VERSION));
+      this.sessions.resetStream();
     });
     await this.ctx.storage.deleteAlarm();
   }

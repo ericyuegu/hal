@@ -36,20 +36,28 @@ if [[ $HAL_NETPLAY_API_URL == https://* ]]; then
     fi
   done
 fi
-if ! command -v uv >/dev/null; then
-  echo "required command is not installed: uv" >&2
-  exit 2
-fi
+commands=(uv Xvfb xsetroot)
+if [[ ${HAL_NETPLAY_STREAM:-1} != 0 ]]; then commands+=(ffmpeg pulseaudio); fi
+for command in "${commands[@]}"; do
+  if ! command -v "$command" >/dev/null; then
+    echo "required command is not installed: $command" >&2
+    exit 2
+  fi
+done
 
 state_dir=${HAL_NETPLAY_STATE_DIR:-"$repo_dir/runs/netplay"}
 mkdir -p "$state_dir/replays"
 cd "$repo_dir"
 uv sync --locked
-exec uv run hal-netplay-runner \
+runner=(uv run hal-netplay-runner \
   --slots "${HAL_NETPLAY_SLOTS:-1}" \
   --slippi-port "${HAL_NETPLAY_SLIPPI_PORT:-51441}" \
+  --display-base "${HAL_NETPLAY_DISPLAY_BASE:-100}" \
   --compiled \
   --graphics-backend "${HAL_NETPLAY_GRAPHICS_BACKEND:-Vulkan}" \
   --replay-dir "$state_dir/replays" \
   --status-path "$state_dir/runner-status.json" \
-  --git-sha "$HAL_GIT_SHA"
+  --git-sha "$HAL_GIT_SHA")
+if [[ ${HAL_NETPLAY_STREAM:-1} == 0 ]]; then runner+=(--no-stream); fi
+if [[ ${HAL_TWITCH_BANDWIDTH_TEST:-0} == 1 ]]; then runner+=(--twitch-bandwidth-test); fi
+exec "${runner[@]}"

@@ -38,6 +38,20 @@ fi
 
 runner_token=${HAL_NETPLAY_RUNNER_TOKEN:-dev-runner-token}
 admin_token=${HAL_NETPLAY_ADMIN_TOKEN:-dev-admin-token}
+local_stream=${HAL_NETPLAY_LOCAL_STREAM:-0}
+if [[ $local_stream == 1 && ${HAL_TWITCH_BANDWIDTH_TEST:-0} != 1 ]]; then
+  echo "local streaming requires HAL_TWITCH_BANDWIDTH_TEST=1" >&2
+  exit 2
+fi
+stream_key=${HAL_NETPLAY_LOCAL_TWITCH_KEY:-local-stream-disabled}
+commands=(Xvfb xsetroot)
+if [[ $local_stream == 1 ]]; then commands+=(ffmpeg pulseaudio); fi
+for command in "${commands[@]}"; do
+  if ! command -v "$command" >/dev/null; then
+    echo "required command is not installed: $command" >&2
+    exit 2
+  fi
+done
 runner_digest=$(printf %s "$runner_token" | sha256sum | cut -d' ' -f1)
 admin_digest=$(printf %s "$admin_token" | sha256sum | cut -d' ' -f1)
 process_groups=()
@@ -60,7 +74,8 @@ cd "$repo_dir/web/netplay-api"
 npm exec wrangler dev -- --local --ip 127.0.0.1 --port 8787 \
   --persist-to "$state_dir/worker" \
   --var "RUNNER_TOKEN_SHA256:$runner_digest" \
-  --var "ADMIN_TOKEN_SHA256:$admin_digest" </dev/null &
+  --var "ADMIN_TOKEN_SHA256:$admin_digest" \
+  --var "TWITCH_STREAM_KEY:$stream_key" </dev/null &
 process_groups+=("$!")
 for _ in {1..120}; do
   curl --fail --silent http://127.0.0.1:8787/v1/capacity >/dev/null 2>&1 && break
@@ -75,7 +90,10 @@ process_groups+=("$!")
 
 cd "$repo_dir"
 runner=(uv run hal-netplay-runner --slots "${HAL_NETPLAY_SLOTS:-1}" --compiled --git-sha "${HAL_GIT_SHA:?set HAL_GIT_SHA}")
+runner+=(--display-base "${HAL_NETPLAY_DISPLAY_BASE:-100}")
 if [[ -n ${HAL_NETPLAY_LOCAL_ASSETS:-} ]]; then runner+=(--local-assets "$HAL_NETPLAY_LOCAL_ASSETS"); fi
+if [[ $local_stream == 0 ]]; then runner+=(--no-stream); fi
+if [[ ${HAL_TWITCH_BANDWIDTH_TEST:-0} == 1 ]]; then runner+=(--twitch-bandwidth-test); fi
 HAL_NETPLAY_API_URL=http://127.0.0.1:8787 HAL_NETPLAY_RUNNER_TOKEN=$runner_token "${runner[@]}" </dev/null &
 process_groups+=("$!")
 set +m

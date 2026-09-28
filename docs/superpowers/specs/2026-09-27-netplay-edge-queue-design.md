@@ -1,7 +1,7 @@
 # Netplay edge queue
 
 Date: 2026-09-27
-Status: design approved in conversation; awaiting written-spec review.
+Status: Plans 1–5 implemented; external deployment and live host and stream checks are owner-gated.
 
 ## Goal
 
@@ -22,7 +22,7 @@ two.
 | 2 | Runner and admin clients, retry-safe runner routes, shared queue contract | done |
 | 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | done |
 | 4 | Host bring-up: image, `gce-up.sh`, G4 verification | done; live G4 check owner-gated |
-| 5 | Twitch streaming: stream lease, claim preference, displays, ffmpeg | not written |
+| 5 | Twitch streaming: stream lease, claim preference, displays, ffmpeg | done; manual stream check owner-gated |
 
 Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
 
@@ -66,7 +66,7 @@ browser ─▶ 20xx.xyz/*     page Worker (web/netplay, vinext, static client)
 
 GPU box: hal-netplay-runner ── outbound HTTPS + WebSocket ──▶ 20xx.xyz/v1/runner/*
          downloads policy, ISO, emulator, account JSON from private R2
-         uploads replays, measurements, audit records to private R2
+         uploads replay files and their small metadata records to private R2
          stream holder only: ffmpeg ── RTMP ──▶ twitch.tv
 ```
 
@@ -280,9 +280,8 @@ the replay and its small metadata JSON.
 
 ## Streaming
 
-Streaming is implemented in Plan 5. Until then the Worker grants no stream
-lease, runners start sessions with `stream: false`, and every status response
-carries `"stream": null`.
+Streaming is implemented. Runners ask for a lease by default, and a status
+response carries either `"stream": null` or the holder's slot and stream key.
 
 One slot streams to Twitch at all times. Dolphin always runs on the same box as
 the GPU and model.

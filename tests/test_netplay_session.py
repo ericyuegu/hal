@@ -19,6 +19,7 @@ from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import fix_dolphin_ini_case
+from hal.sim.session import set_dolphin_internal_resolution
 
 
 def _session(tmp_path: Path, **kwargs) -> NetplaySession:
@@ -117,12 +118,46 @@ def test_console_sets_native_internal_resolution(tmp_path: Path) -> None:
     ini_path.write_text("[Settings]\nMSAA = 1\nEFBScale = 4\n")
     console = SimpleNamespace(_get_dolphin_config_path=lambda: str(config_path))
 
-    netplay.set_dolphin_internal_resolution(console)
+    set_dolphin_internal_resolution(console)
 
     config = configparser.ConfigParser()
     config.read(ini_path)
     assert config.get("Settings", "EFBScale") == "2"
     assert config.get("Settings", "MSAA") == "1"
+
+
+@pytest.mark.parametrize(
+    ("stream_output", "backend", "efb_scale"),
+    ((False, "No audio output", 2), (True, "Pulse", 4)),
+)
+def test_console_writes_stream_display_and_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream_output: bool, backend: str, efb_scale: int
+) -> None:
+    config_path = tmp_path / "Config"
+    console = Mock()
+    console._get_dolphin_config_path.return_value = str(config_path)
+    console_type = Mock(return_value=console)
+    monkeypatch.setattr("hal.sim.netplay.tested_dolphin_version", lambda _path: _dolphin_version())
+    monkeypatch.setattr("hal.sim.netplay.melee.Console", console_type)
+    monkeypatch.setattr("hal.sim.netplay.teardown_console", Mock())
+
+    with _session(tmp_path, stream_output=stream_output):
+        pass
+
+    dolphin = configparser.ConfigParser()
+    dolphin.read(config_path / "Dolphin.ini")
+    gfx = configparser.ConfigParser()
+    gfx.read(config_path / "GFX.ini")
+    assert dolphin.get("DSP", "Backend") == backend
+    assert dolphin.getboolean("Display", "Fullscreen") is False
+    assert gfx.getint("Settings", "EFBScale") == efb_scale
+    if stream_output:
+        assert dolphin.getint("Display", "RenderWindowXPos") == 0
+        assert dolphin.getint("Display", "RenderWindowYPos") == 0
+        assert dolphin.getint("Display", "RenderWindowWidth") == 1280
+        assert dolphin.getint("Display", "RenderWindowHeight") == 720
+        assert dolphin.getboolean("Display", "RenderWindowAutoSize") is False
+        assert console_type.call_args.kwargs["audio_backend"] == "Pulse"
 
 
 def test_controller_is_created_before_dolphin_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

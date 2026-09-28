@@ -296,6 +296,10 @@ export class JobStore {
     throw new HttpError(409, `slot already holds job ${held.id}`);
   }
 
+  hasLease(worker: string): boolean {
+    return this.first(`SELECT 1 FROM jobs WHERE lease_owner = ? AND status IN (${IN_SERVICE})`, worker) !== null;
+  }
+
   claimNext(worker: string): JobResponse | null {
     const now = this.time();
     const row = this.first("SELECT id FROM jobs WHERE status = 'queued' ORDER BY retry_front DESC, queue_seq ASC LIMIT 1");

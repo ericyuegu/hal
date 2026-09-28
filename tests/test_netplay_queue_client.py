@@ -30,6 +30,7 @@ from hal.netplay_service.queue_client import RemoteQueue
 from hal.netplay_service.queue_client import RunnerClient
 from hal.netplay_service.queue_client import SessionReporter
 from hal.netplay_service.queue_client import SessionState
+from hal.netplay_service.queue_client import StreamGrant
 from hal.netplay_service.queue_client import admin_endpoint
 from hal.netplay_service.queue_client import parse_job
 from hal.netplay_service.queue_client import runner_endpoint
@@ -340,10 +341,38 @@ def test_status_report_returns_the_session_state() -> None:
     assert script.requests[0].url.path == "/v1/runner/sessions/sess/status"
 
 
-def test_status_report_refuses_a_stream_grant() -> None:
+def test_status_report_returns_a_stream_grant() -> None:
     script = _Script(httpx.Response(200, json={"draining": False, "stream": {"slot": 0, "key": "live_x"}}))
-    with pytest.raises(QueueProtocolError, match="cannot stream"):
+    assert _runner(script).report_status("sess", _runner_status()) == SessionState(
+        draining=False, stream=StreamGrant(slot=0, key="live_x")
+    )
+
+
+@pytest.mark.parametrize(
+    "grant",
+    (
+        {"slot": 1, "key": "live_x"},
+        {"slot": 0, "key": ""},
+        {"slot": 0, "key": "live_x", "extra": True},
+        "live_x",
+    ),
+)
+def test_status_report_refuses_an_invalid_stream_grant(grant: object) -> None:
+    script = _Script(httpx.Response(200, json={"draining": False, "stream": grant}))
+    with pytest.raises(QueueProtocolError, match="stream grant|status response"):
         _runner(script).report_status("sess", _runner_status())
+
+
+def test_runner_reads_public_queue_depth() -> None:
+    script = _Script(httpx.Response(200, json={"queued": 3, "capacity": 2}))
+    assert _runner(script).queue_depth() == 3
+    assert script.requests[0].url.path == "/v1/capacity"
+
+
+@pytest.mark.parametrize("queued", (-1, 1.5, True, None))
+def test_runner_refuses_invalid_queue_depth(queued: object) -> None:
+    with pytest.raises(QueueProtocolError, match="capacity"):
+        _runner(_Script(httpx.Response(200, json={"queued": queued}))).queue_depth()
 
 
 def _wait_for(condition: Callable[[], bool]) -> None:

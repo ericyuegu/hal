@@ -19,6 +19,7 @@ from hal.controller import ControllerAction
 from hal.sim.session import DolphinGraphicsBackend
 from hal.sim.session import Matchup
 from hal.sim.session import Session
+from hal.sim.session import set_dolphin_stream_output
 
 
 class _FakeGameState:
@@ -93,6 +94,27 @@ def test_session_configures_graphics_backend_native_resolution(
 def test_session_rejects_unsupported_graphics_backend() -> None:
     with pytest.raises(ValueError, match="unsupported Dolphin graphics backend"):
         Session(iso_path="unused.iso", dolphin_path="unused", gfx_backend="Null")  # type: ignore[arg-type]
+
+
+def test_stream_output_preserves_unrelated_dolphin_settings(tmp_path: Path) -> None:
+    (tmp_path / "Dolphin.ini").write_text("[DSP]\nVolume = 75\n[Display]\nKeep = yes\n")
+    (tmp_path / "GFX.ini").write_text("[Settings]\nMSAA = 4\n")
+
+    class Console:
+        def _get_dolphin_config_path(self) -> str:
+            return str(tmp_path)
+
+    set_dolphin_stream_output(Console(), True)  # type: ignore[arg-type]
+
+    dolphin = session_module._CaseSensitiveConfigParser(interpolation=None)
+    dolphin.read(tmp_path / "Dolphin.ini")
+    gfx = session_module._CaseSensitiveConfigParser(interpolation=None)
+    gfx.read(tmp_path / "GFX.ini")
+    assert dolphin.get("DSP", "Volume") == "75"
+    assert dolphin.get("Display", "Keep") == "yes"
+    assert dolphin.get("DSP", "Backend") == "Pulse"
+    assert gfx.get("Settings", "MSAA") == "4"
+    assert gfx.get("Settings", "EFBScale") == "4"
 
 
 def test_navigate_to_live_times_out_when_menu_never_goes_live() -> None:

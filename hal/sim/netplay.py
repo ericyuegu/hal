@@ -25,7 +25,7 @@ from hal.sim.session import fix_dolphin_ini_case
 from hal.sim.session import kill_dolphin
 from hal.sim.session import known_dolphin_version
 from hal.sim.session import popen_with_pdeathsig
-from hal.sim.session import set_dolphin_internal_resolution
+from hal.sim.session import set_dolphin_stream_output
 from hal.sim.session import step_blocking
 from hal.sim.session import teardown_console
 
@@ -87,11 +87,14 @@ class NetplaySession:
         connect_abandoned: Callable[[], bool] = _never_abandoned,
         realtime: bool = False,
         graphics_backend: DolphinGraphicsBackend = "Vulkan",
+        stream_output: bool = False,
     ) -> None:
         if online_delay not in (2, 3):
             raise ValueError(f"online_delay must be 2 or 3, got {online_delay}")
         if graphics_backend not in ("Vulkan", "OGL"):
             raise ValueError(f"unsupported Dolphin graphics backend {graphics_backend!r}")
+        if type(stream_output) is not bool:
+            raise TypeError("stream_output must be a boolean")
         self.frame_times: list[float] = []
         self.realtime = realtime
         self.iso_path = str(iso_path)
@@ -104,6 +107,7 @@ class NetplaySession:
         self.connect_timeout_seconds = connect_timeout_seconds
         self.connect_abandoned = connect_abandoned
         self.graphics_backend = graphics_backend
+        self.stream_output = stream_output
         self.ego_port: int | None = None
         self.opponent_port: int | None = None
         self._console: melee.Console | None = None
@@ -129,7 +133,9 @@ class NetplaySession:
                 skip_rollback_frames=True,
                 rollback_resolution="first",
                 gfx_backend=self.graphics_backend,
-                disable_audio=True,
+                fullscreen=False,
+                disable_audio=not self.stream_output,
+                audio_backend="Pulse" if self.stream_output else "",
                 tmp_home_directory=True,
                 save_replays=True,
                 replay_dir=self.replay_dir,
@@ -139,7 +145,7 @@ class NetplaySession:
                 enable_ffw=False,
             )
         fix_dolphin_ini_case(self._console)
-        set_dolphin_internal_resolution(self._console)
+        set_dolphin_stream_output(self._console, self.stream_output)
         atexit.register(self._atexit_kill)
         return self
 

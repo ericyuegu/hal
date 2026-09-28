@@ -16,6 +16,7 @@ export default defineConfig({
           HAL_TEST_CLOCK: "1",
           RUNNER_TOKEN_SHA256: RUNNER_DIGESTS,
           ADMIN_TOKEN_SHA256: ADMIN_DIGEST,
+          TWITCH_STREAM_KEY: "live_test_stream_key",
         },
       },
     }),

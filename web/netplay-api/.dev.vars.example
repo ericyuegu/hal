@@ -2,3 +2,4 @@
 # echo -n dev-runner-token | sha256sum
 RUNNER_TOKEN_SHA256=<digest of dev-runner-token>
 ADMIN_TOKEN_SHA256=<digest of dev-admin-token>
+TWITCH_STREAM_KEY=live_dev_stream_key

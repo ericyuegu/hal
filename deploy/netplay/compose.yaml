@@ -21,7 +21,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}
       AWS_BUCKET: ${AWS_BUCKET:-hal}
       NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility
+      NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility,video
     volumes:
       - cache:/root/.cache/hal-netplay
       - state:/opt/hal/runs/netplay

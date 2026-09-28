@@ -40,6 +40,8 @@ from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import write_slot_status
 from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import SessionState
+from hal.netplay_service.queue_client import StreamGrant
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import UploadedReplay
 from hal.sim.netplay import ConnectAbandoned
@@ -583,6 +585,69 @@ def test_runner_does_not_admit_a_replacement_when_old_child_survives(
     generation.assert_called_once()
 
 
+def test_runner_owns_stream_resources_across_inference_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(
+        _runner_config(tmp_path),
+        display_base=100,
+        wants_stream=True,
+        twitch_bandwidth_test=True,
+    )
+    closed: list[str] = []
+
+    class Displays:
+        displays = (":100",)
+
+        def __enter__(self) -> Displays:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            closed.append("displays")
+
+    class Pulse:
+        environment = {"PULSE_SERVER": "unix:/tmp/pulse", "PULSE_SINK": "hal_stream"}
+
+        def __enter__(self) -> Pulse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            closed.append("pulse")
+
+    class Stream:
+        grants: list[StreamGrant | None] = []
+
+        def __enter__(self) -> Stream:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            closed.append("stream")
+
+        def set_grant(self, grant: StreamGrant | None) -> None:
+            self.grants.append(grant)
+
+    stream = Stream()
+    client = Mock()
+    reporter = Mock()
+    grant = StreamGrant(0, "live_secret")
+    reporter.state.return_value = SessionState(False, grant)
+    generation = Mock()
+    monkeypatch.setattr(runner, "_bot_connect_codes", lambda _paths: ("BOT#1",))
+    monkeypatch.setattr(runner, "_sha256", lambda _path: "b" * 64)
+    monkeypatch.setattr(runner, "XvfbGroup", lambda *_args, **_kwargs: Displays())
+    monkeypatch.setattr(runner, "PulseAudio", lambda *_args, **_kwargs: Pulse())
+    monkeypatch.setattr(runner, "StreamSupervisor", lambda *_args, **_kwargs: stream)
+    monkeypatch.setattr(runner, "_run_generation", generation)
+
+    runner.run(config, session_client=client, reporter=reporter)
+
+    assert stream.grants == [grant]
+    assert generation.call_args.kwargs["displays"] == (":100",)
+    assert generation.call_args.kwargs["pulse_environment"] == tuple(Pulse.environment.items())
+    assert generation.call_args.kwargs["stream_supervisor"] is stream
+    assert closed == ["stream", "pulse", "displays"]
+
+
 def test_heartbeat_forfeits_active_job_when_runner_aborts() -> None:
     store = Mock()
     done = threading.Event()
@@ -640,11 +705,24 @@ def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch:
     assert config.batch_wait_seconds == 0.0005
     assert config.preparation_timeout_seconds == 1800.0
     assert config.session_id == _SESSION_ID
-    assert client.start_session.call_args.kwargs["wants_stream"] is False
+    assert config.wants_stream is True
+    assert config.display_base == 100
+    assert config.twitch_bandwidth_test is False
+    assert client.start_session.call_args.kwargs["wants_stream"] is True
     client.end_session.assert_called_once_with(_SESSION_ID)
 
     config, _ = _run_cli(tmp_path, monkeypatch, "--graphics-backend", "OGL")
     assert config.graphics_backend == "OGL"
+
+
+def test_runner_cli_can_opt_out_or_use_twitch_bandwidth_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, client = _run_cli(tmp_path, monkeypatch, "--no-stream", "--display-base", "220")
+    assert config.wants_stream is False
+    assert config.display_base == 220
+    assert client.start_session.call_args.kwargs["wants_stream"] is False
+
+    config, _ = _run_cli(tmp_path, monkeypatch, "--twitch-bandwidth-test")
+    assert config.twitch_bandwidth_test is True
 
 
 def test_runner_cli_accepts_explicit_cold_preparation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -821,6 +899,65 @@ def test_abandoned_connect_frees_slot_without_no_show(
     )
 
     store.mark_no_show.assert_not_called()
+
+
+def test_stream_slot_writes_only_public_game_state_and_returns_to_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "stream.json"
+    config = replace(
+        _slot_config(tmp_path),
+        display=":100",
+        stream_output=True,
+        stream_state_path=state_path,
+        pulse_environment=(("PULSE_SINK", "hal_stream"),),
+    )
+    stream_flags: list[bool] = []
+
+    class Session:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            stream_flags.append(bool(kwargs["stream_output"]))
+
+        def __enter__(self) -> Session:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    def play(*_args: object, **_kwargs: object) -> None:
+        payload = json.loads(state_path.read_text())
+        assert payload == {
+            "character": "FOX",
+            "desired_return": 20.0,
+            "game_number": 1,
+            "imitation": "IBDW#0",
+            "schema_version": 1,
+            "state": "game",
+        }
+        assert "CRYO#610" not in state_path.read_text()
+        raise ConnectAbandoned("released")
+
+    monkeypatch.setattr(runner, "NetplaySession", Session)
+    monkeypatch.setattr(runner, "run_netplay_match", play)
+    store = Mock()
+    store.connect_live.return_value = _LiveConnection([])
+    stop = Mock()
+    stop.is_set.return_value = False
+
+    runner._run_reservation(
+        config,
+        store,
+        Mock(),
+        RuntimeConfig(1, (2, 3)),
+        _job(),
+        stop,
+        Mock(),
+        FrameTiming(2, 2, 4, 2, 8),
+    )
+
+    assert stream_flags == [True]
+    assert json.loads(state_path.read_text()) == {"schema_version": 1, "state": "idle"}
 
 
 def test_recoverable_failure_closes_dolphin_before_retry(

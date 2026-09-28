@@ -128,6 +128,50 @@ describe("retried runner calls", () => {
     await start();
     expect(await report(SESSION, 2)).toMatchObject({ status: 200, body: { draining: false, stream: null } });
   });
+
+  it("grants one stream without exposing its key through admin state", async () => {
+    const streamed = { ...START, stream: true };
+    await start(streamed);
+    expect(await report(SESSION, 2)).toMatchObject({
+      status: 200,
+      body: { draining: false, stream: { slot: 0, key: "live_test_stream_key" } },
+    });
+    expect((await report(SESSION, 2)).body.stream).toEqual({ slot: 0, key: "live_test_stream_key" });
+    const status = await call("GET", "/v1/admin/status", { admin: true });
+    expect(status.body.stream).toMatchObject({ session_id: SESSION, slot: 0 });
+    expect(JSON.stringify(status.body)).not.toContain("live_test_stream_key");
+    const events = await call("GET", "/v1/admin/events", { admin: true });
+    expect(JSON.stringify(events.body)).not.toContain("live_test_stream_key");
+    expect(events.body.events.filter((event: { kind: string }) => event.kind === "stream_lease_granted")).toHaveLength(1);
+    await call("POST", `/v1/runner/sessions/${SESSION}/drain`, { runner: true });
+    expect((await call("GET", "/v1/admin/status", { admin: true })).body.stream).toBeNull();
+    const released = await call("GET", "/v1/admin/events", { admin: true });
+    expect(released.body.events.filter((event: { kind: string }) => event.kind === "stream_lease_released")).toHaveLength(1);
+  });
+
+  it("prefers an idle live stream slot without changing FIFO or retry behavior", async () => {
+    await start({ ...START, stream: true });
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: CREATE });
+    expect(
+      await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } }),
+    ).toMatchObject({ status: 204, body: null });
+    const first = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    expect(first).toMatchObject({ status: 200, body: { player_code: CREATE.player_code } });
+    expect(
+      await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } }),
+    ).toMatchObject({ status: 200, body: first.body });
+
+    await call("POST", `/v1/runner/jobs/${first.body.id}/connecting`, {
+      runner: { session: SESSION, slot: 0 },
+      body: { connect_code: "BOT0#1" },
+    });
+
+    await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "OTHER#1" } });
+    expect(
+      await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } }),
+    ).toMatchObject({ status: 200, body: { player_code: "OTHER#1" } });
+  });
 });
 
 describe("replay ownership", () => {

@@ -112,6 +112,45 @@ describe("sessions", () => {
       expect(refused(() => sessions.live("s1"))).toEqual({ status: 410, detail: "session has ended" });
     }));
 
+  it("leases one stream until its holder drains, ends, or goes silent", () =>
+    world(({ sessions, clock }) => {
+      sessions.start("s1", START, policy);
+      expect(sessions.report("s1", readyStatus(2))).toEqual({
+        draining: false,
+        streamHolder: true,
+        streamGranted: true,
+      });
+      expect(sessions.report("s1", readyStatus(2))).toEqual({
+        draining: false,
+        streamHolder: true,
+        streamGranted: false,
+      });
+      expect(sessions.summary().stream).toMatchObject({ session_id: "s1", slot: 0 });
+
+      sessions.drain("s1");
+      expect(sessions.summary().stream).toBeNull();
+      sessions.start("s2", { ...START, slots: 1 }, policy);
+      expect(sessions.report("s2", readyStatus(1)).streamHolder).toBe(true);
+      sessions.end("s2", "ended");
+      expect(sessions.summary().stream).toBeNull();
+
+      sessions.start("s3", { ...START, slots: 1 }, policy);
+      sessions.report("s3", readyStatus(1));
+      clock.advance(30);
+      sessions.endSilent();
+      expect(sessions.summary().stream).toBeNull();
+    }));
+
+  it("does not grant a stream to an opted-out or competing session", () =>
+    world(({ sessions }) => {
+      sessions.start("s1", { ...START, stream: false, slots: 1 }, policy);
+      expect(sessions.report("s1", readyStatus(1)).streamHolder).toBe(false);
+      sessions.start("s2", { ...START, slots: 1 }, policy);
+      sessions.start("s3", { ...START, slots: 1 }, policy);
+      expect(sessions.report("s2", readyStatus(1)).streamHolder).toBe(true);
+      expect(sessions.report("s3", readyStatus(1)).streamHolder).toBe(false);
+    }));
+
   it("ends a silent session, failing its leases and freeing its accounts", () =>
     world(({ jobs, sessions, clock }) => {
       sessions.start("s1", START, policy);
