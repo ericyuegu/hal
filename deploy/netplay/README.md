@@ -74,3 +74,7 @@ The first emulator-suite attempt failed because this worktree lacked its ignored
 fixtures. The second found the ISO and emulator through explicit environment
 paths but lacked the MDS and archive. The exact required command passed after
 the worktree linked to the existing read-only fixtures in the main checkout.
+
+Detailed match measurements and engine audits stay local for qualification.
+R2 receives only each replay and its small metadata JSON. This storage decision
+was approved after Plan 3 implementation.

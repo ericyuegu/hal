@@ -44,7 +44,7 @@ Plan 2's “Decisions carried into Plan 3” section is binding. The owner repla
 | `hal/fixtures.py` | Add verified `NETPLAY_EMULATOR`; keep `ISO` as the single ISO pin. |
 | `hal/netplay_service/assets.py` | Keep `PinnedAsset`, `AssetCache`, `R2Source`, `LocalSource`, policy/account key functions, and `ensure_uploaded`; delete manifest and pinned ISO/emulator code. |
 | `hal/netplay_service/admin.py` | Delete `assets pin`; keep policy and account publication. |
-| `hal/netplay_service/runner.py` | Session lifecycle, qualification, remote slot processes, errors, drain, sidecars, artifacts, local metrics. |
+| `hal/netplay_service/runner.py` | Session lifecycle, qualification, remote slot processes, errors, drain, sidecars, local qualification artifacts, local metrics. |
 | `hal/netplay_service/queue_client.py` | Remote queue, session reporter, settings socket; change only if a focused test shows a contract gap. |
 | `tests/test_netplay_runner.py`, `tests/test_netplay_assets.py`, `tests/test_netplay_admin.py` | Runner and asset regression tests using a `RunnerQueue` fake; remove SQLite fixture assumptions. |
 | `tests/test_netplay_queue_integration.py` | Real `wrangler dev` path through session, claim, transition, replay, and silence. |
@@ -104,15 +104,15 @@ Plan 2's “Decisions carried into Plan 3” section is binding. The owner repla
 - [ ] **Step 4: For a crashed slot, fail its known active job through its original fixed worker ID before replacing the child. If it crashed between remote claim and local job-ID receipt, wait for the Worker's lease expiry before admitting the replacement; do not create a second worker identity. Assert that the other slots keep their active games. Run: `uv run pytest -q tests/test_netplay_runner.py -k 'drain or signal or ended_session or slot_crash'`. Expected: pass.
 - [ ] **Step 5: Commit.** `git add hal/netplay_service/runner.py tests/test_netplay_runner.py && git commit -m "Drain remote sessions safely"`.
 
-### Task 5: Preserve delayed replays and remote measurements
+### Task 5: Preserve delayed replays and local measurements
 
 **Files:** `hal/netplay_service/runner.py`, `hal/netplay_service/replays.py`, `tests/test_netplay_runner.py`, `tests/test_netplay_replays.py`.
 
 **Interfaces:** Sidecar schema 2 contains `worker_id = "<session>/slot-<n>"`. A leftover sidecar is recorded through `RemoteQueue(endpoint, original_session)`; only successful `record_replay` removes it.
 
-- [ ] **Step 1: Add tests for an ended-session sidecar, a replay 409, and R2 upload failure. Assert that 409 and upload failure leave the replay and sidecar. Assert a successful record removes both. Add tests that measurement and engine audit files use deterministic R2 keys adjacent to replay keys and are hash checked.
+- [ ] **Step 1: Add tests for an ended-session sidecar, a replay 409, and R2 upload failure. Assert that 409 and upload failure leave the replay and sidecar. Assert a successful record removes both. Keep measurement and engine audit files local for qualification.
 - [ ] **Step 2: Run: `uv run pytest -q tests/test_netplay_runner.py tests/test_netplay_replays.py -k 'sidecar or audit or measurement'`.** Expected: new tests fail.
-- [ ] **Step 3: In `_complete_pending_upload`, parse the sidecar worker ID into session and slot, construct `RemoteQueue` for that original session, call `record_replay`, then remove the sidecar only after a successful acknowledgement. Log 409 with its detail and the sidecar path. Upload measurement JSON and engine audit JSON to private R2 with SHA-256 metadata and a key beside the replay's `netplay/...` prefix. Use `ensure_uploaded` and retain failed local files for retry. Make upload errors visible in logs without stopping Dolphin.
+- [ ] **Step 3: In `_complete_pending_upload`, parse the sidecar worker ID into session and slot, construct `RemoteQueue` for that original session, call `record_replay`, then remove the sidecar only after a successful acknowledgement. Log 409 with its detail and the sidecar path. Keep detailed measurement and engine-audit JSON local. R2 stores only each replay and its small metadata JSON.
 - [ ] **Step 4: Start the runner's local Prometheus endpoint on a configurable local port. Test that it binds only loopback and exposes a session heartbeat and slot-health values. Run: `uv run pytest -q tests/test_netplay_runner.py tests/test_netplay_replays.py -k 'sidecar or audit or measurement or metrics'`. Expected: pass.
 - [ ] **Step 5: Commit.** `git add hal/netplay_service/runner.py hal/netplay_service/replays.py tests/test_netplay_runner.py tests/test_netplay_replays.py && git commit -m "Preserve remote runner artifacts"`.
 

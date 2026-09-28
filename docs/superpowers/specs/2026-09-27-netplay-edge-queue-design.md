@@ -20,7 +20,7 @@ two.
 | --- | --- | --- |
 | 1 | API Worker and Durable Object (`web/netplay-api`), golden transcripts | done |
 | 2 | Runner and admin clients, retry-safe runner routes, shared queue contract | done |
-| 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | not written |
+| 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | done |
 | 4 | Host bring-up: image, `gce-up.sh`, G4 verification | not written |
 | 5 | Twitch streaming: stream lease, claim preference, displays, ffmpeg | not written |
 
@@ -272,9 +272,11 @@ after their hash is verified again.
 ### Local artifacts
 
 Replays upload to R2 as today, and each upload is then reported with
-`POST /jobs/{id}/replay`. Measurement files and engine audit records are also
-uploaded to R2 next to the replays, so a lost box does not lose them. The
-Prometheus metrics endpoint moves into the runner on a local port.
+`POST /jobs/{id}/replay`. Detailed match measurements and engine audit records
+stay local and are enabled for qualification runs. Qualification summaries are
+recorded in `deploy/netplay/README.md`; production health uses runner status,
+logs, and the runner's loopback Prometheus endpoint. This keeps R2 limited to
+the replay and its small metadata JSON.
 
 ## Streaming
 
