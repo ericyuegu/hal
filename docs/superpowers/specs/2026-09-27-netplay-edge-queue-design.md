@@ -139,11 +139,11 @@ has its own token.
 
 | Route | Purpose | Replaces |
 | --- | --- | --- |
-| `POST /v1/runner/sessions` | Start a session: `{host, bundle_sha256, git_sha, slots, stream}`. Returns the session ID, the policy config, and one leased account per slot. `409` if the bundle is not the active policy; `409` if too few accounts are free. | runner startup and per-box account config |
-| `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. The response says whether this session holds the stream lease and, when it does, carries the stream key. | status files read by the API |
-| `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Refused while the session is draining. Applies the stream-slot preference (see "Streaming"). | `claim_next` |
+| `POST /v1/runner/sessions` | Start a session: `{session_id, host, bundle_sha256, git_sha, slots, stream}`, with a runner-chosen ID. Returns the session ID, the policy config, and one leased account per slot. A repeat with identical fields returns the same session. `409` if the bundle is not the active policy, if too few accounts are free, or if the ID exists with other fields. | runner startup and per-box account config |
+| `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. The response is `{draining, stream}`: `stream` is `null` unless this session holds the stream lease, and then it carries the stream key. | status files read by the API |
+| `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Returns the slot's `leased` job if it holds one, so a repeat cannot take a second job. Refused while the session is draining, or while the slot holds a job past `leased`. Applies the stream-slot preference (see "Streaming"). | `claim_next` |
 | `POST /v1/runner/sessions/{sid}/drain` | Stop claiming; keep current sets. | local stop flag |
-| `DELETE /v1/runner/sessions/{sid}` | End the session: fail its remaining leases with the current generation-abort codes and free its accounts. | `fail_worker_generation` |
+| `DELETE /v1/runner/sessions/{sid}` | End the session: fail its remaining leases with the current generation-abort codes and free its accounts. A repeat returns the first result. | `fail_worker_generation` |
 | `POST /v1/runner/jobs/{id}/heartbeat` | Extend the job lease. | `heartbeat` |
 | `POST /v1/runner/jobs/{id}/connecting` | `{connect_code}` | `mark_connecting` |
 | `POST /v1/runner/jobs/{id}/playing` | | `mark_playing` |
@@ -152,7 +152,7 @@ has its own token.
 | `POST /v1/runner/jobs/{id}/finish-game` | `{game_number, actual_stage, result}` | `finish_game` |
 | `POST /v1/runner/jobs/{id}/fail` | `{error_code, retryable}` | `fail` |
 | `POST /v1/runner/jobs/{id}/forfeit` | | `forfeit_service_failure` |
-| `POST /v1/runner/jobs/{id}/replay` | `{game_number, key, sha256, size, etag}` | `record_replay` |
+| `POST /v1/runner/jobs/{id}/replay` | `{game_number, key, sha256, size, etag}`. Accepted only from the worker that finished that game, even after its session ended. | `record_replay` |
 | `GET /v1/runner/jobs/{id}` | Current job for the owning worker. | `get_worker_job` |
 | `WS /v1/runner/jobs/{id}/live` | Server pushes `settings {revision, desired_return, temperature}` on connect and on every change, and `released` when the job is canceled, expires, or is reassigned. | `_LivePolicySettings` polling SQLite |
 
@@ -194,10 +194,12 @@ Deliberate changes, each with its own test:
    `connecting`, `rematch_wait`, and `rematch_ready`, and 60 s in `playing`, so
    a short network outage does not fail a game that Dolphin is still running
    locally.
-3. **Idempotent runner transitions.** A retried transition that has already
+3. **Idempotent runner routes.** A retried transition that has already
    been applied returns `200` with the current job. `finish-game` is keyed by
    `game_number`, so a retry cannot record a game twice. A transition from the
-   wrong state still returns `409`.
+   wrong state still returns `409`. Session start, claim, and session end are
+   also safe to repeat (see "Runner routes"), because the client retries every
+   request.
 4. **Policy and account checks.** Sessions must match the active bundle, and
    each slot holds exactly one leased account.
 5. **Rate limit, queue cap, and pause** (`429`, `503`).
@@ -212,7 +214,9 @@ runner's reservation logic changes only where the store is constructed. It
 uses `httpx`, which moves from the `dev` group to the runtime dependencies, and
 `websockets` for the settings socket. Requests use bounded retries: exponential backoff from 0.25 s to 4 s for
 connection errors and `5xx`, and no retry on `4xx`. A `409` from a transition
-raises the same `InvalidTransitionError` the runner already handles.
+raises the same `InvalidTransitionError` the runner already handles. That class
+and the `RunnerQueue` protocol live in `hal/netplay_service/queue_contract.py`,
+and both `QueueStore` and `RemoteQueue` implement the protocol.
 
 `_LivePolicySettings` keeps its interface. It reads settings from the job's
 WebSocket instead of polling SQLite, reconnects with backoff, and sets
@@ -258,6 +262,10 @@ uploaded to R2 next to the replays, so a lost box does not lose them. The
 Prometheus metrics endpoint moves into the runner on a local port.
 
 ## Streaming
+
+Streaming is implemented in Plan D. Until then the Worker grants no stream
+lease, runners start sessions with `stream: false`, and every status response
+carries `"stream": null`.
 
 One slot streams to Twitch at all times. Dolphin always runs on the same box as
 the GPU and model.

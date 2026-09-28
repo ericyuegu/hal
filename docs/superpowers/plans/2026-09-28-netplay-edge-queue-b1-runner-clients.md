@@ -2,58 +2,123 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give Python everything it needs to talk to the Plan A queue Worker — a retrying runner client, a live-settings socket, an admin client and CLI, pinned and hash-checked assets, and a local `wrangler dev` harness — without changing the runner yet.
+**Goal:** Give Python everything it needs to talk to the Plan A queue Worker: a retrying runner client, a live-settings socket, a session heartbeat, an admin client and CLI, pinned and hash-checked assets, and a local `wrangler dev` harness. Make every runner route safe to retry, and give the runner one typed queue interface that both the SQLite store and the remote client implement.
 
-**Architecture:** `hal/netplay_service/queue_client.py` wraps one `httpx.Client` per process with bounded retries and maps Worker status codes to exceptions. `RemoteQueue` has the method names the runner already calls on `QueueStore`; `RunnerClient` covers session routes; `AdminClient` covers admin routes. `hal/netplay_service/assets.py` pins the ISO and emulator in `deploy/netplay/assets.json` and keeps verified copies under `~/.cache/hal-netplay/<sha256>/`. `hal-netplay-admin` publishes policies and accounts. `hal/netplay_service/local_worker.py` runs the Worker under `wrangler dev` for the integration test here and for the qualification ports in Plan B2.
+**Architecture:** The Worker makes session start, claim, and session end idempotent, and it checks that a replay comes from the worker that played the game. `hal/netplay_service/queue_contract.py` holds the shared queue errors and the `RunnerQueue` protocol. `QueueStore` and `RemoteQueue` both implement that protocol, and the runner is typed against it. `hal/netplay_service/queue_client.py` wraps one `httpx.Client` per process with bounded retries. It maps Worker status codes to exceptions. `RemoteQueue` implements `RunnerQueue`, `RunnerClient` covers the session routes, `SessionReporter` sends the session heartbeat, and `AdminClient` covers the admin routes. `hal/netplay_service/assets.py` pins the ISO and emulator in `deploy/netplay/assets.json` and keeps verified copies under `~/.cache/hal-netplay/<sha256>/`. `hal-netplay-admin` publishes policies, accounts, and asset pins. `hal/netplay_service/local_worker.py` runs the Worker under `wrangler dev` for the integration test.
 
 **Tech Stack:** Python 3.14 (uv), httpx 0.28.1, websockets 17.1 (sync client), boto3 (R2), loguru, pytest; TypeScript Worker from Plan A (vitest, wrangler 4.124).
 
 **Spec:** `docs/superpowers/specs/2026-09-27-netplay-edge-queue-design.md`
 
-This is Plan B1 of two. Plan A built the Worker. Plan B1 adds the clients and tools and leaves `runner.py`, `api.py`, and `queue.py` unchanged, so every task leaves the tree green. Plan B2 (`2026-09-28-netplay-edge-queue-b2-runner-cutover.md`) moves the runner onto these clients, ports the qualification harnesses, deletes the Python service, and updates the page and deploy scripts. Plan B1 must be complete before Plan B2 starts. Plan A must be complete (Tasks 1–10) before Plan B1 starts.
+The program has four plans. Plan A built the Worker. Plan B moves the runner onto it, in two parts. Plan C adds host bring-up. Plan D adds Twitch streaming. B1 is this plan. It changes the Worker's runner routes, adds the Python clients and tools, and makes `QueueStore` and `runner.py` conform to the shared `RunnerQueue` protocol. The runner still constructs `QueueStore` and runs on SQLite. B2 is not written yet. It will move the runner onto `RemoteQueue`, port the qualification harnesses, delete the Python service, and update the page and deploy scripts. The section "Decisions carried into Plan B2" at the end lists what B2 must implement. Plan A must be complete before B1 starts, and B1 must be complete before B2 starts.
+
+**Streaming is Plan D.** B1 implements no stream lease. The session API is forward compatible. `start_session` sends `stream` from its `wants_stream` argument. Every status response has the shape `{"draining": bool, "stream": null}`. The client parses it into a `SessionState` value and refuses a non-null `stream`, because no B1 runner asks for the lease. Plan D defines the grant, adds it to `SessionState`, and fills `stream`. The routes and the call sites stay as they are.
 
 ## Global Constraints
 
+- **Idempotency is the retry precondition.** The client retries every request, so every runner and admin route must be safe to repeat after a lost response:
+  - A session start carries a client-chosen `session_id`. A repeat with identical fields returns the same session and accounts.
+  - A claim returns the slot's existing `leased` job before it takes another job.
+  - A repeated session end returns the result of the first end.
+  - Transitions are idempotent from Plan A. Heartbeat, status, drain, the admin `PUT`s, pause, and resume are naturally idempotent.
+  - Any new route must meet this rule, or the client must be changed not to retry it.
 - Retries: exponential backoff 0.25 s, 0.5 s, 1 s, 2 s, 4 s (six attempts) on connection errors and `5xx`; no retry on `4xx`.
-- Status mapping: `409` → `InvalidTransitionError`; `410` → `SessionEndedError` (a subclass of `InvalidTransitionError`); other `4xx` → `QueueRejectedError`; retries exhausted → `QueueUnavailableError`; a malformed body → `QueueProtocolError`.
-- Every runner and admin request sends `Authorization: Bearer <token>`, and `CF-Access-Client-Id` / `CF-Access-Client-Secret` when configured. An `https://` URL requires both Access values; an `http://` URL (local `wrangler dev`) may omit them.
-- Job routes send `X-HAL-Session` and `X-HAL-Slot`. Worker IDs are `"<session_id>/slot-<n>"`, the same string as the Worker's `workerId`.
-- Environment: `HAL_NETPLAY_API_URL`, `HAL_NETPLAY_RUNNER_TOKEN`, `HAL_NETPLAY_ADMIN_TOKEN`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`.
+- Status mapping: `409` → `InvalidTransitionError`; `410` → `SessionEndedError` (a subclass of `InvalidTransitionError`); other `4xx` → `QueueRejectedError`; retries exhausted → `QueueUnavailableError`; a malformed body → `QueueProtocolError`. `QueueError`, `InvalidTransitionError`, and `SessionEndedError` live in `queue_contract.py`, and `queue.py` raises the same classes.
+- Every runner and admin request sends `Authorization: Bearer <token>`, and it sends the Cloudflare Access headers when they are configured. An `https://` URL requires both Access values; an `http://` URL (local `wrangler dev`) may omit them.
+- Runners read `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. The admin CLI reads `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET`, so that one `.env` can hold both a local runner and the admin tool without either borrowing the other's token.
+- Job routes send `X-HAL-Session` and `X-HAL-Slot`. Worker IDs are `"<session_id>/slot-<n>"`, the same string as the Worker's `workerId`. Session IDs are 16 URL-safe characters from `secrets.token_urlsafe(12)`. The Worker accepts `^[A-Za-z0-9_-]{16,64}$`.
+- Environment: `HAL_NETPLAY_API_URL`, `HAL_NETPLAY_RUNNER_TOKEN`, `HAL_NETPLAY_ADMIN_TOKEN`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID`, `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`.
 - R2 keys: bundles `netplay/policies/<sha256>.halpolicy`; accounts `netplay/accounts/<sha256>.json`; ISO and emulator `netplay/assets/<sha256>/<file name>`.
 - Cache: `~/.cache/hal-netplay/<sha256>/<file name>`; a cached file is used only after its SHA-256 is verified again.
+- An uploaded object is trusted only when its size and its `sha256` metadata both match the local file.
 - Policy config: schema version 1 with exactly the 13 fields that `web/netplay-api/src/policy.ts` accepts. Where the spec lists `max_games`, `no_show_seconds`, and `rematch_seconds`, the Worker serves them from constants and rejects them in the config; the Worker code wins.
 - Follow `AGENTS.md`: typed Python, frozen slotted dataclasses for values, no `**kwargs` at boundaries, specific exceptions, tests in `tests/`, `uv run`.
-- Do not edit `web/netplay-api/` except in Task 1.
+- Edit `web/netplay-api/` only in Tasks 1–3.
+- Every task leaves `ruff format --check`, `ruff check`, `ty`, the non-integration pytest suite, and the Worker's vitest suite passing.
 - Commit messages are short and apt, with no attribution trailer.
 
 ## Review Focus
 
-1. **A misconfigured box: `HAL_NETPLAY_API_URL` with a trailing slash, an `https://` URL without Access credentials, or a missing token.** Expected: a `ValueError` naming the variable before any request. Pinned in Task 2.
-2. **The Worker applies a transition but its response is lost, and the client retries.** Expected: the retry returns the current job (`200`); the client raises nothing and records one game. Pinned in Task 6 (integration).
-3. **The Worker returns a job body with an extra field or an unknown status.** Expected: `QueueProtocolError`, never `KeyError` or a partly built `Job`. Pinned in Task 2.
-4. **A cached ISO is truncated or corrupted on disk.** Expected: the cache detects the wrong hash, fetches again, and never returns the bad file. Pinned in Task 4.
-5. **Two account files carry the same connect code.** Expected: `hal-netplay-admin accounts upload` refuses before it uploads or publishes anything. Pinned in Task 5.
+1. **A response is lost after the Worker applied the request, and the client retries.** This applies to session start, claim, session end, and a transition. Expected: the retry returns the first result. There is no second session, no second account lease, no second job on the slot, and no second game record. This is pinned in Task 2 (Worker) and Task 9 (integration, through the real Worker).
+2. **A runner records a replay for a game that another worker played.** Expected: `409`. The worker that played the game can still record it after its session has ended. Pinned in Task 3.
+3. **The runner's queue calls type-check against both implementations.** Expected: `ty` passes with `runner.py` typed on `RunnerQueue`, and both `QueueStore` and `RemoteQueue` are assignable to it. Pinned in Tasks 4 and 5.
+4. **A box downloads bundles and qualifies for longer than 30 s after it starts a session.** Expected: `SessionReporter` keeps the session alive, and the Worker never ends it for silence. Pinned in Task 9.
+5. **A misconfigured box: `HAL_NETPLAY_API_URL` with a trailing slash, an `https://` URL without Access credentials, or a missing token.** Expected: a `ValueError` that names the variable, raised before any request. Pinned in Task 5.
+6. **The Worker returns a job body with an extra field or an unknown status.** Expected: `QueueProtocolError`, never `KeyError` or a partly built `Job`. Pinned in Task 5.
+7. **A cached ISO is truncated on disk, or an R2 object carries matching hash metadata but the wrong size.** Expected: the cache fetches the ISO again, and `ensure_uploaded` refuses the object. Pinned in Task 7.
 
 ---
 
 ## File Structure
 
 ```
-web/netplay-api/src/queue.ts, src/http.ts     + GET /v1/runner/policy (Task 1)
-web/netplay-api/test/runner-policy.test.ts    route test (Task 1)
-pyproject.toml, uv.lock                       httpx, websockets, prometheus-client become runtime deps
-hal/netplay_service/domain.py                 PolicyConfig; Job loses SQLite-only fields; account_connect_code
-hal/netplay_service/queue.py                  (modified) stops setting the removed Job fields
-hal/netplay_service/queue_client.py           QueueEndpoint, errors, parse_job, RemoteQueue, RunnerClient, AdminClient
-hal/netplay_service/assets.py                 PinnedAsset, AssetManifest, AssetCache, R2Source, LocalSource, ensure_uploaded
-hal/netplay_service/admin.py                  publish-policy, accounts upload, assets pin, status, events, pause, resume
-hal/netplay_service/local_worker.py           wrangler dev harness with dev tokens
-deploy/netplay/assets.json                    ISO and emulator pins (written by `hal-netplay-admin assets pin`)
-tests/test_netplay_domain.py                  PolicyConfig and account file tests
-tests/test_netplay_queue_client.py            retry policy, error mapping, request shapes
-tests/test_netplay_assets.py                  manifest, cache, uploads
-tests/test_netplay_admin.py                   admin commands
-tests/test_netplay_queue_integration.py       RemoteQueue against wrangler dev (-m integration)
+web/netplay-api/src/queue.ts, http.ts           + GET /v1/runner/policy (Task 1); idempotent start/claim/end (Task 2); replay ownership (Task 3)
+web/netplay-api/src/sessions.ts, store.ts       idempotent start/end, claim returns the slot's lease, games.worker (Tasks 2–3)
+web/netplay-api/test/runner-policy.test.ts      route test (Task 1)
+web/netplay-api/test/retries.test.ts            repeated start, claim, end; replay ownership (Tasks 2–3)
+pyproject.toml, uv.lock                         httpx, websockets, prometheus-client become runtime deps
+hal/netplay_service/queue_contract.py           QueueError, InvalidTransitionError, SessionEndedError, RunnerQueue
+hal/netplay_service/queue.py                    (modified) raises contract errors; implements RunnerQueue
+hal/netplay_service/runner.py                   (modified) typed on RunnerQueue; replay sidecar v2 carries worker_id
+hal/netplay_service/domain.py                   PolicyConfig; Job loses SQLite-only fields; account_connect_code
+hal/netplay_service/queue_client.py             endpoints, client errors, parse_job, RemoteQueue, RunnerClient, SessionReporter, AdminClient
+hal/netplay_service/assets.py                   PinnedAsset, AssetManifest, AssetCache, R2Source, LocalSource, ensure_uploaded
+hal/netplay_service/admin.py                    publish-policy, accounts upload, assets pin, status, events, pause, resume
+hal/netplay_service/local_worker.py             wrangler dev harness with dev tokens
+deploy/netplay/assets.json                      ISO and emulator pins (written by `hal-netplay-admin assets pin`)
+deploy/netplay/README.md                        admin Access service token
+tests/test_netplay_contract.py                  both stores satisfy RunnerQueue; QueueStore conformance changes
+tests/test_netplay_domain.py                    PolicyConfig and account file tests
+tests/test_netplay_queue_client.py              retry policy, error mapping, request shapes, reporter
+tests/test_netplay_assets.py                    manifest, cache, uploads
+tests/test_netplay_admin.py                     admin commands
+tests/test_netplay_queue_integration.py         RemoteQueue against wrangler dev (-m integration)
+```
+
+---
+
+### Task 0: Green baseline
+
+The branch does not pass the handoff checks before B1 starts:
+
+- `ruff check` reports I001 (unsorted imports) in `experiments/059_muon_action_sequence.py` and `scripts/eval_kv_cache.py`. Both came from `main`.
+- `tests/test_netplay_deploy.py::test_local_launcher_waits_for_host_cleanup` times out in any checkout without `web/netplay/node_modules`. In that case `run-local.sh` runs `npm ci` in the foreground. The test's `npm` stub loops forever, and bash defers the SIGINT trap until the foreground child exits. The test passes on the main checkout only because that checkout has `node_modules`.
+
+**Files:**
+- Modify: `experiments/059_muon_action_sequence.py`, `scripts/eval_kv_cache.py` (import order only)
+- Modify: `tests/test_netplay_deploy.py` (the `npm` stub in `test_local_launcher_waits_for_host_cleanup`)
+
+- [ ] **Step 1: Reproduce both failures**
+
+Run: `uv run ruff check --output-format concise . ; uv run pytest -q tests/test_netplay_deploy.py::test_local_launcher_waits_for_host_cleanup`
+Expected: two I001 findings, and `subprocess.TimeoutExpired ... timed out after 7 seconds`.
+
+- [ ] **Step 2: Sort the imports**
+
+Run: `uv run ruff check --fix --select I001 experiments/059_muon_action_sequence.py scripts/eval_kv_cache.py`
+Expected: `git diff` shows only reordered import lines.
+
+- [ ] **Step 3: Make the launcher test independent of `node_modules`**
+
+In `test_local_launcher_waits_for_host_cleanup`, replace the `npm` stub with one that finishes `npm ci` at once and blocks only for `npm run dev`:
+
+```python
+    _write_executable(
+        command_dir / "npm",
+        'if [[ ${1:-} == ci ]]; then exit 0; fi\ntrap \'exit 0\' TERM\nwhile true; do sleep 1; done\n',
+    )
+```
+
+- [ ] **Step 4: Verify**
+
+Run: `uv run ruff check . && uv run pytest -q tests/test_netplay_deploy.py`
+Expected: ruff passes, and every deploy test passes in this worktree, which has no `web/netplay/node_modules`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add experiments/059_muon_action_sequence.py scripts/eval_kv_cache.py tests/test_netplay_deploy.py
+git commit -m "Sort imports and make the launcher test hermetic"
 ```
 
 ---
@@ -135,23 +200,613 @@ git commit -m "Serve the active policy to runners"
 
 ---
 
-### Task 2: Queue client transport and job transitions
+### Task 2: Make session start, claim, and session end safe to retry
+
+Plan A made job transitions idempotent, but three runner routes are not:
+
+- `startSession` generates a new ID and leases accounts on every call. If a response is lost, the retry leaves an orphan session that holds accounts until the 30 s silence alarm.
+- `claimNext` always leases the next queued job. If a response is lost, the retry gives the same slot a second job, and the first job then expires as `lease_expired`.
+- `endSession` returns `410` when repeated. If a response is lost, the retry raises `SessionEndedError` although the end succeeded.
+
+The client retries every route (Global Constraints), so the Worker must make these three safe to repeat. The same task changes the status response to the forward-compatible shape `{draining, stream}`.
+
+**Files:**
+- Modify: `web/netplay-api/src/sessions.ts` (`start` accepts a repeat; `end` records its failure count; `report` returns `stream`; schema adds `failed_jobs`)
+- Modify: `web/netplay-api/src/store.ts` (`claimNext` returns the worker's existing `leased` job)
+- Modify: `web/netplay-api/src/queue.ts` (`startSession` reads `session_id`; `endSession` returns the recorded result for an ended session)
+- Modify: `web/netplay-api/test/helpers.ts`, `test/routes.test.ts`, `test/transcripts.test.ts` (start bodies carry `session_id`)
+- Test: `web/netplay-api/test/retries.test.ts`
+
+**Interfaces:**
+- `POST /v1/runner/sessions` body: `{session_id, host, bundle_sha256, git_sha, slots, stream}`; all required. `session_id` must match `^[A-Za-z0-9_-]{16,64}$` (`422` otherwise).
+  - A repeat with the same `session_id` and identical fields returns `201` with the same body: the same accounts and the current policy.
+  - A repeat with different fields returns `409 {"detail": "session <id> exists with different settings"}`.
+  - A repeat after the session has ended returns `410 {"detail": "session has ended"}`.
+- `POST /v1/runner/sessions/{sid}/claim`:
+  - If the slot's worker holds a job in `leased`, the claim returns that job with `200` and does not increment `attempt`.
+  - If the worker holds a job in any other in-service status, the claim returns `409 {"detail": "slot already holds job <id>"}`.
+  - Otherwise the claim behaves as before.
+- `DELETE /v1/runner/sessions/{sid}` on an ended session: `200 {"failed": <count from the first end>}`. An unknown session still gets `404`. A session that the silence alarm ended reports the alarm's count.
+- `POST /v1/runner/sessions/{sid}/status` → `200 {"draining": bool, "stream": null}`. Plan D fills `stream`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`web/netplay-api/test/retries.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it } from "vitest";
+import { CREATE, POLICY, call, publish, report, resetQueue, seedAccounts } from "./helpers";
+
+const SESSION = "retry-session-0001";
+const START = { session_id: SESSION, host: "box", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 2, stream: false };
+
+beforeEach(async () => {
+  await resetQueue();
+  await publish();
+  await seedAccounts(3);
+});
+
+async function start(body: Record<string, unknown> = START) {
+  return call("POST", "/v1/runner/sessions", { runner: true, body });
+}
+
+describe("retried runner calls", () => {
+  it("returns the same session and accounts when a start is repeated", async () => {
+    const first = await start();
+    expect(first.status).toBe(201);
+    const second = await start();
+    expect(second).toMatchObject({ status: 201, body: first.body });
+    const status = await call("GET", "/v1/admin/status", { admin: true });
+    expect(status.body.sessions).toHaveLength(1);
+    expect(status.body.accounts.filter((row: { session_id: string | null }) => row.session_id !== null)).toHaveLength(2);
+  });
+
+  it("refuses a reused session id with other settings, after an end, or in a bad format", async () => {
+    await start();
+    expect(await start({ ...START, slots: 1 })).toMatchObject({
+      status: 409,
+      body: { detail: `session ${SESSION} exists with different settings` },
+    });
+    await call("DELETE", `/v1/runner/sessions/${SESSION}`, { runner: true });
+    expect(await start()).toMatchObject({ status: 410, body: { detail: "session has ended" } });
+    expect((await start({ ...START, session_id: "short" })).status).toBe(422);
+  });
+
+  it("returns the slot's leased job when a claim is repeated", async () => {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: CREATE });
+    await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "OTHER#1" } });
+    const first = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    const second = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    expect(first.status).toBe(200);
+    expect(second.body).toEqual(first.body);
+    expect(second.body.attempt).toBe(1);
+    const other = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } });
+    expect(other.body.player_code).toBe("OTHER#1");
+  });
+
+  it("refuses a claim from a slot whose job is past leased", async () => {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: CREATE });
+    const job = (await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } })).body;
+    const runner = { session: SESSION, slot: 0 };
+    await call("POST", `/v1/runner/jobs/${job.id}/connecting`, { runner, body: { connect_code: "BOT0#1" } });
+    expect(await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } })).toMatchObject({
+      status: 409,
+      body: { detail: `slot already holds job ${job.id}` },
+    });
+  });
+
+  it("returns the first result when an end is repeated", async () => {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: CREATE });
+    await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    const first = await call("DELETE", `/v1/runner/sessions/${SESSION}`, { runner: true });
+    expect(first).toMatchObject({ status: 200, body: { failed: 1 } });
+    expect(await call("DELETE", `/v1/runner/sessions/${SESSION}`, { runner: true })).toMatchObject({
+      status: 200,
+      body: { failed: 1 },
+    });
+    expect((await call("DELETE", "/v1/runner/sessions/unknown-session-01", { runner: true })).status).toBe(404);
+  });
+
+  it("reports drain and an empty stream grant in status responses", async () => {
+    await start();
+    expect(await report(SESSION, 2)).toMatchObject({ status: 200, body: { draining: false, stream: null } });
+  });
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd web/netplay-api && npx vitest run test/retries.test.ts`
+Expected: FAIL. The start body is refused with `422 unexpected field session_id`.
+
+- [ ] **Step 3: Accept a repeated start and record end results in `sessions.ts`**
+
+Add `failed_jobs INTEGER` after `end_reason TEXT` in the `sessions` table of `SESSION_SCHEMA`.
+
+At the top of `start`, before the policy check, add the repeat path:
+
+```ts
+    const existing = this.rows("SELECT * FROM sessions WHERE id = ?", id)[0];
+    if (existing !== undefined) {
+      if (existing.ended_at !== null) throw new HttpError(410, "session has ended");
+      const same =
+        existing.host === input.host &&
+        existing.bundle_sha256 === input.bundle_sha256 &&
+        existing.git_sha === input.git_sha &&
+        existing.slots === input.slots &&
+        existing.wants_stream === (input.stream ? 1 : 0);
+      if (!same) throw new HttpError(409, `session ${id} exists with different settings`);
+      const accounts = this.rows(
+        "SELECT slot, connect_code, r2_key, sha256 FROM accounts WHERE session_id = ? ORDER BY slot",
+        id,
+      ).map((row) => ({
+        slot: row.slot as number,
+        connect_code: row.connect_code as string,
+        r2_key: row.r2_key as string,
+        sha256: row.sha256 as string,
+      }));
+      return { session_id: id, accounts };
+    }
+```
+
+Change `report` to return the forward-compatible shape. Plan D replaces `null` with the grant:
+
+```ts
+  report(id: string, raw: unknown): { draining: boolean; stream: null } {
+    ...
+    return { draining: row.draining === 1, stream: null };
+  }
+```
+
+In `end`, record the count in the same `UPDATE` that sets `ended_at`:
+
+```ts
+    this.sql.exec(
+      "UPDATE sessions SET ended_at = ?, end_reason = ?, failed_jobs = ? WHERE id = ?",
+      this.now(),
+      reason,
+      failed.length,
+      id,
+    );
+```
+
+Add a method that answers a repeated end:
+
+```ts
+  // A runner repeats DELETE when it loses the first response; it gets the first result.
+  endedResult(id: string): number | null {
+    const row = this.rows("SELECT ended_at, failed_jobs FROM sessions WHERE id = ?", id)[0];
+    if (row === undefined) throw new HttpError(404, "session not found");
+    return row.ended_at === null ? null : (row.failed_jobs as number);
+  }
+```
+
+- [ ] **Step 4: Return the slot's lease from `claimNext` in `store.ts`**
+
+At the top of `claimNext(worker)`:
+
+```ts
+    // A repeated claim after a lost response must not give the slot a second job.
+    const held = this.first(`SELECT id, status FROM jobs WHERE lease_owner = ? AND status IN (${IN_SERVICE})`, worker);
+    if (held !== null) {
+      if (held.status === "leased") return this.response(this.reload(held.id as string));
+      throw new HttpError(409, `slot already holds job ${held.id}`);
+    }
+```
+
+- [ ] **Step 5: Read `session_id` and repeat ends in `queue.ts`**
+
+In `startSession`, drop `const id = randomToken(12);` and read the ID from the body:
+
+```ts
+  async startSession(raw: unknown): Promise<ApiResult> {
+    return this.run(() => {
+      const names = ["session_id", "host", "bundle_sha256", "git_sha", "slots", "stream"];
+      const value = fields(raw, names, names);
+      const id = str(value.session_id, "session_id");
+      if (!SESSION_ID.test(id)) throw new HttpError(422, "session_id must be 16 to 64 URL-safe characters");
+      ...
+```
+
+Here `const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;` is a module constant beside `QUEUE_SCHEMA`. The rest of the method is unchanged. `this.sessions.start` handles the repeat. Log `session_started` and `account_leased` only when the session is new. Check `this.sessions.summary()` or compare before and after. The simplest form is to read `existing` first:
+
+```ts
+      return this.tx(() => {
+        const repeated = this.sessions.exists(id);
+        const started = this.sessions.start(id, input, this.policy());
+        if (!repeated) {
+          this.events.log("session_started", { session: id, host: input.host, slots: input.slots, git_sha: input.git_sha });
+          for (const grant of started.accounts) {
+            this.events.log("account_leased", { session: id, slot: grant.slot, connect_code: grant.connect_code });
+          }
+        }
+        return { ...started, policy: this.policy() };
+      });
+```
+
+Add `exists(id: string): boolean` to `SessionStore`, returning whether a row with that ID exists. Remove `randomToken` from the `queue.ts` import list if nothing else uses it.
+
+In `endSession`, answer a repeat before ending:
+
+```ts
+  async endSession(sessionId: string): Promise<ApiResult> {
+    return this.run(() => {
+      const previous = this.sessions.endedResult(sessionId);
+      if (previous !== null) return { failed: previous };
+      ...unchanged...
+```
+
+- [ ] **Step 6: Give every existing start body a session ID**
+
+- In `test/helpers.ts` `startSession`, add `session_id: crypto.randomUUID()` to the body. A UUID has 36 characters from `[0-9a-f-]`.
+- In `test/routes.test.ts`, lines 89–92 and 185–187, add `session_id: crypto.randomUUID()` to both bodies.
+- In `test/transcripts.test.ts`, lines 124–134, add `session_id: crypto.randomUUID()` to both bodies.
+- Also give a session ID to any other start body that `grep -n '"/v1/runner/sessions"' test/*.ts` finds.
+- `test/sessions.test.ts` calls `SessionStore.start` directly with IDs like `"s1"`. It needs no change, because the ID format is checked only at the route.
+
+- [ ] **Step 7: Run the Worker suite**
+
+Run: `cd web/netplay-api && npx vitest run && npm run typecheck`
+Expected: all tests pass, including `retried runner calls` and the unchanged golden transcripts. Typecheck prints nothing.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add web/netplay-api/src web/netplay-api/test
+git commit -m "Make session start, claim, and end safe to retry"
+```
+
+---
+
+### Task 3: Accept a replay only from the worker that played the game
+
+`recordReplay` checks neither the session nor the slot. Any authenticated runner can attach replay metadata to another job's game if it knows the job ID. The check cannot use `lease_owner`, because a completed job's lease is already released. It also cannot use `last_worker`, because a retried job's later worker would then own an earlier game. Instead, each game row records the worker that finished it. A replay is accepted only from that worker. The replay is accepted even after that worker's session has ended, so an upload that was deferred across a runner restart can still be recorded.
+
+**Files:**
+- Modify: `web/netplay-api/src/store.ts` (`games.worker`; `finishGame` stores it; `recordReplay` takes and checks `worker`)
+- Modify: `web/netplay-api/src/sessions.ts` (`recordingWorker`)
+- Modify: `web/netplay-api/src/queue.ts` (the `replay` action uses `recordingWorker`)
+- Test: `web/netplay-api/test/retries.test.ts` (append), and any `store.test.ts` call to `recordReplay`
+
+**Interfaces:**
+- `games` gains `worker TEXT NOT NULL` (the worker that finished the game).
+- `JobStore.recordReplay(id, worker, gameNumber, key, sha256, size, etag)`: `409 {"detail": "worker did not play this game"}` when `games.worker !== worker`. The other behavior is unchanged: it is idempotent for identical metadata, and it returns `409` for different metadata or an absent game.
+- `SessionStore.recordingWorker(id, slot): string`: it returns `404` for an unknown session and `422` for a slot out of range. Unlike `jobWorker`, it accepts an ended session.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `web/netplay-api/test/retries.test.ts`:
+
+```ts
+describe("replay ownership", () => {
+  async function playOneGame(): Promise<string> {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "OWNER#1" } });
+    const job = (await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } })).body;
+    const runner = { session: SESSION, slot: 0 };
+    await call("POST", `/v1/runner/jobs/${job.id}/connecting`, { runner, body: { connect_code: "BOT0#1" } });
+    await call("POST", `/v1/runner/jobs/${job.id}/playing`, { runner });
+    await call("POST", `/v1/runner/jobs/${job.id}/finish-game`, {
+      runner,
+      body: { game_number: 1, actual_stage: "BATTLEFIELD", result: "win" },
+    });
+    return job.id as string;
+  }
+
+  const REPLAY = { game_number: 1, key: "replays/a.slp", sha256: "a".repeat(64), size: 10, etag: "e" };
+
+  it("refuses a replay from another slot or another session", async () => {
+    const id = await playOneGame();
+    const other = { ...START, session_id: "other-session-0001", slots: 1 };
+    expect((await call("POST", "/v1/runner/sessions", { runner: true, body: other })).status).toBe(201);
+    for (const runner of [
+      { session: SESSION, slot: 1 },
+      { session: "other-session-0001", slot: 0 },
+    ]) {
+      expect(await call("POST", `/v1/runner/jobs/${id}/replay`, { runner, body: REPLAY })).toMatchObject({
+        status: 409,
+        body: { detail: "worker did not play this game" },
+      });
+    }
+  });
+
+  it("accepts the playing worker's replay after its session ends", async () => {
+    const id = await playOneGame();
+    await call("DELETE", `/v1/runner/sessions/${SESSION}`, { runner: true });
+    const runner = { session: SESSION, slot: 0 };
+    expect((await call("POST", `/v1/runner/jobs/${id}/replay`, { runner, body: REPLAY })).status).toBe(200);
+    expect((await call("POST", `/v1/runner/jobs/${id}/replay`, { runner, body: REPLAY })).status).toBe(200);
+    expect(
+      (await call("POST", `/v1/runner/jobs/${id}/replay`, { runner: { session: "never-existed-0001", slot: 0 }, body: REPLAY }))
+        .status,
+    ).toBe(404);
+  });
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd web/netplay-api && npx vitest run test/retries.test.ts`
+Expected: FAIL. The cross-slot replay returns `200`, and the replay after the end returns `410`.
+
+- [ ] **Step 3: Record and check the game's worker**
+
+In `store.ts`, add `worker TEXT NOT NULL,` after `result TEXT NOT NULL,` in the `games` table. In `finishGame`, insert it:
+
+```ts
+    this.exec(
+      "INSERT INTO games(job_id, game_number, actual_stage, result, worker, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      id,
+      gameNumber,
+      stage,
+      result,
+      worker,
+      now,
+    );
+```
+
+Change `recordReplay` to take `worker` second and check it:
+
+```ts
+  recordReplay(id: string, worker: string, gameNumber: number, key: string, sha256: string, size: number, etag: string): JobResponse {
+    const game = this.first(
+      "SELECT worker, replay_key, replay_sha256, replay_size, replay_etag FROM games WHERE job_id = ? AND game_number = ?",
+      id,
+      gameNumber,
+    );
+    if (game === null) throw new HttpError(409, "game is absent");
+    if (game.worker !== worker) throw new HttpError(409, "worker did not play this game");
+    ...unchanged...
+```
+
+Update each `recordReplay` call in `test/store.test.ts` to pass the worker that finished the game.
+
+- [ ] **Step 4: Resolve the recording worker without requiring a live session**
+
+In `sessions.ts`:
+
+```ts
+  // A deferred replay upload can outlive its session, so an ended session may still record.
+  recordingWorker(id: string, slot: number): string {
+    const row = this.rows("SELECT * FROM sessions WHERE id = ?", id)[0];
+    if (row === undefined) throw new HttpError(404, "session not found");
+    return this.slotWorker(row, slot);
+  }
+```
+
+In `queue.ts` `runnerJob`, resolve the worker per action:
+
+```ts
+        const worker =
+          action === "replay" ? this.sessions.recordingWorker(sessionId, slot) : this.sessions.jobWorker(sessionId, slot);
+```
+
+Pass `worker` as the second argument in the `replay` case.
+
+- [ ] **Step 5: Run the Worker suite**
+
+Run: `cd web/netplay-api && npx vitest run && npm run typecheck`
+Expected: all pass. The transcripts are unchanged, because their replays come from the playing worker.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/netplay-api/src web/netplay-api/test
+git commit -m "Accept replays only from the worker that played the game"
+```
+
+---
+
+### Task 4: Shared queue contract
+
+The runner catches `hal.netplay_service.queue.InvalidTransitionError`. A remote client that defines its own class with the same name would pass through those handlers. The two stores also differ in their signatures: `finish_game` has no `game_number` on `QueueStore`, and `record_replay` has no worker. This task puts the errors that both stores raise in a neutral module. It adds the `RunnerQueue` protocol, which covers exactly the calls the runner makes, and makes `QueueStore` and `runner.py` conform to it. A protocol is justified because there are two real implementations and `QueueStore` stays useful as the runner's test seam.
+
+**Files:**
+- Create: `hal/netplay_service/queue_contract.py`
+- Modify: `hal/netplay_service/queue.py` (import the contract errors; `finish_game(..., game_number)`; `record_replay(job_id, worker_id, game_number, ...)`; lease default 20 s)
+- Modify: `hal/netplay_service/runner.py` (type every store parameter as `RunnerQueue`; drop the explicit lease arguments; pass `game_number` and `worker_id`; replay sidecar v2 carries `worker_id`)
+- Modify: `hal/netplay_service/api.py`, `scripts/record_netplay_transcripts.py`, `tests/test_netplay_queue.py` (import errors from the contract)
+- Test: `tests/test_netplay_contract.py`, `tests/test_netplay_runner.py` (sidecar)
+
+**Interfaces:**
+- `queue_contract.py`: `class QueueError(RuntimeError)`, `class InvalidTransitionError(QueueError)`, `class SessionEndedError(InvalidTransitionError)`, and `class RunnerQueue(Protocol)` with:
+  - `claim_next(worker_id: str) -> Job | None`
+  - `heartbeat(job_id: str, worker_id: str) -> None`
+  - `mark_connecting(job_id: str, worker_id: str, connect_code: str) -> None`
+  - `mark_playing(job_id: str, worker_id: str) -> None`
+  - `mark_no_show(job_id: str, worker_id: str) -> None`
+  - `mark_no_contest(job_id: str, worker_id: str) -> None`
+  - `finish_game(job_id: str, worker_id: str, *, game_number: int, actual_stage: str, result: str) -> JobStatus`
+  - `fail(job_id: str, worker_id: str, error_code: str, *, retryable: bool) -> JobStatus`
+  - `forfeit_service_failure(job_id: str, worker_id: str) -> None`
+  - `record_replay(job_id: str, worker_id: str, game_number: int, *, key: str, sha256: str, size: int, etag: str) -> None`
+  - `get_worker_job(job_id: str, worker_id: str) -> Job`
+- `queue.py` keeps `AuthenticationError` and `ActiveJobError` (player-route errors, subclasses of the contract's `QueueError`). It stops defining `QueueError` and `InvalidTransitionError`.
+- `QueueStore.finish_game` raises `InvalidTransitionError("game_number N does not follow game M")` when `game_number != game_count + 1`. This is the Worker's rule and message.
+- `QueueStore.record_replay` accepts `worker_id` and does not check it. The SQLite store serves one runner process whose slots are the only workers, so a replay from another worker's session cannot occur. A comment states this invariant. The store is deleted in B2.
+- `QueueStore.claim_next` and `heartbeat` default to `lease_seconds=20.0`. That is the runner's current explicit value and the Worker's `LEASE_SECONDS`. The runner stops passing it. `mark_connecting` keeps its `IDLE_TIMEOUT_SECONDS` default, and the runner stops passing that too.
+- Replay sidecar schema v2 adds `worker_id`. The reader rejects v1 with `pending replay metadata has the wrong schema`, as it rejects any other schema. Per the spec there is no backward compatibility, and a v1 sidecar can exist only on a box running the pre-B1 runner.
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/test_netplay_contract.py`:
+
+```python
+from pathlib import Path
+
+import pytest
+
+from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_contract import InvalidTransitionError
+from hal.netplay_service.queue_contract import RunnerQueue
+
+
+def _playing(tmp_path: Path) -> tuple[QueueStore, str]:
+    store = QueueStore(tmp_path / "queue.sqlite3")
+    created = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
+    store.claim_next("slot-0")
+    store.mark_connecting(created.job.id, "slot-0", "HAL#1")
+    store.mark_playing(created.job.id, "slot-0")
+    return store, created.job.id
+
+
+def test_queue_store_is_a_runner_queue(tmp_path: Path) -> None:
+    store: RunnerQueue = QueueStore(tmp_path / "queue.sqlite3")
+    assert store.claim_next("slot-0") is None
+
+
+def test_finish_game_rejects_a_game_number_out_of_order(tmp_path: Path) -> None:
+    store, job_id = _playing(tmp_path)
+    with pytest.raises(InvalidTransitionError, match="game_number 2 does not follow game 0"):
+        store.finish_game(job_id, "slot-0", game_number=2, actual_stage="BATTLEFIELD", result="win")
+    store.finish_game(job_id, "slot-0", game_number=1, actual_stage="BATTLEFIELD", result="win")
+    store.record_replay(job_id, "slot-0", 1, key="replays/a.slp", sha256="a" * 64, size=1, etag="e")
+
+
+def test_claim_lease_defaults_to_twenty_seconds(tmp_path: Path) -> None:
+    now = [1000.0]
+    store = QueueStore(tmp_path / "queue.sqlite3", now=lambda: now[0])
+    created = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
+    store.claim_next("slot-0")
+    now[0] += 19.0
+    assert store.reap_expired() == 0
+    now[0] += 2.0
+    assert store.reap_expired() == 1
+    assert created.job.id
+```
+
+In `tests/test_netplay_runner.py`, add a round-trip test for the sidecar. Model it on the existing pending-upload tests: `grep -n "_write_pending_upload\|_read_pending_upload" tests/test_netplay_runner.py`. The test writes metadata with `worker_id="sess/slot-1"`, reads it back, and asserts that `worker_id` survives. It then rewrites the payload with `"schema_version": 1` and without `worker_id`, and asserts that `RuntimeError` matches `wrong schema`.
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `uv run pytest tests/test_netplay_contract.py tests/test_netplay_runner.py -q`
+Expected: FAIL at collection with `ModuleNotFoundError: No module named 'hal.netplay_service.queue_contract'`.
+
+- [ ] **Step 3: Write `queue_contract.py`**
+
+```python
+"""Errors and the queue interface shared by the SQLite store and the remote queue client."""
+
+from typing import Protocol
+
+from hal.netplay_service.domain import Job
+from hal.netplay_service.domain import JobStatus
+
+
+class QueueError(RuntimeError):
+    pass
+
+
+class InvalidTransitionError(QueueError):
+    """The worker does not own the job in a state that allows the operation."""
+
+
+class SessionEndedError(InvalidTransitionError):
+    """The runner's session has ended, so every lease it held is gone."""
+
+
+class RunnerQueue(Protocol):
+    """The queue operations a runner slot performs; lease durations belong to the queue."""
+
+    def claim_next(self, worker_id: str) -> Job | None: ...
+
+    def heartbeat(self, job_id: str, worker_id: str) -> None: ...
+
+    def mark_connecting(self, job_id: str, worker_id: str, connect_code: str) -> None: ...
+
+    def mark_playing(self, job_id: str, worker_id: str) -> None: ...
+
+    def mark_no_show(self, job_id: str, worker_id: str) -> None: ...
+
+    def mark_no_contest(self, job_id: str, worker_id: str) -> None: ...
+
+    def finish_game(
+        self, job_id: str, worker_id: str, *, game_number: int, actual_stage: str, result: str
+    ) -> JobStatus: ...
+
+    def fail(self, job_id: str, worker_id: str, error_code: str, *, retryable: bool) -> JobStatus: ...
+
+    def forfeit_service_failure(self, job_id: str, worker_id: str) -> None: ...
+
+    def record_replay(
+        self, job_id: str, worker_id: str, game_number: int, *, key: str, sha256: str, size: int, etag: str
+    ) -> None: ...
+
+    def get_worker_job(self, job_id: str, worker_id: str) -> Job: ...
+```
+
+- [ ] **Step 4: Conform `QueueStore`**
+
+In `queue.py`:
+- Delete the `QueueError` and `InvalidTransitionError` classes. Import both from `hal.netplay_service.queue_contract`.
+- Change the `lease_seconds` default of `claim_next` and `heartbeat` to `20.0`.
+- In `finish_game`, add the keyword `game_number: int`. After `_owned_job`, raise `InvalidTransitionError(f"game_number {game_number} does not follow game {row['game_count']}")` when `game_number != row["game_count"] + 1`. Use the argument in place of the computed value.
+- In `record_replay`, add `worker_id: str` as the second positional parameter, and add the invariant comment described in Interfaces.
+
+Update importers to take `InvalidTransitionError` from `queue_contract`: `api.py`, `runner.py`, `scripts/record_netplay_transcripts.py`, and `tests/test_netplay_queue.py`. Update every `finish_game` and `record_replay` call in `tests/`, `scripts/`, and `tests/fixtures/` to the new signatures. Find them with `grep -rn "finish_game(\|record_replay(" hal tests scripts`. For each `finish_game` call, pass `game_number=<job>.game_count + 1`, where the job is the one that call site has in hand.
+
+- [ ] **Step 5: Type the runner on `RunnerQueue`**
+
+In `runner.py`:
+- Import `RunnerQueue` and `InvalidTransitionError` from `queue_contract`.
+- Annotate every parameter now typed `QueueStore` as `RunnerQueue`: `_complete_pending_upload`, `_drain_pending_uploads`, `_retry_pending_uploads`, `_heartbeat`, `_LivePolicySettings.__init__`, `_Match.__init__` (line 861), and the functions at lines 995 and 1211. Keep `store = QueueStore(config.database)` at line 1183. It is the only construction.
+- Drop `lease_seconds=20.0` at lines 812 and 1200, and drop `timeout_seconds=IDLE_TIMEOUT_SECONDS` at line 1026.
+- At line 1092, pass `game_number=job.game_count + 1`. That is the number the log line and the replay metadata already use.
+- In `_write_pending_upload(path, metadata, worker_id)`, write `payload["worker_id"] = worker_id` and `schema_version` 2. `_read_pending_upload` expects the v2 field set and returns `(replay, metadata, worker_id)`. `_complete_pending_upload` passes that `worker_id` to `store.record_replay`. The caller at line 1128 passes `config.worker_id`.
+
+- [ ] **Step 6: Run the affected tests and the type check**
+
+Run:
+
+```bash
+uv run pytest tests/test_netplay_contract.py tests/test_netplay_queue.py tests/test_netplay_api.py \
+  tests/test_netplay_runner.py tests/test_netplay_transcripts.py tests/test_qualify_netplay_059.py -q
+uv run ty check --python-version 3.14 --error-on-warning hal scripts
+```
+
+Expected: all pass. The golden transcripts are unchanged, because the recorder passes its lease durations explicitly and plays games in order. `ty` reports no diagnostics, which confirms that `QueueStore` satisfies `RunnerQueue` at every runner call site.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add hal/netplay_service scripts tests
+git commit -m "Share queue errors and a runner queue protocol"
+```
+
+---
+
+### Task 5: Queue client transport and job transitions
 
 **Files:**
 - Modify: `pyproject.toml` (dependencies), `uv.lock`
 - Modify: `hal/netplay_service/domain.py` (add `PolicyConfig`; drop `lease_owner`, `lease_expires_at`, `created_at`, `updated_at` from `Job`)
-- Modify: `hal/netplay_service/queue.py:201-243` (`_job` stops passing the dropped fields)
+- Modify: `hal/netplay_service/queue.py` `QueueStore._job` (stops passing the dropped fields)
 - Modify: `tests/test_netplay_queue.py:254` and `:329` (assert through the store, not the dropped fields)
 - Modify: `tests/test_netplay_runner.py:49-69` (`_job` helper drops the four fields)
 - Create: `hal/netplay_service/queue_client.py`
-- Test: `tests/test_netplay_domain.py`, `tests/test_netplay_queue_client.py`
+- Test: `tests/test_netplay_domain.py`, `tests/test_netplay_queue_client.py`, `tests/test_netplay_contract.py` (append)
 
 The Worker's job body has no lease owner, lease expiry, or timestamps, and the runner never reads them, so `Job` drops them rather than invent values.
 
 **Interfaces:**
 - Produces (`domain.py`): `POLICY_CONFIG_VERSION = 1`; `@dataclass(frozen=True, slots=True) class PolicyConfig` with fields `bundle_sha256: str`, `bundle_r2_key: str`, `vocabulary_sha256: str`, `characters: tuple[Choice, ...]`, `imitations: tuple[Choice, ...]`, `stages: tuple[Choice, ...]`, `online_delays: tuple[int, ...]`, `desired_return_range: tuple[float, float]`, `default_desired_return: float`, `temperature_range: tuple[float, float]`, `default_temperature: float`, `masked_identity: bool`; methods `to_payload() -> dict[str, object]`, `from_payload(payload: object) -> PolicyConfig`.
-- Produces (`queue_client.py`): `RETRY_DELAYS_SECONDS`; exceptions `QueueError`, `InvalidTransitionError`, `SessionEndedError`, `QueueRejectedError(status: int, detail: str)`, `QueueUnavailableError`, `QueueProtocolError`; `QueueEndpoint(url, token, access_client_id=None, access_client_secret=None)` with `from_environment(token_variable: str, environment: Mapping[str, str])` and `headers() -> dict[str, str]`; `worker_id(session_id: str, slot: int) -> str`; `parse_job(payload: object) -> Job`; `class RemoteQueue(endpoint, session_id, *, client: httpx.Client | None = None, sleep: Callable[[float], None] = time.sleep)` with `close()`, `claim_next(worker_id) -> Job | None`, `heartbeat(job_id, worker_id) -> None`, `mark_connecting(job_id, worker_id, connect_code) -> None`, `mark_playing(job_id, worker_id) -> None`, `mark_no_show(job_id, worker_id) -> None`, `mark_no_contest(job_id, worker_id) -> None`, `finish_game(job_id, worker_id, *, game_number, actual_stage, result) -> JobStatus`, `fail(job_id, worker_id, error_code, *, retryable) -> JobStatus`, `forfeit_service_failure(job_id, worker_id) -> None`, `record_replay(job_id, worker_id, game_number, *, key, sha256, size, etag) -> None`, `get_worker_job(job_id, worker_id) -> Job`.
-- Differences from `QueueStore`, all deliberate: lease durations (`lease_seconds`, `timeout_seconds`) are server-owned and gone; `finish_game` takes `game_number`; `record_replay` takes `worker_id` because the Worker needs the session and slot headers on every job route.
+- Produces (`queue_client.py`):
+  - `RETRY_DELAYS_SECONDS`.
+  - Client errors `QueueRejectedError(status: int, detail: str)`, `QueueUnavailableError`, and `QueueProtocolError`. Each subclasses the contract's `QueueError`. A `409` raises the contract's `InvalidTransitionError`, and a `410` raises its `SessionEndedError`.
+  - `QueueEndpoint(url, token, access_client_id=None, access_client_secret=None)` with `headers() -> dict[str, str]`.
+  - `runner_endpoint(environment: Mapping[str, str]) -> QueueEndpoint`, which reads `HAL_NETPLAY_API_URL`, `HAL_NETPLAY_RUNNER_TOKEN`, `CF_ACCESS_CLIENT_ID`, and `CF_ACCESS_CLIENT_SECRET`.
+  - `admin_endpoint(environment: Mapping[str, str]) -> QueueEndpoint`, which reads `HAL_NETPLAY_API_URL`, `HAL_NETPLAY_ADMIN_TOKEN`, `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID`, and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET`.
+  - `slot_worker_id(session_id: str, slot: int) -> str` and `parse_job(payload: object) -> Job`.
+  - `class RemoteQueue(endpoint, session_id, *, client: httpx.Client | None = None, sleep: Callable[[float], None] = time.sleep)`. It implements `RunnerQueue` (Task 4) with the same parameter names, and it adds `close()`.
+- Lease durations are owned by the server, so `RemoteQueue` has no lease arguments.
 
 - [ ] **Step 1: Move the network dependencies to runtime**
 
@@ -279,18 +934,20 @@ import pytest
 
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.queue_client import RETRY_DELAYS_SECONDS
-from hal.netplay_service.queue_client import InvalidTransitionError
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import QueueProtocolError
 from hal.netplay_service.queue_client import QueueRejectedError
 from hal.netplay_service.queue_client import QueueUnavailableError
 from hal.netplay_service.queue_client import RemoteQueue
-from hal.netplay_service.queue_client import SessionEndedError
+from hal.netplay_service.queue_client import admin_endpoint
 from hal.netplay_service.queue_client import parse_job
-from hal.netplay_service.queue_client import worker_id
+from hal.netplay_service.queue_client import runner_endpoint
+from hal.netplay_service.queue_client import slot_worker_id
+from hal.netplay_service.queue_contract import InvalidTransitionError
+from hal.netplay_service.queue_contract import SessionEndedError
 
 ENDPOINT = QueueEndpoint("https://20xx.xyz", "runner-token", "cf-id", "cf-secret")
-WORKER = worker_id("sess", 1)
+WORKER = slot_worker_id("sess", 1)
 
 
 def _job_body(**changes: object) -> dict[str, object]:
@@ -401,7 +1058,7 @@ def test_session_end_is_a_lost_lease() -> None:
 def test_worker_from_another_session_is_rejected_before_a_request() -> None:
     script = _Script()
     with pytest.raises(ValueError, match="does not belong to session sess"):
-        _queue(script, []).mark_no_show("job-1", worker_id("other", 0))
+        _queue(script, []).mark_no_show("job-1", slot_worker_id("other", 0))
     assert script.requests == []
 
 
@@ -419,28 +1076,54 @@ def test_parse_job_rejects_drift() -> None:
 def test_endpoint_rejects_misconfiguration_and_hides_secrets() -> None:
     with pytest.raises(ValueError, match="trailing slash"):
         QueueEndpoint("https://20xx.xyz/", "t", "id", "secret")
-    with pytest.raises(ValueError, match="Cloudflare Access"):
-        QueueEndpoint("https://20xx.xyz", "t")
     with pytest.raises(ValueError, match="both"):
         QueueEndpoint("https://20xx.xyz", "t", "id")
     with pytest.raises(ValueError, match="HAL_NETPLAY_RUNNER_TOKEN"):
-        QueueEndpoint.from_environment("HAL_NETPLAY_RUNNER_TOKEN", {"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787"})
-    local = QueueEndpoint.from_environment(
-        "HAL_NETPLAY_RUNNER_TOKEN",
-        {"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787", "HAL_NETPLAY_RUNNER_TOKEN": "dev", "CF_ACCESS_CLIENT_ID": ""},
+        runner_endpoint({"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787"})
+    with pytest.raises(ValueError, match="CF_ACCESS_CLIENT_ID"):
+        runner_endpoint({"HAL_NETPLAY_API_URL": "https://20xx.xyz", "HAL_NETPLAY_RUNNER_TOKEN": "t"})
+    with pytest.raises(ValueError, match="HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID"):
+        admin_endpoint({"HAL_NETPLAY_API_URL": "https://20xx.xyz", "HAL_NETPLAY_ADMIN_TOKEN": "t"})
+    local = runner_endpoint(
+        {"HAL_NETPLAY_API_URL": "http://127.0.0.1:8787", "HAL_NETPLAY_RUNNER_TOKEN": "dev", "CF_ACCESS_CLIENT_ID": ""}
     )
     assert local.headers() == {"Authorization": "Bearer dev"}
+    admin = admin_endpoint(
+        {
+            "HAL_NETPLAY_API_URL": "https://20xx.xyz",
+            "HAL_NETPLAY_ADMIN_TOKEN": "a",
+            "HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID": "admin-id",
+            "HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET": "admin-secret",
+            "CF_ACCESS_CLIENT_ID": "runner-id",
+            "CF_ACCESS_CLIENT_SECRET": "runner-secret",
+        }
+    )
+    assert admin.headers()["CF-Access-Client-Id"] == "admin-id"
     assert "cf-secret" not in repr(ENDPOINT) and "runner-token" not in repr(ENDPOINT)
+```
+
+Append to `tests/test_netplay_contract.py`. This test pins conformance for `ty`. It fails type checking, not at run time, if `RemoteQueue` drifts from the protocol:
+
+```python
+from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import RemoteQueue
+
+
+def test_remote_queue_is_a_runner_queue() -> None:
+    remote = RemoteQueue(QueueEndpoint("http://127.0.0.1:8787", "t"), "sess")
+    queue: RunnerQueue = remote
+    assert queue is remote
+    remote.close()
 ```
 
 - [ ] **Step 4: Run them to verify they fail**
 
-Run: `uv run pytest tests/test_netplay_domain.py tests/test_netplay_queue_client.py -q`
+Run: `uv run pytest tests/test_netplay_domain.py tests/test_netplay_queue_client.py tests/test_netplay_contract.py -q`
 Expected: FAIL at collection — `ImportError: cannot import name 'PolicyConfig'` and `ModuleNotFoundError: No module named 'hal.netplay_service.queue_client'`.
 
 - [ ] **Step 5: Add `PolicyConfig` and trim `Job` in `domain.py`**
 
-Add `from pathlib import Path` beside the other imports (it is used in Task 5; add it now so the import block changes once). Replace the `Job` dataclass with:
+Add `from pathlib import Path` beside the other imports (it is used in Task 8; add it now so the import block changes once). Replace the `Job` dataclass with:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -632,7 +1315,7 @@ and replace line 329 (`assert other.status is JobStatus.LEASED and other.lease_o
     assert store.get_worker_job(other.id, owners[3]).status is JobStatus.LEASED
 ```
 
-If `InvalidTransitionError` or `pytest` is not yet imported in that file, add `from hal.netplay_service.queue import InvalidTransitionError` and `import pytest` in the sorted import block.
+If `InvalidTransitionError` or `pytest` is not yet imported in that file, add `from hal.netplay_service.queue_contract import InvalidTransitionError` and `import pytest` in the sorted import block.
 
 In `tests/test_netplay_runner.py` `_job` (lines 49–69), delete the four lines `lease_owner="slot-0",`, `lease_expires_at=None,`, `created_at=0,`, `updated_at=0,`.
 
@@ -659,8 +1342,12 @@ from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.domain import validate_stage
+from hal.netplay_service.queue_contract import InvalidTransitionError
+from hal.netplay_service.queue_contract import QueueError
+from hal.netplay_service.queue_contract import SessionEndedError
 
-# Exponential backoff for connection errors and 5xx; a 4xx is never retried.
+# Every runner and admin route is idempotent at the Worker (a repeat after a lost
+# response returns the first result), so any request may be retried. A 4xx is final.
 RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0, 2.0, 4.0)
 _TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(10.0, connect=5.0)
 _WORKER_ID: Final[re.Pattern[str]] = re.compile(r"(?P<session>[A-Za-z0-9_-]+)/slot-(?P<slot>[0-9]+)")
@@ -688,18 +1375,6 @@ _JOB_FIELDS: Final[frozenset[str]] = frozenset(
         "cancel_after_game",
     )
 )
-
-
-class QueueError(RuntimeError):
-    """A queue request did not succeed."""
-
-
-class InvalidTransitionError(QueueError):
-    """The queue refused a transition (409): the worker does not own the job in that state."""
-
-
-class SessionEndedError(InvalidTransitionError):
-    """The runner's session has ended (410); its leases are gone."""
 
 
 class QueueRejectedError(QueueError):
@@ -738,18 +1413,6 @@ class QueueEndpoint:
         if self.url.startswith("https://") and self.access_client_id is None:
             raise ValueError("a public queue URL needs Cloudflare Access service-token credentials")
 
-    @classmethod
-    def from_environment(cls, token_variable: str, environment: Mapping[str, str]) -> QueueEndpoint:
-        missing = [name for name in ("HAL_NETPLAY_API_URL", token_variable) if not environment.get(name)]
-        if missing:
-            raise ValueError(f"set {', '.join(missing)}")
-        return cls(
-            environment["HAL_NETPLAY_API_URL"],
-            environment[token_variable],
-            environment.get("CF_ACCESS_CLIENT_ID") or None,
-            environment.get("CF_ACCESS_CLIENT_SECRET") or None,
-        )
-
     def headers(self) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {self.token}"}
         if self.access_client_id is not None and self.access_client_secret is not None:
@@ -758,7 +1421,36 @@ class QueueEndpoint:
         return headers
 
 
-def worker_id(session_id: str, slot: int) -> str:
+def _endpoint(environment: Mapping[str, str], token: str, access_id: str, access_secret: str) -> QueueEndpoint:
+    missing = [name for name in ("HAL_NETPLAY_API_URL", token) if not environment.get(name)]
+    url = environment.get("HAL_NETPLAY_API_URL", "")
+    if url.startswith("https://"):
+        missing += [name for name in (access_id, access_secret) if not environment.get(name)]
+    if missing:
+        raise ValueError(f"set {', '.join(missing)}")
+    return QueueEndpoint(
+        url,
+        environment[token],
+        environment.get(access_id) or None,
+        environment.get(access_secret) or None,
+    )
+
+
+def runner_endpoint(environment: Mapping[str, str]) -> QueueEndpoint:
+    return _endpoint(environment, "HAL_NETPLAY_RUNNER_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET")
+
+
+def admin_endpoint(environment: Mapping[str, str]) -> QueueEndpoint:
+    """The admin tool has its own Access service token, so one .env can also hold a runner's."""
+    return _endpoint(
+        environment,
+        "HAL_NETPLAY_ADMIN_TOKEN",
+        "HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID",
+        "HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET",
+    )
+
+
+def slot_worker_id(session_id: str, slot: int) -> str:
     """Match the Worker's `workerId(session, slot)`."""
     return f"{session_id}/slot-{slot}"
 
@@ -901,7 +1593,7 @@ def _json(response: httpx.Response) -> object:
 
 
 class RemoteQueue:
-    """Job transitions for one session; the method names match the runner's call sites."""
+    """The `RunnerQueue` for one session, over the Worker's runner routes."""
 
     def __init__(
         self,
@@ -918,66 +1610,66 @@ class RemoteQueue:
     def close(self) -> None:
         self._api.close()
 
-    def _slot(self, worker: str) -> int:
-        match = _WORKER_ID.fullmatch(worker)
+    def _slot(self, worker_id: str) -> int:
+        match = _WORKER_ID.fullmatch(worker_id)
         if match is None or match["session"] != self.session_id:
-            raise ValueError(f"worker {worker!r} does not belong to session {self.session_id}")
+            raise ValueError(f"worker {worker_id!r} does not belong to session {self.session_id}")
         return int(match["slot"])
 
-    def _slot_headers(self, worker: str) -> dict[str, str]:
-        return {"X-HAL-Session": self.session_id, "X-HAL-Slot": str(self._slot(worker))}
+    def _slot_headers(self, worker_id: str) -> dict[str, str]:
+        return {"X-HAL-Session": self.session_id, "X-HAL-Slot": str(self._slot(worker_id))}
 
-    def _transition(self, job_id: str, worker: str, action: str, body: object = None) -> Job:
+    def _transition(self, job_id: str, worker_id: str, action: str, body: object = None) -> Job:
         response = self._api.request(
-            "POST", f"/v1/runner/jobs/{job_id}/{action}", body=body, headers=self._slot_headers(worker)
+            "POST", f"/v1/runner/jobs/{job_id}/{action}", body=body, headers=self._slot_headers(worker_id)
         )
         return parse_job(_json(response))
 
-    def claim_next(self, worker: str) -> Job | None:
+    def claim_next(self, worker_id: str) -> Job | None:
         response = self._api.request(
-            "POST", f"/v1/runner/sessions/{self.session_id}/claim", body={"slot": self._slot(worker)}
+            "POST", f"/v1/runner/sessions/{self.session_id}/claim", body={"slot": self._slot(worker_id)}
         )
         return None if response.status_code == 204 else parse_job(_json(response))
 
-    def heartbeat(self, job_id: str, worker: str) -> None:
-        self._transition(job_id, worker, "heartbeat")
+    def heartbeat(self, job_id: str, worker_id: str) -> None:
+        self._transition(job_id, worker_id, "heartbeat")
 
-    def mark_connecting(self, job_id: str, worker: str, connect_code: str) -> None:
-        self._transition(job_id, worker, "connecting", {"connect_code": validate_player_code(connect_code)})
+    def mark_connecting(self, job_id: str, worker_id: str, connect_code: str) -> None:
+        self._transition(job_id, worker_id, "connecting", {"connect_code": validate_player_code(connect_code)})
 
-    def mark_playing(self, job_id: str, worker: str) -> None:
-        self._transition(job_id, worker, "playing")
+    def mark_playing(self, job_id: str, worker_id: str) -> None:
+        self._transition(job_id, worker_id, "playing")
 
-    def mark_no_show(self, job_id: str, worker: str) -> None:
-        self._transition(job_id, worker, "no-show")
+    def mark_no_show(self, job_id: str, worker_id: str) -> None:
+        self._transition(job_id, worker_id, "no-show")
 
-    def mark_no_contest(self, job_id: str, worker: str) -> None:
-        self._transition(job_id, worker, "no-contest")
+    def mark_no_contest(self, job_id: str, worker_id: str) -> None:
+        self._transition(job_id, worker_id, "no-contest")
 
-    def finish_game(self, job_id: str, worker: str, *, game_number: int, actual_stage: str, result: str) -> JobStatus:
+    def finish_game(self, job_id: str, worker_id: str, *, game_number: int, actual_stage: str, result: str) -> JobStatus:
         body = {"game_number": game_number, "actual_stage": validate_stage(actual_stage), "result": result}
-        return self._transition(job_id, worker, "finish-game", body).status
+        return self._transition(job_id, worker_id, "finish-game", body).status
 
-    def fail(self, job_id: str, worker: str, error_code: str, *, retryable: bool) -> JobStatus:
-        return self._transition(job_id, worker, "fail", {"error_code": error_code, "retryable": retryable}).status
+    def fail(self, job_id: str, worker_id: str, error_code: str, *, retryable: bool) -> JobStatus:
+        return self._transition(job_id, worker_id, "fail", {"error_code": error_code, "retryable": retryable}).status
 
-    def forfeit_service_failure(self, job_id: str, worker: str) -> None:
-        self._transition(job_id, worker, "forfeit")
+    def forfeit_service_failure(self, job_id: str, worker_id: str) -> None:
+        self._transition(job_id, worker_id, "forfeit")
 
     def record_replay(
-        self, job_id: str, worker: str, game_number: int, *, key: str, sha256: str, size: int, etag: str
+        self, job_id: str, worker_id: str, game_number: int, *, key: str, sha256: str, size: int, etag: str
     ) -> None:
         body = {"game_number": game_number, "key": key, "sha256": sha256, "size": size, "etag": etag}
-        self._transition(job_id, worker, "replay", body)
+        self._transition(job_id, worker_id, "replay", body)
 
-    def get_worker_job(self, job_id: str, worker: str) -> Job:
-        response = self._api.request("GET", f"/v1/runner/jobs/{job_id}", headers=self._slot_headers(worker))
+    def get_worker_job(self, job_id: str, worker_id: str) -> Job:
+        response = self._api.request("GET", f"/v1/runner/jobs/{job_id}", headers=self._slot_headers(worker_id))
         return parse_job(_json(response))
 ```
 
 - [ ] **Step 8: Run the tests**
 
-Run: `uv run pytest tests/test_netplay_domain.py tests/test_netplay_queue_client.py tests/test_netplay_queue.py tests/test_netplay_runner.py tests/test_netplay_transcripts.py -q`
+Run: `uv run pytest tests/test_netplay_domain.py tests/test_netplay_queue_client.py tests/test_netplay_contract.py tests/test_netplay_queue.py tests/test_netplay_runner.py tests/test_netplay_transcripts.py -q && uv run ty check --python-version 3.14 --error-on-warning hal tests/test_netplay_contract.py`
 Expected: all pass. (`test_netplay_transcripts.py` re-records from `queue.py`; the dropped `Job` fields never reached a response, so the transcripts do not change.)
 
 - [ ] **Step 9: Commit**
@@ -985,21 +1677,36 @@ Expected: all pass. (`test_netplay_transcripts.py` re-records from `queue.py`; t
 ```bash
 git add pyproject.toml uv.lock hal/netplay_service/domain.py hal/netplay_service/queue.py \
   hal/netplay_service/queue_client.py tests/test_netplay_domain.py tests/test_netplay_queue_client.py \
-  tests/test_netplay_queue.py tests/test_netplay_runner.py
+  tests/test_netplay_queue.py tests/test_netplay_runner.py tests/test_netplay_contract.py
 git commit -m "Add the netplay queue client"
 ```
 
 ---
 
-### Task 3: Session, admin, and live-settings clients
+### Task 6: Session, heartbeat, admin, and live-settings clients
 
 **Files:**
 - Modify: `hal/netplay_service/queue_client.py` (append)
 - Test: `tests/test_netplay_queue_client.py` (append)
 
 **Interfaces:**
-- Consumes: Task 2 `_Api`, `_json`, `parse_job`, `QueueProtocolError`, `PolicyConfig`; `hal.netplay_service.health.RunnerStatus.to_payload()`.
-- Produces: `@dataclass(frozen=True, slots=True) class Account(connect_code: str, r2_key: str, sha256: str)`; `AccountGrant(slot: int, connect_code: str, r2_key: str, sha256: str)`; `StartedSession(session_id: str, policy: PolicyConfig, accounts: tuple[AccountGrant, ...])`; `class RunnerClient(endpoint, *, client=None, sleep=time.sleep)` with `close()`, `active_policy() -> PolicyConfig`, `start_session(*, host: str, bundle_sha256: str, git_sha: str, slots: int) -> StartedSession`, `report_status(session_id: str, status: RunnerStatus) -> bool` (returns `draining`), `drain(session_id) -> None`, `end_session(session_id) -> int` (failed lease count); `class AdminClient(endpoint, *, client=None, sleep=time.sleep)` with `close()`, `put_policy(config: PolicyConfig) -> None`, `put_accounts(accounts: Sequence[Account]) -> None`, `set_paused(paused: bool) -> None`, `status() -> dict[str, object]`, `events(*, job: str | None, session: str | None, since: float | None) -> list[dict[str, object]]`; `RemoteQueue.connect_live(job_id: str, worker: str, *, open_timeout: float = 2.0) -> ClientConnection`.
+- Consumes: Task 5 `_Api`, `_json`, `parse_job`, `QueueProtocolError`, `QueueUnavailableError`; Task 4 `QueueError`, `SessionEndedError`; `PolicyConfig`; `hal.netplay_service.health.RunnerStatus.to_payload()`.
+- Produces (value types): `@dataclass(frozen=True, slots=True) class Account(connect_code: str, r2_key: str, sha256: str)`; `AccountGrant(slot: int, connect_code: str, r2_key: str, sha256: str)`; `StartedSession(session_id: str, policy: PolicyConfig, accounts: tuple[AccountGrant, ...])`; `SessionState(draining: bool)`.
+- Produces `new_session_id() -> str`, which returns `secrets.token_urlsafe(12)` (16 characters). The caller creates the ID once and passes it to `start_session`, so a repeat at the caller's level is also a safe retry.
+- Produces `class RunnerClient(endpoint, *, client=None, sleep=time.sleep)` with:
+  - `close()` and `active_policy() -> PolicyConfig`.
+  - `start_session(*, session_id: str, host: str, bundle_sha256: str, git_sha: str, slots: int, wants_stream: bool) -> StartedSession`.
+  - `report_status(session_id: str, status: RunnerStatus) -> SessionState`.
+  - `drain(session_id) -> None` and `end_session(session_id) -> int`, which returns the failed lease count.
+- `report_status` requires the response fields to be exactly `draining` and `stream`. In B1, `stream` must be `null`, because no runner asks for the stream and the Worker grants none. A non-null `stream` raises `QueueProtocolError("this client cannot stream; the Worker granted the stream lease")`. Plan D adds a grant field to `SessionState` and parses it. The call sites keep the structured result.
+- Produces `class SessionReporter(client: RunnerClient, session_id: str, status: Callable[[], RunnerStatus], *, interval_seconds: float = 2.0)`, a context manager:
+  - It reports once in `__enter__`, so a bad status or an ended session fails at once. It then reports from a daemon thread every `interval_seconds`.
+  - `state() -> SessionState` returns the latest response. After a `QueueError` other than `QueueUnavailableError`, `state()` raises that error, and the thread stops.
+  - `QueueUnavailableError` is logged and retried on the next tick, because the Worker allows 30 s of silence.
+  - `__exit__` stops and joins the thread.
+  - The runner enters it right after `start_session`, before downloads and qualification, which can take longer than the 30 s silence limit.
+- Produces `class AdminClient(endpoint, *, client=None, sleep=time.sleep)` with `close()`, `put_policy(config: PolicyConfig) -> None`, `put_accounts(accounts: Sequence[Account]) -> None`, `set_paused(paused: bool) -> None`, `status() -> dict[str, object]`, and `events(*, job: str | None, session: str | None, since: float | None) -> list[dict[str, object]]`.
+- Produces `RemoteQueue.connect_live(job_id: str, worker_id: str, *, open_timeout: float = 2.0) -> ClientConnection`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1008,6 +1715,7 @@ Append to `tests/test_netplay_queue_client.py`:
 ```python
 import threading
 import time
+from collections.abc import Callable
 
 from websockets.sync.server import ServerConnection
 from websockets.sync.server import serve
@@ -1016,12 +1724,15 @@ from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import PolicyConfig
+from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import aggregate_runner_status
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
 from hal.netplay_service.queue_client import RunnerClient
+from hal.netplay_service.queue_client import SessionReporter
+from hal.netplay_service.queue_client import SessionState
 
 POLICY = PolicyConfig(
     bundle_sha256="a" * 64,
@@ -1052,10 +1763,13 @@ def test_start_session_reads_policy_and_one_account_per_slot() -> None:
     script = _Script(
         httpx.Response(201, json={"session_id": "sess", "accounts": [grant], "policy": POLICY.to_payload()})
     )
-    started = _runner(script).start_session(host="box", bundle_sha256="a" * 64, git_sha="d" * 40, slots=1)
+    started = _runner(script).start_session(
+        session_id="session-00000001", host="box", bundle_sha256="a" * 64, git_sha="d" * 40, slots=1, wants_stream=False
+    )
     assert started.session_id == "sess" and started.policy == POLICY
     assert started.accounts[0].connect_code == "BOT0#1"
     assert json.loads(script.requests[0].content) == {
+        "session_id": "session-00000001",
         "host": "box",
         "bundle_sha256": "a" * 64,
         "git_sha": "d" * 40,
@@ -1068,17 +1782,60 @@ def test_start_session_rejects_a_missing_or_misnumbered_account() -> None:
     body = {"session_id": "sess", "accounts": [], "policy": POLICY.to_payload()}
     with pytest.raises(QueueProtocolError, match="one account per slot"):
         _runner(_Script(httpx.Response(201, json=body))).start_session(
-            host="box", bundle_sha256="a" * 64, git_sha="d" * 40, slots=1
+            session_id="session-00000001", host="box", bundle_sha256="a" * 64, git_sha="d" * 40, slots=1, wants_stream=False
         )
 
 
-def test_status_report_returns_the_drain_flag() -> None:
+def _runner_status() -> RunnerStatus:
     slot = SlotStatus(0, SlotState.IDLE, None, None, None, None, None, 0, time.time())
-    status = aggregate_runner_status("a" * 64, (slot,), time.time(), model_inference_p95_ms=None, batch_wait_p95_ms=None)
-    script = _Script(httpx.Response(200, json={"draining": True}))
-    assert _runner(script).report_status("sess", status) is True
+    return aggregate_runner_status("a" * 64, (slot,), time.time(), model_inference_p95_ms=None, batch_wait_p95_ms=None)
+
+
+def test_status_report_returns_the_session_state() -> None:
+    script = _Script(httpx.Response(200, json={"draining": True, "stream": None}))
+    assert _runner(script).report_status("sess", _runner_status()) == SessionState(draining=True)
     assert json.loads(script.requests[0].content)["schema_version"] == 5
     assert script.requests[0].url.path == "/v1/runner/sessions/sess/status"
+
+
+def test_status_report_refuses_a_stream_grant() -> None:
+    script = _Script(httpx.Response(200, json={"draining": False, "stream": {"slot": 0, "key": "live_x"}}))
+    with pytest.raises(QueueProtocolError, match="cannot stream"):
+        _runner(script).report_status("sess", _runner_status())
+
+
+def _wait_for(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 5
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_reporter_keeps_reporting_through_outages_and_stops_on_session_end() -> None:
+    script = _Script(
+        httpx.Response(200, json={"draining": False, "stream": None}),
+        *(httpx.Response(503) for _ in range(6)),
+        httpx.Response(200, json={"draining": True, "stream": None}),
+        httpx.Response(410, json={"detail": "session has ended"}),
+    )
+    client = RunnerClient(
+        ENDPOINT,
+        client=httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)),
+        sleep=lambda _: None,
+    )
+    with SessionReporter(client, "sess", _runner_status, interval_seconds=0.01) as reporter:
+        assert reporter.state() == SessionState(draining=False)
+
+        def ended() -> bool:
+            try:
+                reporter.state()
+            except SessionEndedError:
+                return True
+            return False
+
+        # One report retries through six 503s, the next sees the drain, the last sees the end.
+        _wait_for(ended)
+    assert len(script.requests) == 9
 
 
 def test_active_policy_drain_and_end() -> None:
@@ -1133,7 +1890,7 @@ def test_live_socket_sends_auth_and_slot_headers() -> None:
         thread.start()
         endpoint = QueueEndpoint(f"http://127.0.0.1:{port}", "runner-token")
         queue = RemoteQueue(endpoint, "sess")
-        with queue.connect_live("job-1", worker_id("sess", 1)) as socket:
+        with queue.connect_live("job-1", slot_worker_id("sess", 1)) as socket:
             assert json.loads(socket.recv(timeout=2)) == {"type": "released"}
         server.shutdown()
     assert seen == {"path": "/v1/runner/jobs/job-1/live", "auth": "Bearer runner-token", "slot": "1"}
@@ -1149,6 +1906,8 @@ Expected: FAIL at collection — `ImportError: cannot import name 'Account'`.
 Add to the imports of `queue_client.py`:
 
 ```python
+import secrets
+import threading
 from collections.abc import Sequence
 
 from websockets.sync.client import ClientConnection
@@ -1156,15 +1915,18 @@ from websockets.sync.client import connect
 
 from hal.netplay_service.domain import PolicyConfig
 from hal.netplay_service.health import RunnerStatus
+from hal.netplay_service.queue_contract import SessionEndedError
 ```
+
+`SessionEndedError` is already imported from Task 5. Keep a single import.
 
 Add this method to `RemoteQueue`:
 
 ```python
-    def connect_live(self, job_id: str, worker: str, *, open_timeout: float = 2.0) -> ClientConnection:
+    def connect_live(self, job_id: str, worker_id: str, *, open_timeout: float = 2.0) -> ClientConnection:
         """Open the job's settings socket; `https` becomes `wss` and `http` becomes `ws`."""
         url = "ws" + self.endpoint.url.removeprefix("http") + f"/v1/runner/jobs/{job_id}/live"
-        headers = {**self.endpoint.headers(), **self._slot_headers(worker)}
+        headers = {**self.endpoint.headers(), **self._slot_headers(worker_id)}
         return connect(url, additional_headers=headers, open_timeout=open_timeout)
 ```
 
@@ -1191,6 +1953,15 @@ class StartedSession:
     session_id: str
     policy: PolicyConfig
     accounts: tuple[AccountGrant, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionState:
+    draining: bool
+
+
+def new_session_id() -> str:
+    return secrets.token_urlsafe(12)
 
 
 def _object(payload: object, fields: frozenset[str], name: str) -> dict[str, object]:
@@ -1234,9 +2005,17 @@ class RunnerClient:
         except ValueError as error:
             raise QueueProtocolError(f"active policy is invalid: {error}") from error
 
-    def start_session(self, *, host: str, bundle_sha256: str, git_sha: str, slots: int) -> StartedSession:
-        # This runner cannot stream, so it never asks for the stream lease.
-        body = {"host": host, "bundle_sha256": bundle_sha256, "git_sha": git_sha, "slots": slots, "stream": False}
+    def start_session(
+        self, *, session_id: str, host: str, bundle_sha256: str, git_sha: str, slots: int, wants_stream: bool
+    ) -> StartedSession:
+        body = {
+            "session_id": session_id,
+            "host": host,
+            "bundle_sha256": bundle_sha256,
+            "git_sha": git_sha,
+            "slots": slots,
+            "stream": wants_stream,
+        }
         payload = _object(
             _json(self._api.request("POST", "/v1/runner/sessions", body=body)),
             frozenset(("session_id", "accounts", "policy")),
@@ -1248,21 +2027,24 @@ class RunnerClient:
         grants = tuple(_grant(item) for item in accounts)
         if tuple(grant.slot for grant in grants) != tuple(range(slots)):
             raise QueueProtocolError(f"session start must lease one account per slot: {grants}")
+        if payload["session_id"] != session_id:
+            raise QueueProtocolError(f"session start returned {payload['session_id']!r}, not {session_id!r}")
         try:
             policy = PolicyConfig.from_payload(payload["policy"])
-            session_id = _text(payload["session_id"])
-        except (TypeError, ValueError) as error:
+        except ValueError as error:
             raise QueueProtocolError(f"session start contains invalid values: {error}") from error
         return StartedSession(session_id, policy, grants)
 
-    def report_status(self, session_id: str, status: RunnerStatus) -> bool:
+    def report_status(self, session_id: str, status: RunnerStatus) -> SessionState:
         payload = _object(
             _json(self._api.request("POST", f"/v1/runner/sessions/{session_id}/status", body=status.to_payload())),
-            frozenset(("draining",)),
+            frozenset(("draining", "stream")),
             "status",
         )
+        if payload["stream"] is not None:
+            raise QueueProtocolError("this client cannot stream; the Worker granted the stream lease")
         try:
-            return _boolean(payload["draining"])
+            return SessionState(draining=_boolean(payload["draining"]))
         except TypeError as error:
             raise QueueProtocolError(f"status response is invalid: {error}") from error
 
@@ -1277,6 +2059,69 @@ class RunnerClient:
             return _integer(payload["failed"])
         except TypeError as error:
             raise QueueProtocolError(f"end response is invalid: {error}") from error
+
+
+class SessionReporter:
+    """Report runner status in the background; the report is also the session heartbeat.
+
+    Enter it right after the session starts. The Worker ends a session after 30 s
+    without a report, and downloads and qualification can take longer than that.
+    """
+
+    def __init__(
+        self,
+        client: RunnerClient,
+        session_id: str,
+        status: Callable[[], RunnerStatus],
+        *,
+        interval_seconds: float = 2.0,
+    ) -> None:
+        self._client = client
+        self._session_id = session_id
+        self._status = status
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._state: SessionState | None = None
+        self._error: QueueError | None = None
+        self._thread = threading.Thread(target=self._run, name=f"session-{session_id}", daemon=True)
+
+    def __enter__(self) -> SessionReporter:
+        # The first report is synchronous and strict, so startup fails fast on any queue error.
+        self._state = self._client.report_status(self._session_id, self._status())
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join()
+
+    def state(self) -> SessionState:
+        with self._lock:
+            if self._error is not None:
+                raise self._error
+            assert self._state is not None, "enter the reporter before reading its state"
+            return self._state
+
+    def _report(self) -> None:
+        try:
+            state = self._client.report_status(self._session_id, self._status())
+        except QueueUnavailableError as error:
+            # The Worker tolerates 30 s of silence; the next tick tries again.
+            logger.bind(event="session_status").warning("session status report failed: {}", error)
+            return
+        except QueueError as error:
+            with self._lock:
+                self._error = error
+            self._stop.set()
+            return
+        with self._lock:
+            self._state = state
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            self._report()
 
 
 class AdminClient:
@@ -1339,12 +2184,12 @@ Expected: `All checks passed!`
 
 ```bash
 git add hal/netplay_service/queue_client.py tests/test_netplay_queue_client.py
-git commit -m "Add session, admin, and live-settings clients"
+git commit -m "Add session, heartbeat, admin, and live-settings clients"
 ```
 
 ---
 
-### Task 4: Pinned assets and the verified cache
+### Task 7: Pinned assets and the verified cache
 
 **Files:**
 - Create: `hal/netplay_service/assets.py`
@@ -1471,6 +2316,16 @@ def test_ensure_uploaded_is_idempotent_and_refuses_a_different_object(tmp_path: 
     assert bucket.puts == 1
     with pytest.raises(AssetError, match="different hash"):
         ensure_uploaded(bucket, "hal", path, "netplay/policies/x.halpolicy", "f" * 64)
+
+
+def test_ensure_uploaded_refuses_a_truncated_object_with_matching_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "bundle.halpolicy"
+    path.write_bytes(b"bundle")
+    bucket = _Bucket()
+    bucket.objects["netplay/policies/x.halpolicy"] = (b"bun", {"sha256": _digest(b"bundle")})
+    with pytest.raises(AssetError, match="3 bytes; expected 6"):
+        ensure_uploaded(bucket, "hal", path, "netplay/policies/x.halpolicy", _digest(b"bundle"))
+    assert bucket.puts == 0
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -1654,6 +2509,11 @@ def ensure_uploaded(remote: Any, bucket: str, path: Path, key: str, sha256: str)
     else:
         if head.get("Metadata", {}).get("sha256") != sha256:
             raise AssetError(f"s3://{bucket}/{key} exists with a different hash")
+        # Matching metadata on a truncated object would fail every runner download.
+        if head.get("ContentLength") != path.stat().st_size:
+            raise AssetError(
+                f"s3://{bucket}/{key} has {head.get('ContentLength')} bytes; expected {path.stat().st_size}"
+            )
         return False
     with path.open("rb") as body:
         remote.put_object(
@@ -1679,19 +2539,20 @@ git commit -m "Add pinned netplay assets and a verified cache"
 
 ---
 
-### Task 5: Admin commands
+### Task 8: Admin commands
 
 **Files:**
 - Modify: `hal/netplay_service/domain.py` (add `account_connect_code`)
 - Replace: `hal/netplay_service/admin.py`
 - Create: `deploy/netplay/assets.json` (written by the new `assets pin` command in Step 6)
+- Modify: `deploy/netplay/README.md` (admin Access service token)
 - Test: `tests/test_netplay_admin.py`, `tests/test_netplay_domain.py` (append)
 
 **Interfaces:**
-- Consumes: `AdminClient`, `Account`, `QueueEndpoint` (Tasks 2–3); `AssetManifest`, `PinnedAsset`, `ensure_uploaded`, key functions, `sha256_file` (Task 4); `read_action_sequence_artifact` (`hal/inference/action_sequence_artifact.py`).
+- Consumes: `AdminClient`, `Account`, `admin_endpoint` (Tasks 5–6); `AssetManifest`, `PinnedAsset`, `ensure_uploaded`, key functions, `sha256_file` (Task 7); `read_action_sequence_artifact` (`hal/inference/action_sequence_artifact.py`).
 - Produces (`domain.py`): `account_connect_code(path: Path) -> str`.
 - Produces (`admin.py`): `policy_config(bundle_sha256: str, vocabulary_sha256: str, capability_version: int, supported_delays: tuple[int, ...]) -> PolicyConfig`; `policy_config_for(bundle: Path) -> PolicyConfig`; `publish_policy(bundle: Path, config: PolicyConfig, admin: AdminClient, remote: Any, bucket: str) -> bool`; `upload_accounts(paths: Sequence[Path], admin: AdminClient, remote: Any, bucket: str) -> tuple[Account, ...]`; `pin_assets(iso: Path, emulator: Path, manifest: Path, remote: Any, bucket: str) -> AssetManifest`; `parse_since(value: str, now: float) -> float`; `main(argv: Sequence[str] | None = None) -> None`.
-- Admin auth: `HAL_NETPLAY_ADMIN_TOKEN` plus `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`. The spec protects admin routes with the owner's Access login, which a CLI cannot complete; Task 10 of Plan B2 documents adding a Service Auth policy with an admin service token to the admin Access application.
+- Admin auth: `HAL_NETPLAY_ADMIN_TOKEN` plus `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET` (see `admin_endpoint`). The spec protects admin routes with the owner's Access login, which a CLI cannot complete. The admin Access application therefore gets a second policy: Service Auth for one admin service token. The owner's browser login still works. Step 6 documents this, so the CLI works against production at the end of B1.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1880,7 +2741,7 @@ from hal.netplay_service.domain import PolicyConfig
 from hal.netplay_service.domain import account_connect_code
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
-from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import admin_endpoint
 from hal.netplay_service.replays import ensure_replay_lifecycle
 
 _SINCE: Final[re.Pattern[str]] = re.compile(r"([0-9]+)([smhd])")
@@ -1963,7 +2824,7 @@ def parse_since(value: str, now: float) -> float:
 
 
 def _admin_client() -> AdminClient:
-    return AdminClient(QueueEndpoint.from_environment("HAL_NETPLAY_ADMIN_TOKEN", os.environ))
+    return AdminClient(admin_endpoint(os.environ))
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -2044,7 +2905,20 @@ if __name__ == "__main__":
 Run: `uv run pytest tests/test_netplay_admin.py tests/test_netplay_domain.py tests/test_netplay_replays.py -q`
 Expected: all pass.
 
-- [ ] **Step 6: Pin the ISO and emulator**
+- [ ] **Step 6: Document the admin service token**
+
+In `deploy/netplay/README.md`, under "One-time Cloudflare setup", replace item 2 with:
+
+```markdown
+2. Create two Cloudflare Access applications:
+   - `20xx.xyz/v1/runner/*` with a Service Auth policy and one service token per GPU box.
+   - `20xx.xyz/v1/admin/*` with two policies: the owner's login, for the browser, and Service Auth for
+     one `hal-netplay-admin` service token, for the CLI. Put that token in `.env` as
+     `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET`, beside
+     `HAL_NETPLAY_ADMIN_TOKEN`. Runners never receive it.
+```
+
+- [ ] **Step 7: Pin the ISO and emulator**
 
 This uploads the two files to the private bucket and writes the pin file. It needs R2 credentials and `AWS_BUCKET=hal` in the environment, and the production Slippi AppImage that `hal.paths.NETPLAY_EMULATOR_PATH` names (`~/data/emulator/slippi-3.6.4/Slippi_Online-x86_64.AppImage` by default; set `HAL_NETPLAY_EMULATOR_PATH` if it lives elsewhere).
 
@@ -2060,36 +2934,44 @@ uv run hal-netplay-admin assets pin \
 Expected: it prints the manifest and writes `deploy/netplay/assets.json`. The ISO entry is
 `"key": "netplay/assets/b7de482eb955c8a96b6746dfa043b69ae7bf6c7c2a09ac382b9da126faa7055c/ssbm.ciso"` with the same `sha256` (this is the hash of the ISO on the development machine). The emulator entry has the AppImage's hash. If the emulator file is missing, stop and ask for its path; do not pin a different build.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add hal/netplay_service/domain.py hal/netplay_service/admin.py deploy/netplay/assets.json \
-  tests/test_netplay_admin.py tests/test_netplay_domain.py
+  deploy/netplay/README.md tests/test_netplay_admin.py tests/test_netplay_domain.py
 git commit -m "Add netplay admin commands and asset pins"
 ```
 
 ---
 
-### Task 6: Local Worker harness and the queue integration test
+### Task 9: Local Worker harness and the queue integration test
 
 **Files:**
 - Create: `hal/netplay_service/local_worker.py`
 - Test: `tests/test_netplay_queue_integration.py`
 
+The test drives the real Worker through the boundaries that unit tests cannot reach:
+- a lost response for session start, claim, a transition, and session end;
+- the settings WebSocket: initial settings, a pushed policy change, and `released`;
+- a session that stays silent past 30 s while another session keeps reporting from `SessionReporter` with a `starting` status, as a box does while it downloads and qualifies.
+
 **Interfaces:**
-- Consumes: Plan A Worker project `web/netplay-api` (with `npm ci` done); Tasks 2–3 clients.
+- Consumes: Plan A Worker project `web/netplay-api` (with `npm ci` done); Tasks 5–6 clients.
 - Produces: `DEV_RUNNER_TOKEN = "dev-runner-token"`, `DEV_ADMIN_TOKEN = "dev-admin-token"`, `WORKER_PROJECT: Path`, `class LocalWorkerError(RuntimeError)`, `free_port() -> int`, `@contextmanager local_worker(state_dir: Path, *, port: int, startup_timeout_seconds: float = 90.0) -> Iterator[str]` (yields the base URL).
-- Consumers: this task's integration test, and the qualification ports in Plan B2 Tasks 5–6.
+- Consumers: this task's integration test, and the qualification ports in Plan B2.
 
 - [ ] **Step 1: Write the failing integration test**
 
 `tests/test_netplay_queue_integration.py`:
 
 ```python
-"""RemoteQueue against the real queue Worker under `wrangler dev`."""
+"""RemoteQueue, RunnerClient, and SessionReporter against the real queue Worker under `wrangler dev`."""
 
+import json
 import os
 import time
+from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -2114,8 +2996,11 @@ from hal.netplay_service.queue_client import AdminClient
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import RemoteQueue
 from hal.netplay_service.queue_client import RunnerClient
-from hal.netplay_service.queue_client import SessionEndedError
-from hal.netplay_service.queue_client import worker_id
+from hal.netplay_service.queue_client import SessionReporter
+from hal.netplay_service.queue_client import StartedSession
+from hal.netplay_service.queue_client import new_session_id
+from hal.netplay_service.queue_client import slot_worker_id
+from hal.netplay_service.queue_contract import SessionEndedError
 
 pytestmark = pytest.mark.integration
 
@@ -2133,51 +3018,47 @@ POLICY = PolicyConfig(
     default_temperature=1.0,
     masked_identity=False,
 )
+ACCOUNTS = [Account(f"BOT{index}#1", f"netplay/accounts/{index}.json", str(index) * 64) for index in range(4)]
 
 
-def _require_wrangler() -> None:
-    if (WORKER_PROJECT / "node_modules" / ".bin" / "wrangler").is_file():
-        return
-    message = f"run `npm ci` in {WORKER_PROJECT}"
-    if os.environ.get("HAL_REQUIRE_INTEGRATION") == "1":
-        pytest.fail(message)
-    pytest.skip(message)
+@pytest.fixture(scope="module")
+def worker_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    if not (WORKER_PROJECT / "node_modules" / ".bin" / "wrangler").is_file():
+        message = f"run `npm ci` in {WORKER_PROJECT}"
+        if os.environ.get("HAL_REQUIRE_INTEGRATION") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    with local_worker(tmp_path_factory.mktemp("worker"), port=free_port()) as url:
+        yield url
 
 
-def _status() -> RunnerStatus:
+@pytest.fixture
+def admin(worker_url: str) -> Iterator[AdminClient]:
+    client = AdminClient(QueueEndpoint(worker_url, DEV_ADMIN_TOKEN))
+    client.put_policy(POLICY)
+    client.put_accounts(ACCOUNTS)
+    yield client
+    client.close()
+
+
+def _status(state: SlotState = SlotState.IDLE) -> RunnerStatus:
     now = time.time()
-    slot = SlotStatus(0, SlotState.IDLE, None, None, None, None, None, 0, now)
+    slot = SlotStatus(0, state, None, None, None, None, None, 0, now)
     return aggregate_runner_status(POLICY.bundle_sha256, (slot,), now, model_inference_p95_ms=None, batch_wait_p95_ms=None)
 
 
-class _DropFirstRequest(httpx.BaseTransport):
-    """Fail the first request before it reaches the Worker."""
-
-    def __init__(self) -> None:
-        self._inner = httpx.HTTPTransport()
-        self._dropped = False
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if not self._dropped:
-            self._dropped = True
-            raise httpx.ConnectError("dropped by the test", request=request)
-        return self._inner.handle_request(request)
-
-    def close(self) -> None:
-        self._inner.close()
-
-
 class _LoseFirstResponse(httpx.BaseTransport):
-    """Deliver the first request, then lose its response."""
+    """Deliver each matching request, and lose the response to the first one."""
 
-    def __init__(self) -> None:
+    def __init__(self, matches: Callable[[httpx.Request], bool]) -> None:
         self._inner = httpx.HTTPTransport()
-        self._lost = False
+        self._matches = matches
+        self.lost = 0
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         response = self._inner.handle_request(request)
-        if not self._lost:
-            self._lost = True
+        if self.lost == 0 and self._matches(request):
+            self.lost += 1
             response.read()
             response.close()
             raise httpx.ReadError("response lost by the test", request=request)
@@ -2187,69 +3068,126 @@ class _LoseFirstResponse(httpx.BaseTransport):
         self._inner.close()
 
 
-def _session_ended(admin: AdminClient, session_id: str) -> bool:
+def _lossy(url: str, method: str, suffix: str) -> tuple[httpx.Client, _LoseFirstResponse]:
+    transport = _LoseFirstResponse(lambda r: r.method == method and r.url.path.endswith(suffix))
+    return httpx.Client(base_url=url, transport=transport), transport
+
+
+def _start(sessions: RunnerClient) -> StartedSession:
+    return sessions.start_session(
+        session_id=new_session_id(),
+        host="integration",
+        bundle_sha256=POLICY.bundle_sha256,
+        git_sha="a" * 40,
+        slots=1,
+        wants_stream=False,
+    )
+
+
+def _create(url: str, player_code: str) -> tuple[str, str]:
+    created = httpx.post(
+        f"{url}/v1/jobs",
+        json={"player_code": player_code, "character": "FOX", "imitation": "IBDW#0", "online_delay": 2},
+        timeout=10,
+    )
+    assert created.status_code == 201, created.text
+    return created.json()["id"], created.json()["token"]
+
+
+def _player_job(url: str, job_id: str, token: str) -> dict[str, object]:
+    response = httpx.get(f"{url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    return response.json()
+
+
+def _live_sessions(admin: AdminClient) -> list[dict[str, object]]:
     sessions = admin.status()["sessions"]
     assert isinstance(sessions, list)
-    return any(row["id"] == session_id and row["ended_at"] is not None for row in sessions)
+    return [row for row in sessions if row["ended_at"] is None]
 
 
-def test_remote_queue_runs_a_reservation_and_a_silent_session_ends(tmp_path: Path) -> None:
-    _require_wrangler()
-    with local_worker(tmp_path / "worker", port=free_port()) as url:
-        admin = AdminClient(QueueEndpoint(url, DEV_ADMIN_TOKEN))
-        admin.put_policy(POLICY)
-        admin.put_accounts([Account("BOT0#1", "netplay/accounts/a.json", "a" * 64)])
-        endpoint = QueueEndpoint(url, DEV_RUNNER_TOKEN)
-        sessions = RunnerClient(endpoint)
-        assert sessions.active_policy() == POLICY
-        started = sessions.start_session(host="integration", bundle_sha256=POLICY.bundle_sha256, git_sha="a" * 40, slots=1)
-        assert [grant.connect_code for grant in started.accounts] == ["BOT0#1"]
-        assert sessions.report_status(started.session_id, _status()) is False
+def test_lost_responses_never_duplicate_sessions_jobs_or_games(worker_url: str, admin: AdminClient) -> None:
+    endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
+    sleeps: list[float] = []
 
-        created = httpx.post(
-            f"{url}/v1/jobs",
-            json={"player_code": "CRYO#610", "character": "FOX", "imitation": "IBDW#0", "online_delay": 2},
+    start_client, start_loss = _lossy(worker_url, "POST", "/v1/runner/sessions")
+    started = _start(RunnerClient(endpoint, client=start_client, sleep=sleeps.append))
+    assert start_loss.lost == 1
+    assert [row["id"] for row in _live_sessions(admin)] == [started.session_id]
+    sessions = RunnerClient(endpoint)
+    sessions.report_status(started.session_id, _status())
+
+    first_id, first_token = _create(worker_url, "CRYO#610")
+    second_id, second_token = _create(worker_url, "OTHER#1")
+    worker = slot_worker_id(started.session_id, 0)
+    claim_client, claim_loss = _lossy(worker_url, "POST", "/claim")
+    claimed = RemoteQueue(endpoint, started.session_id, client=claim_client, sleep=sleeps.append).claim_next(worker)
+    assert claim_loss.lost == 1
+    assert claimed is not None and (claimed.id, claimed.attempt) == (first_id, 1)
+    assert _player_job(worker_url, second_id, second_token)["status"] == "queued"
+
+    queue = RemoteQueue(endpoint, started.session_id)
+    queue.mark_connecting(first_id, worker, started.accounts[0].connect_code)
+    playing_client, playing_loss = _lossy(worker_url, "POST", "/playing")
+    RemoteQueue(endpoint, started.session_id, client=playing_client, sleep=sleeps.append).mark_playing(first_id, worker)
+    assert playing_loss.lost == 1
+    finish = {"game_number": 1, "actual_stage": "BATTLEFIELD", "result": "win"}
+    assert queue.finish_game(first_id, worker, **finish) is JobStatus.REMATCH_WAIT
+    assert queue.finish_game(first_id, worker, **finish) is JobStatus.REMATCH_WAIT
+    assert queue.get_worker_job(first_id, worker).game_count == 1
+
+    end_client, end_loss = _lossy(worker_url, "DELETE", f"/v1/runner/sessions/{started.session_id}")
+    assert RunnerClient(endpoint, client=end_client, sleep=sleeps.append).end_session(started.session_id) == 1
+    assert end_loss.lost == 1
+    assert sleeps == [0.25, 0.25, 0.25, 0.25]
+    first = _player_job(worker_url, first_id, first_token)
+    assert (first["status"], first["error_code"]) == ("failed", "service_generation_aborted")
+    httpx.delete(f"{worker_url}/v1/jobs/{second_id}", headers={"Authorization": f"Bearer {second_token}"}, timeout=10)
+
+
+def test_live_socket_pushes_settings_and_release(worker_url: str, admin: AdminClient) -> None:
+    endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
+    sessions = RunnerClient(endpoint)
+    started = _start(sessions)
+    sessions.report_status(started.session_id, _status())
+    job_id, token = _create(worker_url, "LIVE#1")
+    worker = slot_worker_id(started.session_id, 0)
+    queue = RemoteQueue(endpoint, started.session_id)
+    assert queue.claim_next(worker) is not None
+    with queue.connect_live(job_id, worker) as socket:
+        assert json.loads(socket.recv(timeout=5)) == {
+            "type": "settings",
+            "revision": 0,
+            "desired_return": 20,
+            "temperature": 1,
+        }
+        httpx.patch(
+            f"{worker_url}/v1/jobs/{job_id}/policy",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"desired_return": 35},
             timeout=10,
-        )
-        assert created.status_code == 201, created.text
-        job_id, token = created.json()["id"], created.json()["token"]
+        ).raise_for_status()
+        assert json.loads(socket.recv(timeout=5))["revision"] == 1
+        httpx.delete(f"{worker_url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        assert json.loads(socket.recv(timeout=5)) == {"type": "released"}
+    sessions.end_session(started.session_id)
 
-        worker = worker_id(started.session_id, 0)
-        sleeps: list[float] = []
-        dropped = RemoteQueue(
-            endpoint,
-            started.session_id,
-            client=httpx.Client(base_url=url, transport=_DropFirstRequest()),
-            sleep=sleeps.append,
-        )
-        claimed = dropped.claim_next(worker)
-        assert claimed is not None and claimed.id == job_id
-        dropped.mark_connecting(job_id, worker, "BOT0#1")
-        lossy = RemoteQueue(
-            endpoint,
-            started.session_id,
-            client=httpx.Client(base_url=url, transport=_LoseFirstResponse()),
-            sleep=sleeps.append,
-        )
-        lossy.mark_playing(job_id, worker)
-        assert sleeps == [0.25, 0.25]
-        finish = {"game_number": 1, "actual_stage": "BATTLEFIELD", "result": "win"}
-        assert dropped.finish_game(job_id, worker, **finish) is JobStatus.REMATCH_WAIT
-        assert dropped.finish_game(job_id, worker, **finish) is JobStatus.REMATCH_WAIT
-        assert dropped.get_worker_job(job_id, worker).game_count == 1
 
-        assert sessions.end_session(started.session_id) == 1
-        player = httpx.get(f"{url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        assert (player.json()["status"], player.json()["error_code"]) == ("failed", "service_generation_aborted")
-
-        silent = sessions.start_session(host="silent", bundle_sha256=POLICY.bundle_sha256, git_sha="a" * 40, slots=1)
-        sessions.report_status(silent.session_id, _status())
+def test_reporter_keeps_a_starting_session_alive_while_a_silent_one_ends(worker_url: str, admin: AdminClient) -> None:
+    endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
+    sessions = RunnerClient(endpoint)
+    starting = _start(sessions)
+    silent = _start(sessions)
+    sessions.report_status(silent.session_id, _status())
+    with SessionReporter(sessions, starting.session_id, lambda: _status(SlotState.STARTING)) as reporter:
         deadline = time.monotonic() + 60
-        while not _session_ended(admin, silent.session_id):
+        while silent.session_id in {row["id"] for row in _live_sessions(admin)}:
             assert time.monotonic() < deadline, "the Worker did not end a session that stopped reporting"
             time.sleep(1)
-        with pytest.raises(SessionEndedError):
-            sessions.report_status(silent.session_id, _status())
+        assert starting.session_id in {row["id"] for row in _live_sessions(admin)}
+        assert reporter.state().draining is False
+    with pytest.raises(SessionEndedError):
+        sessions.report_status(silent.session_id, _status())
+    assert sessions.end_session(starting.session_id) == 0
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2369,7 +3307,7 @@ def local_worker(state_dir: Path, *, port: int, startup_timeout_seconds: float =
 - [ ] **Step 4: Run the integration test**
 
 Run: `HAL_REQUIRE_INTEGRATION=1 uv run pytest tests/test_netplay_queue_integration.py -m integration -q`
-Expected: `1 passed` in roughly 35–60 s (the silent session ends 30 s after its last report). If `wrangler dev` ignores the `--var` digests because a developer `.dev.vars` file in `web/netplay-api` sets the same names, the admin call fails with `401 admin token is invalid`; move `.dev.vars` aside and rerun, then report the precedence you observed.
+Expected: `3 passed` in roughly 40–70 s. The silent session ends 30 s after its last report. If `wrangler dev` ignores the `--var` digests because a developer `.dev.vars` file in `web/netplay-api` sets the same names, the admin call fails with `401 admin token is invalid`; move `.dev.vars` aside and rerun, then report the precedence you observed.
 
 - [ ] **Step 5: Commit**
 
@@ -2380,7 +3318,7 @@ git commit -m "Test the queue client against wrangler dev"
 
 ---
 
-### Task 7: Handoff checks
+### Task 10: Handoff checks
 
 **Files:** none new.
 
@@ -2402,4 +3340,19 @@ uv run pytest -q -m "not integration"
 HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration
 ```
 
-Expected: every command passes. Plan B1 does not touch replay extraction, wire format, controller input, session stepping, or offline/live parity, so the roundtrip and session-cleanup integration suite is not required here; Plan B2 runs it. Report each command, failure, and skip.
+Expected: every command passes. Plan B1 does not touch replay extraction, wire format, controller input, session stepping, or offline/live parity. Task 4 changes only the runner's queue types, its lease arguments, and its replay sidecar, so the roundtrip and session-cleanup integration suite is not required here. Plan B2 runs it. Report each command, failure, and skip.
+
+---
+
+## Decisions carried into Plan B2
+
+Plan B2 is not written yet. It must implement these decisions, which B1 depends on:
+
+1. **Session start.** The runner creates the session ID once with `new_session_id()`. It passes the same ID to any repeated `start_session` call, including one after `QueueUnavailableError`. It passes `wants_stream=False` until Plan D.
+2. **Heartbeat from the start.** The runner enters `SessionReporter` immediately after `start_session`, before it downloads the bundle and accounts and before `check_realtime_budget`. Until the slots are ready, the status reports slot state `starting`. When `state()` raises `SessionEndedError`, the runner stops claiming, forfeits active games, and exits non-zero.
+3. **Drain.** `SessionReporter.state().draining` replaces the local stop flag. First signal: `drain`, finish active sets, then `end_session`.
+4. **Claim errors.** A claim can return `409` in three cases: the session is draining, the bundle is no longer active, or the slot already holds a job past `leased`. On the first two, the slot stops claiming. On the third, which a correct runner never causes, the slot logs the held job ID, forfeits it, and stops. `SessionEndedError` (`410`) on any call ends the runner as in item 2.
+5. **Client errors.** `QueueUnavailableError` during a game does not stop Dolphin. Lease grace is 60 s while playing, so the heartbeat thread logs the error and keeps trying. On any other call, it fails the slot through the existing recovery path.
+6. **Replay sidecars.** Sidecar schema v2 already carries `worker_id` (`<session>/slot-<n>`). A restarted runner uploads a leftover sidecar and records it with that `worker_id`. The runner builds a `RemoteQueue` for the sidecar's session ID, which the Worker accepts after that session ended (Task 3). A `409` for the replay is logged, and the sidecar is kept for inspection. The runner never deletes a sidecar whose replay was refused.
+7. **Live settings.** `_LivePolicySettings` reads `connect_live`. It reconnects with backoff and sets `released` on a `released` message, or when `get_worker_job` raises `InvalidTransitionError` after a reconnect.
+8. **Deletion.** B2 deletes `QueueStore`. The runner's unit tests then need a `RunnerQueue` fake. The simplest is an in-memory port of the store's transitions, or `RemoteQueue` against `local_worker`. B2 chooses between them.
