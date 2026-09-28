@@ -1,4 +1,4 @@
-# Production image for the HAL netplay API and GPU runner.
+# Production image for the HAL netplay GPU runner.
 FROM vastai/base-image:cuda-13.0.2-auto AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -40,6 +40,11 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/hal /opt/hal
 COPY docker/entrypoint.sh /usr/local/bin/hal-netplay-entrypoint
 RUN chmod +x /usr/local/bin/hal-netplay-entrypoint
+
+ARG HAL_GIT_SHA
+RUN test -n "$HAL_GIT_SHA"
+ENV HAL_GIT_SHA="$HAL_GIT_SHA"
+LABEL org.opencontainers.image.revision="$HAL_GIT_SHA"
 
 WORKDIR /opt/hal
 ENTRYPOINT ["/usr/local/bin/hal-netplay-entrypoint"]

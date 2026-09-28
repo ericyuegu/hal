@@ -21,7 +21,7 @@ two.
 | 1 | API Worker and Durable Object (`web/netplay-api`), golden transcripts | done |
 | 2 | Runner and admin clients, retry-safe runner routes, shared queue contract | done |
 | 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | done |
-| 4 | Host bring-up: image, `gce-up.sh`, G4 verification | not written |
+| 4 | Host bring-up: image, `gce-up.sh`, G4 verification | done; live G4 check owner-gated |
 | 5 | Twitch streaming: stream lease, claim preference, displays, ffmpeg | not written |
 
 Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.

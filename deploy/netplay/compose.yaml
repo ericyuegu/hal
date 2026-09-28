@@ -6,6 +6,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/netplay/Dockerfile
+      args:
+        HAL_GIT_SHA: ${HAL_GIT_SHA:?set HAL_GIT_SHA}
     restart: unless-stopped
     runtime: nvidia
     command: ["hal-netplay-runner", "--slots", "${HAL_NETPLAY_SLOTS:-1}", "--compiled", "--git-sha", "${HAL_GIT_SHA}"]
