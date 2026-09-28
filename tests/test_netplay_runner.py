@@ -40,6 +40,7 @@ from hal.netplay_service.health import write_slot_status
 from hal.netplay_service.queue import QueueStore
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import UploadedReplay
+from hal.sim.netplay import ConnectAbandoned
 from hal.sim.trajectory import Trajectory
 
 
@@ -694,6 +695,52 @@ def test_health_publisher_failure_terminates_the_slot(
             time.sleep(0.001)
 
 
+def test_live_policy_settings_release_when_player_cancels_before_live(tmp_path: Path) -> None:
+    store = QueueStore(tmp_path / "queue.sqlite3")
+    credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
+    claimed = store.claim_next("slot-0")
+    assert claimed is not None
+    store.mark_connecting(claimed.id, "slot-0", "HAL#1")
+    with runner._LivePolicySettings(store, claimed, "slot-0") as settings:
+        assert not settings.released.is_set()
+        store.cancel(credentials.job.id, credentials.token)
+        assert settings.released.wait(2.0)
+
+
+def test_abandoned_connect_frees_slot_without_no_show(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Session:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    monkeypatch.setattr(runner, "NetplaySession", Session)
+    monkeypatch.setattr(runner, "run_netplay_match", Mock(side_effect=ConnectAbandoned("released")))
+    store = Mock()
+    stop = Mock()
+    stop.is_set.return_value = False
+
+    runner._run_reservation(
+        _slot_config(tmp_path),
+        store,
+        Mock(),
+        RuntimeConfig(1, (2, 3)),
+        _job(),
+        stop,
+        Mock(),
+        FrameTiming(2, 2, 4, 2, 8),
+    )
+
+    store.mark_no_show.assert_not_called()
+
+
 def test_recoverable_failure_closes_dolphin_before_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -849,8 +896,11 @@ def test_local_qualification_retains_replay_without_publishing(
             wall_seconds=1.0,
             game_fps=60.0,
             frame_interval_p95_ms=16.0,
+            frame_interval_p99_ms=17.0,
             dolphin_step_p95_ms=1.0,
+            dolphin_step_p99_ms=2.0,
             inference_p95_ms=5.0,
+            inference_p99_ms=6.0,
             transport_correction_frames=0,
         )
 

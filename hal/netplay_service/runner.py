@@ -56,6 +56,7 @@ from hal.inference.engine import InferenceEngine
 from hal.inference.engine import ModelRegistry
 from hal.inference.engine import configure_inference_process
 from hal.inference.engine import freeze_inference_runtime
+from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -80,6 +81,7 @@ from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
+from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import DolphinGraphicsBackend
@@ -809,6 +811,9 @@ class _LivePolicySettings:
         self._worker_id = worker_id
         self._revision = job.policy_revision
         self._values = (job.choices.desired_return, job.choices.temperature)
+        # Set once the queue cancels, expires, or reassigns the job, so a
+        # connect wait frees the slot without waiting for its own timeout.
+        self.released = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, daemon=True)
 
@@ -817,6 +822,10 @@ class _LivePolicySettings:
             try:
                 job = self._store.get_worker_job(self._job_id, self._worker_id)
             except InvalidTransitionError:
+                self.released.set()
+                return
+            if job.status in TERMINAL_STATUSES:
+                self.released.set()
                 return
             if job.policy_revision != self._revision:
                 self._values = (job.choices.desired_return, job.choices.temperature)
@@ -1002,7 +1011,7 @@ def _run_reservation(
         job.game_count + 1,
     )
 
-    store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=60.0)
+    store.mark_connecting(job.id, config.worker_id, config.bot_connect_code, timeout_seconds=IDLE_TIMEOUT_SECONDS)
     health.configure_schedule(timing)
     health.connecting(job.choices.online_delay)
     try:
@@ -1016,7 +1025,8 @@ def _run_reservation(
                 replay_dir=replay_dir,
                 slippi_port=config.slippi_port,
                 step_timeout_seconds=FRAME_STALL_SECONDS,
-                connect_timeout_seconds=60.0,
+                connect_timeout_seconds=IDLE_TIMEOUT_SECONDS,
+                connect_abandoned=settings.released.is_set,
                 realtime=True,
                 graphics_backend=config.graphics_backend,
             ) as session,
@@ -1074,16 +1084,20 @@ def _run_reservation(
                     result=human_result,
                 )
                 logger.info(
-                    "reservation {} game={} complete frames={} wall={:.1f}s fps={:.1f} frame_p95={:.1f}ms "
-                    "dolphin_p95={:.1f}ms policy_p95={:.1f}ms stage={} human_result={} corrections={}",
+                    "reservation {} game={} complete frames={} wall={:.1f}s fps={:.1f} "
+                    "frame_p95={:.1f}ms frame_p99={:.1f}ms dolphin_p95={:.1f}ms dolphin_p99={:.1f}ms "
+                    "policy_p95={:.1f}ms policy_p99={:.1f}ms stage={} human_result={} corrections={}",
                     job.id,
                     job.game_count + 1,
                     len(result.trajectory),
                     result.wall_seconds,
                     result.game_fps,
                     result.frame_interval_p95_ms,
+                    result.frame_interval_p99_ms,
                     result.dolphin_step_p95_ms,
+                    result.dolphin_step_p99_ms,
                     result.inference_p95_ms,
+                    result.inference_p99_ms,
                     actual_stage,
                     human_result,
                     result.transport_correction_frames,
@@ -1124,6 +1138,8 @@ def _run_reservation(
                         return
                     if job.status is not JobStatus.REMATCH_WAIT:
                         raise RuntimeError(f"unexpected reservation status {job.status.value}")
+    except ConnectAbandoned:
+        logger.info("reservation {} released before its match went live", job.id)
     except FrameTimeout:
         raise _RecoverableRuntimeError("frame_stream_stalled") from None
     except TimeoutError:

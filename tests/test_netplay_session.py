@@ -14,6 +14,7 @@ import pytest
 import hal.sim.netplay as netplay
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
+from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import fix_dolphin_ini_case
@@ -339,6 +340,18 @@ def test_step_requires_an_explicit_input_even_when_neutral(tmp_path: Path) -> No
 
     neutral = ControllerAction(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
     assert neutral.main_x == 0.0
+
+
+def test_connect_wait_stops_when_the_caller_abandons_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session(tmp_path, connect_abandoned=lambda: True)
+    session._console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+    step = Mock()
+    monkeypatch.setattr("hal.sim.netplay.step_blocking", step)
+    with pytest.raises(ConnectAbandoned):
+        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+    step.assert_not_called()
 
 
 def test_finished_match_can_rematch_without_relaunching_dolphin(

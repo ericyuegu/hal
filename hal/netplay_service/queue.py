@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
+from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobCredentials
@@ -312,7 +313,9 @@ class QueueStore:
             if cursor.rowcount != 1:
                 raise InvalidTransitionError("worker does not own an active job lease")
 
-    def mark_connecting(self, job_id: str, worker_id: str, connect_code: str, *, timeout_seconds: float = 60) -> None:
+    def mark_connecting(
+        self, job_id: str, worker_id: str, connect_code: str, *, timeout_seconds: float = IDLE_TIMEOUT_SECONDS
+    ) -> None:
         self._worker_transition(
             job_id,
             worker_id,
@@ -367,7 +370,7 @@ class QueueStore:
             game_number = int(row["game_count"]) + 1
             terminal = game_number >= 5 or bool(row["cancel_after_game"])
             next_status = JobStatus.COMPLETE if terminal else JobStatus.REMATCH_WAIT
-            rematch_deadline = None if terminal else timestamp + 60
+            rematch_deadline = None if terminal else timestamp + IDLE_TIMEOUT_SECONDS
             connection.execute(
                 """
                 UPDATE jobs SET status = ?, game_count = ?, actual_stage = ?, last_result = ?,

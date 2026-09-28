@@ -52,6 +52,10 @@ def tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
     )
 
 
+class ConnectAbandoned(Exception):
+    """The caller gave up on the remote player before the match went live."""
+
+
 @dataclass(frozen=True, slots=True)
 class NetplaySetup:
     """The local character, remote Slippi code, and selected stage."""
@@ -76,6 +80,7 @@ class NetplaySession:
         slippi_port: int = 51441,
         step_timeout_seconds: float = 30.0,
         connect_timeout_seconds: float = 600.0,
+        connect_abandoned: Callable[[], bool] = lambda: False,
         realtime: bool = False,
         graphics_backend: DolphinGraphicsBackend = "Vulkan",
     ) -> None:
@@ -93,6 +98,7 @@ class NetplaySession:
         self.slippi_port = slippi_port
         self.step_timeout_seconds = step_timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.connect_abandoned = connect_abandoned
         self.graphics_backend = graphics_backend
         self.ego_port: int | None = None
         self.opponent_port: int | None = None
@@ -243,6 +249,8 @@ class NetplaySession:
         deadline = time.monotonic() + self.connect_timeout_seconds
         last_status: tuple[melee.Menu, object] | None = None
         while True:
+            if self.connect_abandoned():
+                raise ConnectAbandoned("stopped waiting for the remote player")
             if time.monotonic() > deadline:
                 raise TimeoutError(
                     f"did not reach IN_GAME within {self.connect_timeout_seconds:.0f}s "

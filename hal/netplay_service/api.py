@@ -33,6 +33,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from hal.inference.bundle import read_policy_manifest
 from hal.netplay_service.domain import CHARACTERS
+from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Choice
@@ -103,8 +104,8 @@ class OptionsResponse(BaseModel):
     temperature_range: tuple[float, float] = (0.8, 1.1)
     default_temperature: float = 1.0
     max_games: int = 5
-    no_show_seconds: int = 60
-    rematch_seconds: int = 60
+    no_show_seconds: int = IDLE_TIMEOUT_SECONDS
+    rematch_seconds: int = IDLE_TIMEOUT_SECONDS
 
 
 class CreateJobRequest(BaseModel):

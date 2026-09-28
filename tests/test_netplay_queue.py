@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.queue import ActiveJobError
@@ -151,7 +152,10 @@ def test_no_show_expires_and_releases_player(tmp_path: Path) -> None:
     assert job is not None
     store.mark_connecting(job.id, "slot-0", "HAL#1")
 
-    clock.advance(61)
+    store.heartbeat(job.id, "slot-0", lease_seconds=2 * IDLE_TIMEOUT_SECONDS)
+    clock.advance(IDLE_TIMEOUT_SECONDS - 1)
+    assert store.reap_expired() == 0
+    clock.advance(2)
     assert store.reap_expired() == 1
     assert store.get_job(job.id, credentials.token).status is JobStatus.NO_SHOW
     assert store.create_job("CRYO#610", _choices()).job.status is JobStatus.QUEUED
@@ -193,6 +197,7 @@ def test_rematch_updates_choices_but_not_delay(tmp_path: Path) -> None:
 
 
 def test_rematch_timeout_completes_reservation(tmp_path: Path) -> None:
+    assert IDLE_TIMEOUT_SECONDS == 600
     clock = Clock()
     store = _store(tmp_path, clock)
     credentials = store.create_job("CRYO#610", _choices())
@@ -202,7 +207,10 @@ def test_rematch_timeout_completes_reservation(tmp_path: Path) -> None:
     store.mark_playing(job.id, "slot-0")
     store.finish_game(job.id, "slot-0", actual_stage="BATTLEFIELD", result="loss")
 
-    clock.advance(61)
+    store.heartbeat(job.id, "slot-0", lease_seconds=2 * IDLE_TIMEOUT_SECONDS)
+    clock.advance(IDLE_TIMEOUT_SECONDS - 1)
+    assert store.reap_expired() == 0
+    clock.advance(2)
     assert store.reap_expired() == 1
     assert store.get_job(job.id, credentials.token).status is JobStatus.COMPLETE
     with pytest.raises(InvalidTransitionError):

@@ -68,6 +68,8 @@ STAGES: Final[tuple[Choice, ...]] = (
 CHARACTER_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in CHARACTERS)
 IMITATION_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in IMITATIONS)
 STAGE_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in STAGES)
+# One window bounds both connecting and choosing a rematch; a player may idle this long before the slot is released.
+IDLE_TIMEOUT_SECONDS: Final[int] = 600
 _PLAYER_CODE = re.compile(r"[A-Z0-9]{1,8}#[0-9]{1,4}")
 
 

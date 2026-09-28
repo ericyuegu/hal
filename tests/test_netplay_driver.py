@@ -13,6 +13,8 @@ from hal.controller import ControllerAction
 from hal.eval import netplay
 from hal.eval import observations
 from hal.eval.results import NetplayProgress
+from hal.eval.results import p95_ms
+from hal.eval.results import p99_ms
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicyInput
@@ -445,3 +447,10 @@ def test_failed_countdown_keeps_primary_error_when_stream_release_fails() -> Non
         )
     assert not client.active
     assert any("diagnostic write failed" in note for note in raised.value.__notes__)
+
+
+def test_tail_latency_uses_nearest_rank_percentiles() -> None:
+    samples = tuple(float(ms) / 1_000.0 for ms in range(1, 101))
+    assert p95_ms(samples) == pytest.approx(95.0)
+    assert p99_ms(samples) == pytest.approx(99.0)
+    assert p99_ms(()) == 0.0

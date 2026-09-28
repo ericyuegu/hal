@@ -65,6 +65,10 @@ class PlayResult:
         return p95_ms(self.inference_seconds)
 
     @property
+    def inference_p99_ms(self) -> float:
+        return p99_ms(self.inference_seconds)
+
+    @property
     def game_fps(self) -> float:
         elapsed = sum(self.frame_interval_seconds)
         return len(self.frame_interval_seconds) / elapsed if elapsed > 0 else 0.0
@@ -74,8 +78,16 @@ class PlayResult:
         return p95_ms(self.frame_interval_seconds)
 
     @property
+    def frame_interval_p99_ms(self) -> float:
+        return p99_ms(self.frame_interval_seconds)
+
+    @property
     def dolphin_step_p95_ms(self) -> float:
         return p95_ms(self.dolphin_step_seconds)
+
+    @property
+    def dolphin_step_p99_ms(self) -> float:
+        return p99_ms(self.dolphin_step_seconds)
 
 
 class PlayObserver(Protocol):
@@ -85,7 +97,15 @@ class PlayObserver(Protocol):
 
 
 def p95_ms(values: Collection[float]) -> float:
+    return _nearest_rank_ms(values, 0.95)
+
+
+def p99_ms(values: Collection[float]) -> float:
+    return _nearest_rank_ms(values, 0.99)
+
+
+def _nearest_rank_ms(values: Collection[float], quantile: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    return 1_000.0 * ordered[math.ceil(0.95 * len(ordered)) - 1]
+    return 1_000.0 * ordered[math.ceil(quantile * len(ordered)) - 1]
