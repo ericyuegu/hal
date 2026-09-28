@@ -139,6 +139,45 @@ describe("runner transitions", () => {
       }
     }));
 
+  it("refuses another worker's retry of an applied transition", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", "CRYO#610", CHOICES);
+      store.claimNext("w0");
+      store.markConnecting("j1", "w0", "HALBOT#1");
+      expect(refused(() => store.markConnecting("j1", "w1", "HALBOT#1"))).toEqual({
+        status: 409,
+        detail: "worker does not own this job",
+      });
+    }));
+
+  it("refuses another worker's retry of a recorded game", () =>
+    withStore((store) => {
+      playing(store);
+      store.finishGame("j1", "w0", 1, "BATTLEFIELD", "win");
+      expect(refused(() => store.finishGame("j1", "w1", 1, "BATTLEFIELD", "win")).status).toBe(409);
+      expect(Number(store.row("j1")?.game_count)).toBe(1);
+    }));
+
+  it("refuses a stale fail retry after another worker claims the job", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", "AAAA#1", CHOICES);
+      store.claimNext("w0");
+      store.fail("j1", "w0", "dolphin_crash", true);
+      store.claimNext("w1");
+      expect(refused(() => store.fail("j1", "w0", "dolphin_crash", true))).toEqual({
+        status: 409,
+        detail: "worker does not own this job",
+      });
+      expect(store.row("j1")).toMatchObject({ status: "leased", lease_owner: "w1" });
+    }));
+
+  it("completes after a cancel during play", () =>
+    withStore((store) => {
+      playing(store);
+      store.cancel("j1", "d1");
+      expect(store.finishGame("j1", "w0", 1, "BATTLEFIELD", "win").status).toBe("complete");
+    }));
+
   it("retries a failed job once at the front of the queue", () =>
     withStore((store) => {
       store.createJob("j1", "d1", "AAAA#1", CHOICES);
