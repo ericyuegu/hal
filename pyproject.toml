@@ -13,6 +13,7 @@ dependencies = [
     "beartype>=0.22.9",
     "boto3",
     "fsspec",
+    "httpx",
     "jaxtyping>=0.3.9",
     "loguru",
     "melee",
@@ -20,6 +21,7 @@ dependencies = [
     "mosaicml-streaming==0.13.0",
     "numpy",
     "peppi-py",
+    "prometheus-client",
     "py7zr==1.1.0",
     "pyarrow>=22",
     "s3fs>=2025",
@@ -29,12 +31,12 @@ dependencies = [
     "tyro",
     "vastai>=1.0.13",
     "wandb",
+    "websockets",
 ]
 
 [project.optional-dependencies]
 netplay-server = [
     "fastapi",
-    "prometheus-client",
     "uvicorn[standard]",
 ]
 
@@ -55,7 +57,6 @@ analysis = [
     "pandas",
 ]
 dev = [
-    "httpx",
     "pre-commit",
     "pytest",
     "ruff",

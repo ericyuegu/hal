@@ -62,10 +62,6 @@ def _job(*, stage: str | None = None) -> Job:
         connect_deadline=None,
         rematch_deadline=None,
         cancel_after_game=False,
-        lease_owner="slot-0",
-        lease_expires_at=None,
-        created_at=0,
-        updated_at=0,
     )
 
 

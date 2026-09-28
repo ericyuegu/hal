@@ -257,7 +257,8 @@ def test_no_contest_cancels_without_recording_a_game(tmp_path: Path) -> None:
     assert canceled.status is JobStatus.CANCELED
     assert canceled.game_count == 0
     assert canceled.last_result is None
-    assert canceled.lease_owner is None
+    with pytest.raises(InvalidTransitionError, match="worker does not own this job"):
+        store.get_worker_job(job.id, "slot-0")
     assert store.create_job("CRYO#610", _choices()).job.status is JobStatus.QUEUED
 
 
@@ -338,6 +339,7 @@ def test_stopped_generation_closes_only_its_leases_without_rewriting_completed_g
         "loss",
         "service_generation_aborted",
     )
-    assert other.status is JobStatus.LEASED and other.lease_owner == owners[3]
+    assert other.status is JobStatus.LEASED
+    assert store.get_worker_job(other.id, owners[3]).status is JobStatus.LEASED
     assert queued.status is JobStatus.QUEUED
     assert store.fail_worker_generation(owners[:3]) == 0

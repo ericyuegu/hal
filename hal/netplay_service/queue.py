@@ -229,10 +229,6 @@ class QueueStore:
             connect_deadline=row["connect_deadline"],
             rematch_deadline=row["rematch_deadline"],
             cancel_after_game=bool(row["cancel_after_game"]),
-            lease_owner=row["lease_owner"],
-            lease_expires_at=row["lease_expires_at"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
             policy_revision=row["policy_revision"],
         )
 

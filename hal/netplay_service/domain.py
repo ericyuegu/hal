@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
+from typing import cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,10 +181,6 @@ class Job:
     connect_deadline: float | None
     rematch_deadline: float | None
     cancel_after_game: bool
-    lease_owner: str | None
-    lease_expires_at: float | None
-    created_at: float
-    updated_at: float
     policy_revision: int = 0
 
 
@@ -191,3 +188,153 @@ class Job:
 class JobCredentials:
     job: Job
     token: str
+
+
+POLICY_CONFIG_VERSION: Final[int] = 1
+_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
+_POLICY_FIELDS: Final[frozenset[str]] = frozenset(
+    (
+        "schema_version",
+        "bundle_sha256",
+        "bundle_r2_key",
+        "vocabulary_sha256",
+        "characters",
+        "imitations",
+        "stages",
+        "online_delays",
+        "desired_return_range",
+        "default_desired_return",
+        "temperature_range",
+        "default_temperature",
+        "masked_identity",
+    )
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyConfig:
+    """The active policy as published to the queue Worker, which checks the same rules."""
+
+    bundle_sha256: str
+    bundle_r2_key: str
+    vocabulary_sha256: str
+    characters: tuple[Choice, ...]
+    imitations: tuple[Choice, ...]
+    stages: tuple[Choice, ...]
+    online_delays: tuple[int, ...]
+    desired_return_range: tuple[float, float]
+    default_desired_return: float
+    temperature_range: tuple[float, float]
+    default_temperature: float
+    masked_identity: bool
+
+    def __post_init__(self) -> None:
+        for name, value in (("bundle_sha256", self.bundle_sha256), ("vocabulary_sha256", self.vocabulary_sha256)):
+            if _SHA256.fullmatch(value) is None:
+                raise ValueError(f"policy config {name} must be lowercase SHA-256 hex")
+        if not self.bundle_r2_key:
+            raise ValueError("policy config bundle_r2_key must be non-empty")
+        for name, choices in (
+            ("characters", self.characters),
+            ("imitations", self.imitations),
+            ("stages", self.stages),
+        ):
+            values = [choice.value for choice in choices]
+            if not values or len(set(values)) != len(values) or not all(c.value and c.label for c in choices):
+                raise ValueError(f"policy config {name} must be non-empty, labeled, and unique")
+        if not self.online_delays or any(delay not in (2, 3) for delay in self.online_delays):
+            raise ValueError("policy config online_delays must be a non-empty subset of (2, 3)")
+        for name, (low, high), default in (
+            ("desired_return", self.desired_return_range, self.default_desired_return),
+            ("temperature", self.temperature_range, self.default_temperature),
+        ):
+            if not (math.isfinite(low) and math.isfinite(high) and low < high and low <= default <= high):
+                raise ValueError(f"policy config {name} range and default are invalid")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": POLICY_CONFIG_VERSION,
+            "bundle_sha256": self.bundle_sha256,
+            "bundle_r2_key": self.bundle_r2_key,
+            "vocabulary_sha256": self.vocabulary_sha256,
+            "characters": [{"value": choice.value, "label": choice.label} for choice in self.characters],
+            "imitations": [{"value": choice.value, "label": choice.label} for choice in self.imitations],
+            "stages": [{"value": choice.value, "label": choice.label} for choice in self.stages],
+            "online_delays": list(self.online_delays),
+            "desired_return_range": list(self.desired_return_range),
+            "default_desired_return": self.default_desired_return,
+            "temperature_range": list(self.temperature_range),
+            "default_temperature": self.default_temperature,
+            "masked_identity": self.masked_identity,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> PolicyConfig:
+        if not isinstance(payload, dict) or set(payload) != _POLICY_FIELDS:
+            raise ValueError("policy config fields changed")
+        fields = cast(dict[str, object], payload)
+        if _integer(fields["schema_version"], "schema_version") != POLICY_CONFIG_VERSION:
+            raise ValueError(f"policy config schema_version must be {POLICY_CONFIG_VERSION}")
+        return cls(
+            bundle_sha256=_text(fields["bundle_sha256"], "bundle_sha256"),
+            bundle_r2_key=_text(fields["bundle_r2_key"], "bundle_r2_key"),
+            vocabulary_sha256=_text(fields["vocabulary_sha256"], "vocabulary_sha256"),
+            characters=_choices(fields["characters"], "characters"),
+            imitations=_choices(fields["imitations"], "imitations"),
+            stages=_choices(fields["stages"], "stages"),
+            online_delays=tuple(
+                _integer(delay, "online_delays") for delay in _list(fields["online_delays"], "online_delays")
+            ),
+            desired_return_range=_range(fields["desired_return_range"], "desired_return_range"),
+            default_desired_return=_number(fields["default_desired_return"], "default_desired_return"),
+            temperature_range=_range(fields["temperature_range"], "temperature_range"),
+            default_temperature=_number(fields["default_temperature"], "default_temperature"),
+            masked_identity=_boolean(fields["masked_identity"], "masked_identity"),
+        )
+
+
+def _text(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    return value
+
+
+def _integer(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def _number(value: object, name: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a number")
+    return float(value)
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def _list(value: object, name: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list")
+    return cast(list[object], value)
+
+
+def _range(value: object, name: str) -> tuple[float, float]:
+    items = _list(value, name)
+    if len(items) != 2:
+        raise ValueError(f"{name} must have two numbers")
+    return _number(items[0], name), _number(items[1], name)
+
+
+def _choices(value: object, name: str) -> tuple[Choice, ...]:
+    choices: list[Choice] = []
+    for item in _list(value, name):
+        if not isinstance(item, dict) or set(item) != {"value", "label"}:
+            raise ValueError(f"{name} entries need exactly value and label")
+        entry = cast(dict[str, object], item)
+        choices.append(Choice(_text(entry["value"], name), _text(entry["label"], name)))
+    return tuple(choices)
