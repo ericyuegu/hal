@@ -3358,4 +3358,4 @@ Plan B2 is not written yet. It must implement these decisions, which B1 depends 
 8. **Deletion.** B2 deletes `QueueStore`. The runner's unit tests then need a `RunnerQueue` fake. The simplest is an in-memory port of the store's transitions, or `RemoteQueue` against `local_worker`. B2 chooses between them.
 9. **Asset pins.** `deploy/netplay/assets.json` does not exist yet. Running `hal-netplay-admin assets pin` (Task 8 Step 7) is a B2 prerequisite. The owner does it.
 
-**Note on session start errors.** A `409` from `start_session` has three causes: the bundle is not the active policy, too few bot accounts are free, or the runner protocol version is not the Worker's. Only the detail text tells them apart, so B2 logs the detail.
+**Note on session start errors.** A `409` from `start_session` has four causes: the bundle is not the active policy, too few bot accounts are free, the runner protocol version is not the Worker's, or the session ID exists with different settings. Only the detail text tells them apart, so B2 logs the detail.
