@@ -76,6 +76,11 @@ describe("requests", () => {
     expect(parseCreate({ ...base, desired_return: null }, policy).desired_return).toBeNull();
   });
 
+  it("takes create defaults from the policy", () => {
+    const custom = { ...policy, default_desired_return: 25, default_temperature: 0.9 };
+    expect(parseCreate(base, custom)).toMatchObject({ desired_return: 25, temperature: 0.9 });
+  });
+
   it("rejects malformed create bodies with 422", () => {
     for (const body of [
       null,

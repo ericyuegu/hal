@@ -64,7 +64,8 @@ export function parseCreate(raw: unknown, policy: PolicyConfig): CreateRequest {
   );
   const code = str(value.player_code, "player_code");
   if (code.length < 3 || code.length > 13) throw new HttpError(422, "player_code must have 3 to 13 characters");
-  const desired = "desired_return" in value ? nullableNum(value.desired_return, "desired_return") : 20;
+  const desired =
+    "desired_return" in value ? nullableNum(value.desired_return, "desired_return") : policy.default_desired_return;
   return {
     player_code: code,
     character: str(value.character, "character"),
@@ -74,7 +75,7 @@ export function parseCreate(raw: unknown, policy: PolicyConfig): CreateRequest {
     temperature:
       "temperature" in value
         ? inRange(num(value.temperature, "temperature"), policy.temperature_range, "temperature")
-        : 1,
+        : policy.default_temperature,
   };
 }
 
