@@ -243,6 +243,13 @@ export class SessionStore {
     return this.slotWorker(this.live(id), slot);
   }
 
+  // A deferred replay upload can outlive its session, so an ended session may still record.
+  recordingWorker(id: string, slot: number): string {
+    const row = this.rows("SELECT * FROM sessions WHERE id = ?", id)[0];
+    if (row === undefined) throw new HttpError(404, "session not found");
+    return this.slotWorker(row, slot);
+  }
+
   drain(id: string): void {
     this.live(id);
     this.sql.exec("UPDATE sessions SET draining = 1 WHERE id = ?", id);

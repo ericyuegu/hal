@@ -326,7 +326,8 @@ export class Queue extends DurableObject<Env> {
     return this.run(() => {
       const policy = this.requirePolicy();
       const job = this.tx(() => {
-        const worker = this.sessions.jobWorker(sessionId, slot);
+        const worker =
+          action === "replay" ? this.sessions.recordingWorker(sessionId, slot) : this.sessions.jobWorker(sessionId, slot);
         const log = (kind: string, detail: Record<string, unknown> = {}) =>
           this.events.log(kind, { job: jobId, session: sessionId, slot, ...detail });
         switch (action) {
@@ -382,6 +383,7 @@ export class Queue extends DurableObject<Env> {
             const number = int(value.game_number, "game_number");
             const result = this.jobs.recordReplay(
               jobId,
+              worker,
               number,
               str(value.key, "key"),
               str(value.sha256, "sha256"),

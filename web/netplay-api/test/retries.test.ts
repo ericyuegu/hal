@@ -119,3 +119,49 @@ describe("retried runner calls", () => {
     expect(await report(SESSION, 2)).toMatchObject({ status: 200, body: { draining: false, stream: null } });
   });
 });
+
+describe("replay ownership", () => {
+  async function playOneGame(): Promise<string> {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "OWNER#1" } });
+    const job = (await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } })).body;
+    const runner = { session: SESSION, slot: 0 };
+    await call("POST", `/v1/runner/jobs/${job.id}/connecting`, { runner, body: { connect_code: "BOT0#1" } });
+    await call("POST", `/v1/runner/jobs/${job.id}/playing`, { runner });
+    await call("POST", `/v1/runner/jobs/${job.id}/finish-game`, {
+      runner,
+      body: { game_number: 1, actual_stage: "BATTLEFIELD", result: "win" },
+    });
+    return job.id as string;
+  }
+
+  const REPLAY = { game_number: 1, key: "replays/a.slp", sha256: "a".repeat(64), size: 10, etag: "e" };
+
+  it("refuses a replay from another slot or another session", async () => {
+    const id = await playOneGame();
+    const other = { ...START, session_id: "other-session-0001", slots: 1 };
+    expect((await call("POST", "/v1/runner/sessions", { runner: true, body: other })).status).toBe(201);
+    for (const runner of [
+      { session: SESSION, slot: 1 },
+      { session: "other-session-0001", slot: 0 },
+    ]) {
+      expect(await call("POST", `/v1/runner/jobs/${id}/replay`, { runner, body: REPLAY })).toMatchObject({
+        status: 409,
+        body: { detail: "worker did not play this game" },
+      });
+    }
+  });
+
+  it("accepts the playing worker's replay after its session ends", async () => {
+    const id = await playOneGame();
+    await call("DELETE", `/v1/runner/sessions/${SESSION}`, { runner: true });
+    const runner = { session: SESSION, slot: 0 };
+    expect((await call("POST", `/v1/runner/jobs/${id}/replay`, { runner, body: REPLAY })).status).toBe(200);
+    expect((await call("POST", `/v1/runner/jobs/${id}/replay`, { runner, body: REPLAY })).status).toBe(200);
+    expect(
+      (await call("POST", `/v1/runner/jobs/${id}/replay`, { runner: { session: "never-existed-0001", slot: 0 }, body: REPLAY }))
+        .status,
+    ).toBe(404);
+  });
+});

@@ -216,11 +216,14 @@ describe("runner transitions", () => {
   it("records a replay once per game", () =>
     withStore((store) => {
       playing(store);
-      expect(refused(() => store.recordReplay("j1", 1, "k", "a".repeat(64), 5, "e")).detail).toBe("game is absent");
+      expect(refused(() => store.recordReplay("j1", "w0", 1, "k", "a".repeat(64), 5, "e")).detail).toBe("game is absent");
       store.finishGame("j1", "w0", 1, "BATTLEFIELD", "win");
-      store.recordReplay("j1", 1, "k", "a".repeat(64), 5, "e");
-      store.recordReplay("j1", 1, "k", "a".repeat(64), 5, "e");
-      expect(refused(() => store.recordReplay("j1", 1, "k", "a".repeat(64), 5, "other")).detail).toBe(
+      store.recordReplay("j1", "w0", 1, "k", "a".repeat(64), 5, "e");
+      store.recordReplay("j1", "w0", 1, "k", "a".repeat(64), 5, "e");
+      expect(refused(() => store.recordReplay("j1", "w1", 1, "k", "a".repeat(64), 5, "e")).detail).toBe(
+        "worker did not play this game",
+      );
+      expect(refused(() => store.recordReplay("j1", "w0", 1, "k", "a".repeat(64), 5, "other")).detail).toBe(
         "game already has a different replay",
       );
     }));

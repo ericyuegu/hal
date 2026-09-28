@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS games (
   game_number INTEGER NOT NULL,
   actual_stage TEXT NOT NULL,
   result TEXT NOT NULL,
+  worker TEXT NOT NULL,
   replay_key TEXT,
   replay_sha256 TEXT,
   replay_size INTEGER,
@@ -410,11 +411,12 @@ export class JobStore {
       id,
     );
     this.exec(
-      "INSERT INTO games(job_id, game_number, actual_stage, result, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO games(job_id, game_number, actual_stage, result, worker, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       id,
       gameNumber,
       stage,
       result,
+      worker,
       now,
     );
     return this.response(this.reload(id));
@@ -460,13 +462,14 @@ export class JobStore {
     return this.response(this.reload(id));
   }
 
-  recordReplay(id: string, gameNumber: number, key: string, sha256: string, size: number, etag: string): JobResponse {
+  recordReplay(id: string, worker: string, gameNumber: number, key: string, sha256: string, size: number, etag: string): JobResponse {
     const game = this.first(
-      "SELECT replay_key, replay_sha256, replay_size, replay_etag FROM games WHERE job_id = ? AND game_number = ?",
+      "SELECT worker, replay_key, replay_sha256, replay_size, replay_etag FROM games WHERE job_id = ? AND game_number = ?",
       id,
       gameNumber,
     );
     if (game === null) throw new HttpError(409, "game is absent");
+    if (game.worker !== worker) throw new HttpError(409, "worker did not play this game");
     const same =
       game.replay_key === key && game.replay_sha256 === sha256 && game.replay_size === size && game.replay_etag === etag;
     if (!same) {
