@@ -283,6 +283,9 @@ export class Queue extends DurableObject<Env> {
     return this.run(() => {
       const slot = int(fields(raw, ["slot"], ["slot"]).slot, "slot");
       return this.tx(() => {
+        // A held lease is returned even after a drain or republish, or it would expire as lease_expired.
+        const held = this.jobs.heldLease(this.sessions.jobWorker(sessionId, slot));
+        if (held !== null) return held;
         const worker = this.sessions.claimWorker(sessionId, slot, this.policy());
         const job = this.jobs.claimNext(worker);
         if (job !== null) this.events.log("job_claimed", { job: job.id, session: sessionId, slot });

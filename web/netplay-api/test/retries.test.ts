@@ -46,8 +46,32 @@ describe("retried runner calls", () => {
     expect(first.status).toBe(200);
     expect(second.body).toEqual(first.body);
     expect(second.body.attempt).toBe(1);
+    const events = await call("GET", `/v1/admin/events?job=${first.body.id}`, { admin: true });
+    expect(events.body.events.filter((event: { kind: string }) => event.kind === "job_claimed")).toHaveLength(1);
     const other = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } });
     expect(other.body.player_code).toBe("OTHER#1");
+  });
+
+  it("returns the slot's leased job when a claim is repeated after a drain", async () => {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: CREATE });
+    const first = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    await call("POST", `/v1/runner/sessions/${SESSION}/drain`, { runner: true });
+    const second = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    expect(second).toMatchObject({ status: 200, body: first.body });
+    expect((await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } })).status).toBe(409);
+  });
+
+  it("returns the slot's leased job when a claim is repeated after a policy republish", async () => {
+    await start();
+    await report(SESSION, 2);
+    await call("POST", "/v1/jobs", { body: CREATE });
+    const first = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    await publish({ ...POLICY, bundle_sha256: "e".repeat(64) });
+    const second = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 0 } });
+    expect(second).toMatchObject({ status: 200, body: first.body });
+    expect((await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } })).status).toBe(409);
   });
 
   it("refuses a claim from a slot whose job is past leased", async () => {
