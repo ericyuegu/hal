@@ -40,6 +40,12 @@ export type RunnerAction =
   | "forfeit"
   | "replay";
 
+interface LiveAttachment {
+  jobId: string;
+  worker: string;
+  released: boolean;
+}
+
 export class Queue extends DurableObject<Env> {
   private readonly jobs: JobStore;
   private readonly sessions: SessionStore;
@@ -481,26 +487,36 @@ export class Queue extends DurableObject<Env> {
     }
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server, [`job:${jobId}`]);
-    server.serializeAttachment({ jobId, worker });
+    server.serializeAttachment({ jobId, worker, released: false } satisfies LiveAttachment);
     server.send(this.settingsMessage(jobId)!);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // getWebSockets still lists a socket the server closed until the client
+  // acknowledges the close, and send() on it throws.
+  private openSockets(jobId: string): { socket: WebSocket; worker: string }[] {
+    return this.ctx.getWebSockets(`job:${jobId}`).flatMap((socket) => {
+      const attachment = socket.deserializeAttachment() as LiveAttachment;
+      if (attachment.released || socket.readyState !== WebSocket.READY_STATE_OPEN) return [];
+      return [{ socket, worker: attachment.worker }];
+    });
   }
 
   private broadcastSettings(jobId: string): void {
     const message = this.settingsMessage(jobId);
     if (message === null) return;
-    for (const socket of this.ctx.getWebSockets(`job:${jobId}`)) socket.send(message);
+    for (const { socket } of this.openSockets(jobId)) socket.send(message);
   }
 
   // A socket's runner no longer owns its job: tell it, then close.
   private release(jobIds: readonly string[]): void {
     for (const jobId of new Set(jobIds)) {
       const row = this.jobs.row(jobId);
-      for (const socket of this.ctx.getWebSockets(`job:${jobId}`)) {
-        const { worker } = socket.deserializeAttachment() as { jobId: string; worker: string };
+      for (const { socket, worker } of this.openSockets(jobId)) {
         if (row === null || TERMINAL_STATUSES.has(row.status as string) || row.lease_owner !== worker) {
           socket.send(JSON.stringify({ type: "released" }));
           socket.close(1000, "released");
+          socket.serializeAttachment({ jobId, worker, released: true } satisfies LiveAttachment);
         }
       }
     }

@@ -67,13 +67,36 @@ describe("live settings", () => {
     const { session, job } = await claimed();
     const { messages, socket } = await open(job.id, session, 0);
     await until(() => messages.length === 1);
+    const closed = new Promise((resolve) => socket.addEventListener("close", resolve));
     socket.close(1000, "done");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await closed;
     const update = await call("PATCH", `/v1/jobs/${job.id}/policy`, { token: job.token, body: { desired_return: 35 } });
     expect(update.status).toBe(200);
     const again = await open(job.id, session, 0);
     await until(() => again.messages.length === 1);
     expect(again.messages[0]).toEqual({ type: "settings", revision: 1, desired_return: 35, temperature: 1 });
+  });
+
+  it("keeps serving the job after releasing a socket the runner never acknowledged", async () => {
+    const { session, job } = await claimed();
+    const response = await SELF.fetch(`https://20xx.xyz/v1/runner/jobs/${job.id}/live`, {
+      headers: {
+        Upgrade: "websocket",
+        Authorization: `Bearer ${RUNNER_TOKEN}`,
+        "X-HAL-Session": session,
+        "X-HAL-Slot": "0",
+      },
+    });
+    expect(response.status).toBe(101);
+    const fail = await call("POST", `/v1/runner/jobs/${job.id}/fail`, {
+      runner: { session, slot: 0 },
+      body: { error_code: "dolphin_crashed", retryable: true },
+    });
+    expect(fail.status).toBe(200);
+    expect(fail.body.status).toBe("queued");
+    const update = await call("PATCH", `/v1/jobs/${job.id}/policy`, { token: job.token, body: { desired_return: 35 } });
+    expect(update.status).toBe(200);
+    expect((await call("DELETE", `/v1/jobs/${job.id}`, { token: job.token })).status).toBe(200);
   });
 
   it("refuses a socket from a worker that does not own the job", async () => {
