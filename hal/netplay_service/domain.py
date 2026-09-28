@@ -234,14 +234,18 @@ class PolicyConfig:
                 raise ValueError(f"policy config {name} must be lowercase SHA-256 hex")
         if not self.bundle_r2_key:
             raise ValueError("policy config bundle_r2_key must be non-empty")
-        for name, choices in (
-            ("characters", self.characters),
-            ("imitations", self.imitations),
-            ("stages", self.stages),
+        # The runner parses every leased job against the static domain, so a published choice or range
+        # outside it would let the Worker lease a job that the runner then rejects.
+        for name, choices, supported in (
+            ("characters", self.characters, CHARACTER_VALUES),
+            ("imitations", self.imitations, IMITATION_VALUES),
+            ("stages", self.stages, STAGE_VALUES),
         ):
             values = [choice.value for choice in choices]
             if not values or len(set(values)) != len(values) or not all(c.value and c.label for c in choices):
                 raise ValueError(f"policy config {name} must be non-empty, labeled, and unique")
+            if not set(values) <= supported:
+                raise ValueError(f"policy config {name} has unsupported values {sorted(set(values) - supported)}")
         if not self.online_delays or any(delay not in (2, 3) for delay in self.online_delays):
             raise ValueError("policy config online_delays must be a non-empty subset of (2, 3)")
         for name, (low, high), default in (
@@ -250,6 +254,10 @@ class PolicyConfig:
         ):
             if not (math.isfinite(low) and math.isfinite(high) and low < high and low <= default <= high):
                 raise ValueError(f"policy config {name} range and default are invalid")
+        validate_desired_return(self.desired_return_range[0])
+        validate_desired_return(self.desired_return_range[1])
+        validate_temperature(self.temperature_range[0])
+        validate_temperature(self.temperature_range[1])
 
     def to_payload(self) -> dict[str, object]:
         return {

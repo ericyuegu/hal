@@ -43,6 +43,10 @@ def test_policy_config_round_trips_the_worker_payload() -> None:
         ({"default_desired_return": 41.0}, "desired_return"),
         ({"characters": [{"value": "FOX"}]}, "value and label"),
         ({"masked_identity": 0}, "masked_identity"),
+        ({"stages": [{"value": "CORNERIA", "label": "Corneria"}]}, "stages has unsupported values"),
+        ({"characters": [{"value": "SANDBAG", "label": "Sandbag"}]}, "characters has unsupported values"),
+        ({"temperature_range": [0.5, 1.1]}, "temperature must be in"),
+        ({"desired_return_range": [0.0, 50.0]}, "desired_return must be in"),
     ],
 )
 def test_policy_config_rejects_drift(change: dict[str, object], message: str) -> None:

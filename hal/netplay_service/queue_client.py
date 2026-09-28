@@ -141,7 +141,8 @@ def _detail(response: httpx.Response) -> str:
 
 
 def _checked(response: httpx.Response) -> httpx.Response:
-    if response.status_code < 400:
+    # A 3xx is an error too: Cloudflare Access answers a rejected service token with a login redirect.
+    if 200 <= response.status_code < 300:
         return response
     detail = _detail(response)
     if response.status_code == 409:

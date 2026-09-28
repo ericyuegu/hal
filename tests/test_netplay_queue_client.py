@@ -122,6 +122,13 @@ def test_4xx_is_not_retried_and_maps_to_errors(status: int, error: type[Exceptio
     assert len(script.requests) == 1
 
 
+def test_redirect_is_rejected_not_parsed() -> None:
+    script = _Script(httpx.Response(302, headers={"Location": "https://20xx.cloudflareaccess.com/login"}))
+    with pytest.raises(QueueRejectedError, match=r"\(302\)"):
+        _queue(script, []).claim_next(WORKER)
+    assert len(script.requests) == 1
+
+
 def test_session_end_is_a_lost_lease() -> None:
     assert issubclass(SessionEndedError, InvalidTransitionError)
 
