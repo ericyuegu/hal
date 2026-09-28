@@ -6,6 +6,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import pickle
 import platform
 import secrets
 import signal
@@ -17,10 +18,12 @@ from contextlib import closing
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from functools import partial
 from multiprocessing.connection import Connection
+from multiprocessing.context import SpawnContext
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Protocol
@@ -49,6 +52,8 @@ from hal.inference.api import RuntimeConfig
 from hal.inference.checkpoints import resolve_checkpoint
 from hal.inference.client import InferenceClient
 from hal.inference.client import InferenceUnavailable
+from hal.inference.client import StreamInvalidate
+from hal.inference.client import StreamInvalidated
 from hal.inference.cuda_graph import CaptureCounter
 from hal.inference.cuda_graph import CompilationStartCounter
 from hal.inference.cuda_graph import count_compilation_starts
@@ -201,6 +206,7 @@ _NETPLAY_TIMINGS = (
 )
 _ENGINE_RECOVERY_TIMEOUT_SECONDS = 120.0
 _ENGINE_PROGRESS_TIMEOUT_SECONDS = 1.0
+_SLOT_RESET_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +221,7 @@ class _InferenceProcessConfig:
     source_git_sha: str
     bundle_sha256: str
     measurement_dir: Path | None
+    standby_for: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +324,12 @@ def _prepare_netplay_engine(
         raise RuntimeError("netplay profiles allocated more than one checkpoint model")
     freeze_inference_runtime()
     hardware = torch.cuda.get_device_name(device) if device.type == "cuda" else platform.processor()
-    engine = InferenceEngine(policies, connections, batch_wait_seconds=config.batch_wait_seconds)
+    engine = InferenceEngine(
+        policies,
+        connections,
+        batch_wait_seconds=config.batch_wait_seconds,
+        standby_for=dict(config.standby_for),
+    )
     ready = _EngineReady(
         artifact.spec,
         model.cfg.L_ctx,
@@ -1243,6 +1255,21 @@ def _handle_reservation(
             store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
 
 
+def _slot_process(
+    context: SpawnContext,
+    config: SlotConfig,
+    ready: _EngineReady,
+    runtime: RuntimeConfig,
+    connection: Connection,
+    stop: _StopEvent,
+) -> BaseProcess:
+    return context.Process(
+        target=_slot_worker,
+        args=(config, ready.spec, runtime, connection, stop, _NETPLAY_TIMINGS, ready.context_frames, ready.profiles),
+        name=f"hal-netplay-slot-{config.slot}",
+    )
+
+
 def _start_slot_process(process: BaseProcess, child_connection: Connection) -> None:
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
@@ -1250,6 +1277,111 @@ def _start_slot_process(process: BaseProcess, child_connection: Connection) -> N
     finally:
         child_connection.close()
         signal.signal(signal.SIGINT, previous)
+
+
+def _invalidate_slot_connection(connection: Connection, stream_id: int) -> bool:
+    """Wait for the standby pipe's reset barrier before admitting a replacement."""
+    token = secrets.token_hex(8)
+    deadline = time.monotonic() + _SLOT_RESET_TIMEOUT_SECONDS
+    fd: int | None = None
+    was_blocking: bool | None = None
+    success = False
+    try:
+        fd = connection.fileno()
+        was_blocking = os.get_blocking(fd)
+        # A partial control response must fail the reset without blocking the supervisor.
+        os.set_blocking(fd, False)
+        connection.send(StreamInvalidate(stream_id, token))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not connection.poll(remaining):
+                break
+            response = connection.recv()
+            if isinstance(response, StreamInvalidated):
+                success = response == StreamInvalidated(stream_id, token)
+            break
+    except (EOFError, OSError, ValueError, pickle.UnpicklingError) as error:
+        logger.warning("could not reset failed netplay slot stream {}: {}", stream_id, error)
+    finally:
+        if fd is not None and was_blocking is not None:
+            try:
+                os.set_blocking(fd, was_blocking)
+            except OSError:
+                success = False
+    return success
+
+
+def _stop_slot_process(process: BaseProcess) -> None:
+    if process.pid is None:
+        return
+    deadline = time.monotonic() + 2.0
+    if process.is_alive():
+        with suppress(ProcessLookupError):
+            process.terminate()
+    process.join(timeout=min(0.75, max(0.0, deadline - time.monotonic())))
+    if process.is_alive():
+        with suppress(ProcessLookupError):
+            process.kill()
+    process.join(timeout=max(0.0, deadline - time.monotonic()))
+    if process.is_alive():
+        raise RuntimeError(f"netplay slot {process.name} could not terminate within two seconds")
+
+
+def _replace_failed_slot(
+    context: SpawnContext,
+    failed: BaseProcess,
+    config: SlotConfig,
+    ready: _EngineReady,
+    runtime: RuntimeConfig,
+    connection: Connection,
+    stop: _StopEvent,
+    *,
+    restart_allowed: bool,
+    capacity: int,
+    processes: list[BaseProcess],
+    worker_ids: list[str],
+) -> tuple[SlotConfig, BaseProcess] | None:
+    failed.join(timeout=0)
+    affected = QueueStore(config.database).fail_worker_generation((config.worker_id,))
+    logger.warning(
+        "netplay slot {} exited code={} worker={} affected_leases={}",
+        config.slot,
+        failed.exitcode,
+        config.worker_id,
+        affected,
+    )
+    config.status_path.unlink(missing_ok=True)
+    if not restart_allowed:
+        logger.error("netplay slot {} replacement failed; capacity reduced", config.slot)
+        return None
+    if not _invalidate_slot_connection(connection, config.stream_id):
+        connection.close()
+        logger.error("netplay slot {} standby connection could not reset the route; capacity reduced", config.slot)
+        return None
+    replacement = replace(
+        config,
+        worker_id=f"{config.worker_id}-restart-1",
+        stream_id=config.stream_id + capacity,
+    )
+    process: BaseProcess | None = None
+    try:
+        process = _slot_process(context, replacement, ready, runtime, connection, stop)
+        processes.append(process)
+        worker_ids.append(replacement.worker_id)
+        _start_slot_process(process, connection)
+    except (OSError, RuntimeError) as error:
+        if process is not None:
+            _stop_slot_process(process)
+        connection.close()
+        logger.error("netplay slot {} replacement could not start: {}", config.slot, error)
+        return None
+    logger.info(
+        "netplay slot {} restarted worker={} stream={} after isolated failure",
+        config.slot,
+        replacement.worker_id,
+        replacement.stream_id,
+    )
+    return replacement, process
 
 
 def _await_engine_ready(
@@ -1360,11 +1492,15 @@ def _run_generation(
     context = mp.get_context("spawn")
     generation_id = secrets.token_hex(8)
     worker_ids = tuple(f"generation-{generation_id}-slot-{slot}" for slot in range(len(config.user_jsons)))
+    all_worker_ids = list(worker_ids)
+    capacity = len(config.user_jsons)
     stop = context.Event()
-    status_receive, status_send, parent_connections, child_connections = _open_generation_pipes(
-        context, len(config.user_jsons)
-    )
+    status_receive, status_send, parent_connections, child_connections = _open_generation_pipes(context, 2 * capacity)
     processes: list[BaseProcess] = []
+    slot_processes: dict[int, BaseProcess | None] = {}
+    slot_configs: dict[int, SlotConfig] = {}
+    replacement_deadlines: dict[int, tuple[float, float]] = {}
+    restart_counts: dict[int, int] = {}
     slot_status_paths = tuple(_slot_status_path(config.status_path, slot) for slot in range(len(config.user_jsons)))
     try:
         if config.measurement_dir is not None:
@@ -1394,6 +1530,7 @@ def _run_generation(
             config.git_sha,
             policy_sha256,
             config.measurement_dir,
+            tuple((slot + capacity, slot) for slot in range(capacity)),
         )
         gpu_process = context.Process(
             target=_gpu_inference_process,
@@ -1448,22 +1585,12 @@ def _run_generation(
                 measurement_dir=config.measurement_dir,
                 publish_replays=config.publish_replays,
             )
-            process = context.Process(
-                target=_slot_worker,
-                args=(
-                    slot_config,
-                    ready.spec,
-                    runtime,
-                    child_connections[slot],
-                    stop,
-                    _NETPLAY_TIMINGS,
-                    ready.context_frames,
-                    ready.profiles,
-                ),
-                name=f"hal-netplay-slot-{slot}",
-            )
+            process = _slot_process(context, slot_config, ready, runtime, child_connections[slot], stop)
             processes.append(process)
             _start_slot_process(process, child_connections[slot])
+            slot_processes[slot] = process
+            slot_configs[slot] = slot_config
+            restart_counts[slot] = 0
         logger.info(
             "netplay runner ready generation={} slots={} checkpoint={} capacity={}",
             generation_id,
@@ -1493,9 +1620,52 @@ def _run_generation(
                 raise _EngineLost(f"inference process exited with code {gpu_process.exitcode}")
             if time.monotonic() - last_pulse >= _ENGINE_PROGRESS_TIMEOUT_SECONDS:
                 raise _EngineLost("inference process made no progress for one second")
-            failed = [process for process in processes[1:] if not process.is_alive()]
-            if failed:
-                raise RuntimeError(f"netplay slot process exited with code {failed[0].exitcode}")
+            for slot, (deadline, started_at) in tuple(replacement_deadlines.items()):
+                process = slot_processes[slot]
+                if process is None or not process.is_alive():
+                    continue
+                try:
+                    slot_status = read_slot_status(slot_status_paths[slot])
+                except ValueError:
+                    slot_status = None
+                if (
+                    slot_status is not None
+                    and slot_status.updated_at >= started_at
+                    and slot_status.state in (SlotState.IDLE, SlotState.CONNECTING, SlotState.PLAYING)
+                ):
+                    del replacement_deadlines[slot]
+                elif time.monotonic() >= deadline:
+                    logger.error("netplay slot {} replacement did not become ready within startup grace", slot)
+                    _stop_slot_process(process)
+            for slot, process in tuple(slot_processes.items()):
+                if process is None or process.is_alive():
+                    continue
+                replacement_deadlines.pop(slot, None)
+                restart_started_at = time.time()
+                replacement = _replace_failed_slot(
+                    context,
+                    process,
+                    slot_configs[slot],
+                    ready,
+                    runtime,
+                    child_connections[slot + capacity],
+                    stop,
+                    restart_allowed=restart_counts[slot] == 0,
+                    capacity=capacity,
+                    processes=processes,
+                    worker_ids=all_worker_ids,
+                )
+                if replacement is None:
+                    slot_processes[slot] = None
+                    continue
+                slot_configs[slot], slot_processes[slot] = replacement
+                restart_counts[slot] += 1
+                replacement_deadlines[slot] = (
+                    time.monotonic() + SLOT_STARTUP_GRACE_SECONDS,
+                    restart_started_at,
+                )
+            if slot_processes and all(process is None for process in slot_processes.values()):
+                raise RuntimeError("all netplay slots are unavailable")
             if time.monotonic() >= next_status:
                 status = _write_status(
                     config.status_path,
@@ -1522,7 +1692,7 @@ def _run_generation(
             _terminate_processes(processes, stop)
         finally:
             try:
-                failed_leases = QueueStore(config.database).fail_worker_generation(worker_ids)
+                failed_leases = QueueStore(config.database).fail_worker_generation(all_worker_ids)
                 if failed_leases:
                     logger.warning("netplay generation {} aborted {} active leases", generation_id, failed_leases)
             finally:

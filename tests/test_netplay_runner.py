@@ -29,6 +29,8 @@ from hal.inference.api import PolicySpec
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
 from hal.inference.benchmark import LatencyMeasurement
+from hal.inference.client import StreamInvalidate
+from hal.inference.client import StreamInvalidated
 from hal.inference.cuda_graph import CaptureCounter
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -392,6 +394,109 @@ def test_slot_process_inherits_ignored_terminal_interrupt(monkeypatch: pytest.Mo
     ]
     process.start.assert_called_once_with()
     child_connection.close.assert_called_once_with()
+
+
+def test_standby_reset_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    from multiprocessing import Pipe
+
+    engine, standby = Pipe()
+    monkeypatch.setattr(runner, "_SLOT_RESET_TIMEOUT_SECONDS", 0.02)
+    try:
+        started = time.monotonic()
+        assert not runner._invalidate_slot_connection(standby, 100)
+        assert time.monotonic() - started < 0.2
+        assert not standby.closed
+        engine.close()
+        assert not runner._invalidate_slot_connection(standby, 100)
+    finally:
+        engine.close()
+        standby.close()
+
+
+def test_failed_slot_restarts_once_without_ending_the_other_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from multiprocessing import Pipe
+
+    store = QueueStore(tmp_path / "queue.sqlite3")
+    first = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
+    second = store.create_job("AXE#611", MatchChoices("FOX", "IBDW#0", 2))
+    assert store.claim_next("slot-0") is not None
+    store.mark_connecting(first.job.id, "slot-0", "BOT#1")
+    store.mark_playing(first.job.id, "slot-0")
+    assert store.claim_next("slot-1") is not None
+    store.mark_connecting(second.job.id, "slot-1", "BOT#2")
+    store.mark_playing(second.job.id, "slot-1")
+    old = Mock(pid=123, exitcode=1)
+    old.is_alive.return_value = False
+    replacement = Mock(pid=124, exitcode=None)
+    monkeypatch.setattr(runner, "_slot_process", Mock(return_value=replacement))
+    engine, standby = Pipe()
+
+    def acknowledge() -> None:
+        request = engine.recv()
+        assert isinstance(request, StreamInvalidate)
+        engine.send(StreamInvalidated(request.stream_id, request.token))
+
+    responder = threading.Thread(target=acknowledge, daemon=True)
+    responder.start()
+    processes = [old]
+    workers = ["slot-0", "slot-1"]
+    try:
+        outcome = runner._replace_failed_slot(
+            Mock(),
+            old,
+            _slot_config(tmp_path),
+            Mock(),
+            RuntimeConfig(1, (2, 3)),
+            standby,
+            threading.Event(),
+            restart_allowed=True,
+            capacity=2,
+            processes=processes,
+            worker_ids=workers,
+        )
+        assert outcome is not None
+        config, process = outcome
+        assert process is replacement
+        assert (config.worker_id, config.stream_id) == ("slot-0-restart-1", 2)
+        assert standby.closed
+        assert workers == ["slot-0", "slot-1", "slot-0-restart-1"]
+        assert processes == [old, replacement]
+        replacement.start.assert_called_once_with()
+        assert store.get_job(first.job.id, first.token).status is JobStatus.FAILED
+        assert store.get_job(second.job.id, second.token).status is JobStatus.PLAYING
+
+        third = store.create_job("MANGO#612", MatchChoices("FOX", "IBDW#0", 2))
+        assert store.claim_next(config.worker_id) is not None
+        store.mark_connecting(third.job.id, config.worker_id, "BOT#1")
+        store.mark_playing(third.job.id, config.worker_id)
+        failed_replacement = Mock(pid=124, exitcode=1)
+        failed_replacement.is_alive.return_value = False
+        assert (
+            runner._replace_failed_slot(
+                Mock(),
+                failed_replacement,
+                config,
+                Mock(),
+                RuntimeConfig(1, (2, 3)),
+                standby,
+                threading.Event(),
+                restart_allowed=False,
+                capacity=2,
+                processes=processes,
+                worker_ids=workers,
+            )
+            is None
+        )
+        assert store.get_job(third.job.id, third.token).status is JobStatus.FAILED
+        assert store.get_job(second.job.id, second.token).status is JobStatus.PLAYING
+        assert processes == [old, replacement]
+    finally:
+        responder.join(timeout=1)
+        engine.close()
+        standby.close()
+    assert not responder.is_alive()
 
 
 def test_generation_pipe_failure_closes_every_prior_endpoint() -> None:

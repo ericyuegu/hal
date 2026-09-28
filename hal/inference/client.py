@@ -45,6 +45,20 @@ class StreamRelease:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamInvalidate:
+    """Clear a dead client's stream before a replacement slot is admitted."""
+
+    stream_id: int
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamInvalidated:
+    stream_id: int
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
 class StreamAck:
     stream_id: int
     generation: int

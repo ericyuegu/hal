@@ -1,5 +1,6 @@
 """Weight registry identity and lazy construction."""
 
+import os
 import threading
 import time
 from dataclasses import replace
@@ -17,6 +18,8 @@ from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import action_plan
 from hal.inference.client import StreamAck
 from hal.inference.client import StreamAdmission
+from hal.inference.client import StreamInvalidate
+from hal.inference.client import StreamInvalidated
 from hal.inference.client import StreamRelease
 from hal.inference.engine import InferenceEngine
 from hal.inference.engine import ModelRegistry
@@ -206,13 +209,192 @@ def test_engine_releases_rows_across_rematches_and_rejects_other_connections() -
         engine.serve_batch((second_parent,), 0)
         assert second_child.recv() == StreamAck(999_999, 1, "admitted")
         first_child.send(StreamAdmission(999_999, 2, profile))
-        with pytest.raises(ValueError, match="connection"):
-            engine.serve_batch((first_parent,), 0)
+        engine.serve_batch((first_parent,), 0)
+        assert first_parent.closed
+        assert set(engine.connections) == {1}
+        assert engine._routes[999_999].connection is second_parent
     finally:
         first_parent.close()
         first_child.close()
         second_parent.close()
         second_child.close()
+
+
+def test_dead_or_invalid_client_does_not_interrupt_a_ready_peer() -> None:
+    class Policy:
+        def __init__(self) -> None:
+            self.released: list[int] = []
+            self.batches: list[tuple[int, ...]] = []
+
+        def validate_prepared_profile(self, _profile: PreparedInferenceProfile) -> None:
+            pass
+
+        def release_stream(self, stream_id: int) -> None:
+            self.released.append(stream_id)
+
+        def predict(self, requests: tuple[PredictionRequest, ...]):
+            self.batches.append(tuple(request.stream_id for request in requests))
+            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+
+    profile = PreparedInferenceProfile("two", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 2)
+    policy = Policy()
+    bad_parent, bad_child = Pipe()
+    good_parent, good_child = Pipe()
+    try:
+        engine = InferenceEngine({profile: policy}, {0: bad_parent, 1: good_parent}, batch_wait_seconds=0)
+        bad_child.send(StreamAdmission(100, 1, profile))
+        good_child.send(StreamAdmission(200, 1, profile))
+        engine.serve_batch((bad_parent, good_parent), 0)
+        assert bad_child.recv() == StreamAck(100, 1, "admitted")
+        assert good_child.recv() == StreamAck(200, 1, "admitted")
+
+        bad_child.send(object())
+        item = PolicyInput(200, 0, 1, {}, NEUTRAL_CONTROLLER_ACTION)
+        good_child.send(PredictionRequest(200, 1, 0, 0, (item,), (NEUTRAL_CONTROLLER_ACTION,) * 3))
+        engine.serve_batch((bad_parent, good_parent), 0)
+
+        assert good_child.recv().stream_id == 200
+        assert policy.batches == [(200,)]
+        assert policy.released == [100]
+        assert set(engine.connections) == {1}
+        assert bad_parent.closed
+    finally:
+        bad_parent.close()
+        bad_child.close()
+        good_parent.close()
+        good_child.close()
+
+
+def test_engine_invalidates_dead_slot_and_reuses_its_row_with_peer_unchanged() -> None:
+    class Policy:
+        def __init__(self) -> None:
+            self.released: list[int] = []
+            self.batches: list[tuple[int, ...]] = []
+
+        def validate_prepared_profile(self, _profile: PreparedInferenceProfile) -> None:
+            pass
+
+        def release_stream(self, stream_id: int) -> None:
+            self.released.append(stream_id)
+
+        def predict(self, requests: tuple[PredictionRequest, ...]):
+            self.batches.append(tuple(request.stream_id for request in requests))
+            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+
+    profile = PreparedInferenceProfile("two", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 2)
+    policy = Policy()
+    failed_parent, failed_child = Pipe()
+    healthy_parent, healthy_child = Pipe()
+    standby_parent, standby_child = Pipe()
+    try:
+        engine = InferenceEngine(
+            {profile: policy},
+            {0: failed_parent, 1: healthy_parent, 2: standby_parent},
+            batch_wait_seconds=0,
+            standby_for={2: 0},
+        )
+        failed_child.send(StreamAdmission(100, 1, profile))
+        healthy_child.send(StreamAdmission(200, 1, profile))
+        engine.serve_batch((failed_parent, healthy_parent), 0)
+        assert failed_child.recv() == StreamAck(100, 1, "admitted")
+        assert healthy_child.recv() == StreamAck(200, 1, "admitted")
+
+        # The old writer dies after a partial pickle. Its closed endpoint lets
+        # the engine's recv fail instead of blocking the healthy stream.
+        os.write(failed_child.fileno(), b"\x00\x00\x00\x08ab")
+        failed_child.close()
+        healthy = PolicyInput(200, 0, 1, {}, NEUTRAL_CONTROLLER_ACTION)
+        healthy_child.send(PredictionRequest(200, 1, 0, 0, (healthy,), (NEUTRAL_CONTROLLER_ACTION,) * 3))
+        engine.serve_batch((failed_parent, healthy_parent), 0)
+        assert healthy_child.recv().stream_id == 200
+        assert failed_parent.closed
+        assert policy.released == [100]
+
+        standby_child.send(StreamInvalidate(100, "reset-token"))
+        engine.serve_batch((standby_parent,), 0)
+        assert standby_child.recv() == StreamInvalidated(100, "reset-token")
+        assert engine._routes[200].connection is healthy_parent
+
+        standby_child.send(StreamAdmission(1002, 1, profile))
+        engine.serve_batch((standby_parent,), 0)
+        assert standby_child.recv() == StreamAck(1002, 1, "admitted")
+        replacement = PolicyInput(1002, 0, 1, {}, NEUTRAL_CONTROLLER_ACTION)
+        standby_child.send(PredictionRequest(1002, 1, 0, 0, (replacement,), (NEUTRAL_CONTROLLER_ACTION,) * 3))
+        healthy_next = PolicyInput(200, 1, 1, {}, NEUTRAL_CONTROLLER_ACTION)
+        healthy_child.send(PredictionRequest(200, 1, 1, 1, (healthy_next,), (NEUTRAL_CONTROLLER_ACTION,) * 3))
+        engine.serve_batch((standby_parent, healthy_parent), 0)
+        assert standby_child.recv().stream_id == 1002
+        assert healthy_child.recv().stream_id == 200
+        assert policy.batches[-1] == (1002, 200)
+    finally:
+        failed_parent.close()
+        failed_child.close()
+        healthy_parent.close()
+        healthy_child.close()
+        standby_parent.close()
+        standby_child.close()
+
+
+@pytest.mark.parametrize("order", ["standby_first", "primary_first", "coalesced"])
+def test_standby_reset_cancels_old_arrival_without_losing_healthy_peer(order: str) -> None:
+    class Policy:
+        def __init__(self) -> None:
+            self.released: list[int] = []
+            self.batches: list[tuple[int, ...]] = []
+
+        def validate_prepared_profile(self, _profile: PreparedInferenceProfile) -> None:
+            pass
+
+        def release_stream(self, stream_id: int) -> None:
+            self.released.append(stream_id)
+
+        def predict(self, requests: tuple[PredictionRequest, ...]):
+            self.batches.append(tuple(request.stream_id for request in requests))
+            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+
+    profile = PreparedInferenceProfile("two", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 2)
+    policy = Policy()
+    primary, old_client = Pipe()
+    healthy, healthy_client = Pipe()
+    standby, standby_client = Pipe()
+    try:
+        engine = InferenceEngine(
+            {profile: policy},
+            {0: primary, 1: healthy, 2: standby},
+            batch_wait_seconds=0,
+            standby_for={2: 0},
+        )
+        old_client.send(StreamAdmission(100, 1, profile))
+        healthy_client.send(StreamAdmission(200, 1, profile))
+        engine.serve_batch((primary, healthy), 0)
+        assert old_client.recv() == StreamAck(100, 1, "admitted")
+        assert healthy_client.recv() == StreamAck(200, 1, "admitted")
+
+        old_input = PolicyInput(100, 0, 1, {}, NEUTRAL_CONTROLLER_ACTION)
+        healthy_input = PolicyInput(200, 0, 1, {}, NEUTRAL_CONTROLLER_ACTION)
+        old_client.send(PredictionRequest(100, 1, 0, 0, (old_input,), (NEUTRAL_CONTROLLER_ACTION,) * 3))
+        healthy_client.send(PredictionRequest(200, 1, 0, 0, (healthy_input,), (NEUTRAL_CONTROLLER_ACTION,) * 3))
+        standby_client.send(StreamInvalidate(100, "token"))
+        if order == "standby_first":
+            engine.serve_batch((standby, primary, healthy), 0)
+        elif order == "primary_first":
+            engine.serve_batch((primary, standby, healthy), 0)
+        else:
+            arrived = engine._receive((primary, healthy))
+            engine._receive((standby,))
+            engine._execute_batch(arrived, 0)
+        assert standby_client.recv() == StreamInvalidated(100, "token")
+        assert healthy_client.recv().stream_id == 200
+        assert policy.batches == [(200,)]
+        assert policy.released == [100]
+        assert primary.closed
+    finally:
+        primary.close()
+        old_client.close()
+        healthy.close()
+        healthy_client.close()
+        standby.close()
+        standby_client.close()
 
 
 def test_sparse_ready_pair_does_not_wait_for_idle_admissions(monkeypatch: pytest.MonkeyPatch) -> None:
