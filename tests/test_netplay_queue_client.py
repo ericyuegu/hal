@@ -1,15 +1,33 @@
 import json
+import threading
+import time
+from collections.abc import Callable
 
 import httpx
 import pytest
+from websockets.sync.server import ServerConnection
+from websockets.sync.server import serve
 
+from hal.netplay_service.domain import CHARACTERS
+from hal.netplay_service.domain import IMITATIONS
+from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import JobStatus
+from hal.netplay_service.domain import PolicyConfig
+from hal.netplay_service.health import RunnerStatus
+from hal.netplay_service.health import SlotState
+from hal.netplay_service.health import SlotStatus
+from hal.netplay_service.health import aggregate_runner_status
 from hal.netplay_service.queue_client import RETRY_DELAYS_SECONDS
+from hal.netplay_service.queue_client import Account
+from hal.netplay_service.queue_client import AdminClient
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import QueueProtocolError
 from hal.netplay_service.queue_client import QueueRejectedError
 from hal.netplay_service.queue_client import QueueUnavailableError
 from hal.netplay_service.queue_client import RemoteQueue
+from hal.netplay_service.queue_client import RunnerClient
+from hal.netplay_service.queue_client import SessionReporter
+from hal.netplay_service.queue_client import SessionState
 from hal.netplay_service.queue_client import admin_endpoint
 from hal.netplay_service.queue_client import parse_job
 from hal.netplay_service.queue_client import runner_endpoint
@@ -178,3 +196,191 @@ def test_endpoint_rejects_misconfiguration_and_hides_secrets() -> None:
     )
     assert admin.headers()["CF-Access-Client-Id"] == "admin-id"
     assert "cf-secret" not in repr(ENDPOINT) and "runner-token" not in repr(ENDPOINT)
+
+
+POLICY = PolicyConfig(
+    bundle_sha256="a" * 64,
+    bundle_r2_key=f"netplay/policies/{'a' * 64}.halpolicy",
+    vocabulary_sha256="b" * 64,
+    characters=CHARACTERS,
+    imitations=IMITATIONS,
+    stages=STAGES,
+    online_delays=(2, 3),
+    desired_return_range=(0.0, 40.0),
+    default_desired_return=20.0,
+    temperature_range=(0.8, 1.1),
+    default_temperature=1.0,
+    masked_identity=False,
+)
+
+
+def _runner(script: _Script) -> RunnerClient:
+    return RunnerClient(ENDPOINT, client=httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)))
+
+
+def _admin(script: _Script) -> AdminClient:
+    return AdminClient(ENDPOINT, client=httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)))
+
+
+def test_start_session_reads_policy_and_one_account_per_slot() -> None:
+    grant = {"slot": 0, "connect_code": "BOT0#1", "r2_key": "netplay/accounts/x.json", "sha256": "c" * 64}
+    script = _Script(
+        httpx.Response(
+            201, json={"session_id": "session-00000001", "accounts": [grant], "policy": POLICY.to_payload()}
+        )
+    )
+    started = _runner(script).start_session(
+        session_id="session-00000001",
+        host="box",
+        bundle_sha256="a" * 64,
+        git_sha="d" * 40,
+        slots=1,
+        wants_stream=False,
+    )
+    assert started.session_id == "session-00000001" and started.policy == POLICY
+    assert started.accounts[0].connect_code == "BOT0#1"
+    assert json.loads(script.requests[0].content) == {
+        "session_id": "session-00000001",
+        "host": "box",
+        "bundle_sha256": "a" * 64,
+        "git_sha": "d" * 40,
+        "slots": 1,
+        "stream": False,
+    }
+
+
+def test_start_session_rejects_a_missing_or_misnumbered_account() -> None:
+    body = {"session_id": "session-00000001", "accounts": [], "policy": POLICY.to_payload()}
+    with pytest.raises(QueueProtocolError, match="one account per slot"):
+        _runner(_Script(httpx.Response(201, json=body))).start_session(
+            session_id="session-00000001",
+            host="box",
+            bundle_sha256="a" * 64,
+            git_sha="d" * 40,
+            slots=1,
+            wants_stream=False,
+        )
+
+
+def test_start_session_rejects_a_different_session_id() -> None:
+    grant = {"slot": 0, "connect_code": "BOT0#1", "r2_key": "netplay/accounts/x.json", "sha256": "c" * 64}
+    body = {"session_id": "sess", "accounts": [grant], "policy": POLICY.to_payload()}
+    with pytest.raises(QueueProtocolError, match="returned 'sess'"):
+        _runner(_Script(httpx.Response(201, json=body))).start_session(
+            session_id="session-00000001",
+            host="box",
+            bundle_sha256="a" * 64,
+            git_sha="d" * 40,
+            slots=1,
+            wants_stream=False,
+        )
+
+
+def _runner_status() -> RunnerStatus:
+    slot = SlotStatus(0, SlotState.IDLE, None, None, None, None, None, 0, time.time())
+    return aggregate_runner_status("a" * 64, (slot,), time.time(), model_inference_p95_ms=None, batch_wait_p95_ms=None)
+
+
+def test_status_report_returns_the_session_state() -> None:
+    script = _Script(httpx.Response(200, json={"draining": True, "stream": None}))
+    assert _runner(script).report_status("sess", _runner_status()) == SessionState(draining=True)
+    assert json.loads(script.requests[0].content)["schema_version"] == 5
+    assert script.requests[0].url.path == "/v1/runner/sessions/sess/status"
+
+
+def test_status_report_refuses_a_stream_grant() -> None:
+    script = _Script(httpx.Response(200, json={"draining": False, "stream": {"slot": 0, "key": "live_x"}}))
+    with pytest.raises(QueueProtocolError, match="cannot stream"):
+        _runner(script).report_status("sess", _runner_status())
+
+
+def _wait_for(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 5
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_reporter_keeps_reporting_through_outages_and_stops_on_session_end() -> None:
+    script = _Script(
+        httpx.Response(200, json={"draining": False, "stream": None}),
+        *(httpx.Response(503) for _ in range(6)),
+        httpx.Response(200, json={"draining": True, "stream": None}),
+        httpx.Response(410, json={"detail": "session has ended"}),
+    )
+    client = RunnerClient(
+        ENDPOINT,
+        client=httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)),
+        sleep=lambda _: None,
+    )
+    with SessionReporter(client, "sess", _runner_status, interval_seconds=0.01) as reporter:
+        assert reporter.state() == SessionState(draining=False)
+
+        def ended() -> bool:
+            try:
+                reporter.state()
+            except SessionEndedError:
+                return True
+            return False
+
+        # One report retries through six 503s, the next sees the drain, the last sees the end.
+        _wait_for(ended)
+    assert len(script.requests) == 9
+
+
+def test_active_policy_drain_and_end() -> None:
+    script = _Script(
+        httpx.Response(200, json=POLICY.to_payload()),
+        httpx.Response(200, json={"draining": True}),
+        httpx.Response(200, json={"failed": 2}),
+    )
+    client = _runner(script)
+    assert client.active_policy() == POLICY
+    client.drain("sess")
+    assert client.end_session("sess") == 2
+    assert [(r.method, r.url.path) for r in script.requests] == [
+        ("GET", "/v1/runner/policy"),
+        ("POST", "/v1/runner/sessions/sess/drain"),
+        ("DELETE", "/v1/runner/sessions/sess"),
+    ]
+
+
+def test_admin_routes() -> None:
+    script = _Script(
+        httpx.Response(200, json=POLICY.to_payload()),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"paused": True}),
+        httpx.Response(200, json={"events": [{"kind": "job_created"}]}),
+    )
+    admin = _admin(script)
+    admin.put_policy(POLICY)
+    admin.put_accounts([Account("BOT0#1", "netplay/accounts/x.json", "c" * 64)])
+    admin.set_paused(True)
+    assert admin.events(job="j1", session=None, since=12.5) == [{"kind": "job_created"}]
+    assert json.loads(script.requests[1].content) == [
+        {"connect_code": "BOT0#1", "r2_key": "netplay/accounts/x.json", "sha256": "c" * 64}
+    ]
+    assert script.requests[2].url.path == "/v1/admin/pause"
+    assert dict(script.requests[3].url.params) == {"job": "j1", "since": "12.5"}
+
+
+def test_live_socket_sends_auth_and_slot_headers() -> None:
+    seen: dict[str, str | None] = {}
+
+    def handler(connection: ServerConnection) -> None:
+        seen["path"] = connection.request.path if connection.request is not None else None
+        headers = connection.request.headers if connection.request is not None else {}
+        seen["auth"] = headers.get("Authorization")
+        seen["slot"] = headers.get("X-HAL-Slot")
+        connection.send('{"type": "released"}')
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        port = server.socket.getsockname()[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        endpoint = QueueEndpoint(f"http://127.0.0.1:{port}", "runner-token")
+        queue = RemoteQueue(endpoint, "sess")
+        with queue.connect_live("job-1", slot_worker_id("sess", 1)) as socket:
+            assert json.loads(socket.recv(timeout=2)) == {"type": "released"}
+        server.shutdown()
+    assert seen == {"path": "/v1/runner/jobs/job-1/live", "auth": "Bearer runner-token", "slot": "1"}

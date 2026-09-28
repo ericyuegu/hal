@@ -1,9 +1,12 @@
 """Clients for the netplay queue Worker's runner and admin routes."""
 
 import re
+import secrets
+import threading
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Final
@@ -11,12 +14,16 @@ from typing import cast
 
 import httpx
 from loguru import logger
+from websockets.sync.client import ClientConnection
+from websockets.sync.client import connect
 
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.domain import PolicyConfig
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.domain import validate_stage
+from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.queue_contract import InvalidTransitionError
 from hal.netplay_service.queue_contract import QueueError
 from hal.netplay_service.queue_contract import SessionEndedError
@@ -344,3 +351,246 @@ class RemoteQueue:
     def get_worker_job(self, job_id: str, worker_id: str) -> Job:
         response = self._api.request("GET", f"/v1/runner/jobs/{job_id}", headers=self._slot_headers(worker_id))
         return parse_job(_json(response))
+
+    def connect_live(self, job_id: str, worker_id: str, *, open_timeout: float = 2.0) -> ClientConnection:
+        """Open the job's settings socket; `https` becomes `wss` and `http` becomes `ws`."""
+        url = "ws" + self.endpoint.url.removeprefix("http") + f"/v1/runner/jobs/{job_id}/live"
+        headers = {**self.endpoint.headers(), **self._slot_headers(worker_id)}
+        return connect(url, additional_headers=headers, open_timeout=open_timeout)
+
+
+@dataclass(frozen=True, slots=True)
+class Account:
+    connect_code: str
+    r2_key: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class AccountGrant:
+    slot: int
+    connect_code: str
+    r2_key: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class StartedSession:
+    session_id: str
+    policy: PolicyConfig
+    accounts: tuple[AccountGrant, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionState:
+    draining: bool
+
+
+def new_session_id() -> str:
+    return secrets.token_urlsafe(12)
+
+
+def _object(payload: object, fields: frozenset[str], name: str) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise QueueProtocolError(f"{name} response fields changed")
+    return cast(dict[str, object], payload)
+
+
+def _grant(payload: object) -> AccountGrant:
+    grant = _object(payload, frozenset(("slot", "connect_code", "r2_key", "sha256")), "account grant")
+    try:
+        return AccountGrant(
+            slot=_integer(grant["slot"]),
+            connect_code=validate_player_code(_text(grant["connect_code"])),
+            r2_key=_text(grant["r2_key"]),
+            sha256=_text(grant["sha256"]),
+        )
+    except (TypeError, ValueError) as error:
+        raise QueueProtocolError(f"account grant contains invalid values: {error}") from error
+
+
+class RunnerClient:
+    """Session routes: active policy, start, status heartbeat, drain, and end."""
+
+    def __init__(
+        self,
+        endpoint: QueueEndpoint,
+        *,
+        client: httpx.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._api = _Api(endpoint, client, sleep)
+
+    def close(self) -> None:
+        self._api.close()
+
+    def active_policy(self) -> PolicyConfig:
+        payload = _json(self._api.request("GET", "/v1/runner/policy"))
+        try:
+            return PolicyConfig.from_payload(payload)
+        except ValueError as error:
+            raise QueueProtocolError(f"active policy is invalid: {error}") from error
+
+    def start_session(
+        self, *, session_id: str, host: str, bundle_sha256: str, git_sha: str, slots: int, wants_stream: bool
+    ) -> StartedSession:
+        body = {
+            "session_id": session_id,
+            "host": host,
+            "bundle_sha256": bundle_sha256,
+            "git_sha": git_sha,
+            "slots": slots,
+            "stream": wants_stream,
+        }
+        payload = _object(
+            _json(self._api.request("POST", "/v1/runner/sessions", body=body)),
+            frozenset(("session_id", "accounts", "policy")),
+            "session start",
+        )
+        accounts = payload["accounts"]
+        if not isinstance(accounts, list):
+            raise QueueProtocolError("session start accounts must be a list")
+        grants = tuple(_grant(item) for item in accounts)
+        if tuple(grant.slot for grant in grants) != tuple(range(slots)):
+            raise QueueProtocolError(f"session start must lease one account per slot: {grants}")
+        if payload["session_id"] != session_id:
+            raise QueueProtocolError(f"session start returned {payload['session_id']!r}, not {session_id!r}")
+        try:
+            policy = PolicyConfig.from_payload(payload["policy"])
+        except ValueError as error:
+            raise QueueProtocolError(f"session start contains invalid values: {error}") from error
+        return StartedSession(session_id, policy, grants)
+
+    def report_status(self, session_id: str, status: RunnerStatus) -> SessionState:
+        payload = _object(
+            _json(self._api.request("POST", f"/v1/runner/sessions/{session_id}/status", body=status.to_payload())),
+            frozenset(("draining", "stream")),
+            "status",
+        )
+        if payload["stream"] is not None:
+            raise QueueProtocolError("this client cannot stream; the Worker granted the stream lease")
+        try:
+            return SessionState(draining=_boolean(payload["draining"]))
+        except TypeError as error:
+            raise QueueProtocolError(f"status response is invalid: {error}") from error
+
+    def drain(self, session_id: str) -> None:
+        self._api.request("POST", f"/v1/runner/sessions/{session_id}/drain")
+
+    def end_session(self, session_id: str) -> int:
+        payload = _object(
+            _json(self._api.request("DELETE", f"/v1/runner/sessions/{session_id}")), frozenset(("failed",)), "end"
+        )
+        try:
+            return _integer(payload["failed"])
+        except TypeError as error:
+            raise QueueProtocolError(f"end response is invalid: {error}") from error
+
+
+class SessionReporter:
+    """Report runner status in the background; the report is also the session heartbeat.
+
+    Enter it right after the session starts. The Worker ends a session after 30 s
+    without a report, and downloads and qualification can take longer than that.
+    """
+
+    def __init__(
+        self,
+        client: RunnerClient,
+        session_id: str,
+        status: Callable[[], RunnerStatus],
+        *,
+        interval_seconds: float = 2.0,
+    ) -> None:
+        self._client = client
+        self._session_id = session_id
+        self._status = status
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._state: SessionState | None = None
+        self._error: QueueError | None = None
+        self._thread = threading.Thread(target=self._run, name=f"session-{session_id}", daemon=True)
+
+    def __enter__(self) -> SessionReporter:
+        # The first report is synchronous and strict, so startup fails fast on any queue error.
+        self._state = self._client.report_status(self._session_id, self._status())
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join()
+
+    def state(self) -> SessionState:
+        with self._lock:
+            if self._error is not None:
+                raise self._error
+            assert self._state is not None, "enter the reporter before reading its state"
+            return self._state
+
+    def _report(self) -> None:
+        try:
+            state = self._client.report_status(self._session_id, self._status())
+        except QueueUnavailableError as error:
+            # The Worker tolerates 30 s of silence; the next tick tries again.
+            logger.bind(event="session_status").warning("session status report failed: {}", error)
+            return
+        except QueueError as error:
+            with self._lock:
+                self._error = error
+            self._stop.set()
+            return
+        with self._lock:
+            self._state = state
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            self._report()
+
+
+class AdminClient:
+    """Admin routes: policy, accounts, pause, status, and events."""
+
+    def __init__(
+        self,
+        endpoint: QueueEndpoint,
+        *,
+        client: httpx.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._api = _Api(endpoint, client, sleep)
+
+    def close(self) -> None:
+        self._api.close()
+
+    def put_policy(self, config: PolicyConfig) -> None:
+        self._api.request("PUT", "/v1/admin/policy", body=config.to_payload())
+
+    def put_accounts(self, accounts: Sequence[Account]) -> None:
+        body = [{"connect_code": a.connect_code, "r2_key": a.r2_key, "sha256": a.sha256} for a in accounts]
+        self._api.request("PUT", "/v1/admin/accounts", body=body)
+
+    def set_paused(self, paused: bool) -> None:
+        self._api.request("POST", "/v1/admin/pause" if paused else "/v1/admin/resume")
+
+    def status(self) -> dict[str, object]:
+        payload = _json(self._api.request("GET", "/v1/admin/status"))
+        if not isinstance(payload, dict):
+            raise QueueProtocolError("admin status must be an object")
+        return cast(dict[str, object], payload)
+
+    def events(self, *, job: str | None, session: str | None, since: float | None) -> list[dict[str, object]]:
+        params = {
+            name: value
+            for name, value in (("job", job), ("session", session), ("since", None if since is None else str(since)))
+            if value is not None
+        }
+        payload = _object(
+            _json(self._api.request("GET", "/v1/admin/events", params=params)), frozenset(("events",)), "events"
+        )
+        events = payload["events"]
+        if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
+            raise QueueProtocolError("admin events must be a list of objects")
+        return cast(list[dict[str, object]], events)
