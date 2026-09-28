@@ -6,6 +6,14 @@ diagnosis to branch cleanup and merge review. See
 [the engineering report](refactor-059-engineering-report.md) for the current
 summary and review findings. The original qualification goal is not complete.
 
+Merge follow-up: the observation validation fix (`91fb26c6`), connection
+cancellation fix (`11bd5b7d`), and isolated slot recovery (`b36e8cf0`) are committed.
+The final local checks passed 1,354 CPU tests and seven emulator integration tests,
+plus Ruff, Ty, and frontend lint/type/build checks. The CPU suite skipped 24
+GPU/hardware cases. See section 19 of the engineering report for commands,
+recovery semantics, and preserved user files. No new Modal job or live-service
+restart was performed.
+
 On September 27 the user accepted Blackwell in place of the Ada hardware target,
 directed us to prioritize a working latest-checkpoint service over numerical
 reproduction details, and then requested that all Modal jobs stop. All apps are

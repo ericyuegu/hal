@@ -126,6 +126,34 @@ admits one stream generation, permits one outstanding request, releases its
 cache row at match close, and has a one-second monotonic response timeout
 independent of game-frame deadlines.
 
+New games join at request boundaries. They do not join a GPU call already in
+progress. Admission uses the existing model and prepared storage, with separate
+history, cache positions, and sampling for the new stream. Its ready requests
+can enter the next compatible batch. Different fixed prefixes or observation
+counts form separate batches. Admission and initial history processing still
+consume time on the shared engine.
+
+A Python slot worker owns reservations and launches Dolphin for each reservation.
+A Dolphin disconnect ends the affected game as a bot service failure; the slot
+returns to the queue and launches a fresh Dolphin for the next reservation.
+A ten-second frame stall can retry the reservation once, after cleanup and a
+short cooldown. Neither path restores an interrupted game's emulator state.
+
+If the Python slot process exits, the supervisor fails only its leases and makes
+one replacement attempt per engine generation. A pre-created spare connection
+provides a barrier that releases the old stream before replacement admission.
+The supervisor closes its copy of each active worker's pipe endpoint after
+spawn: if the worker dies mid-message, EOF can reach the engine rather than
+leaving a partial request blocked forever. The replacement uses a new stream ID
+and must report ready within 30 seconds. A failed replacement disables that slot;
+healthy slots continue. If no slots remain, the runner stops.
+
+A shared engine failure has broader scope. A process exit, explicit engine
+failure, or one second without an engine progress pulse stops the generation.
+The runner makes one engine replacement attempt, with a 120-second recovery
+limit. New games are admitted only after preparation succeeds. Failed recovery
+leaves the service unavailable.
+
 The model registry keys weight allocations by checkpoint hash, device, and
 inference dtype. Real-service OpenGL gameplay, two-session admission on the
 target GPU, recovery, and sparse-load capacity still need measured evidence.

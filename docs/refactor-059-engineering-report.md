@@ -2,11 +2,12 @@
 
 Date: 2026-09-27.
 
-This report covers the committed implementation from d7454f9d to 4895c9d7 on
+Sections 1–18 cover the committed implementation from d7454f9d to 4895c9d7 on
 codex/o59-refactor. That range contains 50 commits. Documentation added during
-this review is separate from that runtime snapshot. The working tree also
-contains newer frontend and reservation changes; those are identified below
-and are not counted as committed refactor work.
+that review is separate from that runtime snapshot. References below to pending
+frontend and reservation changes describe the working tree at the time of the
+review. Those changes were subsequently committed separately. The merge
+follow-up at the end records the fixes and checks made after that review.
 
 ## 1. Executive assessment
 
@@ -826,3 +827,120 @@ The code review was targeted at the highest-risk training, loader, artifact,
 inference, scheduling, and service boundaries. It was not an exhaustive proof of
 all changed lines. No new model-training or scheduler correctness defect was
 identified in that review; the concrete findings above remain open.
+
+
+## 19. Merge follow-up
+
+The user requested fixes for the two committed runtime findings, repository
+cleanup, and a merge into main. This follow-up also closes the cancellation gap
+in the separately committed reservation change. It does not restart production
+or resume the stopped Modal qualification jobs.
+
+### Observation validation
+
+Commit `91fb26c6` validates the canonical scalar types of every new observation
+before any request in the batch changes history or cache storage. Previously,
+only the first observation of a new generation had this check. Invalid
+categorical values in a later observation could be converted to integers.
+
+The regression tests cover both positions in a two-frame request, with and
+without existing history. They place the invalid value in the second stream of
+a batch and verify that neither stream advances. After rejection, a valid retry
+produces the same actions as a separate control policy. The focused CPU run
+passed 22 tests and skipped seven CUDA-only cases.
+
+### Connection cancellation
+
+Commit `11bd5b7d` checks cancellation during real-time connection polling and
+countdown processing. A canceled request can now stop while Dolphin supplies no
+new frame, or before the next countdown input is submitted. The callback is
+limited to connection setup; it does not cancel an active match.
+
+The session suite passed 33 tests. The required real-Dolphin roundtrip and
+cleanup suite passed all seven integration tests, with six non-integration
+tests deselected and six existing multiprocessing warnings. This closes the
+identified cancellation gap in the production real-time path. The blocking
+non-real-time read still uses its configured step timeout.
+
+### Slot failure isolation
+
+Commit `b36e8cf0` handles a failed Python slot separately from a failed GPU
+engine. It closes only the failed worker's reservations and attempts one
+replacement. The replacement has a new worker identity and stream ID. It uses
+a spare connection created at startup, and an engine acknowledgment confirms
+that the old stream has been released before the replacement can be admitted.
+If replacement fails, the slot stays unavailable while healthy slots continue.
+If all slots are unavailable, the runner stops.
+
+The engine drops a broken client connection and releases only that client's
+cache row. A prediction from a retired stream is discarded before batching.
+Actual model execution or shared-engine failures still use the existing
+whole-engine recovery path.
+
+Review caught two races before commit. Keeping a supervisor copy of a dead
+worker's pipe could leave the engine blocked on a partial request. Closing that
+copy after each spawn and using a separate spare pipe fixes that lifetime
+problem. Also, a reset could retire a stream after its request was collected
+but before execution. The receive loop now tolerates endpoints retired within
+its ready set, and execution filters retired requests before forming batches.
+
+All 88 focused engine, client, and runner tests passed, including partial-message
+EOF, both orders of reset and request arrival, unchanged healthy-peer responses,
+replacement admission, exhausted replacement allowance, and bounded reset
+waiting. An independent review repeated those tests and found no further
+concrete failure in this path. These are CPU and process-transport checks, not
+a new production load or human-play qualification.
+
+### Preserved work and deployment scope
+
+The frontend and reservation changes were already committed separately as
+`a47564cd` and `d14a9d8c`. Their design documents remain in the branch. The
+unrelated `.superpowers/` plans, `.gitignore` edit, notebook edits, untracked
+notebook, and `outputs/` remain outside this follow-up's commits.
+
+Frontend lint, TypeScript checks, and the production build passed. The build
+ran in a separate copy of the tracked frontend and its installed dependencies,
+so it did not clear or change the running development server's cache. Two
+initial build attempts failed because that temporary copy had incorrect tool
+symlinks and then omitted the shared UI components. Correcting the copy was
+sufficient; no frontend source change was needed.
+
+No Modal jobs were launched. These local checks do not add a human-netplay soak
+or complete the unfinished paired gameplay campaign. Those limits in the
+original report remain unchanged.
+
+### Final merge checks
+
+The selected runtime merge candidate is `b36e8cf0`. These checks cover the
+combined refactor and the three follow-up fixes:
+
+| Check | Result |
+|---|---|
+| `uv run ruff format --check .` | Passed; 256 files |
+| `uv run ruff check .` | Passed |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed; zero diagnostics |
+| `uv run pytest -q -m "not integration" -rs` | 1,354 passed, 24 skipped, 18 deselected; 103.98 seconds |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration` | 7 passed, 6 deselected; 54.11 seconds |
+| Frontend `npm run lint` | Passed |
+| Frontend `npx tsc --noEmit --incremental false` | Passed |
+| Frontend `npm run build` in isolated copy | Passed |
+| `git diff --check` | Passed |
+
+The CPU suite used one thread per numeric library and disabled CUDA. Twenty-two
+skips require CUDA and two require the explicit netplay hardware qualification
+setting. The CPU suite reported ten dependency/multiprocessing warnings; the
+integration suite reported six multiprocessing warnings. None is counted as a
+completed GPU or production-host qualification.
+
+The observation regression was first run against the old behavior: three cases
+failed and one passed. All four passed after the fix. An initial `uv` invocation
+could not write its sandboxed cache; the same test ran successfully with the
+existing environment outside that restriction. The first complete formatting
+and lint checks overlapped the final formatting pass and reported three files
+needing formatting plus import order and one nested-condition diagnostic. The
+final checks above passed after that cleanup. Raw local records are under
+`runs/refactor-059/merge-review/final-*.log` and `final-checks.json`.
+
+The code is ready for the requested local fast-forward merge. The feature branch
+and its individual commits remain available for review. This merge does not
+push to the remote repository or restart the running service.
