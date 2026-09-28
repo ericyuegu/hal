@@ -15,8 +15,8 @@ from typing import cast
 
 import torch
 import tyro
-
 import wandb
+
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
 from hal.eval.cross_stage import sweep_vs_cpu_prior_with_rows
 from hal.eval.cross_stage import vs_cpu_metrics

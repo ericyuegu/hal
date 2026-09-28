@@ -74,6 +74,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tyro
+import wandb
 from beartype import beartype
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -82,7 +83,6 @@ from jaxtyping import jaxtyped
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
-import wandb
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats

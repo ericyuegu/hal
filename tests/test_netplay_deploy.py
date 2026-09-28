@@ -212,7 +212,10 @@ def test_local_launcher_waits_for_host_cleanup(tmp_path: Path) -> None:
         "fi\n",
     )
     _write_executable(command_dir / "xvfb-run", 'shift\nexec "$@"\n')
-    _write_executable(command_dir / "npm", "trap 'exit 0' TERM\nwhile true; do sleep 1; done\n")
+    _write_executable(
+        command_dir / "npm",
+        "if [[ ${1:-} == ci ]]; then exit 0; fi\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n",
+    )
 
     environment_file = tmp_path / "netplay.env"
     environment_file.write_text(
