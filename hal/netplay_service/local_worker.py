@@ -8,6 +8,7 @@ import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
@@ -51,15 +52,18 @@ def _wait_ready(process: subprocess.Popen[bytes], url: str, log_path: Path, time
     raise LocalWorkerError(f"wrangler dev did not answer within {timeout_seconds:g} s:\n{_tail(log_path)}")
 
 
-def _stop(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    os.killpg(process.pid, signal.SIGTERM)
-    try:
+def stop_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop every member of the group that `process` leads, even after the leader has exited.
+
+    workerd runs as a child of wrangler, so the group can outlive its leader.
+    """
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    with suppress(subprocess.TimeoutExpired):
         process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
+    with suppress(ProcessLookupError):
         os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=5)
+    process.wait(timeout=5)
 
 
 @contextmanager
@@ -99,4 +103,4 @@ def local_worker(state_dir: Path, *, port: int, startup_timeout_seconds: float =
             _wait_ready(process, url, log_path, startup_timeout_seconds)
             yield url
         finally:
-            _stop(process)
+            stop_process_group(process)

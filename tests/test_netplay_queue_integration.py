@@ -143,10 +143,16 @@ def test_lost_responses_never_duplicate_sessions_jobs_or_games(worker_url: str, 
     endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
     sleeps: list[float] = []
 
+    live_before = {row["id"] for row in _live_sessions(admin)}
     start_client, start_loss = _lossy(worker_url, "POST", "/v1/runner/sessions")
     started = _start(RunnerClient(endpoint, client=start_client, sleep=sleeps.append))
     assert start_loss.lost == 1
-    assert [row["id"] for row in _live_sessions(admin)] == [started.session_id]
+    assert {row["id"] for row in _live_sessions(admin)} - live_before == {started.session_id}
+    accounts = admin.status()["accounts"]
+    assert isinstance(accounts, list)
+    assert [row["connect_code"] for row in accounts if row["session_id"] == started.session_id] == [
+        started.accounts[0].connect_code
+    ]
     sessions = RunnerClient(endpoint)
     sessions.report_status(started.session_id, _status())
 
@@ -166,6 +172,7 @@ def test_lost_responses_never_duplicate_sessions_jobs_or_games(worker_url: str, 
         first_id, worker
     )
     assert playing_loss.lost == 1
+    assert queue.get_worker_job(first_id, worker).status is JobStatus.PLAYING
     finish = {"game_number": 1, "actual_stage": "BATTLEFIELD", "result": "win"}
     assert queue.finish_game(first_id, worker, **finish) is JobStatus.REMATCH_WAIT
     assert queue.finish_game(first_id, worker, **finish) is JobStatus.REMATCH_WAIT
