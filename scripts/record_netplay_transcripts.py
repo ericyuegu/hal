@@ -157,6 +157,8 @@ class Recorder:
         elif op == "forfeit":
             self.store.forfeit_service_failure(job, owner)
         elif op == "finish-game":
+            # The Worker requires game_number; the Python service ignores it, so these
+            # transcripts pin only the in-order case.
             status = self.store.finish_game(job, owner, actual_stage=args["actual_stage"], result=args["result"])
             return 200, {"status": status.value}
         elif op == "fail":
@@ -261,6 +263,9 @@ def validation_errors(r: Recorder) -> None:
 def connect_deadline_no_show(r: Recorder) -> None:
     job = r.create()
     r.worker("a:0", "claim")
+    # Time passes after claim so the connect deadline is anchored to connecting, not claim.
+    r.advance(7)
+    r.worker("a:0", "heartbeat", job["id"])
     r.worker("a:0", "connecting", job["id"], connect_code=BOT_CODE)
     # Heartbeats keep the 20 s lease alive so the connect deadline is what expires.
     for _ in range(31):
@@ -287,6 +292,9 @@ def full_set(r: Recorder) -> None:
     r.start_game("a:0", job["id"])
     stages = ["BATTLEFIELD", "FINAL_DESTINATION", "DREAMLAND", "POKEMON_STADIUM", "YOSHIS_STORY"]
     for number, stage in enumerate(stages, start=1):
+        if number == 2:
+            # Game 2 finishes later than game 1, so its rematch deadline differs.
+            r.advance(11)
         r.worker("a:0", "heartbeat", job["id"])
         r.worker("a:0", "finish-game", job["id"], game_number=number, actual_stage=stage, result="loss")
         r.worker(

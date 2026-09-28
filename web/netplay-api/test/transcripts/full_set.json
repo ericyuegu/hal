@@ -227,6 +227,10 @@
       "worker": "a:0"
     },
     {
+      "kind": "advance",
+      "seconds": 11
+    },
+    {
       "args": {},
       "compare": "status",
       "job": "$job1",
@@ -297,7 +301,7 @@
           "player_code": "CRYO#610",
           "policy_revision": 0,
           "queue_position": null,
-          "rematch_deadline": 1000600.0,
+          "rematch_deadline": 1000611.0,
           "requested_stage": "BATTLEFIELD",
           "status": "rematch_wait",
           "temperature": 1.0
@@ -425,7 +429,7 @@
           "player_code": "CRYO#610",
           "policy_revision": 0,
           "queue_position": null,
-          "rematch_deadline": 1000600.0,
+          "rematch_deadline": 1000611.0,
           "requested_stage": "BATTLEFIELD",
           "status": "rematch_wait",
           "temperature": 1.0
@@ -553,7 +557,7 @@
           "player_code": "CRYO#610",
           "policy_revision": 0,
           "queue_position": null,
-          "rematch_deadline": 1000600.0,
+          "rematch_deadline": 1000611.0,
           "requested_stage": "BATTLEFIELD",
           "status": "rematch_wait",
           "temperature": 1.0

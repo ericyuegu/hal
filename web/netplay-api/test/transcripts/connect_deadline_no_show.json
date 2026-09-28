@@ -73,6 +73,22 @@
       "worker": "a:0"
     },
     {
+      "kind": "advance",
+      "seconds": 7
+    },
+    {
+      "args": {},
+      "compare": "status",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "heartbeat",
+      "response": {
+        "body": null,
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
       "args": {
         "connect_code": "HALBOT#1"
       },
@@ -598,7 +614,7 @@
           "cancel_after_game": false,
           "character": "FOX",
           "connect_code": "HALBOT#1",
-          "connect_deadline": 1000600.0,
+          "connect_deadline": 1000607.0,
           "desired_return": 20.0,
           "error_code": null,
           "game_count": 0,
