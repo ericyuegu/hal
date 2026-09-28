@@ -2,6 +2,7 @@ import configparser
 import hashlib
 from contextlib import nullcontext
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import call
@@ -352,6 +353,99 @@ def test_connect_wait_stops_when_the_caller_abandons_it(tmp_path: Path, monkeypa
     with pytest.raises(ConnectAbandoned):
         session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
     step.assert_not_called()
+
+
+def test_connect_wait_stops_during_a_stalled_realtime_read(tmp_path: Path) -> None:
+    abandoned = Event()
+    session = _session(tmp_path, connect_abandoned=abandoned.is_set, realtime=True)
+    session._console = console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+
+    def stalled_step(*, flush_controllers: bool) -> None:
+        assert flush_controllers is False
+        abandoned.set()
+        return None
+
+    console.step.side_effect = stalled_step
+
+    with pytest.raises(ConnectAbandoned):
+        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+
+    console.step.assert_called_once_with(flush_controllers=False)
+
+
+def test_connect_wait_stops_during_countdown_before_submitting_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    abandoned = Event()
+    session = _session(tmp_path, connect_abandoned=abandoned.is_set)
+    session._console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+    state = _live()
+    monkeypatch.setattr("hal.sim.netplay.step_blocking", Mock(return_value=state))
+    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(-3))
+    applied = Mock()
+    monkeypatch.setattr("hal.sim.netplay.apply_inputs", applied)
+
+    with pytest.raises(ConnectAbandoned):
+        session._navigate_to_live(
+            NetplaySetup(melee.Character.FOX, "HUMAN#1"),
+            on_countdown_observation=lambda _frame: abandoned.set(),
+        )
+
+    applied.assert_not_called()
+
+
+def test_connect_wait_stops_when_abandoned_during_countdown_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    abandoned = Event()
+    session = _session(tmp_path, connect_abandoned=abandoned.is_set, realtime=True)
+    session._console = console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+    state = _live()
+    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(-3))
+    applied = Mock()
+    monkeypatch.setattr("hal.sim.netplay.apply_inputs", applied)
+    calls = 0
+
+    def poll(*, flush_controllers: bool) -> object:
+        nonlocal calls
+        assert flush_controllers is False
+        calls += 1
+        if calls == 2:
+            abandoned.set()
+        return state
+
+    console.step.side_effect = poll
+
+    with pytest.raises(ConnectAbandoned):
+        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "HUMAN#1"))
+
+    assert calls == 2
+    applied.assert_not_called()
+
+
+def test_active_match_read_ignores_connect_abandonment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    abandoned = Mock(return_value=True)
+    session = _session(tmp_path, connect_abandoned=abandoned)
+    session._console = Mock()
+    session._controller = Mock()
+    session._last_frame_id = 10
+    state = SimpleNamespace(menu_state=melee.Menu.IN_GAME)
+    monkeypatch.setattr("hal.sim.netplay.step_blocking", Mock(return_value=state))
+    monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(11))
+    monkeypatch.setattr("hal.sim.netplay.apply_inputs", Mock())
+
+    frame, in_game = session.step(NEUTRAL_CONTROLLER_ACTION)
+
+    assert (frame["id"], in_game) == (11, True)
+    abandoned.assert_not_called()
 
 
 def test_finished_match_can_rematch_without_relaunching_dolphin(

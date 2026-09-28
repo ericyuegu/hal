@@ -56,6 +56,10 @@ class ConnectAbandoned(Exception):
     """The caller gave up on the remote player before the match went live."""
 
 
+def _never_abandoned() -> bool:
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class NetplaySetup:
     """The local character, remote Slippi code, and selected stage."""
@@ -80,7 +84,7 @@ class NetplaySession:
         slippi_port: int = 51441,
         step_timeout_seconds: float = 30.0,
         connect_timeout_seconds: float = 600.0,
-        connect_abandoned: Callable[[], bool] = lambda: False,
+        connect_abandoned: Callable[[], bool] = _never_abandoned,
         realtime: bool = False,
         graphics_backend: DolphinGraphicsBackend = "Vulkan",
     ) -> None:
@@ -249,14 +253,13 @@ class NetplaySession:
         deadline = time.monotonic() + self.connect_timeout_seconds
         last_status: tuple[melee.Menu, object] | None = None
         while True:
-            if self.connect_abandoned():
-                raise ConnectAbandoned("stopped waiting for the remote player")
+            self._raise_if_connect_abandoned()
             if time.monotonic() > deadline:
                 raise TimeoutError(
                     f"did not reach IN_GAME within {self.connect_timeout_seconds:.0f}s "
                     "while waiting for the remote player"
                 )
-            gamestate = self._read_state()
+            gamestate = self._read_state(during_connect=True)
             status = (
                 gamestate.menu_state,
                 getattr(gamestate, "submenu", None),
@@ -299,6 +302,7 @@ class NetplaySession:
         assert self._controller is not None
         assert self.ego_port is not None
         while True:
+            self._raise_if_connect_abandoned()
             frame = canonical_frame(gamestate)
             frame_id = frame.get("id")
             if not isinstance(frame_id, int):
@@ -309,16 +313,19 @@ class NetplaySession:
                 return frame
             if on_countdown_observation is not None:
                 on_countdown_observation(frame)
+            self._raise_if_connect_abandoned()
             if self.realtime:
                 next_state = self._console.step(flush_controllers=False)
+                self._raise_if_connect_abandoned()
                 if next_state is not None:
                     gamestate = next_state
                     if gamestate.menu_state not in LIVE_MENU_STATES:
                         raise RuntimeError("netplay left the game during the pre-game countdown")
                     continue
             inputs = NEUTRAL_CONTROLLER_ACTION if on_countdown_frame is None else on_countdown_frame(frame)
+            self._raise_if_connect_abandoned()
             apply_inputs(self._controller, inputs)
-            gamestate = self._read_state()
+            gamestate = self._read_state(during_connect=True)
             if gamestate.menu_state not in LIVE_MENU_STATES:
                 raise RuntimeError("netplay left the game during the pre-game countdown")
 
@@ -387,16 +394,29 @@ class NetplaySession:
         self._last_frame_id = frame_id
         return frame, True
 
-    def _read_state(self) -> melee.GameState:
+    def _raise_if_connect_abandoned(self) -> None:
+        if self.connect_abandoned():
+            raise ConnectAbandoned("stopped waiting for the remote player")
+
+    def _read_state(self, *, during_connect: bool = False) -> melee.GameState:
         if self._console is None:
             raise RuntimeError("netplay console is not initialized")
+        if during_connect:
+            self._raise_if_connect_abandoned()
         if not self.realtime:
-            return step_blocking(self._console, self.step_timeout_seconds)
+            state = step_blocking(self._console, self.step_timeout_seconds)
+            if during_connect:
+                self._raise_if_connect_abandoned()
+            return state
         if self._controller is not None:
             self._controller.flush()
         deadline = time.monotonic() + self.step_timeout_seconds
         while True:
+            if during_connect:
+                self._raise_if_connect_abandoned()
             state = self._console.step(flush_controllers=False)
+            if during_connect:
+                self._raise_if_connect_abandoned()
             if state is not None:
                 return state
             if time.monotonic() >= deadline:
