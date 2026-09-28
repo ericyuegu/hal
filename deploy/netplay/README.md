@@ -25,6 +25,37 @@ has not yet been measured on that setting.
 
 Export a validated 059 checkpoint with `uv run hal-policy export /path/to/checkpoint.pt /path/to/policy.halpolicy`. The runner requires a capability-v2 artifact for the declared netplay profiles; an older bundle keeps its original delay meaning and does not gain new capabilities when loaded.
 
+## API Worker
+
+`web/netplay-api` is the netplay queue: a Cloudflare Worker with one Durable
+Object. It replaces `hal-netplay-api` once the runner moves onto it.
+
+Local development:
+
+```sh
+cd web/netplay-api
+npm install
+cp .dev.vars.example .dev.vars   # fill in the digests of your dev tokens
+npm run dev                      # http://localhost:8787
+npm test
+```
+
+One-time Cloudflare setup:
+
+1. The `20xx.xyz` zone is on the account. `wrangler.jsonc` routes `20xx.xyz/v1/*`
+   to this Worker.
+2. Create two Cloudflare Access applications: `20xx.xyz/v1/runner/*` with one
+   service token per GPU box, and `20xx.xyz/v1/admin/*` for the owner's login.
+3. Store the token digests:
+
+   ```sh
+   echo -n "$RUNNER_TOKEN" | sha256sum   # repeat per box; join with commas
+   npx wrangler secret put RUNNER_TOKEN_SHA256
+   npx wrangler secret put ADMIN_TOKEN_SHA256
+   ```
+
+Deploy with `npm run deploy` from `web/netplay-api`.
+
 ## Hosted run
 
 Set the public origins, API URL, and tunnel token in `.env`, then run `deploy/netplay/run-host.sh` and `deploy/netplay/deploy-frontend.sh` in separate terminals. An empty tunnel token disables Cloudflare. The tunnel sends the API hostname to `http://127.0.0.1:8080`, and the frontend origin must match `HAL_NETPLAY_ALLOWED_ORIGINS` exactly.
