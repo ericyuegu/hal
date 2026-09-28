@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Final
 from typing import cast
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -32,6 +33,8 @@ from hal.netplay_service.queue_contract import SessionEndedError
 # response returns the first result), so any request may be retried. A 4xx is final.
 RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0, 2.0, 4.0)
 _TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(10.0, connect=5.0)
+# The bearer token travels in the clear over http, so http is only for a Worker on this machine.
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(("127.0.0.1", "localhost"))
 _WORKER_ID: Final[re.Pattern[str]] = re.compile(r"(?P<session>[A-Za-z0-9_-]+)/slot-(?P<slot>[0-9]+)")
 _JOB_FIELDS: Final[frozenset[str]] = frozenset(
     (
@@ -88,6 +91,8 @@ class QueueEndpoint:
     def __post_init__(self) -> None:
         if not self.url.startswith(("https://", "http://")) or self.url.endswith("/"):
             raise ValueError("HAL_NETPLAY_API_URL must be an http(s) origin without a trailing slash")
+        if self.url.startswith("http://") and urlsplit(self.url).hostname not in _LOOPBACK_HOSTS:
+            raise ValueError("HAL_NETPLAY_API_URL may use http only for 127.0.0.1 or localhost; use https")
         if not self.token:
             raise ValueError("the queue bearer token must be non-empty")
         if (self.access_client_id is None) != (self.access_client_secret is None):

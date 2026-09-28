@@ -169,6 +169,21 @@ def test_parse_job_rejects_drift() -> None:
         parse_job(_job_body(attempt=True))
 
 
+@pytest.mark.parametrize(
+    "url", ["http://20xx.xyz", "http://10.0.0.61:8787", "http://localhost.20xx.xyz", "http://127.0.0.1@20xx.xyz"]
+)
+def test_endpoint_refuses_http_to_another_host(url: str) -> None:
+    with pytest.raises(ValueError, match="http only for 127.0.0.1 or localhost"):
+        QueueEndpoint(url, "t")
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1", "http://127.0.0.1:8787", "http://localhost", "http://localhost:8787"]
+)
+def test_endpoint_accepts_http_to_this_machine(url: str) -> None:
+    assert QueueEndpoint(url, "t").headers() == {"Authorization": "Bearer t"}
+
+
 def test_endpoint_rejects_misconfiguration_and_hides_secrets() -> None:
     with pytest.raises(ValueError, match="trailing slash"):
         QueueEndpoint("https://20xx.xyz/", "t", "id", "secret")
