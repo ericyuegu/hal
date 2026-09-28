@@ -20,10 +20,11 @@ from unittest.mock import Mock
 import pytest
 
 from hal.eval.scheduling import FrameTiming
+from hal.netplay_service.domain import Job
+from hal.netplay_service.domain import JobCredentials
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
 from hal.netplay_service.health import ChunkHealth
-from hal.netplay_service.queue import QueueStore
 
 _SPEC = importlib.util.spec_from_file_location(
     "hal_qualify_netplay_059", Path(__file__).parents[1] / "scripts" / "qualify_netplay_059.py"
@@ -32,6 +33,28 @@ assert _SPEC is not None and _SPEC.loader is not None
 qualify_netplay_059 = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = qualify_netplay_059
 _SPEC.loader.exec_module(qualify_netplay_059)
+
+
+def _credentials(status: JobStatus) -> JobCredentials:
+    return JobCredentials(
+        Job(
+            id="job",
+            player_code="TEST#1",
+            choices=MatchChoices("FOX", "IBDW#0", 2),
+            status=status,
+            queue_position=None,
+            attempt=1,
+            game_count=0,
+            connect_code=None,
+            actual_stage=None,
+            last_result=None,
+            error_code="engine_unavailable" if status is JobStatus.FAILED else None,
+            connect_deadline=None,
+            rematch_deadline=None,
+            cancel_after_game=False,
+        ),
+        "token",
+    )
 
 
 def _spawn_idle_descendant(connection: Connection) -> None:
@@ -147,6 +170,24 @@ def test_qualification_routes_opengl_to_bot_peer_and_run_records(
     monkeypatch.setattr(qualify_netplay_059, "_ResourceSampler", lambda *_args: sampler)
     monkeypatch.setattr(qualify_netplay_059, "_wait_ready", lambda *_args: 0.0)
     monkeypatch.setattr(qualify_netplay_059, "NetplaySession", PeerSession)
+    worker_context = MagicMock()
+    worker_context.__enter__.return_value = "http://127.0.0.1:8787"
+    monkeypatch.setattr(qualify_netplay_059, "local_worker", lambda *_args, **_kwargs: worker_context)
+    monkeypatch.setattr(
+        qualify_netplay_059,
+        "policy_config_for",
+        lambda _bundle: SimpleNamespace(bundle_sha256="a" * 64),
+    )
+    monkeypatch.setattr(qualify_netplay_059, "AdminClient", lambda _endpoint: Mock())
+    session_client = Mock()
+    session_client.start_session.return_value = SimpleNamespace(session_id="session")
+    monkeypatch.setattr(qualify_netplay_059, "RunnerClient", lambda _endpoint: session_client)
+    reporter = MagicMock()
+    reporter.__enter__.return_value = reporter
+    monkeypatch.setattr(qualify_netplay_059, "SessionReporter", lambda *_args: reporter)
+    player_queue = Mock()
+    player_queue.create_job.return_value = _credentials(JobStatus.QUEUED)
+    monkeypatch.setattr(qualify_netplay_059, "_PlayerQueue", lambda _url: player_queue)
     monkeypatch.setattr(
         qualify_netplay_059, "_terminate", lambda *_args: qualify_netplay_059.ShutdownResult(0, False, (), ())
     )
@@ -223,14 +264,10 @@ def test_gpu_memory_requires_valid_matching_processes(
 
 
 @pytest.mark.parametrize("status", [JobStatus.PLAYING, JobStatus.FAILED, JobStatus.QUEUED])
-def test_smoke_requires_a_healthy_bot_reservation(tmp_path: Path, status: JobStatus) -> None:
-    store = QueueStore(tmp_path / "queue.sqlite3")
-    credentials = store.create_job("TEST#1", MatchChoices("FOX", "IBDW#0", 2))
-    current = replace(
-        credentials.job, status=status, error_code="engine_unavailable" if status is JobStatus.FAILED else None
-    )
-    observed_store = Mock(spec=QueueStore)
-    observed_store.get_job.return_value = current
+def test_smoke_requires_a_healthy_bot_reservation(status: JobStatus) -> None:
+    credentials = _credentials(status)
+    observed_store = Mock(spec=qualify_netplay_059._PlayerQueue)
+    observed_store.get_job.return_value = credentials.job
     session = Mock()
     session.step.return_value = ({"id": 600}, True)
     runner = Mock()
@@ -247,9 +284,8 @@ def test_smoke_requires_a_healthy_bot_reservation(tmp_path: Path, status: JobSta
             )
 
 
-def test_live_reservation_rejects_an_exited_runner(tmp_path: Path) -> None:
-    store = QueueStore(tmp_path / "queue.sqlite3")
-    credentials = store.create_job("TEST#1", MatchChoices("FOX", "IBDW#0", 2))
+def test_live_reservation_rejects_an_exited_runner() -> None:
+    credentials = _credentials(JobStatus.PLAYING)
     with pytest.raises(RuntimeError, match="service exited"):
         qualify_netplay_059._validate_live_reservation(
             replace(credentials.job, status=JobStatus.PLAYING), is_runner_alive=False

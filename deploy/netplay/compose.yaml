@@ -1,54 +1,19 @@
 name: hal-netplay
 
-x-hal-image: &hal-image
-  image: hal-netplay:${HAL_GIT_SHA:?set HAL_GIT_SHA}
-  build:
-    context: ../..
-    dockerfile: deploy/netplay/Dockerfile
-  restart: unless-stopped
-
 services:
-  api:
-    <<: *hal-image
-    command: ["hal-netplay-api", "--host", "0.0.0.0", "--port", "8080"]
-    environment:
-      HAL_NETPLAY_DATABASE: /var/lib/hal-netplay/queue.sqlite3
-      HAL_NETPLAY_CAPACITY: "1"
-      HAL_NETPLAY_ALLOWED_ORIGINS: ${HAL_NETPLAY_ALLOWED_ORIGINS:?set the Sites origin}
-      HAL_NETPLAY_ALLOWED_HOSTS: ${HAL_NETPLAY_ALLOWED_HOSTS:?set the API hostname}
-      HAL_NETPLAY_RUNNER_STATUS: /var/lib/hal-netplay/runner-status.json
-    volumes:
-      - state:/var/lib/hal-netplay
-    expose:
-      - "8080"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health/ready"]
-      interval: 5s
-      timeout: 2s
-      retries: 3
-
   runner:
-    <<: *hal-image
+    image: hal-netplay-runner:${HAL_GIT_SHA:?set HAL_GIT_SHA}
+    build:
+      context: ../..
+      dockerfile: deploy/netplay/Dockerfile
+    restart: unless-stopped
     runtime: nvidia
-    command:
-      - hal-netplay-runner
-      - /run/hal-policy/policy.halpolicy
-      - --compiled
-      - --database
-      - /var/lib/hal-netplay/queue.sqlite3
-      - --user-jsons
-      - /run/hal-secrets/slippi-user-a.json
-      - --slippi-ports
-      - "51441"
-      - --iso-path
-      - /run/hal-assets/ssbm.ciso
-      - --dolphin-path
-      - /run/hal-assets/Slippi_Online-x86_64.AppImage
-      - --replay-dir
-      - /var/lib/hal-netplay/replays
-      - --git-sha
-      - ${HAL_GIT_SHA}
+    command: ["hal-netplay-runner", "--slots", "${HAL_NETPLAY_SLOTS:-1}", "--compiled", "--git-sha", "${HAL_GIT_SHA}"]
     environment:
+      HAL_NETPLAY_API_URL: ${HAL_NETPLAY_API_URL:?set HAL_NETPLAY_API_URL}
+      HAL_NETPLAY_RUNNER_TOKEN: ${HAL_NETPLAY_RUNNER_TOKEN:?set HAL_NETPLAY_RUNNER_TOKEN}
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:?set CF_ACCESS_CLIENT_ID}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:?set CF_ACCESS_CLIENT_SECRET}
       AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:?set AWS_ENDPOINT_URL}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}
@@ -56,11 +21,8 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility
     volumes:
-      - state:/var/lib/hal-netplay
-      - ${HAL_NETPLAY_POLICY:?set HAL_NETPLAY_POLICY}:/run/hal-policy/policy.halpolicy:ro
-      - ${HAL_NETPLAY_USER_JSON_A:?set HAL_NETPLAY_USER_JSON_A}:/run/hal-secrets/slippi-user-a.json:ro
-      - ${HAL_ISO_PATH:?set HAL_ISO_PATH}:/run/hal-assets/ssbm.ciso:ro
-      - ${HAL_NETPLAY_EMULATOR_PATH:?set HAL_NETPLAY_EMULATOR_PATH}:/run/hal-assets/Slippi_Online-x86_64.AppImage:ro
+      - cache:/root/.cache/hal-netplay
+      - state:/opt/hal/runs/netplay
     shm_size: 1gb
     deploy:
       resources:
@@ -70,13 +32,6 @@ services:
               count: 1
               capabilities: [gpu]
 
-  tunnel:
-    image: cloudflare/cloudflared:2026.8.3
-    restart: unless-stopped
-    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN}"]
-    depends_on:
-      api:
-        condition: service_healthy
-
 volumes:
+  cache:
   state:

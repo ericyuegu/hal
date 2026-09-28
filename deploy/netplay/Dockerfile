@@ -18,7 +18,7 @@ WORKDIR /opt/hal
 COPY pyproject.toml uv.lock README.md ./
 COPY hal ./hal
 COPY vendor ./vendor
-RUN uv sync --locked --extra netplay-server --no-editable
+RUN uv sync --locked --no-editable
 
 FROM vastai/base-image:cuda-13.0.2-auto
 
@@ -43,4 +43,4 @@ RUN chmod +x /usr/local/bin/hal-netplay-entrypoint
 
 WORKDIR /opt/hal
 ENTRYPOINT ["/usr/local/bin/hal-netplay-entrypoint"]
-CMD ["hal-netplay-api", "--host", "0.0.0.0"]
+CMD ["hal-netplay-runner", "--slots", "1", "--compiled"]

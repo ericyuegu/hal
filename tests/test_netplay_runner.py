@@ -39,11 +39,14 @@ from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import write_slot_status
-from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import UploadedReplay
 from hal.sim.netplay import ConnectAbandoned
 from hal.sim.trajectory import Trajectory
+
+_ENDPOINT = QueueEndpoint("http://127.0.0.1:8787", "runner-token")
+_SESSION_ID = "abcdefghijklmnop"
 
 
 def _job(*, stage: str | None = None) -> Job:
@@ -68,9 +71,10 @@ def _job(*, stage: str | None = None) -> Job:
 def _slot_config(tmp_path: Path) -> runner.SlotConfig:
     return runner.SlotConfig(
         slot=0,
-        worker_id="slot-0",
+        worker_id=f"{_SESSION_ID}/slot-0",
         stream_id=0,
-        database=tmp_path / "queue.sqlite3",
+        queue_endpoint=_ENDPOINT,
+        session_id=_SESSION_ID,
         user_json=tmp_path / "user.json",
         bot_connect_code="HAL#1",
         slippi_port=51441,
@@ -87,7 +91,8 @@ def _slot_config(tmp_path: Path) -> runner.SlotConfig:
 
 def _runner_config(tmp_path: Path) -> runner.RunnerConfig:
     return runner.RunnerConfig(
-        database=tmp_path / "queue.sqlite3",
+        queue_endpoint=_ENDPOINT,
+        session_id=_SESSION_ID,
         policy=tmp_path / "policy.hal",
         user_jsons=(tmp_path / "account.json",),
         slippi_ports=(51441,),
@@ -97,6 +102,40 @@ def _runner_config(tmp_path: Path) -> runner.RunnerConfig:
         status_path=tmp_path / "status.json",
         git_sha="a" * 40,
     )
+
+
+class _LiveConnection:
+    def __init__(self, messages: list[object]) -> None:
+        self._messages = messages
+
+    def __enter__(self) -> _LiveConnection:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def recv(self, timeout: float) -> object:
+        if self._messages:
+            message = self._messages.pop(0)
+            if isinstance(message, BaseException):
+                raise message
+            return message
+        time.sleep(timeout)
+        raise TimeoutError
+
+
+class _LiveQueue:
+    def __init__(self, job: Job, connections: list[_LiveConnection]) -> None:
+        self.job = job
+        self.connections = connections
+        self.get_calls = 0
+
+    def connect_live(self, _job_id: str, _worker_id: str) -> _LiveConnection:
+        return self.connections.pop(0)
+
+    def get_worker_job(self, _job_id: str, _worker_id: str) -> Job:
+        self.get_calls += 1
+        return self.job
 
 
 @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), True])
@@ -159,18 +198,24 @@ def test_recovery_keeps_120_seconds_after_a_long_cold_preparation_budget(
     assert [call.kwargs["recovery_deadline"] for call in generation.call_args_list] == [None, 220.0]
 
 
-def test_live_policy_settings_follow_job_revision(tmp_path: Path) -> None:
-    store = QueueStore(tmp_path / "queue.sqlite3")
-    credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
-    claimed = store.claim_next("slot-0")
-    assert claimed is not None
-    with runner._LivePolicySettings(store, claimed, "slot-0") as settings:
+def test_live_policy_settings_follow_job_revision_after_reconnect() -> None:
+    job = _job()
+    store = _LiveQueue(
+        job,
+        [
+            _LiveConnection([OSError("socket lost")]),
+            _LiveConnection(
+                [json.dumps({"type": "settings", "revision": 1, "desired_return": None, "temperature": 0.9})]
+            ),
+        ],
+    )
+    with runner._LivePolicySettings(store, job, "session/slot-0") as settings:  # type: ignore[arg-type]
         assert settings.current() == (20.0, 1.0)
-        store.update_policy(credentials.job.id, credentials.token, desired_return=None, temperature=0.9)
         deadline = time.monotonic() + 2.0
         while settings.current() != (None, 0.9) and time.monotonic() < deadline:
             time.sleep(0.02)
         assert settings.current() == (None, 0.9)
+    assert store.get_calls == 1
 
 
 def test_bot_account_code_is_read_without_fallback(tmp_path: Path) -> None:
@@ -409,20 +454,9 @@ def test_standby_reset_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
         standby.close()
 
 
-def test_failed_slot_restarts_once_without_ending_the_other_reservation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failed_slot_restarts_once_with_the_same_worker_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from multiprocessing import Pipe
 
-    store = QueueStore(tmp_path / "queue.sqlite3")
-    first = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
-    second = store.create_job("AXE#611", MatchChoices("FOX", "IBDW#0", 2))
-    assert store.claim_next("slot-0") is not None
-    store.mark_connecting(first.job.id, "slot-0", "BOT#1")
-    store.mark_playing(first.job.id, "slot-0")
-    assert store.claim_next("slot-1") is not None
-    store.mark_connecting(second.job.id, "slot-1", "BOT#2")
-    store.mark_playing(second.job.id, "slot-1")
     old = Mock(pid=123, exitcode=1)
     old.is_alive.return_value = False
     replacement = Mock(pid=124, exitcode=None)
@@ -437,7 +471,7 @@ def test_failed_slot_restarts_once_without_ending_the_other_reservation(
     responder = threading.Thread(target=acknowledge, daemon=True)
     responder.start()
     processes = [old]
-    workers = ["slot-0", "slot-1"]
+    draining = threading.Event()
     try:
         outcome = runner._replace_failed_slot(
             Mock(),
@@ -447,26 +481,19 @@ def test_failed_slot_restarts_once_without_ending_the_other_reservation(
             RuntimeConfig(1, (2, 3)),
             standby,
             threading.Event(),
+            draining,
             restart_allowed=True,
             capacity=2,
             processes=processes,
-            worker_ids=workers,
         )
         assert outcome is not None
         config, process = outcome
         assert process is replacement
-        assert (config.worker_id, config.stream_id) == ("slot-0-restart-1", 2)
+        assert (config.worker_id, config.stream_id) == (f"{_SESSION_ID}/slot-0", 2)
         assert standby.closed
-        assert workers == ["slot-0", "slot-1", "slot-0-restart-1"]
         assert processes == [old, replacement]
         replacement.start.assert_called_once_with()
-        assert store.get_job(first.job.id, first.token).status is JobStatus.FAILED
-        assert store.get_job(second.job.id, second.token).status is JobStatus.PLAYING
 
-        third = store.create_job("MANGO#612", MatchChoices("FOX", "IBDW#0", 2))
-        assert store.claim_next(config.worker_id) is not None
-        store.mark_connecting(third.job.id, config.worker_id, "BOT#1")
-        store.mark_playing(third.job.id, config.worker_id)
         failed_replacement = Mock(pid=124, exitcode=1)
         failed_replacement.is_alive.return_value = False
         assert (
@@ -478,15 +505,13 @@ def test_failed_slot_restarts_once_without_ending_the_other_reservation(
                 RuntimeConfig(1, (2, 3)),
                 standby,
                 threading.Event(),
+                draining,
                 restart_allowed=False,
                 capacity=2,
                 processes=processes,
-                worker_ids=workers,
             )
             is None
         )
-        assert store.get_job(third.job.id, third.token).status is JobStatus.FAILED
-        assert store.get_job(second.job.id, second.token).status is JobStatus.PLAYING
         assert processes == [old, replacement]
     finally:
         responder.join(timeout=1)
@@ -536,7 +561,8 @@ def test_runner_does_not_admit_a_replacement_when_old_child_survives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = runner.RunnerConfig(
-        database=tmp_path / "queue.sqlite3",
+        queue_endpoint=_ENDPOINT,
+        session_id=_SESSION_ID,
         policy=tmp_path / "policy.hal",
         user_jsons=(tmp_path / "account.json",),
         slippi_ports=(51441,),
@@ -557,123 +583,81 @@ def test_runner_does_not_admit_a_replacement_when_old_child_survives(
     generation.assert_called_once()
 
 
-def test_generation_failure_records_active_lease_even_if_gpu_child_survives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from multiprocessing import Pipe
+def test_heartbeat_forfeits_active_job_when_runner_aborts() -> None:
+    store = Mock()
+    done = threading.Event()
+    abort = threading.Event()
+    thread = threading.Thread(target=runner._heartbeat, args=(store, "job", "session/slot-0", done, abort))
+    thread.start()
 
-    store = QueueStore(tmp_path / "queue.sqlite3")
-    credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
-    worker_id = "generation-aaaaaaaaaaaaaaaa-slot-0"
-    assert store.claim_next(worker_id) is not None
-    store.mark_connecting(credentials.job.id, worker_id, "BOT#1")
-    store.mark_playing(credentials.job.id, worker_id)
-    config = runner.RunnerConfig(
-        database=store.path,
-        policy=tmp_path / "policy.hal",
-        user_jsons=(tmp_path / "account.json",),
-        slippi_ports=(51441,),
-        iso_path=tmp_path / "game.ciso",
-        dolphin_path=tmp_path / "Slippi.AppImage",
-        replay_dir=tmp_path / "replays",
-        status_path=tmp_path / "status.json",
-        git_sha="a" * 40,
-    )
-    stuck = Mock(pid=123, name="stuck-gpu")
-    stuck.is_alive.return_value = True
-    context = SimpleNamespace(Event=threading.Event, Pipe=Pipe, Process=Mock(return_value=stuck))
-    monkeypatch.setattr(runner.mp, "get_context", lambda _method: context)
-    monkeypatch.setattr(runner.secrets, "token_hex", lambda _length: "a" * 16)
-    monkeypatch.setattr(
-        runner,
-        "_await_engine_ready",
-        Mock(side_effect=runner._EngineLost("inference process stopped")),
-    )
+    abort.set()
+    thread.join(timeout=1.0)
 
-    with pytest.raises(RuntimeError, match="termination exceeded two seconds"):
-        runner._run_generation(config, ("BOT#1",), "b" * 64, runner._ShutdownFlag(), recovery_deadline=None)
+    assert not thread.is_alive()
+    store.forfeit_service_failure.assert_called_once_with("job", "session/slot-0")
 
-    failed = store.get_job(credentials.job.id, credentials.token)
-    assert (failed.status, failed.error_code, failed.last_result) == (
-        JobStatus.FAILED,
-        "service_failure_bot_forfeit",
-        "win",
-    )
-    assert stuck.kill.call_count == 1
+
+def _run_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *extra: str,
+) -> tuple[runner.RunnerConfig, Mock]:
+    policy = tmp_path / "policy.halpolicy"
+    account = tmp_path / "account.json"
+    started = SimpleNamespace(policy=SimpleNamespace(bundle_sha256="a" * 64))
+    client = Mock()
+    client.active_policy.return_value = started.policy
+    client.start_session.return_value = started
+    reporter = Mock()
+
+    @contextmanager
+    def reporting(*_args: object, **_kwargs: object):
+        yield reporter
+
+    captured: list[runner.RunnerConfig] = []
+
+    def run(config: runner.RunnerConfig, **_kwargs: object) -> None:
+        captured.append(config)
+
+    fixtures = iter((tmp_path / "game.ciso", tmp_path / "Slippi.AppImage"))
+    monkeypatch.setattr(runner, "ensure", lambda _fixture: next(fixtures))
+    monkeypatch.setattr(runner, "start_http_server", Mock())
+    monkeypatch.setattr(runner, "runner_endpoint", lambda _environment: _ENDPOINT)
+    monkeypatch.setattr(runner, "RunnerClient", lambda _endpoint: client)
+    monkeypatch.setattr(runner, "SessionReporter", reporting)
+    monkeypatch.setattr(runner, "_download_session_assets", lambda *_args, **_kwargs: (policy, (account,)))
+    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(runner, "new_session_id", lambda: _SESSION_ID)
+
+    runner.main(["--slots", "1", "--git-sha", "test-sha", *extra])
+    return captured[0], client
 
 
 def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    account = tmp_path / "user.json"
-    account.write_text('{"connectCode":"HAL#1"}')
-    policy = tmp_path / "policy.halpolicy"
-    policy.touch()
-    captured: list[runner.RunnerConfig] = []
-    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
-    monkeypatch.setattr(runner, "run", captured.append)
+    config, client = _run_cli(tmp_path, monkeypatch)
+    assert config.compiled is False
+    assert config.graphics_backend == "Vulkan"
+    assert config.batch_wait_seconds == 0.0005
+    assert config.preparation_timeout_seconds == 1800.0
+    assert config.session_id == _SESSION_ID
+    assert client.start_session.call_args.kwargs["wants_stream"] is False
+    client.end_session.assert_called_once_with(_SESSION_ID)
 
-    runner.main(
-        [
-            str(policy),
-            "--user-jsons",
-            str(account),
-            "--slippi-ports",
-            "51441",
-            "--git-sha",
-            "test-sha",
-        ]
-    )
-    assert captured[0].compiled is False
-    assert captured[0].graphics_backend == "Vulkan"
-    assert captured[0].batch_wait_seconds == 0.0005
-    assert captured[0].preparation_timeout_seconds == 1800.0
-
-    runner.main(
-        [
-            str(policy),
-            "--user-jsons",
-            str(account),
-            "--slippi-ports",
-            "51441",
-            "--git-sha",
-            "test-sha",
-            "--graphics-backend",
-            "OGL",
-        ]
-    )
-    assert captured[1].graphics_backend == "OGL"
+    config, _ = _run_cli(tmp_path, monkeypatch, "--graphics-backend", "OGL")
+    assert config.graphics_backend == "OGL"
 
 
 def test_runner_cli_accepts_explicit_cold_preparation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    account = tmp_path / "user.json"
-    account.write_text('{"connectCode":"HAL#1"}')
-    policy = tmp_path / "policy.hal"
-    policy.touch()
-    captured: list[runner.RunnerConfig] = []
-    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
-    monkeypatch.setattr(runner, "run", captured.append)
-
-    runner.main(
-        [
-            str(policy),
-            "--user-jsons",
-            str(account),
-            "--slippi-ports",
-            "51441",
-            "--git-sha",
-            "test-sha",
-            "--preparation-timeout-seconds",
-            "600",
-        ]
-    )
-
-    assert captured[0].preparation_timeout_seconds == 600.0
+    config, _ = _run_cli(tmp_path, monkeypatch, "--preparation-timeout-seconds", "600")
+    assert config.preparation_timeout_seconds == 600.0
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), True])
 def test_runner_rejects_invalid_batch_wait(tmp_path: Path, value: float) -> None:
     with pytest.raises(ValueError, match="batch coalescing"):
         runner.RunnerConfig(
-            database=tmp_path / "queue.sqlite3",
+            queue_endpoint=_ENDPOINT,
+            session_id=_SESSION_ID,
             policy=tmp_path / "policy.hal",
             user_jsons=(tmp_path / "account.json",),
             slippi_ports=(51441,),
@@ -688,7 +672,8 @@ def test_runner_rejects_invalid_batch_wait(tmp_path: Path, value: float) -> None
 
 def test_runner_rejects_boolean_port_and_fractional_frame_limit(tmp_path: Path) -> None:
     config = runner.RunnerConfig(
-        database=tmp_path / "queue.sqlite3",
+        queue_endpoint=_ENDPOINT,
+        session_id=_SESSION_ID,
         policy=tmp_path / "policy.hal",
         user_jsons=(tmp_path / "account.json",),
         slippi_ports=(51441,),
@@ -796,15 +781,10 @@ def test_health_publisher_failure_terminates_the_slot(
             time.sleep(0.001)
 
 
-def test_live_policy_settings_release_when_player_cancels_before_live(tmp_path: Path) -> None:
-    store = QueueStore(tmp_path / "queue.sqlite3")
-    credentials = store.create_job("CRYO#610", MatchChoices("FOX", "IBDW#0", 2))
-    claimed = store.claim_next("slot-0")
-    assert claimed is not None
-    store.mark_connecting(claimed.id, "slot-0", "HAL#1")
-    with runner._LivePolicySettings(store, claimed, "slot-0") as settings:
-        assert not settings.released.is_set()
-        store.cancel(credentials.job.id, credentials.token)
+def test_live_policy_settings_release_when_worker_sends_release() -> None:
+    job = _job()
+    store = _LiveQueue(job, [_LiveConnection([json.dumps({"type": "released"})])])
+    with runner._LivePolicySettings(store, job, "session/slot-0") as settings:  # type: ignore[arg-type]
         assert settings.released.wait(2.0)
 
 
@@ -825,6 +805,7 @@ def test_abandoned_connect_frees_slot_without_no_show(
     monkeypatch.setattr(runner, "NetplaySession", Session)
     monkeypatch.setattr(runner, "run_netplay_match", Mock(side_effect=ConnectAbandoned("released")))
     store = Mock()
+    store.connect_live.return_value = _LiveConnection([])
     stop = Mock()
     stop.is_set.return_value = False
 
@@ -866,6 +847,7 @@ def test_recoverable_failure_closes_dolphin_before_retry(
         Mock(side_effect=runner._RecoverableRuntimeError("low_frame_rate")),
     )
     store = Mock()
+    store.connect_live.return_value = _LiveConnection([])
     stop = Mock()
     stop.is_set.return_value = False
 
@@ -909,7 +891,7 @@ def test_recoverable_failure_resets_slot_and_retries_once(
     )
 
     health.recovering.assert_called_once_with("frame_stutter")
-    store.fail.assert_called_once_with("reservation", "slot-0", "runtime_degraded", retryable=True)
+    store.fail.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0", "runtime_degraded", retryable=True)
     stop.wait.assert_called_once_with(0.0)
 
 
@@ -944,6 +926,7 @@ def test_no_contest_ends_reservation_without_a_result(
         lambda *_args: ReplayEnd(replay, EndMethod.NO_CONTEST),
     )
     store = Mock()
+    store.connect_live.return_value = _LiveConnection([])
     stop = Mock()
     stop.is_set.return_value = False
     health = Mock()
@@ -959,7 +942,7 @@ def test_no_contest_ends_reservation_without_a_result(
         FrameTiming(2, 2, 4, 2, 8),
     )
 
-    store.mark_no_contest.assert_called_once_with("reservation", "slot-0")
+    store.mark_no_contest.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
     assert graphics_backends == ["OGL"]
     store.finish_game.assert_not_called()
     health.playing.assert_called_once_with()
@@ -1016,6 +999,7 @@ def test_local_qualification_retains_replay_without_publishing(
     monkeypatch.setattr(runner, "_write_pending_upload", pending)
     monkeypatch.setattr(runner, "_complete_pending_upload", uploaded)
     store = Mock()
+    store.connect_live.return_value = _LiveConnection([])
     store.finish_game.return_value = JobStatus.COMPLETE
     stop = Mock()
     stop.is_set.return_value = False
@@ -1032,7 +1016,7 @@ def test_local_qualification_retains_replay_without_publishing(
     )
 
     pending.assert_called_once()
-    assert pending.call_args.args[2] == "slot-0"
+    assert pending.call_args.args[2] == f"{_SESSION_ID}/slot-0"
     uploaded.assert_not_called()
     store.finish_game.assert_called_once()
     assert store.finish_game.call_args.kwargs["game_number"] == 1
@@ -1053,7 +1037,7 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
         started_at=now,
         ended_at=now,
     )
-    sidecar = runner._write_pending_upload(replay, metadata, "slot-0")
+    sidecar = runner._write_pending_upload(replay, metadata, f"{_SESSION_ID}/slot-0")
     events: list[str] = []
     uploaded = UploadedReplay("key", "metadata", "c" * 64, 6, "etag")
 
@@ -1064,13 +1048,17 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
         return uploaded
 
     class Store:
+        def close(self) -> None:
+            pass
+
         def record_replay(self, *args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
-            assert args[:3] == ("reservation", "slot-0", 1)
+            assert args[:3] == ("reservation", f"{_SESSION_ID}/slot-0", 1)
             assert replay.exists()
             events.append("record")
 
     monkeypatch.setattr(runner, "upload_replay", upload)
-    runner._complete_pending_upload(sidecar, Store())  # type: ignore[arg-type]
+    monkeypatch.setattr(runner, "_sidecar_queue", lambda _endpoint, _worker_id: Store())
+    runner._complete_pending_upload(sidecar, _ENDPOINT)
     assert events == ["upload", "record"]
     assert not replay.exists()
     assert not sidecar.exists()
@@ -1159,7 +1147,7 @@ def test_dolphin_connection_failure_does_not_report_inference_loss(tmp_path, mon
         FrameTiming(2, 2, 4, 2, 8),
     )
     health.recovering.assert_called_once_with("dolphin_connection_lost")
-    store.forfeit_service_failure.assert_called_once_with("reservation", "slot-0")
+    store.forfeit_service_failure.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
     store.fail.assert_not_called()
 
 
@@ -1178,7 +1166,7 @@ def test_inference_failure_stops_slot_after_forfeiting_current_reservation(tmp_p
             FrameTiming(2, 2, 4, 2, 8),
         )
     health.recovering.assert_called_once_with("inference_engine_lost")
-    store.forfeit_service_failure.assert_called_once_with("reservation", "slot-0")
+    store.forfeit_service_failure.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
     store.claim_next.assert_not_called()
 
 
@@ -1196,7 +1184,7 @@ def test_no_usable_plan_forfeits_match_without_stopping_healthy_slot(tmp_path, m
         FrameTiming(2, 1, 3, 4, 8),
     )
     health.recovering.assert_called_once_with("no_usable_action_plan")
-    store.forfeit_service_failure.assert_called_once_with("reservation", "slot-0")
+    store.forfeit_service_failure.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
     store.fail.assert_not_called()
 
 
@@ -1249,7 +1237,7 @@ def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path
 
     assert path is not None
     payload = json.loads(path.read_text())
-    assert payload["worker_id"] == "slot-0"
+    assert payload["worker_id"] == f"{_SESSION_ID}/slot-0"
     assert payload["schema_version"] == 3
     assert payload["graphics_backend"] == "Vulkan"
     assert payload["generation"] == 1
@@ -1282,7 +1270,7 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
     payload = json.loads(path.read_text())
     assert payload["schema_version"] == 2
     assert payload["graphics_backend"] == "Vulkan"
-    assert payload["worker_id"] == "slot-0"
+    assert payload["worker_id"] == f"{_SESSION_ID}/slot-0"
     assert payload["failure"] == "RuntimeError: lost"
     assert payload["progress"]["observed_frame_ids"] == [-2, -1, 0, 1]
     assert payload["progress"]["pending_sequence"] == 3
@@ -1291,25 +1279,6 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
 
 
 def test_runner_cli_accepts_bounded_coalescing_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    account = tmp_path / "user.json"
-    account.write_text('{"connectCode":"HAL#1"}')
-    policy = tmp_path / "policy.halpolicy"
-    policy.touch()
-    captured: list[runner.RunnerConfig] = []
-    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _source: policy)
-    monkeypatch.setattr(runner, "run", captured.append)
-    runner.main(
-        [
-            str(policy),
-            "--user-jsons",
-            str(account),
-            "--slippi-ports",
-            "51441",
-            "--git-sha",
-            "test-sha",
-            "--batch-wait-ms",
-            "0.25",
-        ]
-    )
-    assert captured[0].batch_wait_seconds == 0.00025
+    config, _ = _run_cli(tmp_path, monkeypatch, "--batch-wait-ms", "0.25")
+    assert config.batch_wait_seconds == 0.00025
     assert (FrameTiming(2, 1, 3, 4, 8), FrameTiming(3, 1, 4, 4, 8)) == runner._NETPLAY_TIMINGS

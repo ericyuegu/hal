@@ -76,8 +76,6 @@ export type Rematch = {
   stage: string;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_HAL_API_URL ?? 'http://localhost:8080';
-
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -90,7 +88,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(path, {
     ...init,
     headers,
   });

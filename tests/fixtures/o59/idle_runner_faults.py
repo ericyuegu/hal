@@ -7,10 +7,10 @@ import os
 import platform
 import re
 import signal
-import sqlite3
 import sys
 import time
 from collections.abc import Mapping
+from contextlib import ExitStack
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -19,10 +19,24 @@ from datetime import datetime
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 
+from hal.netplay_service.admin import policy_config_for
+from hal.netplay_service.assets import account_key
+from hal.netplay_service.assets import sha256_file
+from hal.netplay_service.domain import account_connect_code
 from hal.netplay_service.health import RunnerState
 from hal.netplay_service.health import read_runner_status
-from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.local_worker import DEV_ADMIN_TOKEN
+from hal.netplay_service.local_worker import DEV_RUNNER_TOKEN
+from hal.netplay_service.local_worker import free_port
+from hal.netplay_service.local_worker import local_worker
+from hal.netplay_service.queue_client import Account
+from hal.netplay_service.queue_client import AdminClient
+from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import RunnerClient
+from hal.netplay_service.queue_client import SessionReporter
+from hal.netplay_service.queue_client import new_session_id
 from hal.netplay_service.runner import RunnerConfig
+from hal.netplay_service.runner import SessionStatus
 from hal.netplay_service.runner import run
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
@@ -249,10 +263,37 @@ def qualify_idle_runner_faults(output: Path, bundle: Path, account: Path, *, sli
         "uv_lock_sha256": _sha256(Path(__file__).resolve().parents[3] / "uv.lock"),
     }
     _write_json(output / "manifest.json", manifest)
-    store = QueueStore(output / "queue.sqlite3")
     status_path = output / "runner-status.json"
+    resources = ExitStack()
+    worker_url = resources.enter_context(local_worker(output / "worker-state", port=free_port()))
+    admin = AdminClient(QueueEndpoint(worker_url, DEV_ADMIN_TOKEN))
+    resources.callback(admin.close)
+    policy = policy_config_for(bundle)
+    admin.put_policy(policy)
+    account_digest = sha256_file(account)
+    admin.put_accounts((Account(account_connect_code(account), account_key(account_digest), account_digest),))
+    endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
+    sessions = RunnerClient(endpoint)
+    resources.callback(sessions.close)
+    session_id = new_session_id()
+    started = sessions.start_session(
+        session_id=session_id,
+        host="idle-fault-qualification",
+        bundle_sha256=policy.bundle_sha256,
+        git_sha=git_sha,
+        slots=1,
+        wants_stream=False,
+    )
+
+    def end_session() -> None:
+        with suppress(Exception):
+            sessions.end_session(session_id)
+
+    resources.callback(end_session)
+    resources.enter_context(SessionReporter(sessions, session_id, SessionStatus(status_path, policy.bundle_sha256, 1)))
     config = RunnerConfig(
-        database=store.path,
+        queue_endpoint=endpoint,
+        session_id=started.session_id,
         policy=bundle,
         user_jsons=(account,),
         slippi_ports=(slippi_port,),
@@ -298,8 +339,9 @@ def qualify_idle_runner_faults(output: Path, bundle: Path, account: Path, *, sli
         measured["terminal_seconds"] = _wait_terminal(process, status_path, owned, second_injected_at)
         if process.exitcode in (None, 0) or float(measured["terminal_seconds"]) > 4:
             raise AssertionError("runner failed to become unavailable after its second engine failure")
-        with sqlite3.connect(f"file:{store.path}?mode=ro", uri=True) as connection:
-            measured["reservation_count"] = int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+        measured["reservation_count"] = sum(
+            event.get("job_id") is not None for event in admin.events(job=None, session=None, since=None)
+        )
         if measured["reservation_count"] != 0:
             raise AssertionError("idle failure fixture unexpectedly created a reservation")
     except BaseException as error:
@@ -308,6 +350,7 @@ def qualify_idle_runner_faults(output: Path, bundle: Path, account: Path, *, sli
         raise
     finally:
         cleanup = _cleanup(process, owned)
+        resources.close()
         unchanged = _source_hashes() == source_hashes
         if cleanup.remaining_descendants or not unchanged:
             issue = RuntimeError("idle runner left a process alive or source files changed during qualification")

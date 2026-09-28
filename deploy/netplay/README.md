@@ -1,130 +1,76 @@
 # HAL netplay deployment
 
-The runner starts one prepared inference process and one Dolphin worker per Slippi account. Workers using the same checkpoint share model weights. The service admits matches only after it prepares and checks both delay profiles. Publishing a deployment remains a separate step after hardware qualification.
+The queue runs in `web/netplay-api`. A GPU host runs only `hal-netplay-runner`.
+The runner downloads and verifies its static fixtures, starts a remote session,
+keeps that session alive while it downloads policy and account assets, qualifies
+both delay profiles, and then starts its slots.
 
-## Local run
+## Static fixtures
 
-Install `uv`, `npm`, and `xvfb-run`. Copy the environment template and set the policy, ISO, emulator, one Slippi account, and R2 values. Leave `HAL_NETPLAY_USER_JSON_B` empty for one worker. Then run:
+`hal/fixtures.py` owns both static runtime files.
+
+- `ISO` is the private `fixtures/ssbm.ciso` R2 object.
+- `NETPLAY_EMULATOR` is the official Slippi Online 3.6.4 AppImage. The verified
+  release file is 111,679,992 bytes with SHA-256
+  `e0f984e5bbecb98e3a746da1f173a475b06c3a1ba6b73e2e31bbe85a5f5a5e8a`.
+
+The older file at `~/data/dolphin/slippi/Slippi_Online-x86_64.AppImage` is a
+local 3.5.1 build and is not used.
+
+## Local development
+
+Install the Python and Node dependencies. Copy `.env.example` to `.env`, set
+`HAL_GIT_SHA`, and provide a directory for the policy and account objects named
+by their Worker R2 keys:
 
 ```sh
 cp deploy/netplay/.env.example deploy/netplay/.env
 deploy/netplay/run-local.sh
 ```
 
-The launcher also accepts an environment-file path, for example
-`deploy/netplay/run-local.sh /absolute/path/to/play.env`. It starts the local
-API and page together; stop it with Ctrl-C.
+The launcher starts the Worker at `127.0.0.1:8787`, waits for it, starts the
+page at `127.0.0.1:3000`, and then starts the runner. The page uses same-origin
+`/v1` requests; Vite proxies them to the Worker. Ctrl-C stops all three process
+groups. Local assets still pass the normal SHA-256 checks.
 
-The local page is at `http://127.0.0.1:3000`. The host launcher uses `HAL_NETPLAY_USER_JSON_A` and, when set, `HAL_NETPLAY_USER_JSON_B`. It assigns distinct default Slippi ports 51441 and 51442 and sets API queue capacity to the worker count. Override ports with `HAL_NETPLAY_SLIPPI_PORT_A` and `HAL_NETPLAY_SLIPPI_PORT_B`. The runner rejects duplicate credentials or ports.
+## Host run
 
-Set `HAL_NETPLAY_GRAPHICS_BACKEND=OGL` in the environment file to select OpenGL
-for the netplay worker. The default is `Vulkan`; the runner also accepts
-`--graphics-backend OGL`. Vulkan showed periodic pauses in local 3060 controls.
-OpenGL passed a short neutral-player control, but a complete model-service game
-has not yet been measured on that setting.
-
-Export a validated 059 checkpoint with `uv run hal-policy export /path/to/checkpoint.pt /path/to/policy.halpolicy`. The runner requires a capability-v2 artifact for the declared netplay profiles; an older bundle keeps its original delay meaning and does not gain new capabilities when loaded.
-
-## API Worker
-
-`web/netplay-api` is the netplay queue: a Cloudflare Worker with one Durable
-Object. It replaces `hal-netplay-api` once the runner moves onto it.
-
-Local development:
+Set the runner URL and token, Cloudflare Access service token, R2 credentials,
+full Git SHA, and slot count in `.env`. Then run:
 
 ```sh
-cd web/netplay-api
-npm install
-cp .dev.vars.example .dev.vars   # fill in the digests of your dev tokens
-npm run dev                      # http://localhost:8787
-npm test
+deploy/netplay/run-host.sh
 ```
 
-One-time Cloudflare setup:
+The first signal drains the remote session. A second signal or the 15 minute
+deadline aborts active games. A hard crash is covered by the Worker's 30 second
+session silence limit.
 
-1. The `20xx.xyz` zone is on the account. `wrangler.jsonc` routes `20xx.xyz/v1/*`
-   to this Worker.
-2. Create two Cloudflare Access applications:
-   - `20xx.xyz/v1/runner/*` with a Service Auth policy and one service token per GPU box.
-   - `20xx.xyz/v1/admin/*` with two policies: the owner's login, for the browser, and Service Auth for
-     one `hal-netplay-admin` service token, for the CLI. Put that token in `.env` as
-     `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_ID` and `HAL_NETPLAY_ADMIN_ACCESS_CLIENT_SECRET`, beside
-     `HAL_NETPLAY_ADMIN_TOKEN`. Runners never receive it.
-3. Store the token digests:
+## Web deployment
 
-   ```sh
-   echo -n "$RUNNER_TOKEN" | sha256sum   # repeat per box; join with commas
-   npx wrangler secret put RUNNER_TOKEN_SHA256
-   npx wrangler secret put ADMIN_TOKEN_SHA256
-   ```
-
-Deploy with `npm run deploy` from `web/netplay-api`.
-
-## Hosted run
-
-Set the public origins, API URL, and tunnel token in `.env`, then run `deploy/netplay/run-host.sh` and `deploy/netplay/deploy-frontend.sh` in separate terminals. An empty tunnel token disables Cloudflare. The tunnel sends the API hostname to `http://127.0.0.1:8080`, and the frontend origin must match `HAL_NETPLAY_ALLOWED_ORIGINS` exactly.
-
-Docker Compose uses `deploy/netplay/compose.yaml` for one session. After measuring
-two-session capacity on the target GPU, add the second account and use the
-two-worker override (whose filename is historical):
+`deploy-web.sh` builds and deploys the page. Running it is an owner action
+because it is externally visible:
 
 ```sh
-cd deploy/netplay
-docker compose -f compose.yaml -f compose-ada.yaml up --build -d
+deploy/netplay/deploy-web.sh
 ```
 
-The override gives the API capacity two and binds two distinct credentials and
-ports. Publish that capacity only after timing, failure, and match/rematch checks
-pass on the target GPU. Both Compose configurations keep queue capacity equal to
-their Dolphin worker count. These Compose commands use the runner's Vulkan
-default; the local host launcher carries `HAL_NETPLAY_GRAPHICS_BACKEND`.
+## Verification record
 
-The Compose runner selects the NVIDIA container runtime for its default Vulkan
-backend. CUDA access alone does not ensure that Vulkan's driver and graphics
-libraries are available. For that configuration, confirm that the runner image
-sees the expected GPU:
+Plan 3 focused checks:
 
-```sh
-docker compose run --rm --no-deps --entrypoint vulkaninfo runner --summary
-```
+- `uv run pytest -q tests/test_netplay_runner.py`: 55 passed.
+- `uv run pytest -q tests/test_qualify_netplay_059.py`: 62 passed.
+- `uv run ruff format --check .`: passed, 263 files formatted.
+- `uv run ruff check .`: passed.
+- `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts`: passed.
+- `uv run pytest -q -m "not integration"`: 1,417 passed, 8 skipped, 21 deselected.
+- `npm test` in `web/netplay-api`: 101 passed. `npm run typecheck`: passed.
+- `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration`: 3 passed.
+- `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration`: 7 passed, 6 deselected.
+- `npm run build` in `web/netplay`: passed after `npm ci`. The first attempt failed because `vinext` was not installed.
 
-For the Vulkan profile, the command must list the NVIDIA device. Record the
-selected graphics backend and its actual driver when checking another profile;
-a working CUDA inference device does not establish the renderer's behavior.
-
-## Health and timing
-
-Check `http://127.0.0.1:8080/health/ready` and
-`http://127.0.0.1:8080/v1/capacity` before play. The first endpoint checks that
-the API can read a current runner heartbeat. The second reports the worker
-state; for one-account play, check `service_status: "ready"` and
-`healthy_slots: 1`. The runner writes a schema-4 preparation and timing record
-beside its status file. Slot health uses schema 4; aggregate runner health uses
-schema 5. A live inference process that stops responding is detected within one
-second. The supervisor invalidates old streams and prepares one replacement
-before new admission; failed recovery leaves the service unavailable.
-
-Initial preparation can compile kernels and has a separate 30-minute limit, set with `--preparation-timeout-seconds`. Recovery still has a 120-second deadline with cached artifacts. Neither path admits a match before preparation finishes.
-
-The fixed delay-2 profile uses physical delay 2, fixed prefix 3, one frame of inference allowance, replan interval 4, and horizon 8. Delay 3 uses prefix 4 with the same allowance, interval, and horizon. The engine prepares them separately, uses at most 0.5 ms to coalesce ready requests, and does not wait for admitted idle streams. There is no automatic timing selection in production.
-
-The API accepts `desired_return` in `[0, 40]` or `null` and `temperature` in `[0.8, 1.1]`. During a game, `PATCH /v1/jobs/{id}/policy` changes either setting at the next replan after the runner receives it.
-
-## Qualification
-
-Use a capability-v2 artifact and run the opt-in hardware tests on the target GPU:
-
-```sh
-HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1 \
-HAL_NETPLAY_POLICY=/absolute/path/to/policy.halpolicy \
-HAL_NETPLAY_QUALIFIED_CAPACITY=1 \
-uv run pytest -q tests/test_netplay_hardware.py -m integration
-```
-
-Set the capacity to the intended number of concurrent accounts and run this
-check on the target GPU. This preparation check is one gate; the 2,400-frame
-trials, 30-minute soak, ten matches/rematches, fault injection, and capacity
-checks still need evidence before production publication. They are not a
-prerequisite to start a local one-account game. Record results in
-[the refactor evidence](../../docs/refactor-059.md). The runtime API and timing
-rules are in [Inference](../../docs/inference.md).
+The first emulator-suite attempt failed because this worktree lacked its ignored
+fixtures. The second found the ISO and emulator through explicit environment
+paths but lacked the MDS and archive. The exact required command passed after
+the worktree linked to the existing read-only fixtures in the main checkout.

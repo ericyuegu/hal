@@ -20,6 +20,7 @@ import threading
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import ExitStack
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -29,11 +30,15 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import cast
 
+import httpx
 import melee
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import POLICY_BUTTON_MASK
 from hal.eval.scheduling import FrameTiming
+from hal.netplay_service.admin import policy_config_for
+from hal.netplay_service.assets import account_key
+from hal.netplay_service.assets import sha256_file
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobCredentials
 from hal.netplay_service.domain import JobStatus
@@ -42,8 +47,19 @@ from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import RunnerState
 from hal.netplay_service.health import read_runner_status
-from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.local_worker import DEV_ADMIN_TOKEN
+from hal.netplay_service.local_worker import DEV_RUNNER_TOKEN
+from hal.netplay_service.local_worker import free_port
+from hal.netplay_service.local_worker import local_worker
+from hal.netplay_service.queue_client import Account
+from hal.netplay_service.queue_client import AdminClient
+from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import RunnerClient
+from hal.netplay_service.queue_client import SessionReporter
+from hal.netplay_service.queue_client import new_session_id
+from hal.netplay_service.queue_client import parse_job
 from hal.netplay_service.runner import RunnerConfig
+from hal.netplay_service.runner import SessionStatus
 from hal.netplay_service.runner import run as run_netplay_service
 from hal.paths import ISO_PATH
 from hal.paths import NETPLAY_EMULATOR_PATH
@@ -117,6 +133,61 @@ class MatchAssessment:
     startup_count_by_event: dict[str, int]
     steady_count_by_event: dict[str, int]
     failures: tuple[str, ...]
+
+
+class _PlayerQueue:
+    """Small player-route client for the local qualification Worker."""
+
+    def __init__(self, url: str) -> None:
+        self._client = httpx.Client(base_url=url, timeout=10.0)
+
+    def close(self) -> None:
+        self._client.close()
+
+    @staticmethod
+    def _authorization(token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}"}
+
+    def create_job(self, player_code: str, choices: MatchChoices) -> JobCredentials:
+        response = self._client.post(
+            "/v1/jobs",
+            json={
+                "player_code": player_code,
+                "character": choices.character,
+                "imitation": choices.imitation,
+                "online_delay": choices.online_delay,
+                "desired_return": choices.desired_return,
+                "temperature": choices.temperature,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("token"), str):
+            raise RuntimeError("qualification Worker returned invalid job credentials")
+        token = payload.pop("token")
+        return JobCredentials(parse_job(payload), token)
+
+    def get_job(self, job_id: str, token: str) -> Job:
+        response = self._client.get(f"/v1/jobs/{job_id}", headers=self._authorization(token))
+        response.raise_for_status()
+        return parse_job(response.json())
+
+    def request_rematch(
+        self,
+        job_id: str,
+        token: str,
+        *,
+        character: str,
+        imitation: str,
+        stage: str,
+    ) -> Job:
+        response = self._client.post(
+            f"/v1/jobs/{job_id}/rematch",
+            headers=self._authorization(token),
+            json={"character": character, "imitation": imitation, "stage": stage},
+        )
+        response.raise_for_status()
+        return parse_job(response.json())
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,7 +751,7 @@ def _wait_ready(process: BaseProcess, status_path: Path, timeout_seconds: float)
     raise TimeoutError(f"netplay service did not prepare within {timeout_seconds:g} seconds")
 
 
-def _wait_job(store: QueueStore, credentials: JobCredentials, process: BaseProcess, timeout_seconds: float) -> Job:
+def _wait_job(store: _PlayerQueue, credentials: JobCredentials, process: BaseProcess, timeout_seconds: float) -> Job:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if not process.is_alive():
@@ -699,7 +770,7 @@ def _play_peer_game(
     game_number: int,
     smoke_frames: int | None,
     *,
-    store: QueueStore,
+    store: _PlayerQueue,
     runner: BaseProcess,
 ) -> PeerGame:
     first_id = int(first["id"])
@@ -818,26 +889,63 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
         "started_at": datetime.now(UTC).isoformat(),
     }
     _write_json(config.output / "manifest.json", manifest)
-    store = QueueStore(config.output / "queue.sqlite3")
     status_path = config.output / "runner-status.json"
-    runner = RunnerConfig(
-        database=store.path,
-        policy=config.bundle,
-        user_jsons=(config.bot_account,),
-        slippi_ports=(config.bot_slippi_port,),
-        iso_path=Path(ISO_PATH),
-        dolphin_path=Path(NETPLAY_EMULATOR_PATH),
-        graphics_backend=config.graphics_backend,
-        replay_dir=config.output / "runner-replays",
-        status_path=status_path,
-        git_sha=source_sha,
-        device="cuda",
-        seed=0,
-        compiled=True,
-        batch_wait_seconds=0.0005,
-        measurement_dir=config.output / "match-measurements",
-        publish_replays=False,
-    )
+    resources = ExitStack()
+    try:
+        worker_url = resources.enter_context(
+            local_worker(config.output / "worker-state", port=free_port(), startup_timeout_seconds=30)
+        )
+        admin = AdminClient(QueueEndpoint(worker_url, DEV_ADMIN_TOKEN))
+        resources.callback(admin.close)
+        policy = policy_config_for(config.bundle)
+        admin.put_policy(policy)
+        account_digest = sha256_file(config.bot_account)
+        admin.put_accounts((Account(bot_code, account_key(account_digest), account_digest),))
+        endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
+        session_client = RunnerClient(endpoint)
+        resources.callback(session_client.close)
+        session_id = new_session_id()
+        started = session_client.start_session(
+            session_id=session_id,
+            host="local-qualification",
+            bundle_sha256=policy.bundle_sha256,
+            git_sha=source_sha,
+            slots=1,
+            wants_stream=False,
+        )
+
+        def end_session() -> None:
+            with suppress(Exception):
+                session_client.end_session(session_id)
+
+        resources.callback(end_session)
+        resources.enter_context(
+            SessionReporter(session_client, session_id, SessionStatus(status_path, policy.bundle_sha256, 1))
+        )
+        store = _PlayerQueue(worker_url)
+        resources.callback(store.close)
+        runner = RunnerConfig(
+            queue_endpoint=endpoint,
+            session_id=started.session_id,
+            policy=config.bundle,
+            user_jsons=(config.bot_account,),
+            slippi_ports=(config.bot_slippi_port,),
+            iso_path=Path(ISO_PATH),
+            dolphin_path=Path(NETPLAY_EMULATOR_PATH),
+            graphics_backend=config.graphics_backend,
+            replay_dir=config.output / "runner-replays",
+            status_path=status_path,
+            git_sha=source_sha,
+            device="cuda",
+            seed=0,
+            compiled=True,
+            batch_wait_seconds=0.0005,
+            measurement_dir=config.output / "match-measurements",
+            publish_replays=False,
+        )
+    except BaseException:
+        resources.close()
+        raise
     process = mp.get_context("spawn").Process(target=run_netplay_service, args=(runner,), name="hal-059-qualification")
     games: list[PeerGame] = []
     assessments: list[MatchAssessment] = []
@@ -926,6 +1034,7 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
     finally:
         observed_processes = {} if sampler is None else sampler.owned_processes
         shutdown = _terminate(process, observed_processes)
+        resources.close()
         finalization_error: RuntimeError | None = None
         engine_audit: EngineAuditAssessment | None = None
         engine_audit_failure: str | None = None

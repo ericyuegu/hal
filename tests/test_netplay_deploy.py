@@ -1,15 +1,12 @@
 import fcntl
 import os
-import signal
 import subprocess
-import time
 from pathlib import Path
 
-import pytest
-
-_REPO_ROOT = Path(__file__).parents[1]
-_RUN_HOST = _REPO_ROOT / "deploy" / "netplay" / "run-host.sh"
-_RUN_LOCAL = _REPO_ROOT / "deploy" / "netplay" / "run-local.sh"
+_ROOT = Path(__file__).parents[1]
+_DEPLOY = _ROOT / "deploy" / "netplay"
+_RUN_HOST = _DEPLOY / "run-host.sh"
+_RUN_LOCAL = _DEPLOY / "run-local.sh"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -17,163 +14,49 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def test_host_launcher_skips_cloudflare_for_local_mode(tmp_path: Path) -> None:
-    command_dir = tmp_path / "bin"
-    command_dir.mkdir()
-    log_path = tmp_path / "commands.log"
-    _write_executable(
-        command_dir / "uv",
-        "printf 'uv|%s|%s|%s\\n' \"${HAL_NETPLAY_ALLOWED_ORIGINS:-}\" "
-        '"${HAL_NETPLAY_ALLOWED_HOSTS:-}" "$*" >> "$HAL_DEPLOY_TEST_LOG"\n',
-    )
-    _write_executable(command_dir / "xvfb-run", "exit 0\n")
-    _write_executable(
-        command_dir / "cloudflared",
-        "printf 'cloudflared\\n' >> \"$HAL_DEPLOY_TEST_LOG\"\n",
-    )
+def test_shell_launchers_parse() -> None:
+    for path in (_RUN_HOST, _RUN_LOCAL, _DEPLOY / "deploy-web.sh"):
+        subprocess.run(["bash", "-n", path], check=True)
 
+
+def test_host_launcher_runs_only_the_remote_runner(tmp_path: Path) -> None:
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    log = tmp_path / "log"
+    _write_executable(commands / "uv", 'printf "%s\\n" "$*" >> "$HAL_DEPLOY_TEST_LOG"\n')
     environment_file = tmp_path / "netplay.env"
     environment_file.write_text(
         "\n".join(
             (
                 "HAL_GIT_SHA=" + "a" * 40,
-                "HAL_NETPLAY_POLICY=/policy.halpolicy",
-                "HAL_NETPLAY_USER_JSON_A=/user.json",
-                "HAL_ISO_PATH=/ssbm.ciso",
-                "HAL_NETPLAY_EMULATOR_PATH=/Slippi.AppImage",
-                "CLOUDFLARE_TUNNEL_TOKEN=",
+                "HAL_NETPLAY_API_URL=http://127.0.0.1:8787",
+                "HAL_NETPLAY_RUNNER_TOKEN=token",
                 "AWS_ENDPOINT_URL=https://example.invalid",
                 "AWS_ACCESS_KEY_ID=test",
                 "AWS_SECRET_ACCESS_KEY=test",
                 "AWS_BUCKET=test",
-                f"HAL_NETPLAY_STATE_DIR={tmp_path / 'state'}",
-                "",
             )
         )
     )
-    environment = os.environ.copy()
-    environment["PATH"] = f"{command_dir}:/usr/bin:/bin"
-    environment["HAL_DEPLOY_TEST_LOG"] = str(log_path)
+    environment = os.environ | {
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "HAL_DEPLOY_TEST_LOG": str(log),
+        "HAL_NETPLAY_STATE_DIR": str(tmp_path / "state"),
+    }
 
-    result = subprocess.run(
-        [_RUN_HOST, environment_file],
-        check=False,
-        capture_output=True,
-        env=environment,
-        text=True,
-        timeout=5,
-    )
+    result = subprocess.run([_RUN_HOST, environment_file], capture_output=True, env=environment, text=True)
 
     assert result.returncode == 0, result.stderr
-    command_log = log_path.read_text()
-    assert "uv|http://127.0.0.1:3000,http://localhost:3000|127.0.0.1,localhost|sync" in command_log
-    assert "cloudflared" not in command_log
-
-
-@pytest.mark.parametrize("backend", [None, "OGL"])
-def test_host_launcher_uses_two_distinct_workers_when_second_account_is_set(
-    tmp_path: Path, backend: str | None
-) -> None:
-    command_dir = tmp_path / "bin"
-    command_dir.mkdir()
-    log_path = tmp_path / "commands.log"
-    _write_executable(
-        command_dir / "uv",
-        'printf "uv|%s|%s\\n" "${HAL_NETPLAY_CAPACITY:-}" "$*" >> "$HAL_DEPLOY_TEST_LOG"\n'
-        "if [[ $* == *hal-netplay-api* ]]; then sleep 0.2; fi\n",
-    )
-    _write_executable(command_dir / "xvfb-run", 'shift\nexec "$@"\n')
-    environment_file = tmp_path / "netplay.env"
-    environment_file.write_text(
-        "\n".join(
-            (
-                "HAL_GIT_SHA=" + "a" * 40,
-                "HAL_NETPLAY_POLICY=/policy.halpolicy",
-                "HAL_NETPLAY_USER_JSON_A=/user-a.json",
-                "HAL_NETPLAY_USER_JSON_B=/user-b.json",
-                "HAL_ISO_PATH=/ssbm.ciso",
-                "HAL_NETPLAY_EMULATOR_PATH=/Slippi.AppImage",
-                *((f"HAL_NETPLAY_GRAPHICS_BACKEND={backend}",) if backend is not None else ()),
-                "AWS_ENDPOINT_URL=https://example.invalid",
-                "AWS_ACCESS_KEY_ID=test",
-                "AWS_SECRET_ACCESS_KEY=test",
-                "AWS_BUCKET=test",
-                f"HAL_NETPLAY_STATE_DIR={tmp_path / 'state'}",
-                "",
-            )
-        )
-    )
-    environment = os.environ.copy()
-    environment["PATH"] = f"{command_dir}:/usr/bin:/bin"
-    environment["HAL_DEPLOY_TEST_LOG"] = str(log_path)
-    result = subprocess.run([_RUN_HOST, environment_file], capture_output=True, env=environment, text=True, timeout=5)
-    assert result.returncode == 0, result.stderr
-    commands = log_path.read_text()
-    assert "uv|2|run hal-netplay-api" in commands
-    assert "--user-jsons /user-a.json,/user-b.json --slippi-ports 51441,51442" in commands
-    assert f"--graphics-backend {backend or 'Vulkan'}" in commands
-
-
-def test_host_launcher_stops_runner_when_api_fails(tmp_path: Path) -> None:
-    command_dir = tmp_path / "bin"
-    command_dir.mkdir()
-    runner_pid_path = tmp_path / "runner.pid"
-    _write_executable(
-        command_dir / "uv",
-        "if [[ $* == *hal-netplay-api* ]]; then sleep 0.2; exit 1; fi\n"
-        "if [[ $* == *hal-netplay-runner* ]]; then\n"
-        '  echo $$ > "$HAL_RUNNER_PID_PATH"\n'
-        "  trap 'exit 0' TERM\n"
-        "  while true; do sleep 1; done\n"
-        "fi\n",
-    )
-    _write_executable(command_dir / "xvfb-run", 'shift\nexec "$@"\n')
-
-    environment_file = tmp_path / "netplay.env"
-    environment_file.write_text(
-        "\n".join(
-            (
-                "HAL_GIT_SHA=" + "a" * 40,
-                "HAL_NETPLAY_POLICY=/policy.halpolicy",
-                "HAL_NETPLAY_USER_JSON_A=/user.json",
-                "HAL_ISO_PATH=/ssbm.ciso",
-                "HAL_NETPLAY_EMULATOR_PATH=/Slippi.AppImage",
-                "AWS_ENDPOINT_URL=https://example.invalid",
-                "AWS_ACCESS_KEY_ID=test",
-                "AWS_SECRET_ACCESS_KEY=test",
-                "AWS_BUCKET=test",
-                f"HAL_NETPLAY_STATE_DIR={tmp_path / 'state'}",
-                "",
-            )
-        )
-    )
-    environment = os.environ.copy()
-    environment["PATH"] = f"{command_dir}:/usr/bin:/bin"
-    environment["HAL_RUNNER_PID_PATH"] = str(runner_pid_path)
-
-    result = subprocess.run(
-        [_RUN_HOST, environment_file],
-        check=False,
-        capture_output=True,
-        env=environment,
-        text=True,
-        timeout=5,
-    )
-
-    assert result.returncode == 1
-    runner_pid = int(runner_pid_path.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(runner_pid, 0)
+    recorded = log.read_text()
+    assert "sync --locked" in recorded
+    assert "run hal-netplay-runner --slots 1" in recorded
+    assert "hal-netplay-api" not in recorded
+    assert "cloudflared" not in _RUN_HOST.read_text()
+    assert "xvfb-run" not in _RUN_HOST.read_text()
 
 
 def test_local_launcher_has_one_command_interface() -> None:
-    result = subprocess.run(
-        [_RUN_LOCAL, "--help"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
+    result = subprocess.run([_RUN_LOCAL, "--help"], check=True, capture_output=True, text=True)
     assert result.stdout == "usage: deploy/netplay/run-local.sh [environment-file]\n"
 
 
@@ -181,81 +64,38 @@ def test_local_launcher_rejects_a_second_instance(tmp_path: Path) -> None:
     environment_file = tmp_path / "netplay.env"
     environment_file.touch()
     lock_path = tmp_path / "run-local.lock"
-    environment = os.environ.copy()
-    environment["HAL_NETPLAY_LOCAL_LOCK"] = str(lock_path)
+    environment = os.environ | {"HAL_NETPLAY_LOCAL_LOCK": str(lock_path)}
 
     with lock_path.open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = subprocess.run(
-            [_RUN_LOCAL, environment_file],
-            check=False,
-            capture_output=True,
-            env=environment,
-            text=True,
+            [_RUN_LOCAL, environment_file], check=False, capture_output=True, env=environment, text=True
         )
 
     assert result.returncode == 2
     assert result.stderr == "local netplay is already running\n"
 
 
-def test_local_launcher_waits_for_host_cleanup(tmp_path: Path) -> None:
-    command_dir = tmp_path / "bin"
-    command_dir.mkdir()
-    runner_pid_path = tmp_path / "runner.pid"
-    _write_executable(
-        command_dir / "uv",
-        "if [[ $* == *hal-netplay-api* ]]; then trap 'exit 0' TERM; while true; do sleep 1; done; fi\n"
-        "if [[ $* == *hal-netplay-runner* ]]; then\n"
-        '  echo $$ > "$HAL_RUNNER_PID_PATH"\n'
-        "  trap '' TERM\n"
-        "  while true; do sleep 1; done\n"
-        "fi\n",
-    )
-    _write_executable(command_dir / "xvfb-run", 'shift\nexec "$@"\n')
-    _write_executable(
-        command_dir / "npm",
-        "if [[ ${1:-} == ci ]]; then exit 0; fi\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n",
-    )
+def test_local_launcher_orders_worker_page_then_runner() -> None:
+    source = _RUN_LOCAL.read_text()
+    worker = source.index("wrangler dev")
+    page = source.index("npm run dev")
+    runner = source.index("hal-netplay-runner")
+    assert worker < page < runner
+    assert "HAL_NETPLAY_API_URL=http://127.0.0.1:8787" in source
+    assert "--local-assets" in source
 
-    environment_file = tmp_path / "netplay.env"
-    environment_file.write_text(
-        "\n".join(
-            (
-                "HAL_GIT_SHA=" + "a" * 40,
-                "HAL_NETPLAY_POLICY=/policy.halpolicy",
-                "HAL_NETPLAY_USER_JSON_A=/user.json",
-                "HAL_ISO_PATH=/ssbm.ciso",
-                "HAL_NETPLAY_EMULATOR_PATH=/Slippi.AppImage",
-                "AWS_ENDPOINT_URL=https://example.invalid",
-                "AWS_ACCESS_KEY_ID=test",
-                "AWS_SECRET_ACCESS_KEY=test",
-                "AWS_BUCKET=test",
-                f"HAL_NETPLAY_STATE_DIR={tmp_path / 'state'}",
-                "",
-            )
-        )
-    )
-    environment = os.environ.copy()
-    environment["PATH"] = f"{command_dir}:/usr/bin:/bin"
-    environment["HAL_NETPLAY_LOCAL_LOCK"] = str(tmp_path / "run-local.lock")
-    environment["HAL_RUNNER_PID_PATH"] = str(runner_pid_path)
 
-    process = subprocess.Popen(
-        [_RUN_LOCAL, environment_file],
-        env=environment,
-        stderr=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    for _ in range(100):
-        if runner_pid_path.exists():
-            break
-        time.sleep(0.01)
-    assert runner_pid_path.exists()
+def test_page_uses_same_origin_api_and_local_proxy() -> None:
+    client = (_ROOT / "web" / "netplay" / "lib" / "netplay-api.ts").read_text()
+    vite = (_ROOT / "web" / "netplay" / "vite.config.ts").read_text()
+    assert "NEXT_PUBLIC_HAL_API_URL" not in client
+    assert "fetch(path" in client
+    assert "'/v1': { target: 'http://127.0.0.1:8787' }" in vite
 
-    process.send_signal(signal.SIGINT)
-    process.communicate(timeout=7)
 
-    runner_pid = int(runner_pid_path.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(runner_pid, 0)
+def test_compose_has_only_a_runner() -> None:
+    compose = (_DEPLOY / "compose.yaml").read_text()
+    assert "  runner:" in compose
+    assert "  api:" not in compose
+    assert "  tunnel:" not in compose

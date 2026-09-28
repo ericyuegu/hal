@@ -10,6 +10,7 @@ import pickle
 import platform
 import secrets
 import signal
+import socket
 import sys
 import threading
 import time
@@ -32,7 +33,11 @@ import melee
 import torch
 from loguru import logger
 from peppi_py.game import EndMethod
+from prometheus_client import Gauge
+from prometheus_client import start_http_server
+from websockets.exceptions import ConnectionClosed
 
+from hal import r2
 from hal.eval.match_summary import summarize_trajectory
 from hal.eval.netplay import DolphinConnectionLost
 from hal.eval.netplay import NoUsableActionPlan
@@ -44,12 +49,14 @@ from hal.eval.results import NetplayProgress
 from hal.eval.results import PlayResult
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
+from hal.fixtures import ISO
+from hal.fixtures import NETPLAY_EMULATOR
+from hal.fixtures import ensure
 from hal.inference.action_sequence_artifact import read_action_sequence_artifact
 from hal.inference.action_sequence_policy import ActionSequencePolicy
 from hal.inference.api import PolicySpec
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
-from hal.inference.checkpoints import resolve_checkpoint
 from hal.inference.client import InferenceClient
 from hal.inference.client import InferenceUnavailable
 from hal.inference.client import StreamInvalidate
@@ -61,6 +68,10 @@ from hal.inference.engine import InferenceEngine
 from hal.inference.engine import ModelRegistry
 from hal.inference.engine import configure_inference_process
 from hal.inference.engine import freeze_inference_runtime
+from hal.netplay_service.assets import AssetCache
+from hal.netplay_service.assets import LocalSource
+from hal.netplay_service.assets import PinnedAsset
+from hal.netplay_service.assets import R2Source
 from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
@@ -77,16 +88,25 @@ from hal.netplay_service.health import RuntimeSnapshot
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import aggregate_runner_status
+from hal.netplay_service.health import read_runner_status
 from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.health import write_runner_status
 from hal.netplay_service.health import write_slot_status
-from hal.netplay_service.queue import QueueStore
+from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import QueueProtocolError
+from hal.netplay_service.queue_client import QueueUnavailableError
+from hal.netplay_service.queue_client import RemoteQueue
+from hal.netplay_service.queue_client import RunnerClient
+from hal.netplay_service.queue_client import SessionReporter
+from hal.netplay_service.queue_client import StartedSession
+from hal.netplay_service.queue_client import new_session_id
+from hal.netplay_service.queue_client import runner_endpoint
+from hal.netplay_service.queue_client import slot_worker_id
 from hal.netplay_service.queue_contract import InvalidTransitionError
 from hal.netplay_service.queue_contract import RunnerQueue
+from hal.netplay_service.queue_contract import SessionEndedError
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
-from hal.paths import ISO_PATH
-from hal.paths import NETPLAY_EMULATOR_PATH
 from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
@@ -95,6 +115,12 @@ from hal.sim.session import FrameTimeout
 
 _PENDING_UPLOAD_RETRY_SECONDS = 60.0
 _SLOT_STATUS_INTERVAL_SECONDS = 1.0
+_SLOT_RESTART_LEASE_GRACE_SECONDS = 60.0
+_SESSION_HEARTBEAT = Gauge(
+    "hal_netplay_session_heartbeat_unixtime",
+    "Unix time when the runner prepared its latest session status report.",
+)
+_HEALTHY_SLOTS = Gauge("hal_netplay_healthy_slots", "Number of healthy netplay slots.")
 
 
 class _StopEvent(Protocol):
@@ -116,7 +142,8 @@ class SlotConfig:
     slot: int
     worker_id: str
     stream_id: int
-    database: Path
+    queue_endpoint: QueueEndpoint
+    session_id: str
     user_json: Path
     bot_connect_code: str
     slippi_port: int
@@ -150,7 +177,8 @@ class SlotConfig:
 class RunnerConfig:
     """Validated deployment configuration for one GPU runner."""
 
-    database: Path
+    queue_endpoint: QueueEndpoint
+    session_id: str
     policy: Path
     user_jsons: tuple[Path, ...]
     slippi_ports: tuple[int, ...]
@@ -265,10 +293,18 @@ class _ShutdownRequested(RuntimeError):
 
 class _ShutdownFlag:
     def __init__(self) -> None:
-        self.requested = False
+        self._signals = 0
+
+    @property
+    def requested(self) -> bool:
+        return self._signals > 0
+
+    @property
+    def forced(self) -> bool:
+        return self._signals > 1
 
     def __call__(self, _signum: int, _frame: object) -> None:
-        self.requested = True
+        self._signals += 1
 
 
 def _prepare_netplay_engine(
@@ -769,18 +805,26 @@ def _read_pending_upload(sidecar: Path) -> tuple[Path, ReplayMetadata, str]:
     return replay, metadata, worker_id
 
 
-def _complete_pending_upload(sidecar: Path, store: RunnerQueue) -> None:
+def _sidecar_queue(endpoint: QueueEndpoint, worker_id: str) -> RemoteQueue:
+    session_id, separator, slot = worker_id.rpartition("/slot-")
+    if not separator or not session_id or not slot.isdigit():
+        raise RuntimeError(f"pending replay metadata has invalid worker_id {worker_id!r}")
+    return RemoteQueue(endpoint, session_id)
+
+
+def _complete_pending_upload(sidecar: Path, endpoint: QueueEndpoint) -> None:
     replay, metadata, worker_id = _read_pending_upload(sidecar)
     uploaded = upload_replay(replay, metadata)
-    store.record_replay(
-        metadata.reservation_id,
-        worker_id,
-        metadata.game_number,
-        key=uploaded.key,
-        sha256=uploaded.sha256,
-        size=uploaded.size,
-        etag=uploaded.etag,
-    )
+    with closing(_sidecar_queue(endpoint, worker_id)) as queue:
+        queue.record_replay(
+            metadata.reservation_id,
+            worker_id,
+            metadata.game_number,
+            key=uploaded.key,
+            sha256=uploaded.sha256,
+            size=uploaded.size,
+            etag=uploaded.etag,
+        )
     logger.info(
         "replay uploaded reservation={} game={} key={} size={} etag={}",
         metadata.reservation_id,
@@ -793,10 +837,10 @@ def _complete_pending_upload(sidecar: Path, store: RunnerQueue) -> None:
     sidecar.unlink()
 
 
-def _drain_pending_uploads(root: Path, store: RunnerQueue) -> None:
+def _drain_pending_uploads(root: Path, endpoint: QueueEndpoint) -> None:
     for sidecar in sorted(root.rglob("*.slp.upload.json")):
         try:
-            _complete_pending_upload(sidecar, store)
+            _complete_pending_upload(sidecar, endpoint)
         except Exception as error:  # Replay failures are isolated from active games.
             logger.warning(
                 "pending replay upload failed: {}: {}: {}",
@@ -806,26 +850,71 @@ def _drain_pending_uploads(root: Path, store: RunnerQueue) -> None:
             )
 
 
-def _retry_pending_uploads(root: Path, store: RunnerQueue, next_attempt: float) -> float:
+def _retry_pending_uploads(root: Path, endpoint: QueueEndpoint, next_attempt: float) -> float:
     now = time.monotonic()
     if now < next_attempt:
         return next_attempt
-    _drain_pending_uploads(root, store)
+    _drain_pending_uploads(root, endpoint)
     return now + _PENDING_UPLOAD_RETRY_SECONDS
 
 
-def _heartbeat(store: RunnerQueue, job_id: str, worker_id: str, stop: threading.Event) -> None:
-    while not stop.wait(5.0):
+def _heartbeat(
+    store: RunnerQueue,
+    job_id: str,
+    worker_id: str,
+    done: threading.Event,
+    abort: _StopEvent,
+) -> None:
+    next_heartbeat = time.monotonic() + 5.0
+    while not done.wait(0.1):
+        if abort.is_set():
+            try:
+                store.forfeit_service_failure(job_id, worker_id)
+            except InvalidTransitionError, SessionEndedError:
+                pass
+            except QueueUnavailableError as error:
+                logger.bind(job=job_id, event="forfeit").warning("job forfeit failed: {}", error)
+            return
+        if time.monotonic() < next_heartbeat:
+            continue
         try:
             store.heartbeat(job_id, worker_id)
+        except QueueUnavailableError as error:
+            logger.bind(job=job_id, event="heartbeat").warning("job heartbeat failed: {}", error)
+            continue
         except InvalidTransitionError:
             return
+        next_heartbeat = time.monotonic() + 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionStatus:
+    path: Path
+    policy_sha256: str
+    slots: int
+
+    def __call__(self) -> RunnerStatus:
+        try:
+            status = read_runner_status(self.path)
+        except OSError, ValueError:
+            now = time.time()
+            statuses = tuple(_unavailable_slot_status(slot, now, starting=True) for slot in range(self.slots))
+            status = aggregate_runner_status(
+                self.policy_sha256,
+                statuses,
+                now,
+                model_inference_p95_ms=None,
+                batch_wait_p95_ms=None,
+            )
+        _SESSION_HEARTBEAT.set(time.time())
+        _HEALTHY_SLOTS.set(status.healthy_slots)
+        return status
 
 
 class _LivePolicySettings:
-    """Poll SQLite off the frame thread; publish one immutable settings tuple."""
+    """Receive pushed policy settings off the frame thread."""
 
-    def __init__(self, store: RunnerQueue, job: Job, worker_id: str) -> None:
+    def __init__(self, store: RemoteQueue, job: Job, worker_id: str) -> None:
         self._store = store
         self._job_id = job.id
         self._worker_id = worker_id
@@ -835,21 +924,78 @@ class _LivePolicySettings:
         # connect wait frees the slot without waiting for its own timeout.
         self.released = threading.Event()
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread = threading.Thread(target=self._receive, daemon=True)
 
-    def _poll(self) -> None:
-        while not self._stop.wait(0.1):
+    def _apply(self, raw: object) -> bool:
+        if not isinstance(raw, str):
+            raise QueueProtocolError("live settings message must be text")
+        try:
+            message = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise QueueProtocolError("live settings message is not JSON") from error
+        if not isinstance(message, dict) or not isinstance(message.get("type"), str):
+            raise QueueProtocolError("live settings message has the wrong shape")
+        if message["type"] == "released":
+            if set(message) != {"type"}:
+                raise QueueProtocolError("released message fields changed")
+            self.released.set()
+            return False
+        if message["type"] != "settings" or set(message) != {
+            "type",
+            "revision",
+            "desired_return",
+            "temperature",
+        }:
+            raise QueueProtocolError("settings message fields changed")
+        revision = message["revision"]
+        desired_return = message["desired_return"]
+        temperature = message["temperature"]
+        if type(revision) is not int or revision < 0:
+            raise QueueProtocolError("settings revision must be a non-negative integer")
+        if desired_return is not None and (
+            isinstance(desired_return, bool) or not isinstance(desired_return, (int, float))
+        ):
+            raise QueueProtocolError("desired_return must be a number or null")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise QueueProtocolError("temperature must be a number")
+        if revision >= self._revision:
+            self._values = (
+                None if desired_return is None else float(desired_return),
+                float(temperature),
+            )
+            self._revision = revision
+        return True
+
+    def _receive(self) -> None:
+        backoff = 0.25
+        reconnecting = False
+        while not self._stop.is_set():
             try:
-                job = self._store.get_worker_job(self._job_id, self._worker_id)
-            except InvalidTransitionError:
+                if reconnecting:
+                    job = self._store.get_worker_job(self._job_id, self._worker_id)
+                    if job.status in TERMINAL_STATUSES:
+                        self.released.set()
+                        return
+                with self._store.connect_live(self._job_id, self._worker_id) as connection:
+                    reconnecting = True
+                    backoff = 0.25
+                    while not self._stop.is_set():
+                        try:
+                            message = connection.recv(timeout=0.25)
+                        except TimeoutError:
+                            continue
+                        if not self._apply(message):
+                            return
+            except InvalidTransitionError, SessionEndedError:
                 self.released.set()
                 return
-            if job.status in TERMINAL_STATUSES:
-                self.released.set()
+            except QueueUnavailableError as error:
+                logger.bind(job=self._job_id, event="live_settings").warning("live settings unavailable: {}", error)
+            except (ConnectionClosed, OSError) as error:
+                logger.bind(job=self._job_id, event="live_settings").warning("live settings disconnected: {}", error)
+            if self._stop.wait(backoff):
                 return
-            if job.policy_revision != self._revision:
-                self._values = (job.choices.desired_return, job.choices.temperature)
-                self._revision = job.policy_revision
+            backoff = min(backoff * 2, 4.0)
 
     def current(self) -> tuple[float | None, float]:
         return self._values
@@ -1000,7 +1146,7 @@ def _write_match_failure(
 
 def _run_reservation(
     config: SlotConfig,
-    store: RunnerQueue,
+    store: RemoteQueue,
     policy: InferenceClient,
     runtime: RuntimeConfig,
     job: Job,
@@ -1013,7 +1159,7 @@ def _run_reservation(
     heartbeat_stop = threading.Event()
     heartbeat = threading.Thread(
         target=_heartbeat,
-        args=(store, job.id, config.worker_id, heartbeat_stop),
+        args=(store, job.id, config.worker_id, heartbeat_stop, stop),
         daemon=True,
     )
     heartbeat.start()
@@ -1137,7 +1283,7 @@ def _run_reservation(
                 sidecar = _write_pending_upload(replay, metadata, config.worker_id)
                 if config.publish_replays:
                     try:
-                        _complete_pending_upload(sidecar, store)
+                        _complete_pending_upload(sidecar, config.queue_endpoint)
                     except Exception as error:  # R2 availability must not end a session.
                         logger.warning("replay upload deferred: {}: {}", type(error).__name__, error)
                 if next_status is JobStatus.COMPLETE:
@@ -1182,6 +1328,7 @@ def _slot_worker(
     runtime: RuntimeConfig,
     connection: Connection,
     stop: _StopEvent,
+    draining: _StopEvent,
     schedules: tuple[FrameTiming, ...],
     context_frames: int,
     profiles: tuple[PreparedInferenceProfile, ...],
@@ -1189,10 +1336,10 @@ def _slot_worker(
     # The supervisor owns terminal signals. A SIGINT in Event.wait() can kill
     # a spawned worker while it holds the event lock and deadlock shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    store = QueueStore(config.database)
     next_upload_attempt = 0.0
     with (
         connection,
+        closing(RemoteQueue(config.queue_endpoint, config.session_id)) as store,
         _SlotHealthReporter(config.slot, config.status_path) as health,
         closing(
             InferenceClient(spec, context_frames, connection, stop, {p.fixed_prefix_frames: p for p in profiles})
@@ -1200,13 +1347,21 @@ def _slot_worker(
     ):
         while not stop.is_set():
             health.idle()
+            if draining.is_set():
+                return
             if config.publish_replays:
                 next_upload_attempt = _retry_pending_uploads(
                     config.replay_dir / f"slot-{config.slot}",
-                    store,
+                    config.queue_endpoint,
                     next_upload_attempt,
                 )
-            job = store.claim_next(config.worker_id)
+            try:
+                job = store.claim_next(config.worker_id)
+            except SessionEndedError:
+                raise
+            except InvalidTransitionError as error:
+                logger.bind(slot=config.slot, event="claim").error("slot stopped claiming: {}", error)
+                return
             if job is None:
                 stop.wait(0.25)
                 continue
@@ -1217,7 +1372,7 @@ def _slot_worker(
 
 def _handle_reservation(
     config: SlotConfig,
-    store: RunnerQueue,
+    store: RemoteQueue,
     policy: InferenceClient,
     runtime: RuntimeConfig,
     job: Job,
@@ -1242,6 +1397,12 @@ def _handle_reservation(
         logger.error("reservation {}: {}", job.id, error)
         with suppress(InvalidTransitionError):
             store.forfeit_service_failure(job.id, config.worker_id)
+        raise
+    except SessionEndedError:
+        raise
+    except QueueUnavailableError as error:
+        health.recovering("queue_unavailable")
+        logger.error("reservation {} lost queue access: {}", job.id, error)
         raise
     except _RecoverableRuntimeError as error:
         logger.error(
@@ -1271,10 +1432,21 @@ def _slot_process(
     runtime: RuntimeConfig,
     connection: Connection,
     stop: _StopEvent,
+    draining: _StopEvent,
 ) -> BaseProcess:
     return context.Process(
         target=_slot_worker,
-        args=(config, ready.spec, runtime, connection, stop, _NETPLAY_TIMINGS, ready.context_frames, ready.profiles),
+        args=(
+            config,
+            ready.spec,
+            runtime,
+            connection,
+            stop,
+            draining,
+            _NETPLAY_TIMINGS,
+            ready.context_frames,
+            ready.profiles,
+        ),
         name=f"hal-netplay-slot-{config.slot}",
     )
 
@@ -1344,20 +1516,18 @@ def _replace_failed_slot(
     runtime: RuntimeConfig,
     connection: Connection,
     stop: _StopEvent,
+    draining: _StopEvent,
     *,
     restart_allowed: bool,
     capacity: int,
     processes: list[BaseProcess],
-    worker_ids: list[str],
 ) -> tuple[SlotConfig, BaseProcess] | None:
     failed.join(timeout=0)
-    affected = QueueStore(config.database).fail_worker_generation((config.worker_id,))
     logger.warning(
-        "netplay slot {} exited code={} worker={} affected_leases={}",
+        "netplay slot {} exited code={} worker={}",
         config.slot,
         failed.exitcode,
         config.worker_id,
-        affected,
     )
     config.status_path.unlink(missing_ok=True)
     if not restart_allowed:
@@ -1367,16 +1537,11 @@ def _replace_failed_slot(
         connection.close()
         logger.error("netplay slot {} standby connection could not reset the route; capacity reduced", config.slot)
         return None
-    replacement = replace(
-        config,
-        worker_id=f"{config.worker_id}-restart-1",
-        stream_id=config.stream_id + capacity,
-    )
+    replacement = replace(config, stream_id=config.stream_id + capacity)
     process: BaseProcess | None = None
     try:
-        process = _slot_process(context, replacement, ready, runtime, connection, stop)
+        process = _slot_process(context, replacement, ready, runtime, connection, stop, draining)
         processes.append(process)
-        worker_ids.append(replacement.worker_id)
         _start_slot_process(process, connection)
     except (OSError, RuntimeError) as error:
         if process is not None:
@@ -1497,18 +1662,22 @@ def _run_generation(
     shutdown: _ShutdownFlag,
     *,
     recovery_deadline: float | None,
+    session_client: RunnerClient | None = None,
+    reporter: SessionReporter | None = None,
+    drain_timeout_seconds: float = 900.0,
 ) -> None:
     context = mp.get_context("spawn")
     generation_id = secrets.token_hex(8)
-    worker_ids = tuple(f"generation-{generation_id}-slot-{slot}" for slot in range(len(config.user_jsons)))
-    all_worker_ids = list(worker_ids)
+    worker_ids = tuple(slot_worker_id(config.session_id, slot) for slot in range(len(config.user_jsons)))
     capacity = len(config.user_jsons)
     stop = context.Event()
+    draining = context.Event()
     status_receive, status_send, parent_connections, child_connections = _open_generation_pipes(context, 2 * capacity)
     processes: list[BaseProcess] = []
     slot_processes: dict[int, BaseProcess | None] = {}
     slot_configs: dict[int, SlotConfig] = {}
     replacement_deadlines: dict[int, tuple[float, float]] = {}
+    replacement_not_before: dict[int, float] = {}
     restart_counts: dict[int, int] = {}
     slot_status_paths = tuple(_slot_status_path(config.status_path, slot) for slot in range(len(config.user_jsons)))
     try:
@@ -1578,7 +1747,8 @@ def _run_generation(
                 slot=slot,
                 worker_id=worker_ids[slot],
                 stream_id=slot,
-                database=config.database,
+                queue_endpoint=config.queue_endpoint,
+                session_id=config.session_id,
                 user_json=user_json,
                 bot_connect_code=bot_connect_code,
                 slippi_port=slippi_port,
@@ -1594,7 +1764,7 @@ def _run_generation(
                 measurement_dir=config.measurement_dir,
                 publish_replays=config.publish_replays,
             )
-            process = _slot_process(context, slot_config, ready, runtime, child_connections[slot], stop)
+            process = _slot_process(context, slot_config, ready, runtime, child_connections[slot], stop, draining)
             processes.append(process)
             _start_slot_process(process, child_connections[slot])
             slot_processes[slot] = process
@@ -1612,7 +1782,23 @@ def _run_generation(
         model_p95_ms: float | None = None
         batch_wait_p95_ms: float | None = None
         previous_state: RunnerState | None = None
-        while not shutdown.requested:
+        drain_deadline: float | None = None
+        while True:
+            remote_draining = reporter is not None and reporter.state().draining
+            if (shutdown.requested or remote_draining) and not draining.is_set():
+                if shutdown.requested and not remote_draining and session_client is not None:
+                    session_client.drain(config.session_id)
+                draining.set()
+                drain_deadline = time.monotonic() + drain_timeout_seconds
+                logger.bind(session=config.session_id, event="drain").info("runner is draining")
+            if shutdown.forced or (drain_deadline is not None and time.monotonic() >= drain_deadline):
+                logger.bind(session=config.session_id, event="drain").warning("runner drain was forced")
+                stop.set()
+                raise RuntimeError("runner drain was forced")
+            if draining.is_set() and all(
+                process is None or not process.is_alive() for process in slot_processes.values()
+            ):
+                return
             if status_receive.poll(0.25):
                 try:
                     message = status_receive.recv()
@@ -1649,6 +1835,13 @@ def _run_generation(
             for slot, process in tuple(slot_processes.items()):
                 if process is None or process.is_alive():
                     continue
+                if not draining.is_set():
+                    not_before = replacement_not_before.setdefault(
+                        slot, time.monotonic() + _SLOT_RESTART_LEASE_GRACE_SECONDS
+                    )
+                    if time.monotonic() < not_before:
+                        continue
+                replacement_not_before.pop(slot, None)
                 replacement_deadlines.pop(slot, None)
                 restart_started_at = time.time()
                 replacement = _replace_failed_slot(
@@ -1659,10 +1852,10 @@ def _run_generation(
                     runtime,
                     child_connections[slot + capacity],
                     stop,
-                    restart_allowed=restart_counts[slot] == 0,
+                    draining,
+                    restart_allowed=not draining.is_set() and restart_counts[slot] == 0,
                     capacity=capacity,
                     processes=processes,
-                    worker_ids=all_worker_ids,
                 )
                 if replacement is None:
                     slot_processes[slot] = None
@@ -1700,24 +1893,25 @@ def _run_generation(
         try:
             _terminate_processes(processes, stop)
         finally:
-            try:
-                failed_leases = QueueStore(config.database).fail_worker_generation(all_worker_ids)
-                if failed_leases:
-                    logger.warning("netplay generation {} aborted {} active leases", generation_id, failed_leases)
-            finally:
-                for connection in (
-                    *parent_connections.values(),
-                    *child_connections.values(),
-                    status_receive,
-                    status_send,
-                ):
-                    connection.close()
-                config.status_path.unlink(missing_ok=True)
-                for path in slot_status_paths:
-                    path.unlink(missing_ok=True)
+            for connection in (
+                *parent_connections.values(),
+                *child_connections.values(),
+                status_receive,
+                status_send,
+            ):
+                connection.close()
+            config.status_path.unlink(missing_ok=True)
+            for path in slot_status_paths:
+                path.unlink(missing_ok=True)
 
 
-def run(config: RunnerConfig) -> None:
+def run(
+    config: RunnerConfig,
+    *,
+    session_client: RunnerClient | None = None,
+    reporter: SessionReporter | None = None,
+    drain_timeout_seconds: float = 900.0,
+) -> None:
     """Admit matches only after a separate GPU process qualifies each profile."""
     config.status_path.parent.mkdir(parents=True, exist_ok=True)
     config.status_path.unlink(missing_ok=True)
@@ -1736,6 +1930,9 @@ def run(config: RunnerConfig) -> None:
                     policy_sha256,
                     shutdown,
                     recovery_deadline=recovery_deadline,
+                    session_client=session_client,
+                    reporter=reporter,
+                    drain_timeout_seconds=drain_timeout_seconds,
                 )
                 return
             except _ShutdownRequested:
@@ -1751,24 +1948,42 @@ def run(config: RunnerConfig) -> None:
         config.status_path.unlink(missing_ok=True)
 
 
-def _paths(value: str) -> tuple[Path, ...]:
-    paths = tuple(Path(item).expanduser().resolve() for item in value.split(",") if item)
-    if not paths or any(not path.is_file() for path in paths):
-        raise ValueError("HAL_NETPLAY_USER_JSONS must list existing files")
-    return paths
+def _download_session_assets(started: StartedSession, *, local_assets: Path | None) -> tuple[Path, tuple[Path, ...]]:
+    remote = None
+    if local_assets is None:
+        remote = r2.client()
+        source = R2Source(remote, r2.bucket())
+    else:
+        source = LocalSource(local_assets)
+    cache = AssetCache(Path("~/.cache/hal-netplay").expanduser(), source)
+    try:
+        policy = cache.get(PinnedAsset(started.policy.bundle_r2_key, started.policy.bundle_sha256))
+        accounts = tuple(cache.get(PinnedAsset(grant.r2_key, grant.sha256)) for grant in started.accounts)
+    finally:
+        if remote is not None:
+            remote.close()
+    artifact = read_action_sequence_artifact(policy)
+    if artifact.vocabulary.sha256 != started.policy.vocabulary_sha256:
+        raise ValueError(
+            f"policy vocabulary {artifact.vocabulary.sha256} does not match {started.policy.vocabulary_sha256}"
+        )
+    for path, grant in zip(accounts, started.accounts, strict=True):
+        observed = _bot_connect_code(path)
+        if observed != grant.connect_code:
+            raise ValueError(f"account {path} has connect code {observed}, not leased {grant.connect_code}")
+    return policy, accounts
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="hal-netplay-runner")
-    parser.add_argument("policy")
-    parser.add_argument("--database", type=Path, default=Path("runs/netplay/queue.sqlite3"))
-    parser.add_argument("--user-jsons", default=os.environ.get("HAL_NETPLAY_USER_JSONS"))
-    parser.add_argument("--slippi-ports", default="51441,51442")
-    parser.add_argument("--iso-path", type=Path, default=Path(ISO_PATH))
-    parser.add_argument("--dolphin-path", type=Path, default=Path(NETPLAY_EMULATOR_PATH))
+    parser.add_argument("--slots", type=int, required=True)
+    parser.add_argument("--slippi-port", type=int, default=51441)
+    parser.add_argument("--local-assets", type=Path)
+    parser.add_argument("--drain-timeout", type=float, default=900.0)
+    parser.add_argument("--metrics-port", type=int, default=9100)
     parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
     parser.add_argument("--replay-dir", type=Path, default=Path("runs/netplay/replays"))
-    parser.add_argument("--status-path", type=Path)
+    parser.add_argument("--status-path", type=Path, default=Path("runs/netplay/runner-status.json"))
     parser.add_argument("--git-sha", default=os.environ.get("HAL_GIT_SHA"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
@@ -1777,34 +1992,83 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--preparation-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--max-frames", type=int, default=54_000)
     args = parser.parse_args(argv)
-    if args.user_jsons is None:
-        parser.error("set HAL_NETPLAY_USER_JSONS or pass --user-jsons")
     if args.git_sha is None:
         parser.error("set HAL_GIT_SHA or pass --git-sha")
-    user_jsons = _paths(args.user_jsons)
-    ports = tuple(int(value) for value in args.slippi_ports.split(","))
-    policy = resolve_checkpoint(args.policy)
-    database = args.database.resolve()
-    run(
-        RunnerConfig(
-            database=database,
-            policy=policy,
-            user_jsons=user_jsons,
-            slippi_ports=ports,
-            iso_path=args.iso_path.resolve(),
-            dolphin_path=args.dolphin_path.resolve(),
-            graphics_backend=args.graphics_backend,
-            replay_dir=args.replay_dir.resolve(),
-            status_path=(args.status_path or database.parent / "runner-status.json").resolve(),
-            git_sha=args.git_sha,
-            device=args.device,
-            seed=args.seed,
-            compiled=args.compiled,
-            batch_wait_seconds=args.batch_wait_ms / 1000,
-            preparation_timeout_seconds=args.preparation_timeout_seconds,
-            max_frames=args.max_frames,
-        )
-    )
+    if not 1 <= args.slots <= 8:
+        parser.error("--slots must be in [1, 8]")
+    if not math.isfinite(args.drain_timeout) or args.drain_timeout <= 0:
+        parser.error("--drain-timeout must be finite and positive")
+    if not 1 <= args.slippi_port <= 65_535 or args.slippi_port + args.slots - 1 > 65_535:
+        parser.error("--slippi-port range is invalid")
+    if not 1 <= args.metrics_port <= 65_535:
+        parser.error("--metrics-port must be in [1, 65535]")
+
+    start_http_server(args.metrics_port, addr="127.0.0.1")
+    iso_path = ensure(ISO)
+    dolphin_path = ensure(NETPLAY_EMULATOR)
+    endpoint = runner_endpoint(os.environ)
+    client = RunnerClient(endpoint)
+    session_id = new_session_id()
+    try:
+        policy_config = client.active_policy()
+        try:
+            for attempt in range(2):
+                try:
+                    started = client.start_session(
+                        session_id=session_id,
+                        host=socket.gethostname(),
+                        bundle_sha256=policy_config.bundle_sha256,
+                        git_sha=args.git_sha,
+                        slots=args.slots,
+                        wants_stream=False,
+                    )
+                    break
+                except QueueUnavailableError:
+                    if attempt == 1:
+                        raise
+            else:
+                raise AssertionError("session start loop always starts or raises")
+        except InvalidTransitionError as error:
+            logger.bind(session=session_id, event="session_start").error("session start refused: {}", error)
+            raise
+        except QueueProtocolError:
+            with suppress(Exception):
+                client.end_session(session_id)
+            raise
+        status_path = args.status_path.resolve()
+        status = SessionStatus(status_path, started.policy.bundle_sha256, args.slots)
+        try:
+            with SessionReporter(client, session_id, status) as reporter:
+                policy, user_jsons = _download_session_assets(started, local_assets=args.local_assets)
+                config = RunnerConfig(
+                    queue_endpoint=endpoint,
+                    session_id=session_id,
+                    policy=policy,
+                    user_jsons=user_jsons,
+                    slippi_ports=tuple(args.slippi_port + slot for slot in range(args.slots)),
+                    iso_path=iso_path,
+                    dolphin_path=dolphin_path,
+                    graphics_backend=args.graphics_backend,
+                    replay_dir=args.replay_dir.resolve(),
+                    status_path=status_path,
+                    git_sha=args.git_sha,
+                    device=args.device,
+                    seed=args.seed,
+                    compiled=args.compiled,
+                    batch_wait_seconds=args.batch_wait_ms / 1000,
+                    preparation_timeout_seconds=args.preparation_timeout_seconds,
+                    max_frames=args.max_frames,
+                )
+                run(
+                    config,
+                    session_client=client,
+                    reporter=reporter,
+                    drain_timeout_seconds=args.drain_timeout,
+                )
+        finally:
+            client.end_session(session_id)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

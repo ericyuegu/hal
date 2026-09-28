@@ -17,61 +17,66 @@ if [[ ! -f $env_file ]]; then
   echo "environment file does not exist: $env_file" >&2
   exit 2
 fi
-for command in flock npm; do
+for command in flock npm uv curl sha256sum; do
   if ! command -v "$command" >/dev/null; then
     echo "required command is not installed: $command" >&2
     exit 2
   fi
 done
 
-lock_file=${HAL_NETPLAY_LOCAL_LOCK:-"$repo_dir/runs/netplay/run-local.lock"}
-mkdir -p "$(dirname -- "$lock_file")"
+set -a
+source "$env_file"
+set +a
+state_dir=${HAL_NETPLAY_STATE_DIR:-"$repo_dir/runs/netplay/local"}
+lock_file=${HAL_NETPLAY_LOCAL_LOCK:-"$state_dir/run-local.lock"}
+mkdir -p "$state_dir"
 exec 9>"$lock_file"
 if ! flock -n 9; then
   echo "local netplay is already running" >&2
   exit 2
 fi
 
+runner_token=${HAL_NETPLAY_RUNNER_TOKEN:-dev-runner-token}
+admin_token=${HAL_NETPLAY_ADMIN_TOKEN:-dev-admin-token}
+runner_digest=$(printf %s "$runner_token" | sha256sum | cut -d' ' -f1)
+admin_digest=$(printf %s "$admin_token" | sha256sum | cut -d' ' -f1)
 process_groups=()
 stop() {
-  local alive
-  local process_group
-
   trap - EXIT INT TERM
-  for process_group in "${process_groups[@]}"; do
-    kill -TERM -- "-$process_group" 2>/dev/null || true
-  done
-  # run-host.sh needs time to stop its own child process groups first.
+  for group in "${process_groups[@]}"; do kill -TERM -- "-$group" 2>/dev/null || true; done
   for _ in {1..50}; do
-    alive=false
-    for process_group in "${process_groups[@]}"; do
-      if kill -0 -- "-$process_group" 2>/dev/null; then
-        alive=true
-        break
-      fi
-    done
-    if [[ $alive == false ]]; then
-      break
-    fi
+    local alive=false
+    for group in "${process_groups[@]}"; do kill -0 -- "-$group" 2>/dev/null && alive=true; done
+    [[ $alive == false ]] && break
     sleep 0.1
   done
-  for process_group in "${process_groups[@]}"; do
-    kill -KILL -- "-$process_group" 2>/dev/null || true
-  done
+  for group in "${process_groups[@]}"; do kill -KILL -- "-$group" 2>/dev/null || true; done
   wait "${process_groups[@]}" 2>/dev/null || true
 }
 trap stop EXIT INT TERM
 
 set -m
-"$script_dir/run-host.sh" "$env_file" </dev/null &
+cd "$repo_dir/web/netplay-api"
+npm exec wrangler dev -- --local --ip 127.0.0.1 --port 8787 \
+  --persist-to "$state_dir/worker" \
+  --var "RUNNER_TOKEN_SHA256:$runner_digest" \
+  --var "ADMIN_TOKEN_SHA256:$admin_digest" </dev/null &
 process_groups+=("$!")
+for _ in {1..120}; do
+  curl --fail --silent http://127.0.0.1:8787/v1/capacity >/dev/null 2>&1 && break
+  kill -0 -- "-${process_groups[0]}" 2>/dev/null || exit 1
+  sleep 0.25
+done
+curl --fail --silent http://127.0.0.1:8787/v1/capacity >/dev/null
 
 cd "$repo_dir/web/netplay"
-if [[ ! -x node_modules/.bin/vinext ]]; then
-  npm ci
-fi
-NEXT_PUBLIC_HAL_API_URL=http://127.0.0.1:8080 \
 npm run dev -- --host 127.0.0.1 --port 3000 </dev/null &
+process_groups+=("$!")
+
+cd "$repo_dir"
+runner=(uv run hal-netplay-runner --slots "${HAL_NETPLAY_SLOTS:-1}" --compiled --git-sha "${HAL_GIT_SHA:?set HAL_GIT_SHA}")
+if [[ -n ${HAL_NETPLAY_LOCAL_ASSETS:-} ]]; then runner+=(--local-assets "$HAL_NETPLAY_LOCAL_ASSETS"); fi
+HAL_NETPLAY_API_URL=http://127.0.0.1:8787 HAL_NETPLAY_RUNNER_TOKEN=$runner_token "${runner[@]}" </dev/null &
 process_groups+=("$!")
 set +m
 

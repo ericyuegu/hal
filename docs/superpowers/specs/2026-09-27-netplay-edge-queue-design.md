@@ -227,8 +227,8 @@ uses `httpx`, which moves from the `dev` group to the runtime dependencies, and
 `websockets` for the settings socket. Requests use bounded retries: exponential backoff from 0.25 s to 4 s for
 connection errors and `5xx`, and no retry on `4xx`. A `409` from a transition
 raises the same `InvalidTransitionError` the runner already handles. That class
-and the `RunnerQueue` protocol live in `hal/netplay_service/queue_contract.py`,
-and both `QueueStore` and `RemoteQueue` implement the protocol.
+and the `RunnerQueue` protocol live in `hal/netplay_service/queue_contract.py`.
+`RemoteQueue` is its production implementation.
 
 `_LivePolicySettings` keeps its interface. It reads settings from the job's
 WebSocket instead of polling SQLite, reconnects with backoff, and sets
@@ -245,15 +245,18 @@ terminal state after a reconnect.
 
 Startup order:
 
-1. Download the ISO and emulator AppImage from their pinned R2 keys and verify
-   their SHA-256. Pins live in `deploy/netplay/assets.json`.
-2. Start a session. The response carries the policy config and the leased
+1. Fetch the `ISO` and `NETPLAY_EMULATOR` fixtures through `hal/fixtures.py`.
+   The ISO comes from `fixtures/ssbm.ciso` in R2. The emulator is the verified
+   upstream Slippi Online 3.6.4 AppImage from its pinned GitHub release.
+2. Read the active policy and start a session. The response carries the policy config and the leased
    accounts.
-3. Download the policy bundle and each leased account's `user.json` from R2,
+3. Start the status reporter immediately. It keeps the session alive during
+   downloads and qualification.
+4. Download the policy bundle and each leased account's `user.json` from R2,
    and verify their SHA-256.
-4. Load the bundle and run the existing `check_realtime_budget` qualification.
+5. Load the bundle and run the existing `check_realtime_budget` qualification.
    If it fails, end the session and exit non-zero with the measured timings.
-5. Start the slot processes, which begin claiming.
+6. Start the slot processes, which begin claiming.
 
 Downloads are cached under `~/.cache/hal-netplay/<sha256>` and are reused only
 after their hash is verified again.
