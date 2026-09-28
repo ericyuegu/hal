@@ -229,11 +229,12 @@ export class SessionStore {
     return failed;
   }
 
-  endSilent(): string[] {
+  endSilent(): { sessions: string[]; jobs: string[] } {
     const cutoff = this.now() - SESSION_SILENCE_SECONDS;
-    return this.rows("SELECT id FROM sessions WHERE ended_at IS NULL AND last_seen_at <= ?", cutoff).flatMap((row) =>
-      this.end(row.id as string, "silent"),
+    const sessions = this.rows("SELECT id FROM sessions WHERE ended_at IS NULL AND last_seen_at <= ?", cutoff).map(
+      (row) => row.id as string,
     );
+    return { sessions, jobs: sessions.flatMap((id) => this.end(id, "silent")) };
   }
 
   nextDeadline(): number | null {

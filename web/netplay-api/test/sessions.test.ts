@@ -103,10 +103,10 @@ describe("sessions", () => {
       sessions.start("s1", START, policy);
       sessions.report("s1", readyStatus(2, 2, 12345));
       clock.advance(29);
-      expect(sessions.endSilent()).toEqual([]);
+      expect(sessions.endSilent()).toEqual({ sessions: [], jobs: [] });
       sessions.report("s1", readyStatus(2, 2, 12345));
       clock.advance(29);
-      expect(sessions.endSilent()).toEqual([]);
+      expect(sessions.endSilent()).toEqual({ sessions: [], jobs: [] });
       clock.advance(1);
       sessions.endSilent();
       expect(refused(() => sessions.live("s1"))).toEqual({ status: 410, detail: "session has ended" });
@@ -118,7 +118,7 @@ describe("sessions", () => {
       jobs.createJob("j1", "d1", "CRYO#610", CHOICES);
       jobs.claimNext(sessions.claimWorker("s1", 0, policy));
       clock.advance(30);
-      expect(sessions.endSilent()).toEqual(["j1"]);
+      expect(sessions.endSilent()).toEqual({ sessions: ["s1"], jobs: ["j1"] });
       expect(jobs.row("j1")?.error_code).toBe("service_generation_aborted");
       expect(sessions.start("s2", START, policy).accounts).toHaveLength(2);
     }));
