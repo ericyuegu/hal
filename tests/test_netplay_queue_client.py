@@ -121,8 +121,13 @@ def test_connection_errors_and_5xx_retry_with_backoff_then_succeed() -> None:
 
 def test_retries_are_bounded() -> None:
     sleeps: list[float] = []
-    script = _Script(*(httpx.Response(503) for _ in range(len(RETRY_DELAYS_SECONDS) + 1)))
-    with pytest.raises(QueueUnavailableError, match="after 6 attempts: HTTP 503"):
+    script = _Script(
+        *(
+            httpx.Response(503, json={"detail": "no policy has been published"})
+            for _ in range(len(RETRY_DELAYS_SECONDS) + 1)
+        )
+    )
+    with pytest.raises(QueueUnavailableError, match="after 6 attempts: HTTP 503: no policy has been published$"):
         _queue(script, sleeps).heartbeat("job-1", WORKER)
     assert sleeps == list(RETRY_DELAYS_SECONDS)
 

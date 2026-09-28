@@ -194,7 +194,7 @@ class _Api:
             else:
                 if response.status_code < 500:
                     return _checked(response)
-                failure = f"HTTP {response.status_code}"
+                failure = f"HTTP {response.status_code}: {_detail(response)}"
             if delay is None:
                 raise QueueUnavailableError(f"{method} {path} failed after {attempt} attempts: {failure}")
             logger.bind(event="queue_retry").warning(
