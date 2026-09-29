@@ -37,7 +37,10 @@ if [[ $HAL_NETPLAY_API_URL == https://* ]]; then
   done
 fi
 commands=(uv Xvfb xsetroot)
-if [[ ${HAL_NETPLAY_STREAM:-1} != 0 ]]; then commands+=(ffmpeg pulseaudio); fi
+if [[ ${HAL_NETPLAY_STREAM:-1} != 0 ]]; then
+  : "${HAL_NETPLAY_STREAM_DISPLAY:?set a dedicated NVIDIA Xorg display}"
+  commands+=(obs openbox glxinfo pulseaudio)
+fi
 for command in "${commands[@]}"; do
   if ! command -v "$command" >/dev/null; then
     echo "required command is not installed: $command" >&2

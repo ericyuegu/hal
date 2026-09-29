@@ -51,8 +51,9 @@ deadline aborts active games. A hard crash is covered by the Worker's 30 second
 session silence limit.
 
 A direct host run needs Xvfb and `xsetroot`. An opted-in streaming host also
-needs ffmpeg with `h264_nvenc` and PulseAudio. The runner image installs all
-four. The launchers reject a missing command instead of changing behavior.
+needs the pinned OBS package, Openbox, `glxinfo`, PulseAudio, and an authenticated
+NVIDIA Xorg display. The image supplies the user-space tools. The GCE startup
+script supplies the host display. Launchers reject a missing command.
 
 ## Runner image
 
@@ -184,22 +185,35 @@ Writing the secret and deploying the Worker are owner actions. The Worker gives
 the key only to the live session that holds its one stream lease. That runner
 streams slot 0. `--no-stream` opts a runner out.
 
-The runner starts one Xvfb for every slot. Stream slot 0 uses a 1920×1080
-display and PulseAudio. Dolphin runs in batch mode so its launcher is not part
-of the stream. Other slots use 640×480 displays and no audio. ffmpeg captures
-slot 0 at 60 fps, uses low-latency NVENC at 6 Mb/s CBR and AAC at 160 kb/s,
-and reloads its overlay from a local text file. The overlay state contains
-HAL's character, imitation, desired return, and game count only. It has no
-field for a player or bot connect code.
+The stream slot uses a dedicated NVIDIA Xorg display. Set
+`HAL_NETPLAY_STREAM_DISPLAY=:90` and pass its private Xauthority cookie.
+The GCE startup script installs graphics libraries that match the loaded
+NVIDIA 580 server driver, starts Xorg, and refreshes NVIDIA container metadata.
+A monitor is not required. The runner rejects software OpenGL rendering.
+Other slots retain isolated 640×480 Xvfb displays.
+
+OBS Studio 30.2.3 (Ubuntu package `30.2.3+dfsg-3~bpo24.04.1`) captures only
+Slippi's `Dolphin` window through Xcomposite. Openbox manages that display.
+OBS encodes 1920×1080 at 60 fps using texture NVENC, 6 Mb/s CBR, P5,
+two-second keyframes, two B frames, and no lookahead. Audio comes only from
+`hal_stream.monitor` at AAC 160 kb/s. The overlay uses an OBS text source.
+It contains HAL's settings and game count; it has no connect-code field.
+Connecting, idle, missing, and stale game windows are hidden.
+
+The stream lease owns the OBS process. Its profile and credentials live in a
+private temporary directory and are removed on shutdown. Do not publish the
+OBS control port (4455). OBS reconnects RTMP; the runner restarts OBS with
+backoff after process or control failures. Inspect `obs.log` and
+`runner-status.overlay.obs.json` next to the runner status file.
 
 ### Owner manual stream check
 
 This check is externally visible. Use `HAL_TWITCH_BANDWIDTH_TEST=1` unless the
-owner explicitly approves a public stream. Confirm the ffmpeg target ends in
+owner explicitly approves a public stream. Confirm the OBS stream key ends in
 `?bandwidthtest=true` for a bandwidth test before continuing.
 
 - [ ] Record the full Git SHA, policy SHA, hardware, slot count, delay, stage,
-  peer and region, driver, and ffmpeg version.
+  peer and region, driver, and OBS package version.
 - [ ] Start the runner with `HAL_TWITCH_BANDWIDTH_TEST=1`. Confirm admin status
   shows one stream holder and that no second session receives the lease.
 - [ ] While slot 0 is idle, confirm the video shows `Play HAL at 20xx.xyz` and
@@ -207,11 +221,11 @@ owner explicitly approves a public stream. Confirm the ffmpeg target ends in
   idle slot.
 - [ ] Play a game on slot 0. Confirm 1920×1080 video, game audio, the HAL setting
   line, and no player or bot connect code anywhere in the picture.
-- [ ] Run `pkill -TERM ffmpeg` inside the runner container. Confirm the
+- [ ] Run `pkill -TERM obs` inside the runner container. Confirm the
   supervisor restarts it with bounded backoff and the runner keeps its game.
-- [ ] Drain the holder. Confirm ffmpeg stops, the lease becomes free, and the
+- [ ] Drain the holder. Confirm OBS stops, the lease becomes free, and the
   next opted-in live session takes it on a status report.
-- [ ] Stop every runner. Confirm Xvfb, PulseAudio, Dolphin, and ffmpeg processes
+- [ ] Stop every runner. Confirm runner-owned Xvfb, Openbox, PulseAudio, Dolphin, and OBS processes
   are gone.
 
 The owner approved a public stream for the 2026-09-29 G4 test. Twitch showed

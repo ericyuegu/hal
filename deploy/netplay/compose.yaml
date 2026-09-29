@@ -21,10 +21,14 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}
       AWS_BUCKET: ${AWS_BUCKET:-hal}
       NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility,video
+      NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility,video,display
+      HAL_NETPLAY_STREAM_DISPLAY: ${HAL_NETPLAY_STREAM_DISPLAY:?set a dedicated NVIDIA Xorg display}
+      XAUTHORITY: /run/hal-netplay/Xauthority
     volumes:
       - cache:/root/.cache/hal-netplay
       - state:/opt/hal/runs/netplay
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ${HAL_NETPLAY_XAUTHORITY:?set the Xorg cookie file}:/run/hal-netplay/Xauthority:ro
     shm_size: 1gb
     deploy:
       resources:

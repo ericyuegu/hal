@@ -28,13 +28,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl ffmpeg fonts-dejavu-core procps pulseaudio x11-xserver-utils xvfb \
+      ca-certificates curl fonts-dejavu-core procps pulseaudio x11-xserver-utils xvfb \
+      obs-studio=30.2.3+dfsg-3~bpo24.04.1 libobs0=30.2.3+dfsg-3~bpo24.04.1 \
+      openbox mesa-utils xauth x11-utils \
       libfuse2t64 libvulkan1 vulkan-tools \
       libasound2t64 libegl1 libgl1 libopengl0 libusb-1.0-0 \
       libgtk-3-0t64 libglib2.0-0t64 libgdk-pixbuf-2.0-0 \
       libpangocairo-1.0-0 libx11-6 libxcursor1 libxi6 libxinerama1 \
       libxkbcommon0 libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
+
+# NVIDIA Container Toolkit injects the driver libraries; EGL also needs its
+# vendor registration to keep OBS from selecting Mesa's software renderer.
+RUN mkdir -p /usr/share/glvnd/egl_vendor.d \
+    && printf '%s\n' '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
+      > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 
 COPY --from=builder /.uv/python_install /.uv/python_install
 COPY --from=builder /opt/venv /opt/venv

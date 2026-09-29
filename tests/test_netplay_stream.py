@@ -1,15 +1,18 @@
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
+
+import pytest
 
 from hal.netplay_service.queue_client import StreamGrant
+from hal.netplay_service.stream import DisplayGroup
 from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import PulseAudio
 from hal.netplay_service.stream import StreamSupervisor
-from hal.netplay_service.stream import XvfbGroup
-from hal.netplay_service.stream import ffmpeg_command
 from hal.netplay_service.stream import overlay_text
 from hal.netplay_service.stream import write_stream_state
 
@@ -58,16 +61,18 @@ def test_xvfb_group_starts_one_sized_display_per_slot_and_cleans_up() -> None:
 
     def run(command: list[str], **_kwargs: object) -> Any:
         roots.append(command)
-        return object()
+        return subprocess.CompletedProcess(command, 0, stdout=b"OpenGL vendor string: NVIDIA Corporation")
 
-    with XvfbGroup(3, 100, True, popen=popen, run=run, ready=lambda _number: True) as group:
-        assert group.displays == (":100", ":101", ":102")
-        assert commands == [
-            ["Xvfb", ":100", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+    with DisplayGroup(3, 100, True, stream_display=":90", popen=popen, run=run, ready=lambda _number: True) as group:
+        assert group.displays == (":90", ":101", ":102")
+        assert commands[0][:3] == ["openbox", "--sm-disable", "--config-file"]
+        assert "<fullscreen>yes</fullscreen>" in Path(commands[0][3]).read_text()
+        assert commands[1:] == [
             ["Xvfb", ":101", "-screen", "0", "640x480x24", "-nolisten", "tcp"],
             ["Xvfb", ":102", "-screen", "0", "640x480x24", "-nolisten", "tcp"],
         ]
-        assert [command[2] for command in roots] == [":100", ":101", ":102"]
+        assert roots[0] == ["glxinfo", "-B"]
+        assert [command[2] for command in roots[1:]] == [":101", ":102"]
     assert all(process.terminated for process in processes)
 
 
@@ -115,74 +120,63 @@ def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
     }
 
 
-def test_ffmpeg_uses_nvenc_cbr_audio_and_reloadable_overlay(tmp_path: Path) -> None:
-    command = ffmpeg_command(":100", tmp_path / "overlay.txt", "live_secret", bandwidth_test=True)
-    joined = " ".join(command)
-    assert "-f x11grab -framerate 60 -draw_mouse 0 -video_size 1920x1080 -i :100.0" in joined
-    assert "-f pulse -i hal_stream.monitor" in joined
-    assert "drawtext=" in joined and "reload=1" in joined
-    assert "-c:v h264_nvenc" in joined
-    assert "-preset p5 -tune ll -profile:v high" in joined
-    assert "-rc-lookahead 0 -bf 0 -zerolatency 1" in joined
-    assert "-spatial-aq 1 -aq-strength 8 -pix_fmt yuv420p" in joined
-    assert "-rc cbr" in joined
-    assert "-b:v 6M -maxrate 6M -minrate 6M" in joined
-    assert "-g 120" in joined
-    assert "-forced-idr 1" in joined
-    assert "-c:a aac -b:a 160k" in joined
-    assert command[-1] == "rtmp://live.twitch.tv/app/live_secret?bandwidthtest=true"
+def test_stream_display_rejects_software_renderer() -> None:
+    run = Mock(return_value=subprocess.CompletedProcess([], 0, stdout=b"OpenGL renderer string: llvmpipe"))
+    popen = Mock()
+    with (
+        pytest.raises(RuntimeError, match="NVIDIA hardware"),
+        DisplayGroup(1, 100, True, stream_display=":90", run=run, popen=popen),
+    ):
+        pass
+    popen.assert_not_called()
+
+
+def test_stream_display_rejects_missing_or_overlapping_display() -> None:
+    with pytest.raises(ValueError, match="dedicated"):
+        DisplayGroup(1, 100, True)
+    with pytest.raises(ValueError, match="overlaps"):
+        DisplayGroup(2, 100, True, stream_display=":101")
 
 
 def test_stream_supervisor_starts_once_and_stops_on_lease_loss(tmp_path: Path) -> None:
-    processes: list[_Process] = []
-    commands: list[list[str]] = []
-
-    def popen(command: list[str], **_kwargs: object) -> Any:
-        commands.append(command)
-        process = _Process()
-        processes.append(process)
-        return process
-
-    state = tmp_path / "state.json"
-    write_stream_state(state, IdleStreamState())
+    studio = Mock()
+    studio.stats.return_value = {}
     supervisor = StreamSupervisor(
-        ":100",
-        state,
+        ":90",
+        tmp_path / "state.json",
         tmp_path / "overlay.txt",
         lambda: 4,
-        {"PULSE_SERVER": "unix:/tmp/pulse", "PULSE_SINK": "hal_stream"},
+        {},
         bandwidth_test=True,
-        popen=popen,
+        slot_status_path=tmp_path / "slot.json",
+        obs_factory=lambda: studio,
     )
     with supervisor:
         grant = StreamGrant(0, "live_secret")
         supervisor.set_grant(grant)
-        _wait_for(lambda: len(processes) == 1)
+        _wait_for(lambda: studio.start.call_count == 1)
         supervisor.set_grant(grant)
         time.sleep(0.05)
-        assert len(processes) == 1
+        assert studio.start.call_count == 1
         supervisor.set_grant(None)
-        _wait_for(lambda: processes[0].terminated)
-    assert len(commands) == 1
-    assert "live_secret" in commands[0][-1]
+        _wait_for(lambda: studio.close.call_count == 1)
+    studio.start.assert_called_once_with("live_secret", bandwidth_test=True)
+    studio.close.assert_called_once()
 
 
 def test_stream_supervisor_caps_restart_backoff_at_thirty_seconds(tmp_path: Path) -> None:
-    state = tmp_path / "state.json"
-    write_stream_state(state, IdleStreamState())
     delays: list[float] = []
-
-    def popen(_command: list[str], **_kwargs: object) -> Any:
-        return _Process(returncode=1)
-
+    studio = Mock()
+    studio.start.side_effect = RuntimeError("OBS exited")
     supervisor = StreamSupervisor(
-        ":100",
-        state,
+        ":90",
+        tmp_path / "state.json",
         tmp_path / "overlay.txt",
         lambda: 0,
         {},
         bandwidth_test=True,
-        popen=popen,
+        slot_status_path=tmp_path / "slot.json",
+        obs_factory=lambda: studio,
     )
 
     def wait(seconds: float) -> None:
@@ -196,3 +190,34 @@ def test_stream_supervisor_caps_restart_backoff_at_thirty_seconds(tmp_path: Path
     with supervisor:
         _wait_for(lambda: len(delays) == 7)
     assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+    assert studio.close.call_count == 7
+
+
+def test_stream_hides_connecting_and_stale_game_capture(tmp_path: Path) -> None:
+    from hal.netplay_service.health import SlotState
+    from hal.netplay_service.health import SlotStatus
+    from hal.netplay_service.health import write_slot_status
+
+    state = tmp_path / "state.json"
+    slot = tmp_path / "slot.json"
+    write_stream_state(state, GameStreamState("FOX", "IBDW#0", 20, 1))
+    supervisor = StreamSupervisor(
+        ":90",
+        state,
+        tmp_path / "overlay.txt",
+        lambda: 0,
+        {},
+        bandwidth_test=True,
+        slot_status_path=slot,
+    )
+    for status, age, visible in (
+        (SlotState.CONNECTING, 0, False),
+        (SlotState.PLAYING, 0, True),
+        (SlotState.PLAYING, 10, False),
+        (SlotState.IDLE, 0, False),
+    ):
+        write_slot_status(slot, SlotStatus(0, status, None, None, None, None, None, 0, time.time() - age))
+        text, playing = supervisor._refresh_overlay(2)
+        assert playing is visible
+        assert ("iBDW" in text) is visible
+        assert "CRYO#610" not in text

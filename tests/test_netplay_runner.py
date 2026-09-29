@@ -592,6 +592,7 @@ def test_runner_owns_stream_resources_across_inference_generations(
         _runner_config(tmp_path),
         display_base=100,
         wants_stream=True,
+        stream_display=":90",
         twitch_bandwidth_test=True,
     )
     closed: list[str] = []
@@ -634,7 +635,7 @@ def test_runner_owns_stream_resources_across_inference_generations(
     generation = Mock()
     monkeypatch.setattr(runner, "_bot_connect_codes", lambda _paths: ("BOT#1",))
     monkeypatch.setattr(runner, "_sha256", lambda _path: "b" * 64)
-    monkeypatch.setattr(runner, "XvfbGroup", lambda *_args, **_kwargs: Displays())
+    monkeypatch.setattr(runner, "DisplayGroup", lambda *_args, **_kwargs: Displays())
     monkeypatch.setattr(runner, "PulseAudio", lambda *_args, **_kwargs: Pulse())
     monkeypatch.setattr(runner, "StreamSupervisor", lambda *_args, **_kwargs: stream)
     monkeypatch.setattr(runner, "_run_generation", generation)
@@ -694,7 +695,7 @@ def _run_cli(
     monkeypatch.setattr(runner, "run", run)
     monkeypatch.setattr(runner, "new_session_id", lambda: _SESSION_ID)
 
-    runner.main(["--slots", "1", "--git-sha", "test-sha", *extra])
+    runner.main(["--slots", "1", "--git-sha", "test-sha", "--stream-display", ":90", *extra])
     return captured[0], client
 
 

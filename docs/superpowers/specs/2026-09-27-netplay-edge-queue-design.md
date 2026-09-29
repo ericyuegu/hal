@@ -22,7 +22,7 @@ two.
 | 2 | Runner and admin clients, retry-safe runner routes, shared queue contract | done |
 | 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | done |
 | 4 | Host bring-up: image, `gce-up.sh`, G4 verification | done; live G4 check owner-gated |
-| 5 | Twitch streaming: stream lease, claim preference, displays, ffmpeg | done; manual stream check owner-gated |
+| 5 | Twitch streaming: stream lease, claim preference, displays, OBS | done; manual stream check owner-gated |
 
 Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
 
@@ -67,7 +67,7 @@ browser ─▶ 20xx.xyz/*     page Worker (web/netplay, vinext, static client)
 GPU box: hal-netplay-runner ── outbound HTTPS + WebSocket ──▶ 20xx.xyz/v1/runner/*
          downloads policy, ISO, emulator, account JSON from private R2
          uploads replay files and their small metadata records to private R2
-         stream holder only: ffmpeg ── RTMP ──▶ twitch.tv
+         stream holder only: OBS ── RTMP ──▶ twitch.tv
 ```
 
 The page and API share an origin, so the API sends no CORS headers and the page
@@ -310,40 +310,44 @@ the GPU and model.
 
 ### Displays and audio
 
-- The runner no longer runs under one `xvfb-run` wrapper. It starts one Xvfb per
-  slot and passes that slot's `DISPLAY` to its Dolphin.
-- Headless slots: 640×480 display, audio disabled, native EFB scale. This is
-  today's behavior.
-- Stream slot: 1920×1080×24 display, 2x EFB scale, render window sized and
-  placed to fill the display, and Dolphin batch mode so the launcher is never
-  captured. Its audio backend is PulseAudio routed to the null sink
-  `hal_stream` with `PULSE_SINK`.
-- The runner starts one PulseAudio daemon per box (`--exit-idle-time=-1`) that
-  provides the null sink.
-- Window geometry and audio backend are written to Dolphin's config with the
-  same boundary workaround as `set_dolphin_internal_resolution` in
-  `hal/sim/session.py`, including a removal note naming the libmelee version.
+- The stream slot uses a dedicated NVIDIA Xorg display supplied through
+  `--stream-display` or `HAL_NETPLAY_STREAM_DISPLAY`. A headless G4 needs no
+  physical monitor. Its NVIDIA driver supplies a virtual display.
+- The host installs GLX libraries that match the loaded NVIDIA driver. After
+  installation it refreshes NVIDIA's container device metadata. The runner
+  rejects a stream display whose OpenGL vendor is not NVIDIA.
+- Other slots retain isolated 640×480 Xvfb displays, no audio, and native EFB
+  scale. The streamed slot uses 1920×1080, 2x EFB scale, and Dolphin batch mode.
+- Openbox manages windows on the dedicated stream display. OBS captures only
+  the Dolphin render window. It does not capture the desktop or launcher.
+- One PulseAudio daemon provides the `hal_stream` null sink. Dolphin writes to
+  that sink; OBS captures its monitor.
+- Geometry and audio settings remain at the Dolphin configuration boundary in
+  `hal/sim/session.py`.
 
 ### Stream process
 
-`hal/netplay_service/stream.py` supervises ffmpeg while the session holds the
-lease:
+`hal/netplay_service/stream.py` supervises OBS while the session holds the
+lease. `hal/netplay_service/obs.py` controls OBS through authenticated
+obs-websocket v5. This replaces the original ffmpeg capture decision, as
+approved by the owner on 2026-09-29.
 
-- Inputs: `x11grab` of the stream display at 60 fps, and `pulse` from
-  `hal_stream.monitor`.
-- Overlay: `drawtext` from a text file with `reload=1`. The runner writes one
-  line, for example "HAL · Master-rank Falco · difficulty 25 · Game 2 of 5 ·
-  play at 20xx.xyz". The line is built only from HAL's settings and the game
-  count. It never contains a connect code.
-- Encoding: `h264_nvenc` at 1080p60, CBR 6 Mb/s, keyframe every 2 s, no B
-  frames or lookahead, zero-latency mode, spatial AQ, and AAC 160 kb/s.
-- Output: FLV to `rtmp://live.twitch.tv/app/<key>`.
-- Restart with backoff from 1 s to 30 s when ffmpeg exits. Stop on lease loss
-  and on shutdown.
+- Pin OBS to the tested Ubuntu 30.2.3 package. Keep its profile and control
+  password in a private temporary directory. Remove them after exit. Keep the
+  control port inside the container; do not publish it.
+- Capture the exact Slippi render window through native Xcomposite capture.
+  Hide it unless the slot is playing and its status heartbeat is fresh.
+- Draw the overlay with OBS's text source. Build it from HAL's character,
+  imitation, desired return, and game count. It never contains a connect code.
+- Encode H.264 with OBS's texture NVENC encoder: 1080p60, CBR 6 Mb/s,
+  two-second keyframes, two B frames, P5, no lookahead, and AAC 160 kb/s.
+- Send RTMP to Twitch. OBS owns transport reconnects. Restart OBS after process
+  or control failure with backoff from 1 to 30 seconds. Reset backoff after a
+  healthy minute. Stop it on lease loss and runner shutdown.
+- Sample OBS's render, encoder, and network frame counters every five seconds.
 
-Between games, the stream display's root background is an idle card ("Play HAL
-at 20xx.xyz" and the queue depth), so the stream never goes black when Dolphin
-exits. The runner refreshes the card when the queue depth changes.
+Between games, show `Play HAL at 20xx.xyz` and the queue depth. Connection
+menus and stale game windows remain hidden.
 
 ### Performance
 
@@ -381,7 +385,7 @@ Other admin commands:
 One image, `hal-netplay-runner:<git-sha>`, built from `deploy/netplay/Dockerfile`
 and pushed to a registry, runs everywhere. It contains code, dependencies, and
 system libraries, but no ISO, bundle, or account files. For streaming it adds
-ffmpeg with NVENC, PulseAudio, and a tool to set the X root background.
+OBS with NVENC, Openbox, NVIDIA GLX libraries, and PulseAudio.
 Containers need `NVIDIA_DRIVER_CAPABILITIES` to include `video` for NVENC.
 
 | Host | Command |
@@ -424,8 +428,8 @@ the expected players.
   hash, session start, account lease, claim, connect, game start, game end with
   result, each applied settings revision, replay upload, drain, and exit. Errors
   log the exception and the job's last known state. Stream events: lease
-  granted and lost, ffmpeg start and exit with its code, restart count, and
-  bitrate and dropped-frame figures sampled from ffmpeg's progress output.
+  granted and lost, OBS failures and restart delays, and render, encoder, and network frame
+  counters sampled through obs-websocket.
 - **Durable Object:** the `events` table records every job transition, session
   start and end, lease expiry, account lease and release, stream lease grant and
   release, policy publish, and
@@ -466,7 +470,7 @@ the expected players.
    is live and idle, and gets the job otherwise.
 4. **Python tests** for `RemoteQueue` (retry policy, error mapping) and for
    runner startup (hash verification, qualification failure, drain on first
-   signal, forfeit on second). Streaming: the ffmpeg command; the overlay text
+   signal, forfeit on second). Streaming: the OBS profile and window selection; the overlay text
    never contains a connect code; restart backoff; per-slot `DISPLAY` and
    `PULSE_SINK`; the stream slot's Dolphin config writes.
 5. **Integration** (`-m integration`): `RemoteQueue` against a local
@@ -477,7 +481,7 @@ the expected players.
    slot against local `wrangler dev`, pushing to Twitch with
    `?bandwidthtest=true` appended to the key so nothing goes live. Confirm video,
    audio, overlay, the idle card between games, and recovery after killing
-   ffmpeg. Record the performance figures from "Streaming".
+   OBS. Record the performance figures from "Streaming".
 7. The AGENTS handoff checks: ruff format and check, ty, pytest, and the listed
    integration tests.
 

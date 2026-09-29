@@ -1,10 +1,11 @@
-"""Display, audio, overlay, and ffmpeg lifecycle for the leased stream slot."""
+"""Display, audio, overlay, and OBS lifecycle for the leased stream slot."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -15,17 +16,20 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from websockets.exceptions import WebSocketException
 
+from hal.netplay_service import obs
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
+from hal.netplay_service.health import SLOT_HEARTBEAT_MAX_AGE_SECONDS
+from hal.netplay_service.health import SlotState
+from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.queue_client import StreamGrant
 from hal.netplay_service.queue_contract import QueueError
 
 _STATE_VERSION: Final[int] = 1
 _CHARACTER_LABELS: Final[dict[str, str]] = {choice.value: choice.label for choice in CHARACTERS}
 _IMITATION_LABELS: Final[dict[str, str]] = {choice.value: choice.label for choice in IMITATIONS}
-_FONT: Final[str] = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-_STREAM_SIZE: Final[str] = "1920x1080"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +133,8 @@ def _display_ready(number: int) -> bool:
     return Path(f"/tmp/.X11-unix/X{number}").exists()
 
 
-class XvfbGroup:
-    """Own one isolated X display per runner slot."""
+class DisplayGroup:
+    """Use a GPU display for the stream and isolated Xvfb for other slots."""
 
     def __init__(
         self,
@@ -138,6 +142,7 @@ class XvfbGroup:
         base: int,
         stream_capable: bool,
         *,
+        stream_display: str | None = None,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
         ready: Callable[[int], bool] = _display_ready,
@@ -145,7 +150,14 @@ class XvfbGroup:
     ) -> None:
         if slots < 1 or base < 0 or base + slots > 65_535:
             raise ValueError("Xvfb display range is invalid")
-        self.displays = tuple(f":{base + slot}" for slot in range(slots))
+        if stream_capable and not stream_display:
+            raise ValueError("streaming requires a dedicated NVIDIA Xorg display")
+        if stream_display in {f":{base + slot}" for slot in range(slots)}:
+            raise ValueError("stream display overlaps the managed Xvfb range")
+        self.displays = tuple(
+            stream_display if slot == 0 and stream_capable and stream_display else f":{base + slot}"
+            for slot in range(slots)
+        )
         self._numbers = tuple(base + slot for slot in range(slots))
         self._stream_capable = stream_capable
         self._popen = popen
@@ -153,13 +165,35 @@ class XvfbGroup:
         self._ready = ready
         self._sleep = sleep
         self._processes: list[subprocess.Popen[bytes]] = []
+        self._window_config: tempfile.TemporaryDirectory[str] | None = None
 
-    def __enter__(self) -> XvfbGroup:
+    def __enter__(self) -> DisplayGroup:
         try:
             for slot, number in enumerate(self._numbers):
-                size = f"{_STREAM_SIZE}x24" if slot == 0 and self._stream_capable else "640x480x24"
+                if slot == 0 and self._stream_capable:
+                    environment = os.environ | {"DISPLAY": self.displays[slot]}
+                    result = self._run(["glxinfo", "-B"], env=environment, check=True, capture_output=True)
+                    if b"OpenGL vendor string: NVIDIA Corporation" not in result.stdout:
+                        raise RuntimeError("stream display must use NVIDIA hardware rendering")
+                    self._window_config = tempfile.TemporaryDirectory(prefix="hal-openbox-")
+                    window_config = Path(self._window_config.name) / "rc.xml"
+                    window_config.write_text(
+                        '<openbox_config xmlns="http://openbox.org/3.4/rc"><applications>'
+                        '<application class="Apprun" title="Dolphin">'
+                        "<decor>no</decor><fullscreen>yes</fullscreen>"
+                        "</application></applications></openbox_config>"
+                    )
+                    self._processes.append(
+                        self._popen(
+                            ["openbox", "--sm-disable", "--config-file", str(window_config)],
+                            env=environment,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    )
+                    continue
                 process = self._popen(
-                    ["Xvfb", f":{number}", "-screen", "0", size, "-nolisten", "tcp"],
+                    ["Xvfb", f":{number}", "-screen", "0", "640x480x24", "-nolisten", "tcp"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -186,6 +220,9 @@ class XvfbGroup:
         for process in reversed(self._processes):
             _stop_process(process)
         self._processes.clear()
+        if self._window_config is not None:
+            self._window_config.cleanup()
+            self._window_config = None
 
 
 class PulseAudio:
@@ -241,89 +278,8 @@ class PulseAudio:
         self.socket.unlink(missing_ok=True)
 
 
-def _drawtext_path(path: Path) -> str:
-    return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-
-
-def ffmpeg_command(display: str, overlay: Path, key: str, *, bandwidth_test: bool) -> list[str]:
-    if not key:
-        raise ValueError("Twitch stream key must be non-empty")
-    target = f"rtmp://live.twitch.tv/app/{key}"
-    if bandwidth_test:
-        target += "?bandwidthtest=true"
-    drawtext = (
-        f"drawtext=fontfile={_FONT}:textfile='{_drawtext_path(overlay)}':reload=1:"
-        "fontcolor=white:fontsize=42:box=1:boxcolor=black@0.65:boxborderw=18:x=36:y=36"
-    )
-    return [
-        "ffmpeg",
-        "-nostdin",
-        "-loglevel",
-        "warning",
-        "-f",
-        "x11grab",
-        "-framerate",
-        "60",
-        "-draw_mouse",
-        "0",
-        "-video_size",
-        _STREAM_SIZE,
-        "-i",
-        f"{display}.0",
-        "-f",
-        "pulse",
-        "-i",
-        "hal_stream.monitor",
-        "-vf",
-        drawtext,
-        "-c:v",
-        "h264_nvenc",
-        "-preset",
-        "p5",
-        "-tune",
-        "ll",
-        "-profile:v",
-        "high",
-        "-rc",
-        "cbr",
-        "-rc-lookahead",
-        "0",
-        "-bf",
-        "0",
-        "-zerolatency",
-        "1",
-        "-spatial-aq",
-        "1",
-        "-aq-strength",
-        "8",
-        "-pix_fmt",
-        "yuv420p",
-        "-b:v",
-        "6M",
-        "-maxrate",
-        "6M",
-        "-minrate",
-        "6M",
-        "-bufsize",
-        "12M",
-        "-g",
-        "120",
-        "-forced-idr",
-        "1",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-        "-flush_packets",
-        "1",
-        "-f",
-        "flv",
-        target,
-    ]
-
-
 class StreamSupervisor:
-    """Run ffmpeg while a stream grant exists and keep its overlay current."""
+    """Run OBS while a stream grant exists and keep its overlay current."""
 
     def __init__(
         self,
@@ -334,7 +290,8 @@ class StreamSupervisor:
         pulse_environment: dict[str, str],
         *,
         bandwidth_test: bool,
-        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        slot_status_path: Path,
+        obs_factory: Callable[[], obs.ObsStudio] | None = None,
     ) -> None:
         self._display = display
         self._state_path = state_path
@@ -342,7 +299,8 @@ class StreamSupervisor:
         self._queue_depth = queue_depth
         self._environment = os.environ | pulse_environment
         self._bandwidth_test = bandwidth_test
-        self._popen = popen
+        self._slot_status_path = slot_status_path
+        self._obs_factory = obs_factory or (lambda: obs.ObsStudio(display, overlay_path.parent, self._environment))
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._lock = threading.Lock()
@@ -383,67 +341,83 @@ class StreamSupervisor:
             depth = self._queue_depth()
         return depth
 
-    def _refresh_overlay(self, depth: int) -> None:
+    def _refresh_overlay(self, depth: int) -> tuple[str, bool]:
         try:
             state = read_stream_state(self._state_path)
         except ValueError:
             state = IdleStreamState()
-        text = overlay_text(state, depth)
+        playing = False
+        try:
+            status = read_slot_status(self._slot_status_path)
+            playing = (
+                isinstance(state, GameStreamState)
+                and status.state in (SlotState.PLAYING, SlotState.DEGRADED)
+                and 0 <= time.time() - status.updated_at <= SLOT_HEARTBEAT_MAX_AGE_SECONDS
+            )
+        except OSError, ValueError:
+            pass
+        text = overlay_text(state if playing else IdleStreamState(), depth)
         if not self._overlay_path.exists() or self._overlay_path.read_text() != text + "\n":
             write_overlay(self._overlay_path, text)
+        return text, playing
 
     def _run(self) -> None:
-        process: subprocess.Popen[bytes] | None = None
+        studio: obs.ObsStudio | None = None
         running_key: str | None = None
         backoff = 1.0
         depth = 0
         next_depth = 0.0
-        next_overlay = 0.0
+        next_stats = 0.0
+        healthy_since = time.monotonic()
         try:
             while not self._stop.is_set():
                 grant = self._current_grant()
-                if process is not None and (grant is None or grant.key != running_key):
-                    _stop_process(process)
-                    process = None
+                if studio is not None and (grant is None or grant.key != running_key):
+                    studio.close()
+                    studio = None
                     running_key = None
                     backoff = 1.0
                 if grant is None:
                     self._wait(0.25)
                     continue
-                if process is None:
-                    try:
-                        process = self._popen(
-                            ffmpeg_command(
-                                self._display,
-                                self._overlay_path,
-                                grant.key,
-                                bandwidth_test=self._bandwidth_test,
-                            ),
-                            env=self._environment,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    except OSError as error:
-                        logger.error("ffmpeg could not start: {}", error)
-                        self._wait(backoff)
-                        backoff = min(backoff * 2, 30.0)
-                        continue
-                    running_key = grant.key
-                now = time.monotonic()
-                if now >= next_depth:
-                    depth = self._read_queue_depth(depth)
-                    next_depth = now + 5.0
-                if now >= next_overlay:
-                    self._refresh_overlay(depth)
-                    next_overlay = now + 0.25
-                if process.poll() is not None:
-                    returncode = process.wait()
-                    logger.warning("ffmpeg exited with code {}; restarting after {} seconds", returncode, backoff)
-                    process = None
+                try:
+                    if studio is None:
+                        studio = self._obs_factory()
+                        studio.start(grant.key, bandwidth_test=self._bandwidth_test)
+                        running_key = grant.key
+                        healthy_since = time.monotonic()
+                    now = time.monotonic()
+                    if now >= next_depth:
+                        depth = self._read_queue_depth(depth)
+                        next_depth = now + 5.0
+                    text, playing = self._refresh_overlay(depth)
+                    studio.update(text, playing=playing)
+                    if now >= next_stats:
+                        stats = studio.stats() | {"updated_at": time.time()}
+                        stream_stats = stats.get("stream")
+                        if (
+                            now - healthy_since > 10
+                            and isinstance(stream_stats, dict)
+                            and not stream_stats.get("outputActive")
+                            and not stream_stats.get("outputReconnecting")
+                        ):
+                            raise RuntimeError("OBS stopped sending video")
+                        path = self._overlay_path.with_suffix(".obs.json")
+                        temporary = path.with_suffix(".partial")
+                        temporary.write_text(json.dumps(stats, allow_nan=False))
+                        temporary.replace(path)
+                        next_stats = now + 5.0
+                    if now - healthy_since >= 60:
+                        backoff = 1.0
+                except (OSError, RuntimeError, ValueError, WebSocketException) as error:
+                    logger.error("OBS stream failed: {}; restarting after {} seconds", error, backoff)
+                    if studio is not None:
+                        studio.close()
+                    studio = None
                     self._wait(backoff)
                     backoff = min(backoff * 2, 30.0)
                     continue
                 self._wait(0.25)
         finally:
-            if process is not None:
-                _stop_process(process)
+            if studio is not None:
+                studio.close()

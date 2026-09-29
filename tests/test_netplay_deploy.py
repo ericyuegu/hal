@@ -117,7 +117,16 @@ def test_compose_has_only_a_runner() -> None:
 def test_runner_image_contains_stream_runtime_without_an_entrypoint_display() -> None:
     dockerfile = (_DEPLOY / "Dockerfile").read_text()
     entrypoint = (_ROOT / "docker" / "entrypoint.sh").read_text()
-    for package in ("ffmpeg", "fonts-dejavu-core", "procps", "pulseaudio", "x11-xserver-utils", "xvfb"):
+    for package in (
+        "obs-studio=30.2.3",
+        "openbox",
+        "mesa-utils",
+        "fonts-dejavu-core",
+        "procps",
+        "pulseaudio",
+        "x11-xserver-utils",
+        "xvfb",
+    ):
         assert package in dockerfile
     assert "Xvfb" not in entrypoint
     assert 'exec "$@"' in entrypoint

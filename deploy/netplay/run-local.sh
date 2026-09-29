@@ -45,7 +45,10 @@ if [[ $local_stream == 1 && ${HAL_TWITCH_BANDWIDTH_TEST:-0} != 1 ]]; then
 fi
 stream_key=${HAL_NETPLAY_LOCAL_TWITCH_KEY:-local-stream-disabled}
 commands=(Xvfb xsetroot)
-if [[ $local_stream == 1 ]]; then commands+=(ffmpeg pulseaudio); fi
+if [[ $local_stream == 1 ]]; then
+  : "${HAL_NETPLAY_STREAM_DISPLAY:?set a dedicated NVIDIA Xorg display}"
+  commands+=(obs openbox glxinfo pulseaudio)
+fi
 for command in "${commands[@]}"; do
   if ! command -v "$command" >/dev/null; then
     echo "required command is not installed: $command" >&2

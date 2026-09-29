@@ -108,11 +108,11 @@ from hal.netplay_service.queue_contract import RunnerQueue
 from hal.netplay_service.queue_contract import SessionEndedError
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import upload_replay
+from hal.netplay_service.stream import DisplayGroup
 from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import PulseAudio
 from hal.netplay_service.stream import StreamSupervisor
-from hal.netplay_service.stream import XvfbGroup
 from hal.netplay_service.stream import write_stream_state
 from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import NetplaySession
@@ -213,6 +213,7 @@ class RunnerConfig:
     publish_replays: bool = True
     display_base: int | None = None
     wants_stream: bool = False
+    stream_display: str | None = None
     twitch_bandwidth_test: bool = False
 
     def __post_init__(self) -> None:
@@ -255,6 +256,8 @@ class RunnerConfig:
             raise ValueError("runner stream flags must be boolean")
         if self.wants_stream and self.display_base is None:
             raise ValueError("streaming requires a managed X display")
+        if self.wants_stream and not self.stream_display:
+            raise ValueError("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
 
 
 _NETPLAY_TIMINGS = (
@@ -1995,7 +1998,12 @@ def run(
             stream_supervisor: StreamSupervisor | None = None
             if config.display_base is not None:
                 display_group = resources.enter_context(
-                    XvfbGroup(len(config.user_jsons), config.display_base, config.wants_stream)
+                    DisplayGroup(
+                        len(config.user_jsons),
+                        config.display_base,
+                        config.wants_stream,
+                        stream_display=config.stream_display,
+                    )
                 )
                 displays = display_group.displays
             if config.wants_stream:
@@ -2013,6 +2021,7 @@ def run(
                         session_client.queue_depth,
                         pulse.environment,
                         bandwidth_test=config.twitch_bandwidth_test,
+                        slot_status_path=_slot_status_path(config.status_path, 0),
                     )
                 )
                 stream_supervisor.set_grant(reporter.state().stream)
@@ -2079,6 +2088,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--drain-timeout", type=float, default=900.0)
     parser.add_argument("--metrics-port", type=int, default=9100)
     parser.add_argument("--display-base", type=int, default=100)
+    parser.add_argument("--stream-display", default=os.environ.get("HAL_NETPLAY_STREAM_DISPLAY"))
     parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--twitch-bandwidth-test", action="store_true")
     parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
@@ -2104,6 +2114,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--metrics-port must be in [1, 65535]")
     if args.display_base < 0 or args.display_base + args.slots > 65_535:
         parser.error("--display-base range is invalid")
+    if args.stream and not args.stream_display:
+        parser.error("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
 
     start_http_server(args.metrics_port, addr="127.0.0.1")
     iso_path = ensure(ISO)
@@ -2162,6 +2174,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     max_frames=args.max_frames,
                     display_base=args.display_base,
                     wants_stream=args.stream,
+                    stream_display=args.stream_display,
                     twitch_bandwidth_test=args.twitch_bandwidth_test,
                 )
                 run(
