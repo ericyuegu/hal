@@ -330,3 +330,165 @@ Plan 5 checks:
 - Host runtime probe: Xvfb and `xsetroot` are installed. ffmpeg and PulseAudio are absent on this checkout's host. Use the runner image or install them before a direct streaming run.
 - Docker build and image push: skipped. The static package and capability tests passed. Image push is an owner action.
 - Worker deployment, `TWITCH_STREAM_KEY` write, live Twitch bandwidth test, RTX 3060 treatment measurement, and G4 measurement: skipped because they are owner actions. The scripts, local capture helper, checklist, and pending result table are above.
+
+
+## GPU rendering and OBS verification, 2026-09-29
+
+Source milestone: `a978dbf3` (`Stream Dolphin through OBS on the GPU`).
+The owner approved this change and the public stream. The VM still has one
+RTX PRO 6000 Blackwell GPU. The page is <https://20xx.xyz>; the stream is
+<https://www.twitch.tv/hal_20xx>.
+
+The original stream used Xvfb, Mesa llvmpipe, and ffmpeg. Dolphin now uses
+NVIDIA GLX on Xorg `:90`. OBS uses NVIDIA EGL, native Xcomposite window
+capture, and texture NVENC. Both renderer checks name the RTX PRO 6000.
+The container must contain `10_nvidia.json` as well as the injected NVIDIA
+libraries. Missing EGL registration made OBS select llvmpipe even after
+Dolphin's GLX path was fixed. The image now supplies that registration, and
+the OBS controller explicitly selects it.
+
+The live game window and OBS output are both 1920×1080. A program screenshot
+confirmed game video, black aspect-ratio bars, and the HAL overlay. It showed
+no desktop, launcher, or connect code. OBS has exactly three inputs: the
+Dolphin window, the overlay, and `hal_stream.monitor`. The window is hidden
+outside a fresh playing state. The first-run wizard is disabled in the OBS
+profile. Openbox forces the exact Dolphin render window to fullscreen.
+
+### Measurements
+
+The policy bundle remained
+`0ff1daf80caa36a94a713c4ccba9223db8d7ba7c1379b5865bbc40b8a8c2f3ec`.
+The checkpoint remained
+`52b5233ed506f59f514f7e90a6a6111206152db7413f451dc35be5c30d1e671b`.
+Both samples used the same G4, one slot, compiled inference, delay 2, Fox,
+and the iBDW imitation. The peer ran on the local RTX 3060. The driver was
+580.173.02. OBS was Ubuntu package `30.2.3+dfsg-3~bpo24.04.1`.
+
+| Pipeline | Game FPS | Frame p95 ms | Dolphin p95 ms | Policy p95 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Xvfb / llvmpipe / ffmpeg | 59.932 | 18.153 | 18.029 | 7.282 |
+| NVIDIA Xorg / OBS | 59.934 | 17.999 | 17.926 | 7.905 |
+
+These are rolling live samples from different games, not a controlled stage
+and seed comparison. The simulation already ran near 60 fps. This change
+fixed the rendering and capture path. It does not establish an inference
+speed improvement. The full two-slot, stream-on/off matrix above remains
+pending. Viewer latency was not measured.
+
+During a 126.65-second OBS interval spanning live play and game transitions:
+
+- Output: 60.00 fps, 6.183 Mb/s including audio and transport overhead.
+- Render misses: 0. Encoder skips: 0. Network drops: 0.
+- Final average OBS frame render time: 0.248 ms.
+- Two render misses occurred during OBS startup, before the interval.
+- The earlier 15-second ffmpeg file probe encoded 897 frames at 59.61 fps,
+  with two drops. That file probe did not measure Twitch delivery or distinct
+  game frames and is not directly comparable to OBS's counters.
+
+The raw report is `/var/lib/hal-netplay/obs-verification.json` on the VM.
+No measurement files or screenshots were uploaded to R2.
+
+### Live deployment and cleanup
+
+The existing registry image remains the base. The VM has a local derived
+image, `hal-netplay-runner:obs-local`, with the pinned OBS packages and EGL
+registration. It was not pushed to a registry. The current container received
+the same EGL registration directly before OBS restarted. Source files are
+mounted from `/var/lib/hal-netplay/hotfix/obs-v1`; their source milestone is
+`a978dbf3`. The base image label still identifies `728d9601`.
+
+`90-obs.conf` selects the local image, source mounts, authenticated X socket,
+and display `:90`. The VM startup metadata now contains the updated
+`gce-startup.sh`, so the host can recreate its display and Xauthority cookie
+after reboot. A reboot was not performed. The explicit EGL environment guard
+in the final source applies on the next full runner start; the running OBS
+was independently verified to use NVIDIA EGL.
+
+The OBS probe container was removed. Its temporary profile and the stale
+profile from the first rollout were removed. The active profile remains
+private. The previous source files and base image remain available for
+rollback. No second VM, GPU, registry push, R2 asset upload, Worker deployment,
+or Git push occurred during this change.
+
+The old runner did not exit after an idle drain. A second TERM completed each
+restart after the active game ended. This existing drain behavior still needs
+a separate fix. Local matches resumed after the required integration checks
+released port 51441.
+
+### Commands and results
+
+Commands below ran from this worktree unless another location is given.
+Repeated probes are grouped by purpose. No credentials are included.
+
+| Command | Result |
+| --- | --- |
+| `uv run pytest -q tests/test_netplay_obs.py tests/test_netplay_stream.py tests/test_netplay_runner.py tests/test_netplay_deploy.py` | 80 passed before the final EGL regression was added. |
+| `uv run pytest -q tests/test_netplay_obs.py tests/test_netplay_stream.py tests/test_netplay_deploy.py` | Final focused check: 23 passed. |
+| `uv run ruff format --check .` | Passed; 270 files formatted. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed. |
+| `uv run pytest -q -rs -m 'not integration'` | Final run: 1,459 passed, 8 skipped, 21 deselected; 24 upstream warnings. Earlier runs had 1,458 passes before the EGL test. |
+| `npm test` in `web/netplay-api` | 105 passed. Workerd logged a closed WebSocket during shutdown. |
+| `npm run typecheck` in `web/netplay-api` | Passed. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration` | 3 passed. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration` | Final run: 7 passed, 6 deselected; 6 upstream multiprocessing warnings. |
+| `bash -n deploy/netplay/gce-startup.sh deploy/netplay/run-host.sh deploy/netplay/run-local.sh` | Passed. |
+| `git diff --check` and `git diff --cached --check` | Passed. |
+| `git commit -m 'Stream Dolphin through OBS on the GPU'` | Created `a978dbf3`; format, lint, and type pre-commit hooks passed. |
+| `gcloud compute ssh hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --command=...` | Installed matching graphics packages; configured Xorg and Xauthority; refreshed CDI; built the local OBS image; staged source; drained and restarted the runner; inspected logs, renderer maps, screenshots, and counters; removed the probe container and stale profiles. |
+| `gcloud compute scp ... --project centering-star-502613-k3 --zone us-west1-a` | Copied source to the VM and retrieved the program image and measurement report. |
+| Remote `apt-get -s install ...` followed by `apt-get install ...` | Installed Xorg, NVIDIA GL 580.173.02, xauth, and diagnostic tools. `libnvidia-common-580-server` also had to be pinned to the same version. |
+| Remote `systemctl restart nvidia-cdi-refresh.service` | Refreshed NVIDIA container metadata after the graphics install. |
+| Remote `glxinfo -B` and `eglinfo -B` | Final host and container checks selected NVIDIA. |
+| Remote `docker build -t hal-netplay-runner:obs-local /var/lib/hal-netplay/obs-image` | Passed. Final local image: `e255ef5d8a8c`; no registry push. |
+| Remote `systemctl restart --no-block hal-netplay-runner` and `docker kill --signal TERM hal-netplay-runner` | Drained each current game, then used the second signal to finish shutdown. |
+| Remote `docker exec hal-netplay-runner pkill -TERM -x obs` | Verified OBS restart without stopping the active match; the replacement used NVIDIA EGL and texture NVENC. |
+| Remote OBS `GetSourceScreenshot`, `GetStats`, and `GetStreamStatus` | Confirmed the game-only image, 1080p60 output, and zero drops during the recorded interval. |
+| `gcloud compute instances add-metadata hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --metadata-from-file=startup-script=deploy/netplay/gce-startup.sh` | Updated startup metadata on the existing VM. |
+| `env TMPDIR=/home/ericgu/src/hal-edge-queue/runs/netplay/tmp uv run python /tmp/hal_queue_cody_fox_forever.py` | Continuous Cody Fox matches resumed and remain running. |
+
+Failures found and resolved:
+
+- The first graphics install failed because the common NVIDIA package selected
+  a newer driver dependency. Pinning it to 580.173.02 resolved the conflict.
+- Xorg first failed with `UseDisplayDevice=None`; G4's virtual display does not
+  support that option. Removing it allowed NVIDIA rendering.
+- OBS probes first rejected the Ubuntu build suffix, then reached the control
+  socket before OBS was ready. Exact package/API version checks and the
+  documented readiness response resolved both cases.
+- A focused test expected the label `Cody`; the established label is `iBDW`.
+  The test was corrected. Ruff also found import ordering and a nested context
+  statement; both were corrected.
+- OBS's first-run wizard blocked output. `FirstRun=true` prevents the wizard.
+  The window capture API returns `AppRun.wrapped`, not the second WM_CLASS
+  string shown by `xwininfo`. The selector now uses the observed API value.
+- OBS selected Mesa because its EGL registration file was missing. The image
+  now includes NVIDIA's registration. The final log has no CUDA/OpenGL
+  interoperability error.
+- The first required Dolphin test run stalled and was interrupted after
+  266 seconds. A visible-output retry timed out at 180 seconds and reported
+  port 51441 in use. After the local match finished, the loop was paused and
+  the exact required command passed in 55.89 seconds. Test-owned blocked
+  processes were reaped. The timeout run reported leaked shared-memory cleanup.
+- `uvx py-spy dump --pid ...` lacked ptrace permission. The sudo retry required
+  interactive authentication. `unshare --user --map-root-user --net ...` was
+  denied. Pausing the match loop avoided both requirements.
+- Early source lookups used an obsolete `.cpp` path and an unquoted URL query;
+  corrected requests fetched OBS's `.c` source. Exploratory reads of
+  `compose.yml` and `live_settings.py` failed; the maintained files were then
+  located. An early `xwininfo` call targeted an image without that tool; the
+  host tool and container namespace supplied the diagnostic instead.
+- A diagnostic `python -c` from `/opt/hal` found the base source tree before
+  the installed patched module. Running it with `docker exec -w /tmp` selected
+  the installed code. Diagnostic direct websocket connections emitted a
+  deprecation warning; their sockets were closed.
+
+Skips and limits:
+
+- Two hardware tests require `HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1`.
+- Six schema tests require the unavailable local v7 subset. That fixture is
+  still absent; these skips are not evidence that those schema tests passed.
+- The stream-off and second-slot performance controls remain unmeasured.
+- Twitch viewer latency and reboot recovery were not tested.
+- No push or new asset upload was needed. The live stream remains public under
+  the owner's existing approval.
