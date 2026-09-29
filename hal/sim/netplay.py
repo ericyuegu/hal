@@ -188,7 +188,9 @@ class NetplaySession:
             fix_analog_inputs=False,
         )
         fix_dolphin_ini_case(self._console)
-        with popen_with_pdeathsig():
+        # Batch mode suppresses Dolphin's launcher window. The render window is
+        # still visible, so a stream display contains only gameplay.
+        with popen_with_pdeathsig(dolphin_batch=True):
             self._console.run(iso_path=self.iso_path)
         if not self._controller.connect():
             raise RuntimeError("failed to connect the local controller")

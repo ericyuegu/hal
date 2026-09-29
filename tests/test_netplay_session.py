@@ -154,8 +154,8 @@ def test_console_writes_stream_display_and_audio(
     if stream_output:
         assert dolphin.getint("Display", "RenderWindowXPos") == 0
         assert dolphin.getint("Display", "RenderWindowYPos") == 0
-        assert dolphin.getint("Display", "RenderWindowWidth") == 1280
-        assert dolphin.getint("Display", "RenderWindowHeight") == 720
+        assert dolphin.getint("Display", "RenderWindowWidth") == 1920
+        assert dolphin.getint("Display", "RenderWindowHeight") == 1080
         assert dolphin.getboolean("Display", "RenderWindowAutoSize") is False
         assert console_type.call_args.kwargs["audio_backend"] == "Pulse"
 
@@ -182,7 +182,7 @@ def test_controller_is_created_before_dolphin_launch(tmp_path: Path, monkeypatch
     console.run.side_effect = lambda **_kwargs: events.append("launch")
     monkeypatch.setattr("hal.sim.netplay.melee.Controller", Controller)
     monkeypatch.setattr("hal.sim.netplay.fix_dolphin_ini_case", lambda _console: events.append("fix"))
-    monkeypatch.setattr("hal.sim.netplay.popen_with_pdeathsig", nullcontext)
+    monkeypatch.setattr("hal.sim.netplay.popen_with_pdeathsig", lambda **_kwargs: nullcontext())
     monkeypatch.setattr("hal.sim.netplay.step_blocking", lambda *_args: _live())
     monkeypatch.setattr("hal.sim.netplay.canonical_frame", lambda _state: _canonical_live(0))
     session = _session(tmp_path)

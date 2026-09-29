@@ -205,6 +205,23 @@ def test_parent_bound_spawn_uses_exec_wrapper_without_preexec(monkeypatch: pytes
     assert "preexec_fn" not in calls[0][2]
 
 
+def test_parent_bound_spawn_adds_dolphin_batch_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def popen(command: list[str], *_args: object, **_kwargs: object) -> object:
+        commands.append(command)
+        return object()
+
+    monkeypatch.setattr(session_module, "_PARENT_BOUND_POPEN_ORIGINAL", popen)
+    monkeypatch.setattr(session_module, "_PARENT_BOUND_DOLPHIN_BATCH", True)
+
+    session_module._spawn_parent_bound(["dolphin", "-e", "game.iso"])
+
+    assert commands == [
+        [session_module.sys.executable, "-m", "hal.sim.pdeathsig_exec", "dolphin", "-b", "-e", "game.iso"]
+    ]
+
+
 def test_teardown_signals_the_whole_dolphin_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
     process = Mock(pid=123)
     process.poll.return_value = None

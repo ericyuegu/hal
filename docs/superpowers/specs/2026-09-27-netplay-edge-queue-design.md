@@ -314,8 +314,9 @@ the GPU and model.
   slot and passes that slot's `DISPLAY` to its Dolphin.
 - Headless slots: 640×480 display, audio disabled, native EFB scale. This is
   today's behavior.
-- Stream slot: 1280×720×24 display, EFB scale 2, render window sized and
-  placed to fill the display, audio backend PulseAudio routed to the null sink
+- Stream slot: 1920×1080×24 display, 2x EFB scale, render window sized and
+  placed to fill the display, and Dolphin batch mode so the launcher is never
+  captured. Its audio backend is PulseAudio routed to the null sink
   `hal_stream` with `PULSE_SINK`.
 - The runner starts one PulseAudio daemon per box (`--exit-idle-time=-1`) that
   provides the null sink.
@@ -334,7 +335,8 @@ lease:
   line, for example "HAL · Master-rank Falco · difficulty 25 · Game 2 of 5 ·
   play at 20xx.xyz". The line is built only from HAL's settings and the game
   count. It never contains a connect code.
-- Encoding: `h264_nvenc`, CBR 6 Mb/s, keyframe every 2 s, AAC 160 kb/s.
+- Encoding: `h264_nvenc` at 1080p60, CBR 6 Mb/s, keyframe every 2 s, no B
+  frames or lookahead, zero-latency mode, spatial AQ, and AAC 160 kb/s.
 - Output: FLV to `rtmp://live.twitch.tv/app/<key>`.
 - Restart with backoff from 1 s to 30 s when ffmpeg exits. Stop on lease loss
   and on shutdown.
@@ -508,7 +510,7 @@ still hash-checked.
   image, and UDP hole punching from Google Cloud are unverified.
 - **Cloudflare dependency.** The queue is unavailable if Cloudflare is. The page
   already depends on it.
-- **Stream load.** Rendering at EFB scale 2, `x11grab`, and NVENC share the box
+- **Stream load.** Rendering at 2x EFB scale, `x11grab`, and NVENC share the box
   with inference. The stream slot's latency must be measured, not assumed.
 
 ## Page redesign (follow-on spec), recorded decisions

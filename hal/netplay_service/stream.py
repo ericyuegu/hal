@@ -25,6 +25,7 @@ _STATE_VERSION: Final[int] = 1
 _CHARACTER_LABELS: Final[dict[str, str]] = {choice.value: choice.label for choice in CHARACTERS}
 _IMITATION_LABELS: Final[dict[str, str]] = {choice.value: choice.label for choice in IMITATIONS}
 _FONT: Final[str] = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+_STREAM_SIZE: Final[str] = "1920x1080"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +157,7 @@ class XvfbGroup:
     def __enter__(self) -> XvfbGroup:
         try:
             for slot, number in enumerate(self._numbers):
-                size = "1280x720x24" if slot == 0 and self._stream_capable else "640x480x24"
+                size = f"{_STREAM_SIZE}x24" if slot == 0 and self._stream_capable else "640x480x24"
                 process = self._popen(
                     ["Xvfb", f":{number}", "-screen", "0", size, "-nolisten", "tcp"],
                     stdout=subprocess.DEVNULL,
@@ -252,7 +253,7 @@ def ffmpeg_command(display: str, overlay: Path, key: str, *, bandwidth_test: boo
         target += "?bandwidthtest=true"
     drawtext = (
         f"drawtext=fontfile={_FONT}:textfile='{_drawtext_path(overlay)}':reload=1:"
-        "fontcolor=white:fontsize=28:box=1:boxcolor=black@0.65:boxborderw=12:x=24:y=24"
+        "fontcolor=white:fontsize=42:box=1:boxcolor=black@0.65:boxborderw=18:x=36:y=36"
     )
     return [
         "ffmpeg",
@@ -263,8 +264,10 @@ def ffmpeg_command(display: str, overlay: Path, key: str, *, bandwidth_test: boo
         "x11grab",
         "-framerate",
         "60",
+        "-draw_mouse",
+        "0",
         "-video_size",
-        "1280x720",
+        _STREAM_SIZE,
         "-i",
         f"{display}.0",
         "-f",
@@ -276,11 +279,25 @@ def ffmpeg_command(display: str, overlay: Path, key: str, *, bandwidth_test: boo
         "-c:v",
         "h264_nvenc",
         "-preset",
-        "p4",
+        "p5",
         "-tune",
         "ll",
+        "-profile:v",
+        "high",
         "-rc",
         "cbr",
+        "-rc-lookahead",
+        "0",
+        "-bf",
+        "0",
+        "-zerolatency",
+        "1",
+        "-spatial-aq",
+        "1",
+        "-aq-strength",
+        "8",
+        "-pix_fmt",
+        "yuv420p",
         "-b:v",
         "6M",
         "-maxrate",
@@ -291,10 +308,14 @@ def ffmpeg_command(display: str, overlay: Path, key: str, *, bandwidth_test: boo
         "12M",
         "-g",
         "120",
+        "-forced-idr",
+        "1",
         "-c:a",
         "aac",
         "-b:a",
         "160k",
+        "-flush_packets",
+        "1",
         "-f",
         "flv",
         target,

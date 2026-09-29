@@ -113,6 +113,7 @@ class SessionOptions(TypedDict):
 # launch, which only spawns (it doesn't wait), so serializing it is cheap.
 _POPEN_PATCH_LOCK = threading.Lock()
 _PARENT_BOUND_POPEN_ORIGINAL: Any = None
+_PARENT_BOUND_DOLPHIN_BATCH = False
 
 
 def _spawn_parent_bound(command: object, *args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
@@ -121,14 +122,19 @@ def _spawn_parent_bound(command: object, *args: Any, **kwargs: Any) -> subproces
         raise TypeError("the parent-bound process command must be a sequence of paths and strings")
     if _PARENT_BOUND_POPEN_ORIGINAL is None:
         raise RuntimeError("parent-bound Popen used outside its patch scope")
-    wrapped = [sys.executable, "-m", "hal.sim.pdeathsig_exec"]
+    dolphin: list[str] = []
     for part in command:
         if not isinstance(part, str | os.PathLike):
             raise TypeError("the parent-bound process command must contain only paths and strings")
         path = os.fspath(part)
         if not isinstance(path, str):
             raise TypeError("the parent-bound process command must not contain bytes")
-        wrapped.append(path)
+        dolphin.append(path)
+    if not dolphin:
+        raise ValueError("the parent-bound process command must not be empty")
+    if _PARENT_BOUND_DOLPHIN_BATCH:
+        dolphin.insert(1, "-b")
+    wrapped = [sys.executable, "-m", "hal.sim.pdeathsig_exec", *dolphin]
     if kwargs.get("start_new_session", True) is not True:
         raise ValueError("parent-bound Dolphin processes require a new session")
     kwargs["start_new_session"] = True
@@ -136,21 +142,25 @@ def _spawn_parent_bound(command: object, *args: Any, **kwargs: Any) -> subproces
 
 
 @contextmanager
-def popen_with_pdeathsig() -> Iterator[None]:
+def popen_with_pdeathsig(*, dolphin_batch: bool = False) -> Iterator[None]:
     """Route libmelee's Dolphin launch through a parent-bound exec wrapper.
 
     The extra executable avoids ``preexec_fn``, which can deadlock when another
     thread holds a Python runtime lock at fork.
     """
-    global _PARENT_BOUND_POPEN_ORIGINAL
+    if type(dolphin_batch) is not bool:
+        raise TypeError("Dolphin batch mode flag must be a boolean")
+    global _PARENT_BOUND_DOLPHIN_BATCH, _PARENT_BOUND_POPEN_ORIGINAL
     with _POPEN_PATCH_LOCK:
         original = subprocess.Popen
         _PARENT_BOUND_POPEN_ORIGINAL = original
+        _PARENT_BOUND_DOLPHIN_BATCH = dolphin_batch
         subprocess.__dict__["Popen"] = _spawn_parent_bound
         try:
             yield
         finally:
             subprocess.__dict__["Popen"] = original
+            _PARENT_BOUND_DOLPHIN_BATCH = False
             _PARENT_BOUND_POPEN_ORIGINAL = None
 
 
@@ -273,8 +283,8 @@ def set_dolphin_stream_output(console: melee.Console, enabled: bool) -> None:
         config.set("Display", "RenderWindowAutoSize", "False")
         config.set("Display", "RenderWindowXPos", "0")
         config.set("Display", "RenderWindowYPos", "0")
-        config.set("Display", "RenderWindowWidth", "1280")
-        config.set("Display", "RenderWindowHeight", "720")
+        config.set("Display", "RenderWindowWidth", "1920")
+        config.set("Display", "RenderWindowHeight", "1080")
     with ini_path.open("w") as output:
         config.write(output)
 

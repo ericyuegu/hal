@@ -63,7 +63,7 @@ def test_xvfb_group_starts_one_sized_display_per_slot_and_cleans_up() -> None:
     with XvfbGroup(3, 100, True, popen=popen, run=run, ready=lambda _number: True) as group:
         assert group.displays == (":100", ":101", ":102")
         assert commands == [
-            ["Xvfb", ":100", "-screen", "0", "1280x720x24", "-nolisten", "tcp"],
+            ["Xvfb", ":100", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
             ["Xvfb", ":101", "-screen", "0", "640x480x24", "-nolisten", "tcp"],
             ["Xvfb", ":102", "-screen", "0", "640x480x24", "-nolisten", "tcp"],
         ]
@@ -118,12 +118,17 @@ def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
 def test_ffmpeg_uses_nvenc_cbr_audio_and_reloadable_overlay(tmp_path: Path) -> None:
     command = ffmpeg_command(":100", tmp_path / "overlay.txt", "live_secret", bandwidth_test=True)
     joined = " ".join(command)
-    assert "-f x11grab -framerate 60 -video_size 1280x720 -i :100.0" in joined
+    assert "-f x11grab -framerate 60 -draw_mouse 0 -video_size 1920x1080 -i :100.0" in joined
     assert "-f pulse -i hal_stream.monitor" in joined
     assert "drawtext=" in joined and "reload=1" in joined
     assert "-c:v h264_nvenc" in joined
-    assert "-rc cbr -b:v 6M -maxrate 6M -minrate 6M" in joined
+    assert "-preset p5 -tune ll -profile:v high" in joined
+    assert "-rc-lookahead 0 -bf 0 -zerolatency 1" in joined
+    assert "-spatial-aq 1 -aq-strength 8 -pix_fmt yuv420p" in joined
+    assert "-rc cbr" in joined
+    assert "-b:v 6M -maxrate 6M -minrate 6M" in joined
     assert "-g 120" in joined
+    assert "-forced-idr 1" in joined
     assert "-c:a aac -b:a 160k" in joined
     assert command[-1] == "rtmp://live.twitch.tv/app/live_secret?bandwidthtest=true"
 

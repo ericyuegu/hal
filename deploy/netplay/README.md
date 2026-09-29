@@ -184,12 +184,13 @@ Writing the secret and deploying the Worker are owner actions. The Worker gives
 the key only to the live session that holds its one stream lease. That runner
 streams slot 0. `--no-stream` opts a runner out.
 
-The runner starts one Xvfb for every slot. Stream slot 0 uses a 1280×720
-display and PulseAudio. Other slots use 640×480 displays and no audio. ffmpeg
-captures slot 0 at 60 fps, uses NVENC at 6 Mb/s CBR and AAC at 160 kb/s, and
-reloads its overlay from a local text file. The overlay state contains HAL's
-character, imitation, desired return, and game count only. It has no field for
-a player or bot connect code.
+The runner starts one Xvfb for every slot. Stream slot 0 uses a 1920×1080
+display and PulseAudio. Dolphin runs in batch mode so its launcher is not part
+of the stream. Other slots use 640×480 displays and no audio. ffmpeg captures
+slot 0 at 60 fps, uses low-latency NVENC at 6 Mb/s CBR and AAC at 160 kb/s,
+and reloads its overlay from a local text file. The overlay state contains
+HAL's character, imitation, desired return, and game count only. It has no
+field for a player or bot connect code.
 
 ### Owner manual stream check
 
@@ -204,7 +205,7 @@ owner explicitly approves a public stream. Confirm the ffmpeg target ends in
 - [ ] While slot 0 is idle, confirm the video shows `Play HAL at 20xx.xyz` and
   the public queue depth. Confirm a waiting job goes to slot 0 before another
   idle slot.
-- [ ] Play a game on slot 0. Confirm 1280×720 video, game audio, the HAL setting
+- [ ] Play a game on slot 0. Confirm 1920×1080 video, game audio, the HAL setting
   line, and no player or bot connect code anywhere in the picture.
 - [ ] Run `pkill -TERM ffmpeg` inside the runner container. Confirm the
   supervisor restarts it with bounded backoff and the runner keeps its game.
