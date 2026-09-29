@@ -7,9 +7,11 @@ menu hang surfaces as a clean ``TimeoutError`` instead of spinning forever
 (``start_match`` callers already log-and-continue on that).
 """
 
+import signal
 import time
 from pathlib import Path
 from unittest.mock import Mock
+from unittest.mock import call
 
 import melee
 import pytest
@@ -197,10 +199,24 @@ def test_parent_bound_spawn_uses_exec_wrapper_without_preexec(monkeypatch: pytes
         (
             [session_module.sys.executable, "-m", "hal.sim.pdeathsig_exec", "dolphin", "-e", "game.iso"],
             (),
-            {"env": {"A": "B"}},
+            {"env": {"A": "B"}, "start_new_session": True},
         )
     ]
     assert "preexec_fn" not in calls[0][2]
+
+
+def test_teardown_signals_the_whole_dolphin_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = Mock(pid=123)
+    process.poll.return_value = None
+    signals = Mock()
+    monkeypatch.setattr(session_module.os, "killpg", signals)
+    console = Mock(_process=process, controllers=[])
+
+    session_module.teardown_console(console, None)
+
+    assert signals.call_args_list == [call(123, signal.SIGTERM), call(123, signal.SIGKILL)]
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
 
 
 def test_replay_repair_failure_does_not_mask_body_error_or_retain_state(

@@ -410,6 +410,22 @@ def test_connect_wait_stops_during_a_stalled_realtime_read(tmp_path: Path) -> No
     console.step.assert_called_once_with(flush_controllers=False)
 
 
+def test_connect_wait_uses_the_connect_timeout_for_a_stalled_realtime_read(tmp_path: Path) -> None:
+    session = _session(
+        tmp_path,
+        realtime=True,
+        step_timeout_seconds=0.0,
+        connect_timeout_seconds=1.0,
+    )
+    session._console = console = Mock()
+    session._controller = Mock()
+    state = SimpleNamespace(menu_state=melee.Menu.SLIPPI_ONLINE_CSS)
+    console.step.side_effect = (None, state)
+
+    assert session._read_state(during_connect=True) is state
+    assert console.step.call_count == 2
+
+
 def test_connect_wait_stops_during_countdown_before_submitting_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

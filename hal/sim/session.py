@@ -13,6 +13,7 @@ match. Use as a context manager.
 import atexit
 import configparser
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -128,6 +129,9 @@ def _spawn_parent_bound(command: object, *args: Any, **kwargs: Any) -> subproces
         if not isinstance(path, str):
             raise TypeError("the parent-bound process command must not contain bytes")
         wrapped.append(path)
+    if kwargs.get("start_new_session", True) is not True:
+        raise ValueError("parent-bound Dolphin processes require a new session")
+    kwargs["start_new_session"] = True
     return _PARENT_BOUND_POPEN_ORIGINAL(wrapped, *args, **kwargs)
 
 
@@ -296,16 +300,33 @@ def known_dolphin_version(version: melee.console.DolphinVersion | None) -> Itera
             melee.console.__dict__["get_dolphin_version"] = original
 
 
+def _signal_dolphin_group(process: subprocess.Popen[Any], signal_number: signal.Signals) -> bool:
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.killpg(pid, signal_number)
+    except ProcessLookupError:
+        return process.poll() is not None
+    except OSError as error:
+        logger.warning(f"Dolphin process-group signal failed: {error}")
+        return False
+    return True
+
+
 def kill_dolphin(console: melee.Console | None) -> None:
     """Hard-kill Dolphin if it is still running."""
     if console is None:
         return
     process = getattr(console, "_process", None)
-    if process is None or process.poll() is not None:
+    if process is None:
         return
     try:
-        process.kill()
-        process.wait(timeout=2.0)
+        group_signaled = _signal_dolphin_group(process, signal.SIGKILL)
+        if process.poll() is None:
+            if not group_signaled:
+                process.kill()
+            process.wait(timeout=2.0)
     except (OSError, subprocess.TimeoutExpired) as error:
         logger.warning(f"Dolphin SIGKILL failed: {error}")
 
@@ -317,7 +338,8 @@ def teardown_console(console: melee.Console | None, replay_dir: str | None) -> N
     process = getattr(console, "_process", None)
     if process is not None and process.poll() is None:
         try:
-            process.terminate()
+            if not _signal_dolphin_group(process, signal.SIGTERM):
+                process.terminate()
             process.wait(timeout=_DOLPHIN_TERM_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             pass

@@ -57,7 +57,7 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=${unit_timeout}
 ExecStartPre=-/usr/bin/docker rm -f hal-netplay-runner
-ExecStart=/usr/bin/docker run --rm --name hal-netplay-runner --gpus all --ipc=host --env-file /run/hal-netplay/runner.env -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video -v /var/cache/hal-netplay:/root/.cache/hal-netplay -v /var/lib/hal-netplay:/var/lib/hal-netplay ${image} hal-netplay-runner --slots ${slots} --compiled --drain-timeout ${drain_timeout} --replay-dir /var/lib/hal-netplay/replays --status-path /var/lib/hal-netplay/runner-status.json --git-sha ${git_sha}
+ExecStart=/usr/bin/docker run --rm --name hal-netplay-runner --gpus all --ipc=host --env-file /run/hal-netplay/runner.env -e APPIMAGE_EXTRACT_AND_RUN=1 -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video -v /var/cache/hal-netplay:/root/.cache/hal-netplay -v /var/lib/hal-netplay:/var/lib/hal-netplay ${image} hal-netplay-runner --slots ${slots} --compiled --graphics-backend OGL --drain-timeout ${drain_timeout} --replay-dir /var/lib/hal-netplay/replays --status-path /var/lib/hal-netplay/runner-status.json --git-sha ${git_sha}
 ExecStop=/usr/bin/docker stop --time=${stop_seconds} hal-netplay-runner
 
 [Install]

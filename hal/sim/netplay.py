@@ -416,7 +416,8 @@ class NetplaySession:
             return state
         if self._controller is not None:
             self._controller.flush()
-        deadline = time.monotonic() + self.step_timeout_seconds
+        timeout_seconds = self.connect_timeout_seconds if during_connect else self.step_timeout_seconds
+        deadline = time.monotonic() + timeout_seconds
         while True:
             if during_connect:
                 self._raise_if_connect_abandoned()

@@ -131,8 +131,7 @@ Its 40 minute initial delay covers fixture download and qualification.
 
 ### First G4 verification checklist
 
-Running this checklist creates billable resources. It is prepared for the
-owner and was not run during Plan 4.
+Running this checklist creates billable resources.
 
 - [ ] Record the image URI, full Git SHA, zone, machine type, boot image family,
   slot count, and start/end times.
@@ -155,7 +154,21 @@ owner and was not run during Plan 4.
   fell to zero, the account leases were freed, and the VM or managed group was
   deleted.
 
-Plan 4 live G4 result: **not run; owner action required**.
+Live G4 result on 2026-09-29:
+
+- VM `hal-netplay-g4` ran in `us-west1-a` on `g4-standard-48` with one NVIDIA
+  RTX PRO 6000 Blackwell Server Edition. The driver was 580.173.02.
+- The runner image and Git SHA were
+  `us-west1-docker.pkg.dev/centering-star-502613-k3/hal-netplay/hal-netplay-runner:728d96018e242332854a6a77ea5d2ff6eb17012c`.
+  It ran one slot. PyTorch 2.11.0+cu130 reported CUDA capability `(12, 0)`.
+- The standard data-center driver could not create a Vulkan instance in the
+  container. The runner used OpenGL and completed the direct-connect game.
+- A peer in Los Angeles connected without an inbound firewall rule. The game
+  ran for 5,647 frames on Yoshi's Story. The runner recorded 58.7 FPS, 18.2 ms
+  frame p95, 18.0 ms Dolphin p95, and 7.1 ms policy p95.
+- The runner uploaded the 2,209,026 byte replay, released the job, and returned
+  the public queue to zero active and zero queued jobs with one healthy slot.
+- The VM remains running for continued owner testing.
 
 ## Twitch stream
 
@@ -180,9 +193,9 @@ a player or bot connect code.
 
 ### Owner manual stream check
 
-This check is externally visible and must stay in Twitch bandwidth-test mode.
-Set `HAL_TWITCH_BANDWIDTH_TEST=1` in the runner environment before starting it.
-Confirm the ffmpeg target ends in `?bandwidthtest=true` before continuing.
+This check is externally visible. Use `HAL_TWITCH_BANDWIDTH_TEST=1` unless the
+owner explicitly approves a public stream. Confirm the ffmpeg target ends in
+`?bandwidthtest=true` for a bandwidth test before continuing.
 
 - [ ] Record the full Git SHA, policy SHA, hardware, slot count, delay, stage,
   peer and region, driver, and ffmpeg version.
@@ -200,7 +213,10 @@ Confirm the ffmpeg target ends in `?bandwidthtest=true` before continuing.
 - [ ] Stop every runner. Confirm Xvfb, PulseAudio, Dolphin, and ffmpeg processes
   are gone.
 
-Plan 5 manual Twitch result: **not run; owner action required**.
+The owner approved a public stream for the 2026-09-29 G4 test. Twitch showed
+the live 1280x720 game. The active-game display contained no connect code.
+ffmpeg 6.1.1 used NVENC while the policy ran. The idle-card, restart, and
+lease-transfer checks remain pending.
 
 ### Performance measurement
 
@@ -227,8 +243,12 @@ stream check, so their cells remain pending for the owner.
 | RTX 3060 | on | headless treatment | pending | pending | pending | pending |
 | G4 RTX PRO 6000 | off | slot 0 control | pending | pending | pending | pending |
 | G4 RTX PRO 6000 | off | headless control | pending | pending | pending | pending |
-| G4 RTX PRO 6000 | on | stream slot 0 | pending | pending | pending | pending |
+| G4 RTX PRO 6000 | on | stream slot 0 | 58.7 | 18.2 | 18.0 | 7.1 |
 | G4 RTX PRO 6000 | on | headless treatment | pending | pending | pending | pending |
+
+The G4 treatment is one complete live game with NVENC enabled. A matched
+streaming-off control is still required before drawing a performance
+conclusion.
 
 ## Web deployment
 
