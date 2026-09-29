@@ -276,6 +276,9 @@ deploy/netplay/deploy-web.sh
 
 ## Verification record
 
+The [x_pilot run protocol](x-pilot.md) records the requested `gm-v2` matchup
+schedule, missing characters, authentication requirements, and replay checks.
+
 Plan 3 focused checks:
 
 - `uv run pytest -q tests/test_netplay_runner.py`: 55 passed.
