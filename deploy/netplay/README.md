@@ -7,10 +7,10 @@ both delay profiles, and then starts its slots.
 
 ## Current deployment — 2026-09-30
 
-The eval, runner, and stream are paused after the Cloudflare daily read quota
-was exhausted. The [queue cost fix](queue-costs.md) is deployed; it preserves
-schema 2. The G4 guest accepted shutdown and SSH became unavailable. Google
-API status confirmation needs renewed login. The persistent disk is retained.
+The public runner and Phillip evaluation remain paused after the Cloudflare
+quota incident. The [queue cost fix](queue-costs.md) is deployed; it preserves
+schema 2. G4 now runs a separate [ranked player](ranked.md) with Cody Fox,
+advantage 120, and live Twitch video. This path does not use the public queue.
 
 - Site: [20xx.xyz](https://20xx.xyz). Cloudflare Worker `hal-netplay-web`
   serves the vinext page. Worker `hal-netplay-api` handles `/v1/*`.
@@ -22,7 +22,8 @@ API status confirmation needs renewed login. The persistent disk is retained.
   6000 Blackwell GPU and one runner slot. No managed instance group is deployed.
 - Runner: systemd starts Docker container `hal-netplay-runner`. Effective
   source last ran at `3d2bdc40`; `a425fc29` is staged for the next start. Its
-  Slippi account is `HAL#647`. Starting the VM also starts the runner.
+  Slippi account is `HAL#647`. The `ranked-active` marker and `95-ranked.conf`
+  systemd condition keep the public runner stopped during ranked play.
 - Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
   `:90` renders Dolphin; OBS captures its window at 1080p60 and uses NVENC.
   Menus remain visible. There is no waiting card.

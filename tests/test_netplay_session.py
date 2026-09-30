@@ -420,6 +420,7 @@ def test_connect_wait_uses_the_connect_timeout_for_a_stalled_realtime_read(tmp_p
     session._console = console = Mock()
     session._controller = Mock()
     state = SimpleNamespace(menu_state=melee.Menu.SLIPPI_ONLINE_CSS)
+    console._process = None
     console.step.side_effect = (None, state)
 
     assert session._read_state(during_connect=True) is state
@@ -617,6 +618,7 @@ def test_custom_menu_releases_input_without_observations_and_stops_at_countdown(
     session._console = console = Mock()
     session._controller = controller = Mock()
     session._menu_helper = legacy = Mock()
+    console._process = None
     console.step.side_effect = [menu, None, None, live]
     monkeypatch.setattr(netplay, "canonical_frame", lambda _state: _canonical_live(0))
     result = session._navigate_to_live(NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
@@ -640,3 +642,35 @@ def test_custom_menu_cancellation_sends_no_further_input(tmp_path: Path) -> None
         session._navigate_to_live(NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
     driver.assert_not_called()
     session._controller.flush.assert_not_called()
+
+
+def test_countdown_quit_can_navigate_again_without_relaunch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session(tmp_path, realtime=True, menu_driver=Mock(return_value=False))
+    session._console = console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+    live = _live()
+    live.frame = -2
+    menu = SimpleNamespace(menu_state=melee.Menu.UNKNOWN_MENU)
+    console.step.side_effect = [live, menu]
+    monkeypatch.setattr(netplay, "canonical_frame", lambda state: _canonical_live(state.frame))
+    setup = NetplaySetup(melee.Character.FOX, "", local_code="BOT#0")
+    with pytest.raises(netplay.CountdownEnded):
+        session._navigate_to_live(setup)
+    assert session._last_frame_id is None
+    live.frame = 0
+    console.step.side_effect = [menu, live]
+    assert session.start_rematch(setup)["id"] == 0
+    console.run.assert_not_called()
+
+
+def test_menu_detects_dolphin_exit_without_waiting_for_queue_timeout(tmp_path: Path) -> None:
+    session = _session(tmp_path, realtime=True, menu_driver=Mock())
+    session._console = console = Mock()
+    session._controller = controller = Mock()
+    session._menu_helper = Mock()
+    console.step.return_value = None
+    console._process.poll.return_value = 1
+    with pytest.raises(netplay.FrameTimeout, match="Dolphin exited"):
+        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
+    controller.flush.assert_not_called()

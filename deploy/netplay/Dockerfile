@@ -30,7 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl fonts-dejavu-core procps pulseaudio x11-xserver-utils xvfb \
       obs-studio=30.2.3+dfsg-3~bpo24.04.1 libobs0=30.2.3+dfsg-3~bpo24.04.1 \
-      openbox mesa-utils xauth x11-utils \
+      openbox mesa-utils xauth x11-utils tesseract-ocr \
       libfuse2t64 libvulkan1 vulkan-tools \
       libasound2t64 libegl1 libgl1 libopengl0 libusb-1.0-0 \
       libgtk-3-0t64 libglib2.0-0t64 libgdk-pixbuf-2.0-0 \
@@ -47,6 +47,7 @@ RUN mkdir -p /usr/share/glvnd/egl_vendor.d \
 COPY --from=builder /.uv/python_install /.uv/python_install
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/hal /opt/hal
+COPY scripts/play_ranked.py /opt/hal/scripts/play_ranked.py
 COPY docker/entrypoint.sh /usr/local/bin/hal-netplay-entrypoint
 RUN chmod +x /usr/local/bin/hal-netplay-entrypoint
 

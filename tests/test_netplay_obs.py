@@ -114,3 +114,67 @@ def test_obs_startup_has_no_waiting_card(tmp_path: Path) -> None:
         if method in ("CreateInput", "CreateSceneItem") and data["sceneName"] == "HAL"
     ]
     assert main_sources == ["Dolphin", "Overlay", "Game audio"]
+
+
+def test_screenshot_does_not_capture_an_unset_source(tmp_path: Path) -> None:
+    studio = obs.ObsStudio(":90", tmp_path, {})
+    studio.request = Mock()
+    assert studio.screenshot() is None
+    studio.request.assert_not_called()
+
+
+def test_gameplay_screenshot_can_exceed_one_megabyte(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from threading import Thread
+
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.client import connect
+    from websockets.sync.server import serve
+
+    png = b"\x89PNG\r\n\x1a\n" + bytes(1_100_000)
+
+    def handle(socket):
+        socket.send(json.dumps({"d": {"authentication": {"salt": "salt", "challenge": "challenge"}}}))
+        socket.recv()
+        socket.send(json.dumps({"op": 2}))
+        try:
+            for raw in socket:
+                request = json.loads(raw)["d"]
+                data = {"sceneItemId": 1}
+                if request["requestType"] == "GetVersion":
+                    data = {"obsVersion": obs.VERSION}
+                if request["requestType"] == "GetSourceScreenshot":
+                    data = {"imageData": "data:image/png;base64," + base64.b64encode(png).decode()}
+                socket.send(
+                    json.dumps(
+                        {
+                            "op": 7,
+                            "d": {
+                                "requestId": request["requestId"],
+                                "requestStatus": {"result": True},
+                                "responseData": data,
+                            },
+                        }
+                    )
+                )
+        except ConnectionClosed:
+            return
+
+    process = Mock()
+    process.poll.return_value = None
+    monkeypatch.setattr(obs.subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(obs.subprocess, "check_output", Mock(return_value=f"OBS Studio - {obs.PACKAGE_VERSION}"))
+    with serve(handle, "127.0.0.1", 0) as server:
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        port = server.socket.getsockname()[1]
+        monkeypatch.setattr(obs, "connect", lambda _url, **kwargs: connect(f"ws://127.0.0.1:{port}", **kwargs))
+        studio = obs.ObsStudio(":90", tmp_path, {})
+        try:
+            studio.start("test-key", bandwidth_test=True)
+            studio._visible = True
+            assert studio.screenshot() == png
+            assert studio.stats()["stream"] == {"sceneItemId": 1}
+        finally:
+            studio.close()
+            server.shutdown()
+            thread.join(timeout=5)

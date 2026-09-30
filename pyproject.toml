@@ -21,6 +21,7 @@ dependencies = [
     "mosaicml-streaming==0.13.0",
     "numpy",
     "peppi-py",
+    "pillow>=12.2.0",
     "prometheus-client",
     "py7zr==1.1.0",
     "pyarrow>=22",

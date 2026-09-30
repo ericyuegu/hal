@@ -53,6 +53,10 @@ def tested_dolphin_version(dolphin_path: str) -> melee.console.DolphinVersion:
     )
 
 
+class CountdownEnded(RuntimeError):
+    """The remote game returned to a menu before playable frame zero."""
+
+
 class ConnectAbandoned(Exception):
     """The caller gave up on the remote player before the match went live."""
 
@@ -289,6 +293,7 @@ class NetplaySession:
                 gamestate = self._console.step(flush_controllers=False)
                 self._raise_if_connect_abandoned()
                 if gamestate is None:
+                    self._raise_if_dolphin_exited()
                     if self.menu_driver(None, self._controller):
                         self._controller.flush()
                     time.sleep(0.0005)
@@ -356,14 +361,14 @@ class NetplaySession:
                 if next_state is not None:
                     gamestate = next_state
                     if gamestate.menu_state not in LIVE_MENU_STATES:
-                        raise RuntimeError("netplay left the game during the pre-game countdown")
+                        raise CountdownEnded("netplay left the game during the pre-game countdown")
                     continue
             inputs = NEUTRAL_CONTROLLER_ACTION if on_countdown_frame is None else on_countdown_frame(frame)
             self._raise_if_connect_abandoned()
             apply_inputs(self._controller, inputs)
             gamestate = self._read_state(during_connect=True)
             if gamestate.menu_state not in LIVE_MENU_STATES:
-                raise RuntimeError("netplay left the game during the pre-game countdown")
+                raise CountdownEnded("netplay left the game during the pre-game countdown")
 
     def _discover_ports(self, gamestate: melee.GameState, setup: NetplaySetup) -> None:
         # libmelee 0.47.0 can key pre-frame players with NumPy integer scalars.
@@ -444,6 +449,13 @@ class NetplaySession:
         if self.connect_abandoned():
             raise ConnectAbandoned("stopped waiting for the remote player")
 
+    def _raise_if_dolphin_exited(self) -> None:
+        if self._console is None:
+            return
+        process = self._console._process
+        if process is not None and process.poll() is not None:
+            raise FrameTimeout("Dolphin exited while waiting for a frame")
+
     def _read_state(self, *, during_connect: bool = False) -> melee.GameState:
         if self._console is None:
             raise RuntimeError("netplay console is not initialized")
@@ -466,6 +478,7 @@ class NetplaySession:
                 self._raise_if_connect_abandoned()
             if state is not None:
                 return state
+            self._raise_if_dolphin_exited()
             if time.monotonic() >= deadline:
                 raise FrameTimeout("netplay observation stream stalled")
             time.sleep(0.0005)

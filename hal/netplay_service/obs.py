@@ -207,7 +207,9 @@ class ObsStudio:
                 if self._process.poll() is not None:
                     raise RuntimeError("OBS exited during startup; see obs.log")
                 try:
-                    self._socket = connect("ws://127.0.0.1:4455", open_timeout=1, close_timeout=1, proxy=None)
+                    self._socket = connect(
+                        "ws://127.0.0.1:4455", open_timeout=1, close_timeout=1, proxy=None, max_size=8 * 1024 * 1024
+                    )
                     break
                 except OSError:
                     if time.monotonic() >= deadline:
@@ -338,6 +340,20 @@ class ObsStudio:
                 {"sceneName": "HAL", "sceneItemId": self._capture_id, "sceneItemEnabled": visible},
             )
             self._visible = visible
+
+    def screenshot(self) -> bytes | None:
+        """Capture only the selected Dolphin window, never an unset source."""
+        if not self._visible:
+            return None
+        result = self.request(
+            "GetSourceScreenshot",
+            {"sourceName": "Dolphin", "imageFormat": "png", "imageWidth": 960, "imageHeight": 720},
+        )
+        data = _string(result.get("imageData"))
+        prefix = "data:image/png;base64,"
+        if not data.startswith(prefix):
+            raise ValueError("OBS screenshot must be a PNG data URL")
+        return base64.b64decode(data[len(prefix) :], validate=True)
 
     def stats(self) -> dict[str, Json]:
         return {"obs": self.request("GetStats"), "stream": self.request("GetStreamStatus")}
