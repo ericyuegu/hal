@@ -521,3 +521,58 @@ Slippi recordings and verified results are retained locally under
 host-bound storage under `runs/netplay/credentials/`. The G4 continues to
 use its existing Secret Manager secret. See [the run record](x-pilot.md)
 for controls, credential handling, all commands, test results, and limits.
+
+## Waiting card — 2026-09-29
+
+Source `f5976b7c` replaces the empty background between games with a navy
+1080p card: `NEXT MATCH`, `Getting the next game ready`, and the site link.
+The existing overlay still shows queue depth. OBS builds the card in a
+separate scene and places it below Dolphin. The opaque 1920×1080 Dolphin
+window covers it during gameplay; hiding that window reveals the card.
+Connection menus and connect codes remain hidden.
+
+The card uses native OBS color and text sources. It adds no image assets,
+downloads, browser process, or R2 objects. The scene was first updated live.
+Screenshots confirmed the card and unchanged game capture. After game nine
+was saved, the runner was restarted to load the new startup configuration.
+The source bind mount is `/var/lib/hal-netplay/hotfix/obs-v1/obs.py`.
+
+Before the change, OBS reported 60.00 FPS, zero encoder skips, zero network
+drops, and three render skips over roughly 70,900 frames. After adding the
+card, OBS still reported 60.00 FPS; all three counters were unchanged over
+roughly 83,600 frames. Average render time changed from 0.246 ms during play
+to 0.138 ms while idle. These different states are not a controlled speed
+comparison. The earlier game sample was 59.93 FPS.
+
+### Commands and checks
+
+Commands ran in this worktree; npm commands ran in `web/netplay-api`.
+Repeated read-only probes are grouped below.
+
+| Command or operation | Result |
+| --- | --- |
+| `cat AGENTS.md`; `git status --short`; `git branch --show-current`; `sed`, `cat`, and `rg` over OBS, its supervisor, tests, and the streaming spec | Confirmed the branch, clean starting state, capture privacy boundary, and missing background. |
+| Official obs-websocket 5.5.2 protocol reads | Confirmed scene creation and ordering requests. Two raw OBS color-source fetches failed with cache misses; the live `GetInputKindList` confirmed `color_source_v3`. |
+| `uv run pytest -q tests/test_netplay_obs.py tests/test_netplay_stream.py` | 16 passed. Includes card placement, startup composition, capture transitions, and absence of connect codes. |
+| `uv run ruff format hal/netplay_service/obs.py tests/test_netplay_obs.py` | One file formatted; one unchanged. |
+| `uv run ruff format --check .` | 270 files passed. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed with zero diagnostics. |
+| `uv run pytest -q -m 'not integration'` | 1,493 passed, 8 skipped, 21 deselected, 24 warnings in 141.80 s. |
+| `npm test` | 105 passed in 10 files. workerd printed its WebSocketPipe disconnect diagnostic; no tests failed. |
+| `npm run typecheck` | Passed. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration` | 3 passed in 41.72 s. |
+| Dolphin round-trip and cleanup integration suite | Not rerun: this change only adds OBS scene sources. Session stepping, controller input, replay extraction, and Dolphin configuration are unchanged. The previous required run passed seven tests. |
+| `gcloud compute ssh hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --command ...` | Read source kinds, scene geometry, frame counters, and slot status. The first automatic approval review timed out; one allowed retry succeeded. No secrets were printed. |
+| `gcloud compute scp hal/netplay_service/obs.py hal-netplay-g4:/tmp/hal_obs_waiting.py --project centering-star-502613-k3 --zone us-west1-a` | Copied the source for live configuration and the persistent mount. SHA-256: `a24756ccf7a5dcd5084756c68845692b492c22b3f074c31ab3f7e9193b6e92f6`. |
+| Remote `docker cp`, authenticated OBS `CreateScene`, `CreateInput`, `CreateSceneItem`, `SetSceneItemIndex`, and `SetSceneItemEnabled` | Built the card off air, then enabled it below the active capture. The ongoing game continued. |
+| OBS `GetSourceScreenshot`, `GetSceneItemList`, `GetStats`, and `GetStreamStatus`; `gcloud compute scp ... /tmp/` | Saved and inspected the card and game screenshots. The actual idle-program check also confirmed Dolphin was disabled. |
+| `touch runs/netplay/x-pilot-master120/stop-after-game`; `tail` of the event log | The scheduler finished and verified game nine, then stopped before row ten. |
+| Remote source hash check, `systemctl daemon-reload`, runner stop/start | Installed the committed OBS module and effective source label `f5976b7c` at the completed-game boundary. |
+| `git diff --check`; `git diff`; focused `git add`; `git commit -m 'Show a waiting card between matches'` | Passed; committed `f5976b7c`. Format, lint, and type commit hooks passed. No attribution trailers. |
+
+The eight skips are the same two opt-in production GPU checks and six tests
+with an absent optional local v7 subset. Warnings concern Python 3.14
+TorchScript, uncompiled flex attention, and fork from a threaded process.
+No new cloud resource, Worker deployment, registry push, R2 asset upload,
+or Git push was performed.
