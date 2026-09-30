@@ -7,14 +7,18 @@ menu hang surfaces as a clean ``TimeoutError`` instead of spinning forever
 (``start_match`` callers already log-and-continue on that).
 """
 
+import multiprocessing
 import signal
 import time
+from multiprocessing.connection import Connection
+from multiprocessing.synchronize import Event
 from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import call
 
 import melee
 import pytest
+from melee.slippstream import SlippstreamClient
 
 import hal.sim.session as session_module
 from hal.controller import ControllerAction
@@ -326,3 +330,69 @@ def test_teardown_disconnects_controllers_and_breaks_console_references() -> Non
     controller.disconnect.assert_called_once_with()
     assert console.controllers == []
     console.stop.assert_called_once_with()
+
+
+def _fill_slippstream_pipe(sender: Connection, ready: Event, ignore_term: bool) -> None:
+    if ignore_term:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    ready.set()
+    sender.send_bytes(b"x" * 1_048_576)
+
+
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_teardown_reaps_slippstream_receiver_with_full_pipe(ignore_term: bool) -> None:
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    ready = context.Event()
+    worker = context.Process(target=_fill_slippstream_pipe, args=(sender, ready, ignore_term))
+    client = SlippstreamClient.__new__(SlippstreamClient)
+    client._buffer = receiver
+    client._shutdown = context.Event()
+    client._worker = worker
+    client.running = True
+    console = Mock(_process=None, controllers=[], _slippstream=client)
+    console.stop.side_effect = client.shutdown
+    try:
+        worker.start()
+        assert ready.wait(timeout=10)
+        worker.join(timeout=0.1)
+        assert worker.is_alive()
+
+        started = time.monotonic()
+        session_module.teardown_console(console, None)
+
+        assert time.monotonic() - started < 5
+        assert client._worker is None
+        assert receiver.closed
+        assert not client.running
+        console.stop.assert_called_once_with()
+        session_module.teardown_console(console, None)
+    finally:
+        if not worker._closed:
+            if worker.is_alive():
+                worker.kill()
+            worker.join(timeout=5)
+            worker.close()
+        sender.close()
+        receiver.close()
+
+
+def test_teardown_closes_slippstream_before_connect() -> None:
+    client = SlippstreamClient()
+    console = Mock(_process=None, controllers=[], _slippstream=client)
+    console.stop.side_effect = client.shutdown
+
+    session_module.teardown_console(console, None)
+
+    assert client._worker is None
+    assert client._buffer.closed
+    assert not client.running
+
+
+def test_slippstream_shutdown_rejects_untested_libmelee(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SlippstreamClient()
+    with monkeypatch.context() as patch:
+        patch.setattr(melee.version, "__version__", "0.48.0")
+        with pytest.raises(RuntimeError, match="untested libmelee"):
+            session_module._stop_slippstream(client)
+    session_module._stop_slippstream(client)

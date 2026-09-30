@@ -32,6 +32,7 @@ from typing import TypedDict
 
 import melee
 from loguru import logger
+from melee.slippstream import SlippstreamClient
 
 from hal.data.index import PlayerEntry
 from hal.data.index import ReplayIndexEntry
@@ -341,6 +342,31 @@ def kill_dolphin(console: melee.Console | None) -> None:
         logger.warning(f"Dolphin SIGKILL failed: {error}")
 
 
+def _stop_slippstream(client: SlippstreamClient) -> None:
+    # Pinned libmelee 0.47.0+hal.realtime.1 joins its receiver without a
+    # deadline. A full frame pipe blocks that receiver after Dolphin exits.
+    # Remove this workaround when upstream shutdown passes the full-pipe test.
+    if melee.version.__version__ != "0.47.0+hal.realtime.1":
+        raise RuntimeError("untested libmelee Slippstream shutdown version")
+    worker = client._worker
+    if worker is not None:
+        if worker.pid is not None:
+            client._shutdown.set()
+            worker.join(timeout=1.25)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=1.0)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=1.0)
+            if worker.is_alive():
+                raise RuntimeError("Slippstream receiver survived bounded shutdown")
+        worker.close()
+        client._worker = None
+    client._buffer.close()
+    client.running = False
+
+
 def teardown_console(console: melee.Console | None, replay_dir: str | None) -> None:
     """Stop Dolphin, release libmelee state, and finalize recorded replays."""
     if console is None:
@@ -362,6 +388,9 @@ def teardown_console(console: melee.Console | None, replay_dir: str | None) -> N
             with suppress(OSError):
                 controller.disconnect()
         controllers.clear()
+    slippstream = getattr(console, "_slippstream", None)
+    if isinstance(slippstream, SlippstreamClient):
+        _stop_slippstream(slippstream)
     try:
         console.stop()
     except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as error:
