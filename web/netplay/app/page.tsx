@@ -8,28 +8,11 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import type { ReactNode, SyntheticEvent } from 'react';
-import {
-  ArrowRight,
-  Check,
-  ChevronDown,
-  Copy,
-  Gamepad2,
-  LoaderCircle,
-  RotateCcw,
-  Settings2,
-  X,
-} from 'lucide-react';
+import type { ReactNode } from 'react';
+import { Check, Copy, Gamepad2, LoaderCircle, X } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { Sentence, ShortcutSheet, useHotkeys } from '@/components/sentence';
+import type { Panel } from '@/components/sentence';
 import {
   ApiError,
   cancelJob,
@@ -46,22 +29,31 @@ import {
   requestRematch,
   updatePolicy,
 } from '@/lib/netplay-api';
+import {
+  clampReturn,
+  defaultImitation,
+  toDifficulty,
+  toReturn,
+} from '@/lib/roster';
 
 type SavedJob = { id: string; token: string };
+// Temperature is not exposed; the API applies the policy default.
 type Prefs = {
   player_code: string;
   character: string;
   imitation: string;
   online_delay: number;
-  desired_return: number | null;
-  temperature: number;
+  desired_return: number;
 };
 
 const savedJobKey = 'hal-netplay-job-v1';
-const prefsKey = 'hal-netplay-prefs-v1';
+// v2 stores raw desired_return and drops temperature.
+const prefsKey = 'hal-netplay-prefs-v2';
 const terminal = new Set(['complete', 'failed', 'canceled', 'no_show']);
 // Mirrors hal/netplay_service/domain.py validate_player_code.
 const playerCodePattern = /^[A-Z0-9]{1,8}#[0-9]{1,4}$/;
+const defaultCharacter = 'FALCO';
+const streamChannel = 'hal_20xx';
 const unavailableCapacity: Capacity = {
   capacity: 2,
   healthy_slots: 0,
@@ -143,9 +135,8 @@ function isPrefs(value: unknown): value is Prefs {
     typeof prefs.character === 'string' &&
     typeof prefs.imitation === 'string' &&
     typeof prefs.online_delay === 'number' &&
-    (prefs.desired_return === null ||
-      typeof prefs.desired_return === 'number') &&
-    typeof prefs.temperature === 'number'
+    typeof prefs.desired_return === 'number' &&
+    Number.isFinite(prefs.desired_return)
   );
 }
 
@@ -183,8 +174,7 @@ export default function Home() {
         character: values.character,
         imitation: values.imitation,
         online_delay: values.online_delay,
-        desired_return: values.desired_return ?? null,
-        temperature: values.temperature ?? 1,
+        desired_return: values.desired_return ?? created.desired_return ?? 0,
       };
       writeStored(savedJobKey, credentials);
       writeStored(prefsKey, nextPrefs);
@@ -274,11 +264,10 @@ export default function Home() {
             },
             online_delay: { type: 'integer', enum: options.online_delays },
             desired_return: {
-              type: ['number', 'null'],
-              minimum: 0,
-              maximum: 40,
+              type: 'number',
+              minimum: options.desired_return_range[0],
+              maximum: options.desired_return_range[1],
             },
-            temperature: { type: 'number', minimum: 0.8, maximum: 1.1 },
           },
           required: ['player_code', 'character', 'imitation', 'online_delay'],
           additionalProperties: false,
@@ -315,7 +304,11 @@ export default function Home() {
 
   let body: ReactNode;
   if (!loaded || (saved && !job)) {
-    body = <LoadingCard />;
+    body = (
+      <p className="loading">
+        <LoaderCircle className="spin" size={18} /> One moment…
+      </p>
+    );
   } else if (job && saved) {
     body = (
       <Reservation
@@ -350,14 +343,9 @@ export default function Home() {
   }
 
   return (
-    <main className="shell">
+    <main className="wrap">
       <Header capacity={capacity} />
-      <div className="layout">
-        <section aria-labelledby="page-title" className="min-w-0">
-          {body}
-        </section>
-        <QueueAside capacity={capacity} options={options} />
-      </div>
+      {body}
     </main>
   );
 }
@@ -373,7 +361,7 @@ function useStatusAlerts(job: Job | null, options: Options) {
   const previous = useRef<string | null>(null);
   useEffect(() => {
     const status = job?.status ?? null;
-    document.title = job ? `${tabTitle(job)} · HAL` : 'HAL Netplay';
+    document.title = job ? `${tabTitle(job)} · HAL` : 'HAL';
     const from = previous.current;
     previous.current = status;
     if (!job || from === null || from === status) return;
@@ -401,57 +389,106 @@ function tabTitle(job: Job): string {
   return statusTitle(job);
 }
 
+function openSlots(capacity: Capacity): number {
+  return Math.max(capacity.healthy_slots - capacity.active, 0);
+}
+
 function Header({ capacity }: { capacity: Capacity | null }) {
-  const status = capacity?.service_status ?? 'loading';
+  const [howTo, setHowTo] = useState(false);
+  useEffect(() => {
+    if (!howTo) return;
+    function outside(event: MouseEvent) {
+      if (!(event.target as Element | null)?.closest('.howto-wrap'))
+        setHowTo(false);
+    }
+    document.addEventListener('click', outside);
+    return () => document.removeEventListener('click', outside);
+  }, [howTo]);
+
   return (
-    <header className="topbar">
-      <div className="flex items-center gap-3">
-        <div className="logo-mark" aria-hidden="true">
-          <span />
-        </div>
-        <div className="leading-tight">
-          <p className="wordmark">HAL</p>
-          <p className="text-xs text-muted-foreground">Slippi direct netplay</p>
-        </div>
+    <header className="top">
+      <div className="logo">
+        HAL<i>.</i>
       </div>
-      <div className="pill" data-status={status}>
-        <span className="dot" aria-hidden="true" />
-        {capacity ? serviceStatus(capacity.service_status) : 'Connecting…'}
+      <div className="right">
+        <span
+          className="status"
+          data-status={capacity?.service_status ?? 'loading'}
+          title={capacity?.service_message}
+        >
+          <b aria-hidden="true">●</b>{' '}
+          {capacity
+            ? `${openSlots(capacity)} open · ${capacity.queued} waiting`
+            : 'Connecting…'}
+        </span>
+        <div className="howto-wrap">
+          <button
+            type="button"
+            className="howto"
+            aria-expanded={howTo}
+            onClick={() => setHowTo(!howTo)}
+          >
+            How do I play?
+          </button>
+          {howTo && (
+            <div className="pop">
+              <b>HAL is a Melee AI trained on human replays.</b> You play it
+              over Slippi netplay.
+              <ol>
+                <li>Install Slippi and set up netplay.</li>
+                <li>Fill in the sentence and press Play.</li>
+                <li>When it’s your turn, direct-connect to the code shown.</li>
+              </ol>
+              <a
+                href="https://slippi.gg/netplay"
+                target="_blank"
+                rel="noopener"
+              >
+                slippi.gg/netplay →
+              </a>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );
 }
 
-function PageTitle({
-  eyebrow,
-  title,
-  children,
-}: {
-  eyebrow: string;
-  title: string;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="mb-6">
-      <p className="eyebrow">{eyebrow}</p>
-      <h1 id="page-title" className="page-title">
-        {title}
-      </h1>
-      {children}
-    </div>
-  );
-}
-
-function LoadingCard() {
-  return (
+const joinShortcuts: [ReactNode, string][] = [
+  [
     <>
-      <PageTitle eyebrow="Loading" title="One moment" />
-      <div className="card grid min-h-72 place-items-center">
-        <LoaderCircle className="size-6 animate-spin text-muted-foreground" />
-      </div>
-    </>
-  );
-}
+      <kbd>P</kbd>
+      <kbd>1</kbd>
+      <kbd>/</kbd>
+    </>,
+    'Pick player',
+  ],
+  [
+    <>
+      <kbd>C</kbd>
+      <kbd>2</kbd>
+    </>,
+    'Pick character',
+  ],
+  [
+    <>
+      <kbd>D</kbd>
+      <kbd>3</kbd>
+    </>,
+    'Set difficulty',
+  ],
+  [
+    <>
+      <kbd>[</kbd>
+      <kbd>]</kbd>
+    </>,
+    'Difficulty −5 / +5',
+  ],
+  [<kbd key="k">K</kbd>, 'Edit connect code'],
+  [<kbd key="enter">↵</kbd>, 'Play (⌘/Ctrl ↵ from a text field)'],
+  [<kbd key="esc">Esc</kbd>, 'Close'],
+  [<kbd key="help">?</kbd>, 'This sheet'],
+];
 
 function JoinForm({
   options,
@@ -473,333 +510,236 @@ function JoinForm({
   // The last reservation on this device prefills every field.
   const [playerCode, setPlayerCode] = useState(prefs?.player_code ?? '');
   const [touched, setTouched] = useState(false);
-  const [character, setCharacter] = useState(prefs?.character ?? 'FOX');
-  const [imitation, setImitation] = useState(prefs?.imitation ?? 'IBDW#0');
+  const [character, setCharacter] = useState(
+    prefs?.character ?? defaultCharacter,
+  );
+  const [imitation, setImitation] = useState(
+    prefs?.imitation ?? defaultImitation(options.imitations),
+  );
   const [delay, setDelay] = useState(prefs?.online_delay ?? 2);
-  const [returnTarget, setReturnTarget] = useState<number | null>(
-    prefs ? prefs.desired_return : fallbackOptions.default_desired_return,
+  const [desired, setDesired] = useState(
+    prefs?.desired_return ?? options.default_desired_return,
   );
-  const [temperature, setTemperature] = useState(
-    prefs?.temperature ?? fallbackOptions.default_temperature,
-  );
+  const [open, setOpen] = useState<Panel | null>(null);
+  const [sheet, setSheet] = useState(false);
+  const code = useRef<HTMLInputElement>(null);
 
   // Stored choices can outlive what the current policy offers.
-  const characterValue = has(options.characters, character) ? character : 'FOX';
+  const characterValue = has(options.characters, character)
+    ? character
+    : has(options.characters, defaultCharacter)
+      ? defaultCharacter
+      : options.characters[0].value;
   const imitationValue = has(options.imitations, imitation)
     ? imitation
-    : options.imitations[0].value;
+    : defaultImitation(options.imitations);
   const delayValue = options.online_delays.includes(delay)
     ? delay
     : options.online_delays[0];
+  const range = options.desired_return_range;
+  const desiredValue = clampReturn(desired, range);
+  const difficulty = toDifficulty(desiredValue, range);
 
   const codeValid = playerCodePattern.test(playerCode);
-  const showCodeError = touched && playerCode !== '' && !codeValid;
+  const showCodeError = touched && !codeValid;
   const unavailable = capacity !== null && capacity.healthy_slots === 0;
 
-  function submit(event: SyntheticEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function setDifficulty(value: number) {
+    setDesired(toReturn(Math.max(0, Math.min(100, value)), range));
+  }
+
+  function submit() {
     setTouched(true);
-    if (!codeValid) return;
+    if (!codeValid) {
+      setOpen(null);
+      code.current?.focus();
+      return;
+    }
+    if (busy || unavailable) return;
+    setOpen(null);
     void join({
       player_code: playerCode,
       character: characterValue,
       imitation: imitationValue,
       online_delay: delayValue,
-      desired_return: returnTarget,
-      temperature,
+      desired_return: desiredValue,
     }).catch(() => undefined);
   }
 
+  useHotkeys({
+    p: () => setOpen('player'),
+    '1': () => setOpen('player'),
+    '/': () => setOpen('player'),
+    c: () => setOpen('char'),
+    '2': () => setOpen('char'),
+    d: () => setOpen('diff'),
+    '3': () => setOpen('diff'),
+    '[': () => setDifficulty(difficulty - 5),
+    ']': () => setDifficulty(difficulty + 5),
+    k: () => {
+      setOpen(null);
+      code.current?.focus();
+      code.current?.select();
+    },
+    '?': () => setSheet(!sheet),
+    enter: submit,
+    'mod+enter': submit,
+    escape: () => (sheet ? setSheet(false) : setOpen(null)),
+  });
+
   return (
     <>
-      <PageTitle eyebrow="Play the model" title="Set up your match">
-        <p className="lede">
-          Pick how HAL plays and join the queue. When a slot opens,
-          direct-connect in Slippi and play up to {options.max_games} games.
-        </p>
-      </PageTitle>
-      <form onSubmit={submit} className="card" noValidate>
-        <div className="card-section grid gap-5 sm:grid-cols-[1fr_1fr]">
-          <Field
-            label="Your connect code"
-            htmlFor="player-code"
-            hint={
-              showCodeError
-                ? 'Use the format CODE#123, exactly as Slippi shows it.'
-                : 'Exactly as shown in Slippi. Remembered on this device.'
+      <Sentence
+        lead="I want to play"
+        options={options}
+        imitation={{ value: imitationValue, set: setImitation }}
+        character={{ value: characterValue, set: setCharacter }}
+        difficulty={{ value: difficulty, set: setDifficulty }}
+        open={open}
+        setOpen={setOpen}
+      />
+      <div className="bottom">
+        <div className="field">
+          <label className="lbl" htmlFor="code">
+            Your connect code
+          </label>
+          <input
+            ref={code}
+            id="code"
+            className="code"
+            placeholder="CODE#123"
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            maxLength={13}
+            value={playerCode}
+            aria-invalid={showCodeError || undefined}
+            aria-describedby={showCodeError ? 'code-hint' : undefined}
+            onBlur={() => setTouched(playerCode !== '')}
+            onChange={(event) =>
+              setPlayerCode(
+                event.target.value
+                  .toUpperCase()
+                  .replaceAll('＃', '#')
+                  .replace(/\s/g, ''),
+              )
             }
-            invalid={showCodeError}
-          >
-            <Input
-              id="player-code"
-              name="player_code"
-              className="control code-input"
-              placeholder="CODE#123"
-              autoComplete="off"
-              autoCapitalize="characters"
-              spellCheck={false}
-              maxLength={13}
-              value={playerCode}
-              aria-invalid={showCodeError || undefined}
-              onBlur={() => setTouched(true)}
-              onChange={(event) =>
-                setPlayerCode(
-                  event.target.value
-                    .toUpperCase()
-                    .replaceAll('＃', '#')
-                    .replace(/\s/g, ''),
-                )
-              }
-              required
-            />
-          </Field>
-          <DelayField options={options} value={delayValue} set={setDelay} />
-        </div>
-        <div className="card-section grid gap-5 sm:grid-cols-2">
-          <ChoiceSelect
-            label="HAL plays"
-            id="character"
-            value={characterValue}
-            choices={options.characters}
-            set={setCharacter}
           />
-          <ChoiceSelect
-            label="In the style of"
-            id="imitation"
-            value={imitationValue}
-            choices={options.imitations}
-            set={setImitation}
-            hint="Conditions the policy on a player; it does not affect matchmaking."
-          />
-        </div>
-        <details className="card-section advanced">
-          <summary>
-            <Settings2 className="size-4 text-muted-foreground" />
-            <span className="font-medium">Policy tuning</span>
-            <span className="ml-auto font-mono text-xs text-muted-foreground tabular-nums">
-              {returnTarget === null
-                ? 'Unconditioned'
-                : `Return ${returnTarget}`}{' '}
-              · T {temperature.toFixed(2)}
-            </span>
-            <ChevronDown className="chevron size-4 text-muted-foreground" />
-          </summary>
-          <div className="pt-5">
-            <PolicyFields
-              options={options}
-              returnTarget={returnTarget}
-              setReturnTarget={setReturnTarget}
-              temperature={temperature}
-              setTemperature={setTemperature}
-            />
-            <p className="mt-4 text-xs text-muted-foreground">
-              You can also change these while a game is running.
+          {showCodeError && (
+            <p className="hint bad" id="code-hint">
+              Use the format CODE#123, exactly as Slippi shows it.
             </p>
-          </div>
-        </details>
-        <div className="card-footer">
-          <p className="text-sm text-muted-foreground">
-            Game 1 is on a random legal stage.
-          </p>
-          <Button
-            type="submit"
-            size="lg"
-            className="cta"
-            disabled={busy || unavailable}
-          >
-            {busy ? (
-              <LoaderCircle className="animate-spin" />
-            ) : (
-              <>
-                Join queue <ArrowRight />
-              </>
-            )}
-          </Button>
+          )}
+          <details className="adv">
+            <summary>Advanced</summary>
+            <div className="advrow">
+              <span>
+                Frame delay{' '}
+                <span className="seg">
+                  {options.online_delays.map((frames) => (
+                    <button
+                      key={frames}
+                      type="button"
+                      aria-pressed={frames === delayValue}
+                      onClick={() => setDelay(frames)}
+                    >
+                      {frames}f
+                    </button>
+                  ))}
+                </span>
+              </span>
+            </div>
+          </details>
         </div>
-        {unavailable && (
-          <output className="notice mx-5 mb-5 sm:mx-7">
-            {capacity.service_message}
-          </output>
-        )}
-      </form>
+        <div className="go">
+          <button
+            type="button"
+            className="play"
+            title="Enter"
+            disabled={busy || unavailable}
+            onClick={submit}
+          >
+            {busy ? 'Joining…' : 'Play →'}
+          </button>
+          <div className="line">
+            {queueLine(capacity, options)}
+            <span className="kbtn-sep"> · </span>
+            <button
+              type="button"
+              className="kbtn"
+              onClick={() => setSheet(true)}
+            >
+              <kbd>?</kbd> shortcuts
+            </button>
+          </div>
+          <StreamNotice />
+        </div>
+      </div>
+      {unavailable && <p className="notice">{capacity.service_message}</p>}
       <ErrorMessage value={error} dismiss={dismissError} />
+      {sheet && (
+        <ShortcutSheet
+          shortcuts={joinShortcuts}
+          close={() => setSheet(false)}
+        />
+      )}
     </>
   );
 }
 
-function DelayField({
-  options,
-  value,
-  set,
-}: {
-  options: Options;
-  value: number;
-  set: (value: number) => void;
-}) {
+function queueLine(capacity: Capacity | null, options: Options): string {
+  const games = `up to ${options.max_games} games`;
+  if (capacity === null) return `Checking the queue · ${games}`;
+  if (capacity.healthy_slots === 0) return `Servers unavailable · ${games}`;
+  if (capacity.queued === 0 && openSlots(capacity) > 0)
+    return `You’re first in line · ${games}`;
+  return `${capacity.queued} waiting · ${games}`;
+}
+
+function StreamNotice() {
   return (
-    <fieldset>
-      <legend className="field-label">Frame delay</legend>
-      <div className="segmented">
-        {options.online_delays.map((frames) => (
-          <label key={frames}>
-            <input
-              type="radio"
-              name="online_delay"
-              className="sr-only"
-              checked={frames === value}
-              onChange={() => set(frames)}
-            />
-            {frames} frames
-          </label>
-        ))}
-      </div>
-      <p className="field-hint">
-        {value === Math.min(...options.online_delays)
-          ? 'Lowest latency. Recommended.'
-          : 'More tolerant of a weak connection.'}
-      </p>
-    </fieldset>
+    <p className="line">
+      Games may be streamed live on{' '}
+      <a
+        href={`https://www.twitch.tv/${streamChannel}`}
+        target="_blank"
+        rel="noopener"
+      >
+        twitch.tv/{streamChannel}
+      </a>
+      .
+    </p>
   );
 }
 
-function PolicyFields({
-  options,
-  returnTarget,
-  setReturnTarget,
-  temperature,
-  setTemperature,
-}: {
-  options: Options;
-  returnTarget: number | null;
-  setReturnTarget: (value: number | null) => void;
-  temperature: number;
-  setTemperature: (value: number) => void;
-}) {
-  const [returnMin, returnMax] = options.desired_return_range;
-  const [tempMin, tempMax] = options.temperature_range;
-  return (
-    <div className="grid gap-6 sm:grid-cols-2">
-      <div>
-        <div className="flex items-baseline justify-between">
-          <label htmlFor="return-target" className="field-label">
-            Return target
-          </label>
-          <span className="readout">
-            {returnTarget === null ? 'Off' : returnTarget}
-          </span>
-        </div>
-        <input
-          id="return-target"
-          type="range"
-          className="range"
-          min={returnMin}
-          max={returnMax}
-          step={1}
-          disabled={returnTarget === null}
-          value={returnTarget ?? options.default_desired_return}
-          onChange={(event) => setReturnTarget(Number(event.target.value))}
-        />
-        <div className="mt-2 flex items-center justify-between gap-3">
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={returnTarget === null}
-              onChange={(event) =>
-                setReturnTarget(
-                  event.target.checked ? null : options.default_desired_return,
-                )
-              }
-            />
-            Unconditioned
-          </label>
-          <ResetLink
-            visible={returnTarget !== options.default_desired_return}
-            reset={() => setReturnTarget(options.default_desired_return)}
-          />
-        </div>
-        <p className="field-hint">
-          Higher asks for stronger play. {options.default_desired_return} is
-          about the top 10% of training games.
-        </p>
-      </div>
-      <div>
-        <div className="flex items-baseline justify-between">
-          <label htmlFor="temperature" className="field-label">
-            Temperature
-          </label>
-          <span className="readout">{temperature.toFixed(2)}</span>
-        </div>
-        <input
-          id="temperature"
-          type="range"
-          className="range"
-          min={tempMin}
-          max={tempMax}
-          step={0.01}
-          value={temperature}
-          onChange={(event) => setTemperature(Number(event.target.value))}
-        />
-        <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-          <span>Focused</span>
-          <ResetLink
-            visible={temperature !== options.default_temperature}
-            reset={() => setTemperature(options.default_temperature)}
-          />
-          <span>Varied</span>
-        </div>
-        <p className="field-hint">
-          Higher values add variety to HAL&apos;s play.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function ResetLink({
-  visible,
-  reset,
-}: {
-  visible: boolean;
-  reset: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="reset-link"
-      onClick={reset}
-      data-visible={visible}
-      tabIndex={visible ? 0 : -1}
-      aria-hidden={!visible}
-    >
-      Reset
-    </button>
-  );
-}
-
-function PolicyForm({
-  job,
-  saved,
-  options,
-  busy,
-  update,
-  setBusy,
-  setError,
-}: {
-  job: Job;
-  saved: SavedJob;
-  options: Options;
-  busy: boolean;
-  update: (job: Job) => void;
-  setBusy: (value: boolean) => void;
-  setError: (value: string) => void;
-}) {
-  const [returnTarget, setReturnTarget] = useState<number | null>(
-    job.desired_return,
-  );
-  const [temperature, setTemperature] = useState(job.temperature);
+/** Difficulty edits apply mid-game without an Apply button. */
+function useLiveDifficulty(
+  job: Job,
+  saved: SavedJob,
+  options: Options,
+  update: (job: Job) => void,
+  setError: (value: string) => void,
+) {
+  const range = options.desired_return_range;
+  // Only a user edit is sent; the job's own value is never echoed back.
+  const [edit, setEdit] = useState<number | null>(null);
   const [applied, setApplied] = useState(false);
-  const dirty =
-    returnTarget !== job.desired_return || temperature !== job.temperature;
+  const desired = edit ?? job.desired_return ?? options.default_desired_return;
+
+  useEffect(() => {
+    if (edit === null || edit === job.desired_return) return;
+    const timer = window.setTimeout(() => {
+      updatePolicy(saved.id, saved.token, { desired_return: edit })
+        .then((next) => {
+          update(next);
+          setApplied(true);
+        })
+        .catch((cause: unknown) =>
+          setError(errorText(cause, 'Could not update the difficulty.')),
+        );
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [edit, job.desired_return, saved, update, setError]);
 
   useEffect(() => {
     if (!applied) return;
@@ -807,65 +747,13 @@ function PolicyForm({
     return () => window.clearTimeout(timer);
   }, [applied]);
 
-  async function submit(event: SyntheticEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setError('');
-    try {
-      update(
-        await updatePolicy(saved.id, saved.token, {
-          desired_return: returnTarget,
-          temperature,
-        }),
-      );
-      setApplied(true);
-    } catch (cause) {
-      setError(errorText(cause, 'Could not update policy settings.'));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <details className="card-section advanced">
-      <summary>
-        <Settings2 className="size-4 text-muted-foreground" />
-        <span className="font-medium">Policy tuning</span>
-        <span className="ml-auto font-mono text-xs text-muted-foreground tabular-nums">
-          {job.desired_return === null
-            ? 'Unconditioned'
-            : `Return ${job.desired_return}`}{' '}
-          · T {job.temperature.toFixed(2)}
-        </span>
-        <ChevronDown className="chevron size-4 text-muted-foreground" />
-      </summary>
-      <form onSubmit={(event) => void submit(event)} className="pt-5">
-        <PolicyFields
-          options={options}
-          returnTarget={returnTarget}
-          setReturnTarget={setReturnTarget}
-          temperature={temperature}
-          setTemperature={setTemperature}
-        />
-        <div className="mt-5 flex items-center gap-3">
-          <Button type="submit" variant="secondary" disabled={busy || !dirty}>
-            Apply
-          </Button>
-          <span className="text-xs text-muted-foreground" aria-live="polite">
-            {applied ? (
-              <span className="inline-flex items-center gap-1 text-[var(--good)]">
-                <Check className="size-3.5" /> Applied at the next replan
-              </span>
-            ) : dirty ? (
-              'Unsaved changes'
-            ) : (
-              'Takes effect mid-game'
-            )}
-          </span>
-        </div>
-      </form>
-    </details>
-  );
+  const difficulty = toDifficulty(clampReturn(desired, range), range);
+  return {
+    difficulty,
+    setDifficulty: (value: number) =>
+      setEdit(toReturn(Math.max(0, Math.min(100, value)), range)),
+    applied,
+  };
 }
 
 function Reservation({
@@ -894,74 +782,103 @@ function Reservation({
   setError: (value: string) => void;
 }) {
   const ended = terminal.has(job.status);
+  const [open, setOpen] = useState<Panel | null>(null);
+  const live = useLiveDifficulty(job, saved, options, update, setError);
+  const rematch = job.status === 'rematch_wait';
+
+  useHotkeys({
+    d: ended ? undefined : () => setOpen('diff'),
+    '3': ended ? undefined : () => setOpen('diff'),
+    '[': ended ? undefined : () => live.setDifficulty(live.difficulty - 5),
+    ']': ended ? undefined : () => live.setDifficulty(live.difficulty + 5),
+    p: rematch ? () => setOpen('player') : undefined,
+    '1': rematch ? () => setOpen('player') : undefined,
+    c: rematch ? () => setOpen('char') : undefined,
+    '2': rematch ? () => setOpen('char') : undefined,
+    escape: () => setOpen(null),
+  });
+
   return (
     <>
-      <PageTitle eyebrow="Your reservation" title={statusTitle(job)}>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <span className="tag font-mono">{job.player_code}</span>
-          <span className="tag">
-            vs {label(options.characters, job.character)}
+      <p className="eyebrow">{statusTitle(job)}</p>
+      <Sentence
+        small
+        lead={ended ? 'You played' : 'You’re playing'}
+        options={options}
+        imitation={{ value: job.imitation }}
+        character={{ value: job.character }}
+        difficulty={{
+          value: live.difficulty,
+          set: ended ? undefined : live.setDifficulty,
+        }}
+        open={open}
+        setOpen={setOpen}
+      />
+      <div className="tags">
+        <span className="tag mono">{job.player_code}</span>
+        <span className="tag">{job.online_delay}f delay</span>
+        {!ended && (
+          <span className="tag quiet" aria-live="polite">
+            {live.applied ? (
+              <>
+                <Check size={12} /> Applied at the next replan
+              </>
+            ) : (
+              'Difficulty applies mid-game'
+            )}
           </span>
-          <span className="tag">
-            {label(options.imitations, job.imitation)}
-          </span>
-          <span className="tag">{job.online_delay}f delay</span>
-        </div>
-      </PageTitle>
-      <div className="card overflow-hidden">
+        )}
+      </div>
+      <div className="card">
         <Progress job={job} options={options} />
         <div className="status-panel" data-status={job.status}>
           <StatusBody job={job} options={options} />
         </div>
-        {job.status === 'rematch_wait' && (
+        {rematch && (
           <RematchForm
             key={job.game_count}
             job={job}
             saved={saved}
             options={options}
             busy={busy}
+            open={open}
+            setOpen={setOpen}
             cancel={cancel}
             update={update}
             setBusy={setBusy}
             setError={setError}
           />
         )}
-        {!ended && (
-          <PolicyForm
-            key={job.id}
-            job={job}
-            saved={saved}
-            options={options}
-            busy={busy}
-            update={update}
-            setBusy={setBusy}
-            setError={setError}
-          />
-        )}
         <div className="card-footer">
-          <p className="text-sm text-muted-foreground tabular-nums">
+          <p className="muted">
             {ended
               ? `${job.game_count} of ${options.max_games} games played`
               : `Game ${Math.min(job.game_count + 1, options.max_games)} of up to ${options.max_games}`}
           </p>
           {ended ? (
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={forget} variant="ghost">
+            <div className="actions">
+              <button type="button" className="ghost" onClick={forget}>
                 Change settings
-              </Button>
-              <Button onClick={requeue} className="cta" disabled={busy}>
-                <RotateCcw /> Queue again
-              </Button>
+              </button>
+              <button
+                type="button"
+                className="play small"
+                onClick={requeue}
+                disabled={busy}
+              >
+                Queue again →
+              </button>
             </div>
           ) : (
-            job.status !== 'rematch_wait' && (
-              <Button
+            !rematch && (
+              <button
+                type="button"
+                className="ghost"
                 onClick={() => void cancel()}
-                variant="ghost"
                 disabled={busy || job.cancel_after_game}
               >
-                <X /> {cancelLabel(job)}
-              </Button>
+                {cancelLabel(job)}
+              </button>
             )
           )}
         </div>
@@ -997,14 +914,9 @@ function Progress({ job, options }: { job: Job; options: Options }) {
           }
           aria-current={index === current ? 'step' : undefined}
         >
-          <span className="progress-dot" aria-hidden="true">
-            {index < current ? <Check className="size-3" /> : index + 1}
-          </span>
-          <span className="progress-label">
-            {step.label === 'Play' && job.game_count > 0
-              ? `Game ${Math.min(job.game_count + (job.status === 'rematch_wait' ? 0 : 1), options.max_games)}`
-              : step.label}
-          </span>
+          {step.label === 'Play' && job.game_count > 0
+            ? `Game ${Math.min(job.game_count + (job.status === 'rematch_wait' ? 0 : 1), options.max_games)}`
+            : step.label}
         </li>
       ))}
     </ol>
@@ -1016,24 +928,24 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
     return (
       <BigStatus
         value={job.queue_position === null ? '—' : `#${job.queue_position}`}
-        label={job.queue_position === 1 ? "You're next" : 'Place in queue'}
-        detail="Keep this tab open. We'll notify you when your slot is ready."
+        label={job.queue_position === 1 ? 'You’re next' : 'Place in queue'}
+        detail="Keep this tab open. We’ll notify you when your slot is ready."
       />
     );
   }
   if (job.status === 'leased') {
     return (
       <BigStatus
-        icon={<LoaderCircle className="size-10 animate-spin" />}
-        label="Booting HAL's Dolphin"
-        detail="Your slot is reserved. Open Slippi so you're ready to connect."
+        icon={<LoaderCircle className="spin" size={40} />}
+        label="Booting HAL’s Dolphin"
+        detail="Your slot is reserved. Open Slippi so you’re ready to connect."
       />
     );
   }
   if (job.status === 'connecting') {
     return (
-      <div className="w-full">
-        <p className="field-label">Direct-connect to</p>
+      <div>
+        <p className="lbl">Direct-connect to</p>
         <CopyCode code={job.connect_code} />
         <ol className="connect-steps">
           <li>
@@ -1053,7 +965,7 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
   if (job.status === 'playing') {
     return (
       <BigStatus
-        icon={<Gamepad2 className="size-10" />}
+        icon={<Gamepad2 size={40} />}
         label={`Game ${job.game_count + 1} in progress`}
         detail={
           job.cancel_after_game
@@ -1065,7 +977,7 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
   }
   if (job.status === 'rematch_wait') {
     return (
-      <div className="w-full">
+      <div>
         <BigStatus
           value={resultText(job.last_result)}
           label={
@@ -1075,20 +987,18 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
           }
           detail="Stay on the Slippi results screen while you choose."
         />
-        <div className="mt-6">
-          <Countdown
-            deadline={job.rematch_deadline}
-            total={options.rematch_seconds}
-            suffix="to start the next game"
-          />
-        </div>
+        <Countdown
+          deadline={job.rematch_deadline}
+          total={options.rematch_seconds}
+          suffix="to start the next game"
+        />
       </div>
     );
   }
   if (job.status === 'rematch_ready') {
     return (
       <BigStatus
-        icon={<LoaderCircle className="size-10 animate-spin" />}
+        icon={<LoaderCircle className="spin" size={40} />}
         label="Setting up the rematch"
         detail="Keep the Slippi connection open."
       />
@@ -1096,13 +1006,7 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
   }
   return (
     <BigStatus
-      icon={
-        job.status === 'complete' ? (
-          <Check className="size-10" />
-        ) : (
-          <X className="size-10" />
-        )
-      }
+      icon={job.status === 'complete' ? <Check size={40} /> : <X size={40} />}
       label={statusTitle(job)}
       detail={terminalDetail(job)}
     />
@@ -1150,11 +1054,11 @@ function CopyCode({ code }: { code: string | null }) {
       <span className="copy-code-action" aria-live="polite">
         {copied ? (
           <>
-            <Check className="size-4" /> Copied
+            <Check size={16} /> Copied
           </>
         ) : (
           <>
-            <Copy className="size-4" /> Copy
+            <Copy size={16} /> Copy
           </>
         )}
       </span>
@@ -1167,6 +1071,8 @@ function RematchForm({
   saved,
   options,
   busy,
+  open,
+  setOpen,
   cancel,
   update,
   setBusy,
@@ -1176,6 +1082,8 @@ function RematchForm({
   saved: SavedJob;
   options: Options;
   busy: boolean;
+  open: Panel | null;
+  setOpen: (panel: Panel | null) => void;
   cancel: () => Promise<void>;
   update: (job: Job) => void;
   setBusy: (value: boolean) => void;
@@ -1187,8 +1095,7 @@ function RematchForm({
     job.requested_stage ?? job.actual_stage ?? 'BATTLEFIELD',
   );
 
-  async function submit(event: SyntheticEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function submit() {
     setBusy(true);
     setError('');
     try {
@@ -1207,146 +1114,40 @@ function RematchForm({
   }
 
   return (
-    <form
-      onSubmit={(event) => void submit(event)}
-      className="card-section rematch"
-    >
-      <div className="grid gap-4 sm:grid-cols-3">
-        <ChoiceSelect
-          label="HAL plays"
-          id="rematch-character"
-          value={character}
-          choices={options.characters}
-          set={setCharacter}
-        />
-        <ChoiceSelect
-          label="In the style of"
-          id="rematch-imitation"
-          value={imitation}
-          choices={options.imitations}
-          set={setImitation}
-        />
-        <ChoiceSelect
-          label="HAL's stage pick"
-          id="rematch-stage"
-          value={stage}
-          choices={options.stages}
-          set={setStage}
-        />
-      </div>
-      <p className="field-hint">
+    <div className="rematch">
+      <Sentence
+        small
+        lead="Next, I want to play"
+        options={options}
+        imitation={{ value: imitation, set: setImitation }}
+        character={{ value: character, set: setCharacter }}
+        stage={{ value: stage, set: setStage }}
+        open={open}
+        setOpen={setOpen}
+      />
+      <p className="hint">
         HAL picks the stage only if it lost the last game. If you lost, pick it
         in Slippi.
       </p>
-      <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
-        <Button
+      <div className="actions">
+        <button
           type="button"
-          variant="ghost"
+          className="ghost"
           disabled={busy}
           onClick={() => void cancel()}
         >
           End set
-        </Button>
-        <Button type="submit" disabled={busy} className="cta">
-          {busy ? (
-            <LoaderCircle className="animate-spin" />
-          ) : (
-            <>
-              Play game {job.game_count + 1} <ArrowRight />
-            </>
-          )}
-        </Button>
+        </button>
+        <button
+          type="button"
+          className="play small"
+          disabled={busy}
+          onClick={() => void submit()}
+        >
+          {busy ? 'Starting…' : `Play game ${job.game_count + 1} →`}
+        </button>
       </div>
-    </form>
-  );
-}
-
-function QueueAside({
-  capacity,
-  options,
-}: {
-  capacity: Capacity | null;
-  options: Options;
-}) {
-  const open = capacity
-    ? Math.max(capacity.healthy_slots - capacity.active, 0)
-    : null;
-  return (
-    <aside className="aside" aria-label="Service information">
-      <section className="card">
-        <div className="stats">
-          <Stat value={open === null ? '–' : String(open)} label="Open slots" />
-          <Stat
-            value={capacity ? String(capacity.queued) : '–'}
-            label="Waiting"
-          />
-          <Stat
-            value={
-              capacity?.game_fps == null ? '–' : capacity.game_fps.toFixed(0)
-            }
-            label="Game FPS"
-          />
-        </div>
-        <p className="border-t border-[var(--hairline)] px-5 py-4 text-xs leading-5 text-muted-foreground">
-          {capacity?.service_message ?? 'Checking service status…'}
-        </p>
-      </section>
-      <section className="card p-5">
-        <h2 className="text-sm font-semibold">How it works</h2>
-        <ol className="steps mt-4 space-y-4 text-sm">
-          <li>Join the queue and keep this tab open.</li>
-          <li>
-            When your slot is ready, direct-connect in Slippi. You have{' '}
-            {minutes(options.no_show_seconds)}.
-          </li>
-          <li>
-            Play up to {options.max_games} games. Between games you have{' '}
-            {minutes(options.rematch_seconds)} to call a rematch.
-          </li>
-        </ol>
-      </section>
-    </aside>
-  );
-}
-
-function serviceStatus(status: Capacity['service_status']): string {
-  return status[0].toUpperCase() + status.slice(1);
-}
-
-function ChoiceSelect({
-  label: title,
-  id,
-  value,
-  choices,
-  set,
-  hint,
-}: {
-  label: string;
-  id: string;
-  value: string;
-  choices: Choice[];
-  set: (value: string) => void;
-  hint?: string;
-}) {
-  return (
-    <Field label={title} htmlFor={id} hint={hint}>
-      <Select
-        items={choices}
-        value={value}
-        onValueChange={(next) => set(next ?? value)}
-      >
-        <SelectTrigger id={id} className="control w-full">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {choices.map((choice) => (
-            <SelectItem key={choice.value} value={choice.value}>
-              {choice.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </Field>
+    </div>
   );
 }
 
@@ -1364,8 +1165,8 @@ function BigStatus({
   return (
     <div>
       <div className="status-value">{value ?? icon}</div>
-      <h2 className="mt-3 text-lg font-semibold tracking-tight">{title}</h2>
-      <p className="mt-1.5 max-w-md text-sm text-muted-foreground">{detail}</p>
+      <h2 className="status-label">{title}</h2>
+      <p className="muted">{detail}</p>
     </div>
   );
 }
@@ -1391,52 +1192,15 @@ function Countdown({
   const fraction = seconds === null ? 1 : Math.min(seconds / total, 1);
   return (
     <div className="countdown" data-urgent={seconds !== null && seconds <= 60}>
-      <div className="flex items-baseline justify-between text-sm">
-        <span className="font-mono text-base font-semibold tabular-nums">
+      <div className="countdown-head">
+        <span className="countdown-clock">
           {seconds === null ? '–:––' : clock(seconds)}
         </span>
-        <span className="text-muted-foreground">{suffix}</span>
+        <span className="muted">{suffix}</span>
       </div>
       <div className="meter" aria-hidden="true">
         <span style={{ transform: `scaleX(${fraction})` }} />
       </div>
-    </div>
-  );
-}
-
-function Field({
-  label: title,
-  htmlFor,
-  hint,
-  invalid,
-  children,
-}: {
-  label: string;
-  htmlFor: string;
-  hint?: string;
-  invalid?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div>
-      <label htmlFor={htmlFor} className="field-label">
-        {title}
-      </label>
-      {children}
-      {hint && (
-        <p className="field-hint" data-invalid={invalid || undefined}>
-          {hint}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function Stat({ value, label: title }: { value: string; label: string }) {
-  return (
-    <div className="stat">
-      <p className="stat-value">{value}</p>
-      <p className="stat-label">{title}</p>
     </div>
   );
 }
@@ -1452,7 +1216,7 @@ function ErrorMessage({
     <div role="alert" className="error">
       <span>{value}</span>
       <button type="button" onClick={dismiss} aria-label="Dismiss error">
-        <X className="size-4" />
+        <X size={16} />
       </button>
     </div>
   ) : null;
@@ -1510,28 +1274,27 @@ function validateToolInput(input: unknown, options: Options): CreateJob {
   for (const name of strings)
     if (typeof values[name] !== 'string' || !values[name])
       throw new Error(`${name} must be a non-empty string.`);
-  if (!options.characters.some((choice) => choice.value === values.character))
+  if (!has(options.characters, values.character as string))
     throw new Error('character is not available.');
-  if (!options.imitations.some((choice) => choice.value === values.imitation))
+  if (!has(options.imitations, values.imitation as string))
     throw new Error('imitation is not available.');
   if (!options.online_delays.includes(values.online_delay as number))
     throw new Error('online_delay is not available.');
+  const desired = values.desired_return;
   if (
-    values.desired_return !== undefined &&
-    values.desired_return !== null &&
-    (typeof values.desired_return !== 'number' ||
-      !Number.isFinite(values.desired_return) ||
-      values.desired_return < options.desired_return_range[0] ||
-      values.desired_return > options.desired_return_range[1])
+    desired !== undefined &&
+    (typeof desired !== 'number' ||
+      !Number.isFinite(desired) ||
+      desired < options.desired_return_range[0] ||
+      desired > options.desired_return_range[1])
   )
     throw new Error('desired_return is out of range.');
-  if (
-    values.temperature !== undefined &&
-    (typeof values.temperature !== 'number' ||
-      !Number.isFinite(values.temperature) ||
-      values.temperature < options.temperature_range[0] ||
-      values.temperature > options.temperature_range[1])
-  )
-    throw new Error('temperature is out of range.');
-  return values as CreateJob;
+  return {
+    player_code: values.player_code as string,
+    character: values.character as string,
+    imitation: values.imitation as string,
+    online_delay: values.online_delay as number,
+    desired_return:
+      desired === undefined ? options.default_desired_return : desired,
+  };
 }

@@ -1,20 +1,9 @@
 import type { Metadata } from 'next';
-import { Geist, Geist_Mono } from 'next/font/google';
 
 import './globals.css';
 
-const geistSans = Geist({
-  variable: '--font-geist-sans',
-  subsets: ['latin'],
-});
-
-const geistMono = Geist_Mono({
-  variable: '--font-geist-mono',
-  subsets: ['latin'],
-});
-
 export const metadata: Metadata = {
-  title: 'HAL Netplay',
+  title: 'HAL',
   description: 'Queue for a direct Slippi set against a HAL policy.',
 };
 
@@ -22,11 +11,17 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html
-      lang="en"
-      className={`dark ${geistSans.variable} ${geistMono.variable}`}
-    >
-      <body className="antialiased">{children}</body>
+    <html lang="en">
+      <head>
+        <link
+          rel="preload"
+          href="/fonts/schibsted-grotesk-latin-wght.woff2"
+          as="font"
+          type="font/woff2"
+          crossOrigin=""
+        />
+      </head>
+      <body>{children}</body>
     </html>
   );
 }
