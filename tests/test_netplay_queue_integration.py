@@ -44,7 +44,7 @@ POLICY = PolicyConfig(
     imitations=IMITATIONS,
     stages=STAGES,
     online_delays=(2, 3),
-    desired_return_range=(0.0, 40.0),
+    desired_return_range=(-20.0, 140.0),
     default_desired_return=20.0,
     temperature_range=(0.8, 1.1),
     default_temperature=1.0,
@@ -121,7 +121,13 @@ def _start(sessions: RunnerClient) -> StartedSession:
 def _create(url: str, player_code: str) -> tuple[str, str]:
     created = httpx.post(
         f"{url}/v1/jobs",
-        json={"player_code": player_code, "character": "FOX", "imitation": "IBDW#0", "online_delay": 2},
+        json={
+            "player_code": player_code,
+            "character": "FOX",
+            "imitation": "MASTER",
+            "online_delay": 2,
+            "desired_return": 120,
+        },
         timeout=10,
     )
     assert created.status_code == 201, created.text
@@ -163,6 +169,8 @@ def test_lost_responses_never_duplicate_sessions_jobs_or_games(worker_url: str, 
     claimed = RemoteQueue(endpoint, started.session_id, client=claim_client, sleep=sleeps.append).claim_next(worker)
     assert claim_loss.lost == 1
     assert claimed is not None and (claimed.id, claimed.attempt) == (first_id, 1)
+    assert claimed.choices.imitation == "MASTER"
+    assert claimed.choices.desired_return == 120.0
     assert _player_job(worker_url, second_id, second_token)["status"] == "queued"
 
     queue = RemoteQueue(endpoint, started.session_id)
@@ -200,16 +208,29 @@ def test_live_socket_pushes_settings_and_release(worker_url: str, admin: AdminCl
         assert json.loads(socket.recv(timeout=5)) == {
             "type": "settings",
             "revision": 0,
-            "desired_return": 20,
+            "desired_return": 120,
             "temperature": 1,
         }
         httpx.patch(
             f"{worker_url}/v1/jobs/{job_id}/policy",
             headers={"Authorization": f"Bearer {token}"},
-            json={"desired_return": 35},
+            json={"desired_return": 140},
             timeout=10,
         ).raise_for_status()
-        assert json.loads(socket.recv(timeout=5))["revision"] == 1
+        assert json.loads(socket.recv(timeout=5)) == {
+            "type": "settings",
+            "revision": 1,
+            "desired_return": 140,
+            "temperature": 1,
+        }
+        assert queue.get_worker_job(job_id, worker).choices.desired_return == 140.0
+        rejected = httpx.patch(
+            f"{worker_url}/v1/jobs/{job_id}/policy",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"desired_return": 141},
+            timeout=10,
+        )
+        assert rejected.status_code == 422
         httpx.delete(f"{worker_url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
         assert json.loads(socket.recv(timeout=5)) == {"type": "released"}
     sessions.end_session(started.session_id)

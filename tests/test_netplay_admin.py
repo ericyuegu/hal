@@ -43,6 +43,7 @@ def test_policy_config_requires_both_netplay_delays() -> None:
     config = policy_config("a" * 64, "b" * 64, 2, (0, 2, 3))
     assert config.bundle_r2_key == f"netplay/policies/{'a' * 64}.halpolicy"
     assert config.online_delays == (2, 3)
+    assert config.desired_return_range == (-20.0, 140.0)
     assert not config.masked_identity
     assert config.imitations[0].value == "MASKED"
     with pytest.raises(ValueError, match="capability-v2"):

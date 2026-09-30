@@ -18,6 +18,7 @@ from hal.netplay_service.assets import ensure_uploaded
 from hal.netplay_service.assets import policy_bundle_key
 from hal.netplay_service.assets import sha256_file
 from hal.netplay_service.domain import CHARACTERS
+from hal.netplay_service.domain import DESIRED_RETURN_RANGE
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Choice
@@ -64,7 +65,7 @@ def policy_config(
         imitations=IMITATIONS,
         stages=STAGES,
         online_delays=delays,
-        desired_return_range=(0.0, 40.0),
+        desired_return_range=DESIRED_RETURN_RANGE,
         default_desired_return=20.0,
         temperature_range=(0.8, 1.1),
         default_temperature=1.0,

@@ -71,6 +71,7 @@ STAGES: Final[tuple[Choice, ...]] = (
 CHARACTER_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in CHARACTERS)
 IMITATION_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in IMITATIONS)
 STAGE_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in STAGES)
+DESIRED_RETURN_RANGE: Final[tuple[float, float]] = (-20.0, 140.0)
 # One window bounds both connecting and choosing a rematch; a player may idle this long before the slot is released.
 IDLE_TIMEOUT_SECONDS: Final[int] = 600
 _PLAYER_CODE = re.compile(r"[A-Z0-9]{1,8}#[0-9]{1,4}")
@@ -131,9 +132,9 @@ def validate_desired_return(value: float | None) -> float | None:
         isinstance(value, bool)
         or not isinstance(value, (float, int))
         or not math.isfinite(value)
-        or not 0 <= value <= 40
+        or not DESIRED_RETURN_RANGE[0] <= value <= DESIRED_RETURN_RANGE[1]
     ):
-        raise ValueError("desired_return must be in [0, 40] or null")
+        raise ValueError("desired_return must be in [-20, 140] or null")
     return float(value)
 
 

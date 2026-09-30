@@ -9,6 +9,7 @@ from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Choice
 from hal.netplay_service.domain import PolicyConfig
 from hal.netplay_service.domain import account_connect_code
+from hal.netplay_service.domain import validate_desired_return
 
 
 def _config() -> PolicyConfig:
@@ -50,7 +51,7 @@ def test_policy_config_round_trips_the_worker_payload() -> None:
         ({"stages": [{"value": "CORNERIA", "label": "Corneria"}]}, "stages has unsupported values"),
         ({"characters": [{"value": "SANDBAG", "label": "Sandbag"}]}, "characters has unsupported values"),
         ({"temperature_range": [0.5, 1.1]}, "temperature must be in"),
-        ({"desired_return_range": [0.0, 50.0]}, "desired_return must be in"),
+        ({"desired_return_range": [0.0, 141.0]}, "desired_return must be in"),
     ],
 )
 def test_policy_config_rejects_drift(change: dict[str, object], message: str) -> None:
@@ -62,6 +63,17 @@ def test_policy_config_rejects_drift(change: dict[str, object], message: str) ->
 def test_policy_config_rejects_duplicate_choices() -> None:
     with pytest.raises(ValueError, match="unique"):
         PolicyConfig(**{**_fields(), "stages": (Choice("BATTLEFIELD", "Battlefield"),) * 2})
+
+
+@pytest.mark.parametrize("value", [None, -20.0, 0.0, 20.0, 120.0, 140.0])
+def test_desired_return_accepts_the_spec_range(value: float | None) -> None:
+    assert validate_desired_return(value) == value
+
+
+@pytest.mark.parametrize("value", [-20.01, 140.01, True, float("inf"), float("nan")])
+def test_desired_return_rejects_invalid_targets(value: float) -> None:
+    with pytest.raises(ValueError, match=r"\[-20, 140\]"):
+        validate_desired_return(value)
 
 
 def _fields() -> dict[str, object]:
