@@ -7,6 +7,10 @@ both delay profiles, and then starts its slots.
 
 ## Current deployment — 2026-09-29
 
+The eval, runner, and stream are paused after the Cloudflare daily read quota
+was exhausted. The G4 VM remains running and billable. The tested local
+[queue cost fix](queue-costs.md) is ready for deployment; it preserves schema 2.
+
 - Site: [20xx.xyz](https://20xx.xyz). Cloudflare Worker `hal-netplay-web`
   serves the vinext page. Worker `hal-netplay-api` handles `/v1/*`.
 - Queue: one SQLite-backed Durable Object, class `Queue`, instance name

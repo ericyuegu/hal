@@ -43,7 +43,7 @@ export class EventLog {
   }
 
   prune(): void {
-    this.sql.exec("DELETE FROM events WHERE at < ?", this.now() - EVENT_RETENTION_SECONDS);
+    this.sql.exec("DELETE FROM events WHERE at <= ?", this.now() - EVENT_RETENTION_SECONDS);
   }
 
   oldest(): number | null {

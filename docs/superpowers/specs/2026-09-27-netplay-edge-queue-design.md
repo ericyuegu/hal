@@ -115,7 +115,7 @@ Tables (storage schema version 2; no migrations):
 
 ### Alarm
 
-One alarm is always set for the earliest pending deadline:
+One alarm wakes the queue no later than the earliest pending deadline:
 
 - connect deadline (becomes `no_show`)
 - rematch deadline (completes the reservation)
@@ -123,7 +123,11 @@ One alarm is always set for the earliest pending deadline:
 - session silence (see "Sessions")
 - event retention
 
-When it fires, it processes everything due and sets the next alarm. This
+When it fires, it processes everything due and sets the next alarm. A mutation
+keeps an existing earlier alarm instead of rewriting it after each heartbeat.
+Reads and empty claims do not schedule alarms. Recurring queries use the active
+job index and leased account IDs, so completed job and session history does not
+increase their read cost. An idle slot waits five seconds between claims. This
 replaces the API process's `reap_expired` loop.
 
 ## Routes

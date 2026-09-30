@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS stream (
 INSERT OR IGNORE INTO stream(id, session_id, slot, granted_at) VALUES (1, NULL, 0, NULL);
 `;
 
+// Every live session holds at least one account; start/end change both in one transaction.
+// Use those IDs for primary-key lookups instead of scanning ended sessions.
+const LEASED_SESSION_IDS = "SELECT session_id FROM accounts WHERE session_id IS NOT NULL";
+
 export interface StartRequest {
   host: string;
   bundle_sha256: string;
@@ -326,22 +330,26 @@ export class SessionStore {
 
   endSilent(): { sessions: string[]; jobs: string[] } {
     const cutoff = this.now() - SESSION_SILENCE_SECONDS;
-    const sessions = this.rows("SELECT id FROM sessions WHERE ended_at IS NULL AND last_seen_at <= ?", cutoff).map(
-      (row) => row.id as string,
-    );
+    const sessions = this.rows(
+      `SELECT id FROM sessions WHERE id IN (${LEASED_SESSION_IDS})
+         AND ended_at IS NULL AND last_seen_at <= ?`,
+      cutoff,
+    ).map((row) => row.id as string);
     return { sessions, jobs: sessions.flatMap((id) => this.end(id, "silent")) };
   }
 
   nextDeadline(): number | null {
-    const row = this.rows("SELECT MIN(last_seen_at) AS t FROM sessions WHERE ended_at IS NULL")[0];
+    const row = this.rows(
+      `SELECT MIN(last_seen_at) AS t FROM sessions WHERE id IN (${LEASED_SESSION_IDS}) AND ended_at IS NULL`,
+    )[0];
     return row?.t == null ? null : (row.t as number) + SESSION_SILENCE_SECONDS;
   }
 
   capacity(): CapacityBody {
     const cutoff = this.now() - SESSION_LIVE_SECONDS;
     const statuses = this.rows(
-      `SELECT status FROM sessions WHERE ended_at IS NULL AND draining = 0 AND status IS NOT NULL
-         AND last_seen_at >= ? ORDER BY started_at`,
+      `SELECT status FROM sessions WHERE id IN (${LEASED_SESSION_IDS}) AND ended_at IS NULL
+         AND draining = 0 AND status IS NOT NULL AND last_seen_at >= ? ORDER BY started_at`,
       cutoff,
     ).map((row) => JSON.parse(row.status as string) as RunnerStatus);
     const base = { active: this.jobs.activeCount(), queued: this.jobs.queueDepth(), target_fps: 60 };

@@ -258,7 +258,8 @@ export class JobStore {
   }
 
   activeCount(): number {
-    return Number(this.first(`SELECT COUNT(*) AS n FROM jobs WHERE status IN (${IN_SERVICE})`)?.n);
+    // Repeat the partial-index predicate: SQLite does not infer it from a subset of statuses.
+    return Number(this.first(`SELECT COUNT(*) AS n FROM jobs WHERE status IN (${ACTIVE}) AND status != 'queued'`)?.n);
   }
 
   private owned(id: string, worker: string, expected: readonly JobStatus[]): Row {
@@ -525,7 +526,9 @@ export class JobStore {
     const changed: string[] = [];
     const ids = (query: string): string[] =>
       this.sql.exec<Row>(query, now).toArray().map((row) => row.id as string);
-    for (const id of ids("SELECT id FROM jobs WHERE status = 'connecting' AND connect_deadline <= ?")) {
+    for (const id of ids(
+      `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status = 'connecting' AND connect_deadline <= ?`,
+    )) {
       this.exec(
         `UPDATE jobs SET status = 'no_show', lease_owner = NULL, lease_expires_at = NULL,
            connect_deadline = NULL, updated_at = ? WHERE id = ?`,
@@ -534,7 +537,9 @@ export class JobStore {
       );
       changed.push(id);
     }
-    for (const id of ids("SELECT id FROM jobs WHERE status = 'rematch_wait' AND rematch_deadline <= ?")) {
+    for (const id of ids(
+      `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status = 'rematch_wait' AND rematch_deadline <= ?`,
+    )) {
       this.exec(
         `UPDATE jobs SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL,
            rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
@@ -568,8 +573,10 @@ export class JobStore {
   nextDeadline(): number | null {
     const row = this.first(
       `SELECT MIN(t) AS t FROM (
-         SELECT connect_deadline AS t FROM jobs WHERE status = 'connecting' AND connect_deadline IS NOT NULL
-         UNION ALL SELECT rematch_deadline FROM jobs WHERE status = 'rematch_wait' AND rematch_deadline IS NOT NULL
+         SELECT connect_deadline AS t FROM jobs
+           WHERE status IN (${ACTIVE}) AND status = 'connecting' AND connect_deadline IS NOT NULL
+         UNION ALL SELECT rematch_deadline FROM jobs
+           WHERE status IN (${ACTIVE}) AND status = 'rematch_wait' AND rematch_deadline IS NOT NULL
          UNION ALL SELECT lease_expires_at FROM jobs
            WHERE lease_owner IS NOT NULL AND status NOT IN (${TERMINAL}))`,
     );

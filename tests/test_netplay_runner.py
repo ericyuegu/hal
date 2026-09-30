@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from unittest.mock import Mock
 
 import melee
@@ -1420,3 +1421,49 @@ def test_runner_cli_accepts_bounded_coalescing_wait(tmp_path: Path, monkeypatch:
     config, _ = _run_cli(tmp_path, monkeypatch, "--batch-wait-ms", "0.25")
     assert config.batch_wait_seconds == 0.00025
     assert (FrameTiming(2, 1, 3, 4, 8), FrameTiming(3, 1, 4, 4, 8)) == runner._NETPLAY_TIMINGS
+
+
+@pytest.mark.parametrize("after_wait", ["stop", "drain", "job"])
+def test_idle_slot_limits_claims_and_observes_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_wait: str
+) -> None:
+    stop, draining = threading.Event(), threading.Event()
+    waits: list[float] = []
+    store = Mock()
+    store.claim_next.side_effect = [None, _job()]
+    connection = MagicMock()
+    health = MagicMock()
+    handle = Mock(side_effect=lambda *_args: stop.set())
+
+    def wait(seconds: float) -> bool:
+        waits.append(seconds)
+        if after_wait == "stop":
+            stop.set()
+        elif after_wait == "drain":
+            draining.set()
+        return stop.is_set()
+
+    monkeypatch.setattr(stop, "wait", wait)
+    monkeypatch.setattr(runner.signal, "signal", Mock())
+    monkeypatch.setattr(runner, "RemoteQueue", Mock(return_value=store))
+    monkeypatch.setattr(runner, "_SlotHealthReporter", Mock(return_value=health))
+    monkeypatch.setattr(runner, "InferenceClient", Mock(return_value=Mock()))
+    monkeypatch.setattr(runner, "_handle_reservation", handle)
+    config = replace(_slot_config(tmp_path), publish_replays=False)
+    runner._slot_worker(
+        config,
+        Mock(),
+        RuntimeConfig(1, (2,)),
+        connection,
+        stop,
+        draining,
+        (FrameTiming(2, 2, 4, 2, 8),),
+        128,
+        (),
+    )
+
+    assert waits == [5.0]
+    assert store.claim_next.call_count == (2 if after_wait == "job" else 1)
+    assert handle.call_count == (1 if after_wait == "job" else 0)
+    store.close.assert_called_once()
+    connection.__exit__.assert_called_once()

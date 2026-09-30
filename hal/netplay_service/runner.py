@@ -1416,7 +1416,8 @@ def _slot_worker(
                 logger.bind(slot=config.slot, event="claim").error("slot stopped claiming: {}", error)
                 return
             if job is None:
-                stop.wait(0.25)
+                # Empty claims still use the edge request budget. Stop remains interruptible.
+                stop.wait(5.0)
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
             timing = next(s for s in schedules if s.physical_delay_frames == job.choices.online_delay)

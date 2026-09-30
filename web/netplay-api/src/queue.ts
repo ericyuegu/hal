@@ -129,12 +129,16 @@ export class Queue extends DurableObject<Env> {
     if (this.schemaError !== null) throw new HttpError(503, this.schemaError);
   }
 
-  private async run(fn: () => unknown, okStatus = 200): Promise<ApiResult> {
+  private async run(
+    fn: () => unknown,
+    { status = 200, alarm = true }: { status?: number; alarm?: boolean } = {},
+  ): Promise<ApiResult> {
     try {
       this.requireSchema();
       const body = await fn();
-      await this.scheduleAlarm();
-      return body === null || body === undefined ? { status: 204 } : { status: okStatus, body };
+      // Empty claims do not change deadlines. Read routes also opt out.
+      if (alarm && body !== null && body !== undefined) await this.scheduleAlarm();
+      return body === null || body === undefined ? { status: 204 } : { status, body };
     } catch (error) {
       if (error instanceof HttpError) {
         return { status: error.status, body: { detail: error.detail }, headers: error.headers };
@@ -144,6 +148,7 @@ export class Queue extends DurableObject<Env> {
   }
 
   private async scheduleAlarm(): Promise<void> {
+    const existing = await this.ctx.storage.getAlarm();
     const oldest = this.events.oldest();
     const candidates = [
       this.jobs.nextDeadline(),
@@ -151,13 +156,14 @@ export class Queue extends DurableObject<Env> {
       oldest === null ? null : oldest + 30 * 24 * 60 * 60,
     ].filter((value): value is number => value !== null);
     if (candidates.length === 0) {
-      await this.ctx.storage.deleteAlarm();
+      if (existing !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
     // Under the test clock every deadline is a fake time in the past. Park the
     // alarm a day ahead so only runDurableObjectAlarm fires it, never a race.
     const at = this.env.HAL_TEST_CLOCK === "1" ? Date.now() + 86_400_000 : Math.ceil(Math.min(...candidates) * 1000);
-    await this.ctx.storage.setAlarm(at);
+    // An earlier wakeup is safe and avoids a billed write on every heartbeat.
+    if (existing === null || at < existing) await this.ctx.storage.setAlarm(at);
   }
 
   async alarm(): Promise<void> {
@@ -182,11 +188,11 @@ export class Queue extends DurableObject<Env> {
   // Player routes
 
   async options(): Promise<ApiResult> {
-    return this.run(() => optionsBody(this.requirePolicy()));
+    return this.run(() => optionsBody(this.requirePolicy()), { alarm: false });
   }
 
   async capacity(): Promise<ApiResult> {
-    return this.run(() => this.sessions.capacity());
+    return this.run(() => this.sessions.capacity(), { alarm: false });
   }
 
   async createJob(raw: unknown): Promise<ApiResult> {
@@ -219,12 +225,12 @@ export class Queue extends DurableObject<Env> {
         return created;
       });
       return { ...job, token };
-    }, 201);
+    }, { status: 201 });
   }
 
   async getJob(id: string, token: string): Promise<ApiResult> {
     const digest = await sha256Hex(token);
-    return this.run(() => this.jobs.getJob(id, digest));
+    return this.run(() => this.jobs.getJob(id, digest), { alarm: false });
   }
 
   async updatePolicy(id: string, token: string, raw: unknown): Promise<ApiResult> {
@@ -277,7 +283,7 @@ export class Queue extends DurableObject<Env> {
   // Runner routes
 
   async activePolicy(): Promise<ApiResult> {
-    return this.run(() => this.requirePolicy());
+    return this.run(() => this.requirePolicy(), { alarm: false });
   }
 
   async startSession(raw: unknown): Promise<ApiResult> {
@@ -310,7 +316,7 @@ export class Queue extends DurableObject<Env> {
         }
         return { ...started, policy: this.policy() };
       });
-    }, 201);
+    }, { status: 201 });
   }
 
   async reportStatus(sessionId: string, raw: unknown): Promise<ApiResult> {
@@ -375,7 +381,7 @@ export class Queue extends DurableObject<Env> {
   }
 
   async workerJob(sessionId: string, slot: number, jobId: string): Promise<ApiResult> {
-    return this.run(() => this.jobs.workerJob(jobId, this.sessions.jobWorker(sessionId, slot)));
+    return this.run(() => this.jobs.workerJob(jobId, this.sessions.jobWorker(sessionId, slot)), { alarm: false });
   }
 
   async runnerJob(sessionId: string, slot: number, jobId: string, action: RunnerAction, raw: unknown): Promise<ApiResult> {
@@ -495,16 +501,19 @@ export class Queue extends DurableObject<Env> {
   }
 
   async adminStatus(): Promise<ApiResult> {
-    return this.run(() => ({
-      paused: this.setting("paused") === "1",
-      policy: this.policy(),
-      capacity: this.sessions.capacity(),
-      ...this.sessions.summary(),
-    }));
+    return this.run(
+      () => ({
+        paused: this.setting("paused") === "1",
+        policy: this.policy(),
+        capacity: this.sessions.capacity(),
+        ...this.sessions.summary(),
+      }),
+      { alarm: false },
+    );
   }
 
   async adminEvents(query: { job?: string; session?: string; since?: number; limit?: number }): Promise<ApiResult> {
-    return this.run(() => ({ events: this.events.query(query) }));
+    return this.run(() => ({ events: this.events.query(query) }), { alarm: false });
   }
 
   // Test seams, enabled only by the HAL_TEST_CLOCK binding in vitest.config.ts.
