@@ -199,8 +199,8 @@ Commit hooks passed Ruff format, Ruff check, and ty.
 
 ## Maintained deployment
 
-Container `hal-ranked-player-v3` runs `scripts/play_ranked.py` from source
-commit `d4822adb`. Its current run is:
+Container `hal-ranked-player-v3` ran `scripts/play_ranked.py` from source
+commit `d4822adb`. Its run was:
 
 `/var/lib/hal-netplay/ranked/20260930T193913.999585Z/`
 
@@ -283,11 +283,11 @@ To retry completed runs manually:
 uv run python scripts/upload_ranked_replays.py --root /var/lib/hal-netplay/ranked
 ```
 
-Add `--watch` to run the same upload worker beside an existing player. This
-deployment uses that mode to keep the current model and Twitch stream online;
-future launches of `play_ranked.py` start the worker themselves. The current
-player remains source `d4822adb`; uploader source is recorded separately
-under `/var/lib/hal-netplay/ranked-cody120/upload-v4/`.
+Add `--watch` to run the same upload worker beside an existing player. The
+first deployment used that mode at a set boundary before game 19. It kept
+the model and Twitch stream online. Uploader source and deployment times
+are recorded under `/var/lib/hal-netplay/ranked-cody120/upload-v4/`.
+The resumed player starts the upload worker itself.
 
 Validation and command results:
 
@@ -320,3 +320,53 @@ Validation and command results:
 - `uv run python scripts/upload_ranked_replays.py --help` passed.
 - Worker/npm checks were not repeated for this upload change; Worker source
   did not change. They passed in the preceding ranked milestone.
+
+## Resumed deployment — 2026-09-30
+
+At the owner's request, two SIGINT signals stopped Ranked play and OBS at
+20:29:29 UTC. The immediate stop recorded `KeyboardInterrupt` and exit code
+130. The owner then requested an immediate restart.
+
+Container `hal-ranked-player-v4` started at 20:31:43 UTC. It runs source
+`86c5d627` with the integrated replay uploader. Its Docker arguments are in
+`/var/lib/hal-netplay/ranked-cody120/player-command-v4.json`. Its run is:
+
+`/var/lib/hal-netplay/ranked/20260930T203153.297761Z/`
+
+The manifest confirms Cody Fox (`IBDW#0`), advantage 120, network delay 2,
+inference allowance 1, fixed prefix 3, replan interval 4, and horizon 8.
+The same single RTX PRO 6000 Blackwell runs the model.
+
+At 20:32:15 UTC, OBS reported active output at 60 FPS, no reconnect, no
+network or encoder drops, and two startup render skips. A fresh screenshot
+confirmed the Dolphin window and Ranked opponent search. Twitch is
+[hal_20xx](https://www.twitch.tv/hal_20xx). The public direct-play runner
+remains disabled by the Ranked marker.
+
+All 26 completed games from before the stop have upload receipts: eight
+prototype games and 18 maintained games. The interrupted game has no
+completed game record and is not included. The new process scans completed
+runs and uploads each new completed game. Replay expiration remains disabled.
+
+Command results for this deployment:
+
+- SSH `docker kill --signal SIGINT hal-ranked-player-v3` ran twice and
+  stopped the player. `docker inspect` confirmed exit code 130.
+- The pending-launcher check completed. The upload watcher had already
+  started at the set boundary, before game 19.
+- SSH `sudo python3 -c ...` loaded and executed the saved v4 Docker
+  argument list with `subprocess.run(..., check=True)`. `docker run`
+  succeeded and the deployment record was updated.
+- `docker inspect` and `docker top` confirmed the new player, Dolphin,
+  PulseAudio, and OBS were running.
+- Remote Python checks read status, OBS statistics, the manifest, upload
+  receipts, and the direct-runner guard. They passed. No upload or stream
+  error file was present in the new run at the check.
+- SSH `sudo cat .../latest.png` saved a local screenshot. Visual inspection
+  confirmed the Ranked search and the Dolphin image.
+- Local `cat`, `sed`, `git status`, `git log`, and `git diff --check`
+  checks passed.
+- The first documentation edit used unavailable `python` and failed before
+  writing. Repeating it with `python3` succeeded.
+- This handoff changes documentation only. The code validation results
+  above apply to the deployed source; no test suite was repeated.
