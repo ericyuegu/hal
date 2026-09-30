@@ -58,6 +58,12 @@ _ROUTES = {
     )
     for port in (1, 2)
 }
+_OBSERVATION_TYPES = {
+    port: tuple(
+        (name, relative, feature_kind(relative, ITEM_COLUMNS) in ("cat", "button")) for name, relative in routes
+    )
+    for port, routes in _ROUTES.items()
+}
 
 
 def _action_vector(action: ControllerAction) -> np.ndarray:
@@ -65,16 +71,30 @@ def _action_vector(action: ControllerAction) -> np.ndarray:
 
 
 def _validate_prepared_observation(item: PolicyInput) -> None:
-    for field, relative in _ROUTES[item.controlled_port]:
+    for field, relative, expects_int in _OBSERVATION_TYPES[item.controlled_port]:
         value = item.observation[field]
         is_int = isinstance(value, (int, np.integer)) and not isinstance(value, bool)
-        expects_int = feature_kind(relative, ITEM_COLUMNS) in ("cat", "button")
         if is_int != expects_int:
             raise ValueError(f"observation field {relative!r} has a noncanonical scalar type")
 
 
+def _advance_cached(policy: ActionSequencePolicy, batch: GpuObservationBatch, cache: KVCache) -> Tensor:
+    return policy._kv_trunk(batch.features(), batch.actions, cache)
+
+
 def _decode_cached(policy: ActionSequencePolicy, cache: KVCache, inputs: tuple[Tensor, ...]) -> Tensor:
-    return policy._kv_decoder(cache.hidden, cache.memory(), *inputs)
+    observed, uniforms, forced, values, present, temperature = inputs
+    indices = policy._kv_decoder(
+        cache.hidden,
+        cache.memory(),
+        policy.model.codec.quantize(observed),
+        uniforms,
+        policy.model.codec.quantize(forced),
+        values,
+        present,
+        temperature,
+    )
+    return policy.model.codec.dequantize(indices)[:, policy._prefix_frames : policy._prediction_frames].float()
 
 
 @dataclass(slots=True)
@@ -142,6 +162,8 @@ class ActionSequencePolicy:
         self._observation_batches: dict[tuple[int, int], GpuObservationBatch] = {}
         self._update_calls: dict[tuple[int, int], CapturedCall] = {}
         self._decoder_calls: dict[int, CapturedCall] = {}
+        self._direct_update_calls: dict[int, CapturedCall] = {}
+        self._direct_decoder_call: CapturedCall | None = None
         self._decode_inputs: dict[int, tuple[Tensor, ...]] = {}
         self._kv_decoder = self._sample_with_kv_cache
         self._prediction_streams: dict[int, _Stream] = {}
@@ -275,6 +297,8 @@ class ActionSequencePolicy:
         self._observation_batches.clear()
         self._update_calls.clear()
         self._decoder_calls.clear()
+        self._direct_update_calls.clear()
+        self._direct_decoder_call = None
         self._decode_inputs.clear()
         dummy = {
             name: (0 if feature_kind(relative, ITEM_COLUMNS) in ("cat", "button") else 0.0)
@@ -318,7 +342,7 @@ class ActionSequencePolicy:
                     batch = GpuObservationBatch(stage, bucket, count)
                     batch.gather((stage,) * bucket, (MASKED_PLAYER_ID,) * bucket)
                     self._observation_batches[(bucket, count)] = batch
-                    operation = partial(self._kv_trunk, batch.features(), batch.actions, cache)
+                    operation = partial(_advance_cached, self, batch, cache)
                     if self.kv_cuda_graphs:
                         self._update_calls[(bucket, count)] = CapturedCall(
                             operation, (), cache.buffers(), device=self.device, counter=self.capture_counter
@@ -328,13 +352,11 @@ class ActionSequencePolicy:
                     cache.reset()
                 first = self._observation_batches[(bucket, 1)]
                 self._kv_trunk(first.features(), first.actions, cache)
-                observed = first.actions[:, -1]
+                observed = first.raw_actions[:, -1]
                 uniforms = torch.full(
                     (self._prediction_frames, len(CONTROLLER_GROUP_NAMES), bucket), 0.5, device=self.device
                 )
-                forced = torch.zeros(
-                    (bucket, self._prefix_frames, len(CONTROLLER_GROUP_NAMES)), dtype=torch.long, device=self.device
-                )
+                forced = torch.zeros((bucket, self._prefix_frames, len(ACTION_CHANNELS)), device=self.device)
                 values = torch.full((bucket,), 20.0, device=self.device)
                 present = torch.ones(bucket, dtype=torch.bool, device=self.device)
                 temperature = torch.ones(bucket, 1, device=self.device)
@@ -350,22 +372,46 @@ class ActionSequencePolicy:
                     sampled = operation()
                 # Torch 2.11 lazily initializes controller dequantization kernels
                 # on their first shape. Prepare the full delivered-action path.
-                decoded = (
-                    self.model.codec.dequantize(sampled)[:, self._prefix_frames : self._prediction_frames]
-                    .float()
-                    .cpu()
-                    .numpy()
-                )
+                decoded = sampled.cpu().numpy()
                 for row in decoded:
                     for action in row:
                         action_vec_to_controller(action)
                 cache.reset()
+            # Full batches execute against permanent rows. Partial batches retain
+            # their smaller scratch graphs, so idle streams never advance.
+            if self.kv_cuda_graphs and capacity > 1 and capacity & (capacity - 1) == 0:
+                for count in (1, 2, 4):
+                    if count > self.kv_update_frames:
+                        continue
+                    batch = self._observation_batches[(capacity, count)]
+                    self._direct_update_calls[count] = CapturedCall(
+                        partial(_advance_cached, self, batch, pool.storage),
+                        (),
+                        pool.storage.buffers(),
+                        device=self.device,
+                        counter=self.capture_counter,
+                    )
+                first = self._observation_batches[(capacity, 1)]
+                _advance_cached(self, first, pool.storage)
+                self._direct_decoder_call = CapturedCall(
+                    partial(_decode_cached, self, pool.storage, self._decode_inputs[capacity]),
+                    (),
+                    pool.storage.buffers(),
+                    device=self.device,
+                    counter=self.capture_counter,
+                )
             pool.storage.reset()
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         self.reset_prediction()
 
-    def _advance_batch(self, streams: tuple[_Stream, ...], count: int, columns: slice | None = None) -> None:
+    def _advance_batch(
+        self,
+        streams: tuple[_Stream, ...],
+        count: int,
+        columns: slice | None = None,
+        cache: KVCache | None = None,
+    ) -> KVCache:
         pool = self._cache_pool
         if pool is None:
             raise RuntimeError("KV cache was not prepared")
@@ -379,18 +425,25 @@ class ActionSequencePolicy:
             tuple(stream.player_id for stream in streams),
             columns,
         )
-        cache = pool.gather(tuple(stream.row for stream in streams), bucket, direct=pool.capacity == 1)
+        direct = bucket == pool.capacity and tuple(stream.row for stream in streams) == tuple(range(pool.capacity))
+        if cache is None:
+            cache = (
+                pool.storage if direct else pool.gather(tuple(stream.row for stream in streams), bucket, direct=False)
+            )
         with (
             torch.inference_mode(),
             torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda"),
         ):
             if self.kv_cuda_graphs:
-                self._update_calls[(bucket, count)](())
+                if direct and pool.capacity > 1:
+                    self._direct_update_calls[count](())
+                else:
+                    self._update_calls[(bucket, count)](())
             else:
                 self._kv_trunk(batch.features(), batch.actions, cache)
-        pool.scatter(tuple(stream.row for stream in streams), cache)
         for stream in streams:
             stream.pending_frames -= count
+        return cache
 
     def _ingest(self, item: PolicyInput, stream: _Stream | None, row: int) -> _Stream:
         player_id = self._player_id(item.player_identity)
@@ -432,7 +485,7 @@ class ActionSequencePolicy:
 
     @torch.inference_mode()
     def _plan_cached_batch(
-        self, requests: tuple[PredictionRequest, ...], streams: tuple[_Stream, ...]
+        self, requests: tuple[PredictionRequest, ...], streams: tuple[_Stream, ...], cache: KVCache
     ) -> tuple[tuple[ControllerAction, ...], ...]:
         pool = self._cache_pool
         if pool is None:
@@ -446,7 +499,6 @@ class ActionSequencePolicy:
             stages,
             tuple(stream.player_id for stream in streams),
         )
-        cache = pool.gather(tuple(stream.row for stream in streams), bucket, direct=pool.capacity == 1)
         if len(streams) < bucket:
             cache.positions[len(streams) :, 0] = 0
             cache.next_position[len(streams) :] = 1
@@ -455,7 +507,6 @@ class ActionSequencePolicy:
         ).reshape(len(requests), self._prefix_frames, len(ACTION_CHANNELS))
         if len(streams) < bucket:
             committed = np.pad(committed, ((0, bucket - len(streams)), (0, 0), (0, 0)))
-        forced = self.model.codec.quantize(torch.from_numpy(committed).to(self.device))
         self._rng.begin(
             tuple(request.stream_id for request in requests),
             tuple(request.generation - 1 for request in requests),
@@ -472,32 +523,33 @@ class ActionSequencePolicy:
                 for depth in range(self._prediction_frames)
             ]
         )
-        uniforms = torch.full((self._prediction_frames, len(CONTROLLER_GROUP_NAMES), bucket), 0.5, device=self.device)
-        uniforms[:, :, : len(streams)] = draws.to(self.device)
-        values = torch.zeros(bucket, device=self.device)
-        present = torch.zeros(bucket, dtype=torch.bool, device=self.device)
-        temperature = torch.ones(bucket, 1, device=self.device)
+        uniforms = torch.full((self._prediction_frames, len(CONTROLLER_GROUP_NAMES), bucket), 0.5)
+        uniforms[:, :, : len(streams)] = draws
+        values = torch.zeros(bucket)
+        present = torch.zeros(bucket, dtype=torch.bool)
+        temperature = torch.ones(bucket, 1)
         for index, request in enumerate(requests):
             item = request.observations[-1]
             if item.desired_return is not None:
                 values[index] = item.desired_return
                 present[index] = True
             temperature[index, 0] = item.temperature
-        inputs = (batch.actions[:, -1], uniforms, forced, values, present, temperature)
+        inputs = (batch.raw_actions[:, -1], uniforms, torch.from_numpy(committed), values, present, temperature)
+        prepared_inputs = self._decode_inputs[bucket]
+        for target, source in zip(prepared_inputs, inputs, strict=True):
+            if target.data_ptr() != source.data_ptr():
+                target.copy_(source)
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
             if self.kv_cuda_graphs:
-                for target, source in zip(self._decode_inputs[bucket], inputs, strict=True):
-                    target.copy_(source)
-                indices = self._decoder_calls[bucket](())
+                if cache is pool.storage and pool.capacity > 1:
+                    assert self._direct_decoder_call is not None
+                    planned = self._direct_decoder_call(())
+                else:
+                    planned = self._decoder_calls[bucket](())
             else:
-                indices = self._kv_decoder(cache.hidden, cache.memory(), *inputs)
-            planned = (
-                self.model.codec.dequantize(indices[: len(streams)])[:, self._prefix_frames : self._prediction_frames]
-                .float()
-                .cpu()
-                .numpy()
-            )
-        return tuple(tuple(action_vec_to_controller(row) for row in plan) for plan in planned)
+                planned = _decode_cached(self, cache, prepared_inputs)
+            actions = planned[: len(streams)].cpu().numpy()
+        return tuple(tuple(action_vec_to_controller(row) for row in plan) for plan in actions)
 
     @property
     def sampling_seed(self) -> int:
@@ -609,21 +661,28 @@ class ActionSequencePolicy:
             groups.setdefault(len(request.observations), []).append((index, request, row, current))
         plans: dict[int, ActionPlan] = {}
         for observation_count, group in groups.items():
+            group.sort(key=lambda entry: entry[2])
             states = [entry[3] for entry in group]
+            cache: KVCache | None = None
             for at in range(observation_count):
                 for index, (_, request, row, _) in enumerate(group):
                     item = request.observations[at]
                     states[index] = self._ingest(replace(item, reset=states[index] is None), states[index], row)
                 if self.history_mode == "kv_cache" and (at + 1) % self.kv_update_frames == 0:
-                    self._advance_batch(tuple(cast(_Stream, state) for state in states), self.kv_update_frames)
+                    cache = self._advance_batch(
+                        tuple(cast(_Stream, state) for state in states), self.kv_update_frames, cache=cache
+                    )
             streams = tuple(cast(_Stream, state) for state in states)
             remainder = observation_count % self.kv_update_frames
             if remainder == 3:
-                self._advance_batch(streams, 2, slice(-3, -1))
-                self._advance_batch(streams, 1, slice(-1, None))
+                cache = self._advance_batch(streams, 2, slice(-3, -1), cache)
+                cache = self._advance_batch(streams, 1, slice(-1, None), cache)
             elif remainder:
-                self._advance_batch(streams, remainder)
-            tails = self._plan_cached_batch(tuple(entry[1] for entry in group), streams)
+                cache = self._advance_batch(streams, remainder, cache=cache)
+            assert cache is not None and self._cache_pool is not None
+            tails = self._plan_cached_batch(tuple(entry[1] for entry in group), streams, cache)
+            if cache is not self._cache_pool.storage:
+                self._cache_pool.scatter(tuple(stream.row for stream in streams), cache)
             for (index, request, _, _), stream, tail in zip(group, streams, tails, strict=True):
                 if stream.last_frame != request.source_frame:
                     raise ValueError("obsolete action sequence prediction request")
