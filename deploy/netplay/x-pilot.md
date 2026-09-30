@@ -2,17 +2,25 @@
 
 ## Status
 
-Prepared on 2026-09-29 from `96ea6218`. No x_pilot games have started.
-Twitch chat authentication is required. The existing Twitch stream key cannot
-authenticate chat. Keep the current local opponent running until chat is ready.
+Started on 2026-09-29 with effective runner source `1dd743b2`.
+The first two completed games used `MASTER` player conditioning and raw desired
+return 120. Their verified Slippi replays record HAL Fox against `gm-v2-falco`
+and `gm-v2-marth`. HAL lost both. The run continues through the supported schedule.
+See the local result files for current progress; this document is a checkpoint.
 
 The G4 runner is ready at `HAL#647`. Its stream is
 [hal_20xx](https://www.twitch.tv/hal_20xx). The opponent channel is
 [x_pilot](https://www.twitch.tv/x_pilot).
 
-The live check reported 59.95 game FPS and 60.00 OBS FPS. OBS reported zero
-encoder skips and zero network drops. These figures describe the existing
-local opponent match, not a match against x_pilot.
+The first x_pilot game averaged 58.7 game FPS across 5,810 frames. Frame
+interval p95 was 18.0 ms, Dolphin step p95 was 17.9 ms, and policy round-trip
+p95 was 7.4 ms. The runner reported one missed deadline and four transport
+correction frames. OBS reported 60.00 FPS, one encoder skip, four render
+skips, and zero network drops across roughly 18,500 output frames.
+The earlier local opponent check averaged 59.95 game FPS. Different opponents
+and network paths prevent treating these figures as a controlled comparison.
+During the Marth game, the live sample reported 59.95 game FPS and 60.00 OBS
+FPS, with no new encoder skips or network drops.
 
 ## Schedule
 
@@ -60,24 +68,32 @@ treatment; its scores do not reproduce the CPU evaluation. Netplay stages,
 ports, random seeds, and remote agent artifacts are not controlled by HAL.
 Record their observed values where the replay exposes them.
 
-Keep the current online settings fixed: imitation `IBDW#0`, delay 2,
-desired return 20, and temperature 1.0. Change HAL's character for each row.
+Keep the requested online settings fixed: imitation `MASTER`, delay 2,
+raw desired return 120, and temperature 1.0. Change HAL's character for each row.
 The loaded policy SHA-256 is
 `0ff1daf80caa36a94a713c4ccba9223db8d7ba7c1379b5865bbc40b8a8c2f3ec`.
-The running source includes the OBS changes from `a978dbf3`; the base image
-label still reports `728d9601`. See the deployment README for the patch record.
-Record the source and runtime configuration again when the run starts.
+The first game used the OBS changes from `a978dbf3` and the shared return
+validation from `1dd743b2`. The local image is `hal-netplay-runner:obs-local`;
+its registry base is still `728d9601`. The local runtime snapshot records
+the effective source, image ID, checkpoint hash, environment, and sampling
+seeds. Record subsequent source changes at game boundaries.
+
+After game two, `e942072e` adds bounded libmelee receiver shutdown. The old
+receiver blocked on a full pipe after Dolphin exited and prevented the next
+reservation from starting. The first instance was released manually after its
+recording was verified. The fix changes cleanup only; gameplay settings stay
+fixed. The G4 uses the same source bind mount as the prior OBS deployment.
 
 1. Validate the Twitch user token with `GET https://id.twitch.tv/oauth2/validate`.
    Require `user:write:chat` for sending and `user:read:chat` for reading replies.
-   Read the token from a private file. Do not print it or commit it.
+   Decrypt the token in memory from the local credential store described below.
 2. Read replies through EventSub and send commands through
    `POST https://api.twitch.tv/helix/chat/messages`. Check `is_sent` and
    `drop_reason`; HTTP success alone does not confirm delivery.
-3. Send `!help` to x_pilot and confirm its current Slippi connect code from the
-   bot's reply. Historical references to `PHAI#591` are not a live check.
-4. Stop the local opponent loop after its current game. Let its cleanup cancel
-   its reservation. Confirm that the G4 slot is free.
+3. Use the owner's confirmed opponent code `PHAI#591`. The first completed
+   replay also confirms this code and HAL's `HAL#647` code.
+4. Stop the local opponent loop after its current game. This was completed
+   before the x_pilot run; its reservation and local Dolphin were cleaned up.
 5. Select the next supported row with `!agent gm-v2-<character>`. Wait for the
    selection reply. Never change agents during a game: the published bot
    implementation restarts an active session when `!agent` changes.
@@ -120,7 +136,65 @@ image's Git SHA does not describe its source patches. The run manifest must
 also include the effective source record above. A Twitch stream is not proof
 of a saved VOD. Slippi replay recording is the confirmed recording path.
 
+The local run directory is `runs/netplay/x-pilot-master120/`:
+
+- `result-NNN.json` records each verified schedule row and HAL's result.
+- `NNN-<job-id>/game-01.{slp,json}` holds the downloaded recording and sidecar.
+- `runtime-snapshot.json` records the initial G4 environment and sampling seeds.
+- `events.jsonl` and `chat.jsonl` record progress and relevant bot replies.
+- `private/` contains reservation tokens with mode 600.
+- `control/` retains the local operator scripts used for this run.
+
+Two attempts are excluded: the canceled `IBDW#0`/20 reservation
+`oNHh0qZ14F2pg27ZOQc5cZpQ`, and `D54iIcqY1Z7RCUIQ-S9kigOz`, which failed
+before completing a game because inference still enforced the old return cap.
+The fix shares `[-20, 140]` across the inference, evaluation, and queue
+boundaries. Tests now perform actual predictions with `MASTER`/120.
+
+## Local operation and credentials
+
+Two local user services manage the run. They use no new cloud resources:
+
+```sh
+systemctl --user status hal-xpilot-chat hal-xpilot-games
+journalctl --user -u hal-xpilot-games -n 30 --no-pager
+```
+
+To stop after the current game and preserve its recording:
+
+```sh
+touch runs/netplay/x-pilot-master120/stop-after-game
+```
+
+The scheduler skips verified rows and stops on a failed or mismatched game.
+Inspect a failure before restarting it. The chat listener restarts after a
+network failure. These are transient local services; they do not start after
+a reboot. The G4 runner and stream have their own system services.
+
+Operator credentials are encrypted with `systemd-creds --user --with-key=host`
+under `runs/netplay/credentials/`. The directory has mode 700; files have
+mode 600. Encryption binds each credential to this host, user, and credential
+name. It protects copied files, but not a compromised local user or root.
+Do not use these files as portable backups.
+
+The store contains Twitch chat and refresh tokens, the Twitch stream key,
+runner environment, runner/admin tokens, and Cloudflare deployment credentials.
+The old temporary plaintext copies were removed after verifying the encrypted
+copies. Original Slippi account files were left in place. The G4 still reads
+its existing Secret Manager secret into root-only files under `/run`.
+
+The operator helper decrypts secrets in memory. It locks refresh operations,
+stores replacement Twitch tokens atomically, validates the account and scopes,
+and uses only official Twitch endpoints. A live refresh and the next bot
+commands passed after the move. Twitch's
+[refresh protocol](https://dev.twitch.tv/docs/authentication/refresh-tokens/)
+describes the token replacement requirement. Never print decrypted secrets,
+put them in command arguments, or commit them.
+
 ## Preparation checks
+
+These entries describe the initial preparation. The execution checks below
+supersede the authentication and local-peer status in this table.
 
 | Command or inspection | Result |
 | --- | --- |
@@ -138,3 +212,56 @@ of a saved VOD. Slippi replay recording is the confirmed recording path.
 | `rclone lsf 'r2:hal/netplay/v1/replays/2026/09/29/CRYO#610/' --max-depth 2 --files-only` | Existing local-peer matches have both `.slp` and `.json` objects. This does not claim any x_pilot recording. |
 | Twitch API validation and chat sends | Not run: no user access token was available. |
 | Full Python, Worker, and Dolphin handoff suites | Not rerun: this preparation changes only documentation and a schedule CSV. Runtime code is unchanged. |
+
+## Execution checks — 2026-09-29
+
+All local commands used `/home/ericgu/src/hal-edge-queue`; npm commands used
+its `web/netplay-api` directory. No command changed another worktree.
+
+| Command or operation | Result |
+| --- | --- |
+| `cat AGENTS.md`; `git status --short`; targeted `rg`, `sed`, and `cat` reads of the queue, inference validators, evaluation settings, session cleanup, tests, and installed libmelee | Read the affected boundaries before editing. Some initial searches named absent files; corrected searches found the real callers. A later unquoted `tests/test_v7*` glob also matched no files; a recursive `rg` found the skip definitions. |
+| Twitch device authorization, `GET /oauth2/validate`, EventSub subscription, and `POST /helix/chat/messages` | Authenticated `hal_20xx` through official Twitch endpoints with `user:read:chat` and `user:write:chat`. The bot confirmed agent selection and `!play HAL#647`. The initial device authorization tool review timed out; retry succeeded. |
+| Local peer stop and reservation cleanup | Waited for its active game, then stopped the parent loop. It left the G4 slot available for x_pilot. |
+| Publish the existing policy's approved `desired_return_range` of `[-20, 140]` | Passed. Policy bytes, hash, and default return were unchanged. |
+| First `MASTER`/120 reservation | Failed before completing a game: inference still enforced `[0, 40]`. Commit `1dd743b2` fixes the remaining inference/evaluation validators and adds actual prediction coverage. This attempt is excluded. |
+| `uv run pytest -q tests/test_policy_api.py tests/test_policy_adapter.py tests/test_netplay_domain.py tests/test_action_sequence_policy_batch.py -m 'not integration'` | 105 passed, 2 deselected, 14 warnings after the return fix. |
+| `uv run pytest -q tests/test_session.py tests/test_netplay_session.py` | 54 passed. Covers a full receiver pipe, ignored SIGTERM, shutdown before connect, repeated cleanup, and rejection of an untested libmelee version. |
+| `uv run ruff format hal/sim/session.py tests/test_session.py` | Both files already formatted. |
+| `uv run ruff format --check .` | 270 files passed. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed with zero diagnostics. |
+| `uv run pytest -q -m 'not integration'` | Final source: 1,491 passed, 8 skipped, 21 deselected, 24 warnings in 141.12 s. Earlier return-fix checkpoints passed 1,470 and 1,487 tests. |
+| `npm test` | 105 tests passed in 10 files. workerd printed a WebSocketPipe disconnect diagnostic; no tests failed. |
+| `npm run typecheck` | Passed. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration` | 3 passed in 41.60 s. Includes `MASTER`/120 creation, live update to 140, and rejection of 141. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration` | 7 passed, 6 deselected, 6 warnings in 54.16 s. Required fixtures were present. |
+| `.venv/bin/python /tmp/hal_xpilot_run.py --first-job runs/netplay/x-pilot-master120/private/first-game.json --max-new-games 1` | Downloaded and verified the first replay's hash, size, completed end record, player codes, characters, policy, and result. Automatic approval review initially rejected this read-only collector for a suspected R2 upload. Inspection found only list/download methods; the reviewed retry passed. |
+| `systemd-creds --user --with-key=host --name=... encrypt - -`; `systemd-creds --user --name=... --refuse-null decrypt - -`, through the local credential helper | Non-secret round-trip and wrong-name rejection passed. Sandbox access to the system credential service failed; host execution passed. All nine real credentials passed encrypted round-trip checks. Temporary plaintext copies were then removed. |
+| Direct Twitch `POST /oauth2/token` refresh, followed by validation and bot commands | Passed with the encrypted store. No third-party token service was used. |
+| `systemd-run --user --unit=hal-xpilot-chat --property=UMask=0077 --property=Restart=on-failure --property=RestartSec=5 ... hal_xpilot_chat.py listen` | Listener subscribed successfully with encrypted credentials. |
+| `systemd-run --user --unit=hal-xpilot-games --property=UMask=0077 ... hal_xpilot_run.py --first-job .../private/first-game.json` | Continued the schedule, verified game two, then honored `stop-after-game` for deployment. |
+| `journalctl --user -u hal-xpilot-games -n ... --no-pager`; `systemctl --user show/status ...` | Confirmed agent replies, connection, gameplay, recording, and boundary stop. |
+| `gcloud compute ssh hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --command ...` | Read status, OBS statistics, source identity, logs, process wait states, and runtime budget. Saved the initial environment and seeds locally. No credentials were printed. One status read during startup found no file; the readiness check was corrected to handle preparation. |
+| G4 process inspection and targeted SIGTERM | Found the completed game's Slippi receiver blocked in pipe write, with its parent waiting for exit. Releasing that receiver let game two start. No active Dolphin game was terminated. |
+| `gcloud compute scp hal/sim/session.py hal-netplay-g4:/tmp/hal-session-e942072e.py --project centering-star-502613-k3 --zone us-west1-a` | Staged the committed cleanup fix. SHA-256: `07d087f60e6eb51d73bc902e68e607b2256dad344a53d0132cf51a6305c96286`. |
+| G4 source installation, `systemctl daemon-reload`, and runner stop/start at the completed-game boundary | Installed the cleanup fix and updated the effective source label to `e942072e`. |
+| Python CSV validation and manifest generation | All 96 pairings match `matchups_for_vs_cpu(96)`. Exactly five remain unsupported. Saved settings, source, runtime, and operator script hashes. |
+| `git check-ignore` on the credential, reservation, and operator-script paths | All are ignored. |
+| `git diff --check`; focused `git add`; `git commit` | Whitespace passed. Commits contain no attribution trailers. Source milestones are `2f56cd18`, `1dd743b2`, and `e942072e`; the first was incomplete and is superseded by the second. |
+
+The eight full-suite skips comprise two production GPU qualification checks
+that require `HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1`, and six tests
+whose optional local v7 subset is absent. Integration deselections are tests
+outside the requested marker. Warnings concern Python 3.14 TorchScript,
+uncompiled flex attention, and multiprocessing fork from a threaded process.
+No required integration fixture was missing.
+
+Read-only documentation research used official Twitch and systemd sources.
+The freedesktop manual URL returned HTTP 403; the official systemd GitHub
+manual and the installed manual supplied the credential details instead.
+
+No new VM, instance group, Secret Manager entry, registry push, R2 asset
+upload, Worker deployment, or Git push was performed during this run setup.
+The existing runner continues its configured replay uploads. The local
+collector only downloads them.

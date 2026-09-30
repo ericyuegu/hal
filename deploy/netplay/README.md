@@ -495,3 +495,29 @@ Skips and limits:
 - Twitch viewer latency and reboot recovery were not tested.
 - No push or new asset upload was needed. The live stream remains public under
   the owner's existing approval.
+
+## x_pilot run — 2026-09-29
+
+The local Cody Fox loop has stopped. G4 now plays x_pilot's `PHAI#591` bot
+with `MASTER` player conditioning, raw desired return 120, delay 2, and
+temperature 1. The supported schedule has 91 of the 96 CPU evaluation
+pairings. `gm-v2` lacks Ganondorf, Dr. Mario, and Ness for five rows.
+
+The first two verified games were HAL Fox against `gm-v2-falco` and
+`gm-v2-marth`; HAL lost both. The first complete game averaged 58.7 FPS,
+with frame interval p95 18.0 ms and policy round-trip p95 7.4 ms. A sample
+during the second game measured 59.95 game FPS and 60.00 OBS FPS. OBS had
+zero network drops and no new encoder skips in that second sample.
+These opponent and network conditions differ from the earlier local run.
+
+The effective source is `e942072e`. It includes the shared return range fix
+from `1dd743b2` and bounded Slippi receiver cleanup. The cleanup fix was
+installed after both recordings were saved. It prevents a full receiver
+pipe from blocking the next reservation. The source remains mounted under
+`/var/lib/hal-netplay/hotfix/obs-v1`; no registry image was pushed.
+
+Slippi recordings and verified results are retained locally under
+`runs/netplay/x-pilot-master120/`. Operator credentials now use encrypted,
+host-bound storage under `runs/netplay/credentials/`. The G4 continues to
+use its existing Secret Manager secret. See [the run record](x-pilot.md)
+for controls, credential handling, all commands, test results, and limits.
