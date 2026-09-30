@@ -1,4 +1,4 @@
-"""One local Dolphin session for Slippi direct-connect netplay."""
+"""One local Dolphin session for Slippi netplay."""
 
 import atexit
 import hashlib
@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
+from typing import Protocol
 from typing import Self
 
 import melee
@@ -60,18 +61,29 @@ def _never_abandoned() -> bool:
     return False
 
 
+class MenuDriver(Protocol):
+    def __call__(self, state: melee.GameState | None, controller: melee.Controller) -> bool:
+        """Return true when inputs changed and need one flush.
+
+        A missing state lets the driver release a timed button press while a
+        Slippi scene does not emit menu observations. Never called in a game.
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class NetplaySetup:
-    """The local character, remote Slippi code, and selected stage."""
+    """Match choices; local_code identifies our port against unknown opponents."""
 
     character: melee.Character
     opponent_code: str
     costume: int = 0
     stage: melee.Stage = melee.Stage.FINAL_DESTINATION
+    local_code: str | None = None
 
 
 class NetplaySession:
-    """Drive a Dolphin direct-connect session with explicit real-time I/O."""
+    """Drive a Dolphin netplay session with explicit real-time I/O."""
 
     def __init__(
         self,
@@ -88,6 +100,7 @@ class NetplaySession:
         realtime: bool = False,
         graphics_backend: DolphinGraphicsBackend = "Vulkan",
         stream_output: bool = False,
+        menu_driver: MenuDriver | None = None,
     ) -> None:
         if online_delay not in (2, 3):
             raise ValueError(f"online_delay must be 2 or 3, got {online_delay}")
@@ -95,6 +108,9 @@ class NetplaySession:
             raise ValueError(f"unsupported Dolphin graphics backend {graphics_backend!r}")
         if type(stream_output) is not bool:
             raise TypeError("stream_output must be a boolean")
+        if menu_driver is not None and not realtime:
+            raise ValueError("a custom menu driver requires real-time netplay")
+        self.menu_driver = menu_driver
         self.frame_times: list[float] = []
         self.realtime = realtime
         self.iso_path = str(iso_path)
@@ -169,8 +185,8 @@ class NetplaySession:
             raise RuntimeError("NetplaySession must be used as a context manager")
         if self._controller is not None:
             raise RuntimeError("NetplaySession has already launched Dolphin")
-        if not setup.opponent_code:
-            raise ValueError("opponent_code must be non-empty")
+        if not setup.opponent_code and not (setup.local_code and self.menu_driver is not None):
+            raise ValueError("opponent_code must be non-empty, or a local code and menu driver are required")
         logger.info(
             "starting Dolphin slippi_port={} delay={} character={} stage={} replay_dir={}",
             self.slippi_port,
@@ -199,7 +215,7 @@ class NetplaySession:
         if not self._console.connect():
             raise RuntimeError("failed to connect to Dolphin Slippi server")
         self._menu_helper = melee.MenuHelper()
-        logger.info("waiting for direct-connect opponent {}", setup.opponent_code)
+        logger.info("waiting for netplay match; remote code={}", setup.opponent_code or "matchmaking")
         first_frame = self._navigate_to_live(
             setup, on_countdown_frame=on_countdown_frame, on_countdown_observation=on_countdown_observation
         )
@@ -267,7 +283,16 @@ class NetplaySession:
                     f"did not reach IN_GAME within {self.connect_timeout_seconds:.0f}s "
                     "while waiting for the remote player"
                 )
-            gamestate = self._read_state(during_connect=True)
+            if self.menu_driver is None:
+                gamestate = self._read_state(during_connect=True)
+            else:
+                gamestate = self._console.step(flush_controllers=False)
+                self._raise_if_connect_abandoned()
+                if gamestate is None:
+                    if self.menu_driver(None, self._controller):
+                        self._controller.flush()
+                    time.sleep(0.0005)
+                    continue
             status = (
                 gamestate.menu_state,
                 getattr(gamestate, "submenu", None),
@@ -285,7 +310,10 @@ class NetplaySession:
                     on_countdown_frame=on_countdown_frame,
                     on_countdown_observation=on_countdown_observation,
                 )
-            if gamestate.menu_state in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
+            if self.menu_driver is not None:
+                if self.menu_driver(gamestate, self._controller):
+                    self._controller.flush()
+            elif gamestate.menu_state in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
                 self._menu_helper.choose_direct_online(gamestate, self._controller)
             else:
                 self._menu_helper.menu_helper_simple(
@@ -343,7 +371,17 @@ class NetplaySession:
         opponent_matches = [
             port for port, player in ports.items() if getattr(player, "connectCode", "") == setup.opponent_code
         ]
-        if len(opponent_matches) == 1:
+        if setup.local_code is not None:
+            local_matches = [
+                port for port, player in ports.items() if getattr(player, "connectCode", "") == setup.local_code
+            ]
+            if len(local_matches) != 1:
+                raise RuntimeError(
+                    "cannot discover local netplay port: local connect code must match exactly one player"
+                )
+            self.ego_port = local_matches[0]
+            self.opponent_port = 3 - self.ego_port
+        elif len(opponent_matches) == 1:
             self.opponent_port = opponent_matches[0]
             self.ego_port = 3 - self.opponent_port
         else:

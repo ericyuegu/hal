@@ -582,3 +582,61 @@ def test_dolphin_ini_keys_are_restored_to_camel_case(tmp_path: Path) -> None:
     assert ini.read_text() == (
         "[Core]\nSlippiOnlineDelay = 2\nBlockingPipes = True\nSlippiReplayDir = /tmp/replays\nSIDevice0 = 6\n"
     )
+
+
+@pytest.mark.parametrize("ego_port", (1, 2))
+def test_local_identity_resolves_ranked_mirrors(tmp_path: Path, ego_port: int) -> None:
+    session = _session(tmp_path)
+    state = _live(ego_port=ego_port)
+    state.players[ego_port].costume = 2
+    session._discover_ports(state, NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
+    assert (session.ego_port, session.opponent_port) == (ego_port, 3 - ego_port)
+
+
+@pytest.mark.parametrize("local_code", ("MISSING#0", "HUMAN#1"))
+def test_local_identity_never_guesses_from_character(tmp_path: Path, local_code: str) -> None:
+    session = _session(tmp_path)
+    state = _live()
+    state.players[2].character = melee.Character.MARTH
+    with pytest.raises(RuntimeError, match="local connect code|local player selected"):
+        session._discover_ports(state, NetplaySetup(melee.Character.FOX, "", local_code=local_code))
+
+
+def test_custom_menu_requires_realtime(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="real-time"):
+        _session(tmp_path, menu_driver=Mock())
+
+
+def test_custom_menu_releases_input_without_observations_and_stops_at_countdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    menu = SimpleNamespace(menu_state=melee.Menu.UNKNOWN_MENU)
+    live = _live()
+    driver = Mock(side_effect=(True, False, True))
+    session = _session(tmp_path, realtime=True, menu_driver=driver)
+    session._console = console = Mock()
+    session._controller = controller = Mock()
+    session._menu_helper = legacy = Mock()
+    console.step.side_effect = [menu, None, None, live]
+    monkeypatch.setattr(netplay, "canonical_frame", lambda _state: _canonical_live(0))
+    result = session._navigate_to_live(NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
+    assert result["id"] == 0
+    assert driver.call_args_list == [call(menu, controller), call(None, controller), call(None, controller)]
+    assert controller.flush.call_count == 2
+    legacy.choose_direct_online.assert_not_called()
+    legacy.menu_helper_simple.assert_not_called()
+    assert all(c == call(flush_controllers=False) for c in console.step.call_args_list)
+
+
+def test_custom_menu_cancellation_sends_no_further_input(tmp_path: Path) -> None:
+    abandoned = Event()
+    driver = Mock(return_value=True)
+    session = _session(tmp_path, realtime=True, menu_driver=driver, connect_abandoned=abandoned.is_set)
+    session._console = Mock()
+    session._controller = Mock()
+    session._menu_helper = Mock()
+    session._console.step.side_effect = lambda **_kwargs: abandoned.set()
+    with pytest.raises(ConnectAbandoned):
+        session._navigate_to_live(NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
+    driver.assert_not_called()
+    session._controller.flush.assert_not_called()
