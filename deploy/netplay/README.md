@@ -11,6 +11,8 @@ The public runner and Phillip evaluation remain paused after the Cloudflare
 quota incident. The [queue cost fix](queue-costs.md) is deployed; it preserves
 schema 2. G4 now runs a separate [ranked player](ranked.md) with Cody Fox,
 advantage 120, and live Twitch video. This path does not use the public queue.
+The new frontend is live. The owner deferred the direct-play restart and policy
+publication. See the [deployment report](public-relaunch.md).
 
 - Site: [20xx.xyz](https://20xx.xyz). Cloudflare Worker `hal-netplay-web`
   serves the vinext page. Worker `hal-netplay-api` handles `/v1/*`.
@@ -21,9 +23,13 @@ advantage 120, and live Twitch video. This path does not use the public queue.
   `us-west1-a`. It is a standalone `g4-standard-48` VM with exactly one RTX PRO
   6000 Blackwell GPU and one runner slot. No managed instance group is deployed.
 - Runner: systemd starts Docker container `hal-netplay-runner`. Effective
-  source last ran at `3d2bdc40`; `a425fc29` is staged for the next start. Its
+  source last ran at `3d2bdc40`; `298b3506` is staged for the next start. Its
   Slippi account is `HAL#647`. The `ranked-active` marker and `95-ranked.conf`
   systemd condition keep the public runner stopped during ranked play.
+- Ranked: `hal-ranked-player-v5` resumed at 23:56:25 UTC. Its run directory is
+  `/var/lib/hal-netplay/ranked/20260930T235630.598726Z`. A separate container,
+  `hal-ranked-player-v5-monitor`, records FPS, OBS drops, and process memory
+  under that run's `monitor/` directory.
 - Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
   `:90` renders Dolphin; OBS captures its window at 1080p60 and uses NVENC.
   Menus remain visible. There is no waiting card.
@@ -53,10 +59,11 @@ HAL web API. Slippi uses its own peer connection.
 
 The retained image is `hal-netplay-runner:obs-local`, image ID `e255ef5d8a8c`.
 It adds OBS and NVIDIA EGL registration to the registry image tagged
-`728d96018e242332854a6a77ea5d2ff6eb17012c`. Eight source files are mounted from
-`/var/lib/hal-netplay/hotfix/obs-v1`. The systemd override `90-obs.conf` selects
-this image and the source mounts. The old image label alone does not identify
-the effective runner source.
+`728d96018e242332854a6a77ea5d2ff6eb17012c`. The staged public runner mounts
+the complete HAL package from `/var/lib/hal-netplay/releases/298b35062d29bbb497b07a4e41a4171c0ac3cbc3/`.
+The systemd override `99-current-source.conf` selects that source. Ranked v5
+keeps its separately verified value-meter source mounts. The old image label
+alone does not identify the effective source of either player.
 
 A fresh replacement from the existing registry image will not reproduce this
 runtime. Build and publish the current committed Dockerfile before replacing

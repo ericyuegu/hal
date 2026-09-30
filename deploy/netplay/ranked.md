@@ -647,8 +647,8 @@ setting change was made.
 
 Evidence is in local `runs/netplay/stream-monitor/`: `incident.json`, four
 screenshots, the full test log, and the source archive. G4 retains the original
-run and `stream-monitor/check-result.json`. The new monitor is staged for
-the next authorized Ranked start; it was not running during the incident.
+run and `stream-monitor/check-result.json`. The new monitor was attached
+after the authorized Ranked restart below. It was not running during the incident.
 
 ### Monitor checks and commands
 
@@ -682,4 +682,47 @@ the next authorized Ranked start; it was not running during the incident.
   removed after exit. This expected monitor termination does not restart play.
 - Emulator integration tests were not needed for this monitor-only change;
   it does not touch controllers, session stepping, replay extraction, or
-  inference. Live gameplay verification is deferred until an authorized start.
+  inference. Live gameplay verification followed the authorized start below.
+  The later deployment checks also passed all ten required emulator and queue
+  integration tests; see [the deployment report](public-relaunch.md).
+
+
+### Ranked restart with live monitoring
+
+The owner requested Ranked instead of the pending public direct-play restart.
+`sudo docker start hal-ranked-player-v5` succeeded at 23:56:25 UTC on
+September 30. The existing player retains Cody Fox, advantage 120, BF16,
+network delay 2, inference allowance 1, replan interval 4, and horizon 8.
+The new run is `/var/lib/hal-netplay/ranked/20260930T235630.598726Z`.
+
+The menu helper selected the character, searched, struck two stages, and
+confirmed without manual input. The first game entered IN_GAME at
+23:57:08 UTC. The first verified live monitor window estimated 59.88 game
+FPS. OBS reported 60 FPS with zero render, encoder, and network drops,
+no reconnect, and no congestion. There were 41 monitor samples and no alerts
+at that check. These short observations do not establish a memory trend.
+
+The stream is live at <https://www.twitch.tv/hal_20xx>. The value overlay,
+recording, and replay uploader remain part of the unchanged player. Both
+player and monitor stay running. The public runner remains inactive and the
+`ranked-active` exclusion marker remains present.
+
+Restart commands and results:
+
+- SSH `test`, `systemctl is-active`, and `docker inspect` confirmed the marker,
+  stopped public runner, and stopped Ranked container before startup.
+- `sudo docker start hal-ranked-player-v5` succeeded.
+- The monitor launcher succeeded:
+
+      sudo /var/lib/hal-netplay/stream-monitor/deploy/netplay/run-ranked-monitor.sh hal-ranked-player-v5 /var/lib/hal-netplay/ranked/20260930T235630.598726Z
+
+- SSH `docker logs`, `docker inspect`, and Python reads of status, actions,
+  OBS telemetry, and monitor samples confirmed both containers running,
+  automatic menu progression, active Twitch output, and live inference.
+- SSH Python output saved the existing telemetry locally as
+  `runs/netplay/stream-monitor/ranked-restart.json`. No secret was read.
+- Dolphin logged an Adwaita pixbuf warning during startup. It still entered
+  the game and OBS output remained active.
+- Git diff checks and the documentation commit recorded this restart.
+  Code tests were not repeated for documentation-only edits. The completed
+  test results and skips are recorded above and in the deployment report.
