@@ -2,8 +2,10 @@
 
 The owner paused the evaluation after Cloudflare reported the daily
 5,000,000 SQL rows-read limit. The public capacity endpoint returned HTTP 500.
-The local scheduler and G4 runner were stopped. The G4 VM remains running
-and billable. The 48 verified recordings and NSM summary remain local.
+The local scheduler and G4 runner were stopped. The owner then approved the
+fix deployment and G4 shutdown. The guest accepted shutdown on September 30;
+SSH became unavailable. Google API status verification needs renewed login.
+The 48 verified recordings and NSM summary remain local.
 
 ## Cause
 
@@ -72,28 +74,54 @@ Raw results and logs are in the ignored `runs/netplay/quota-incident/` directory
 and the `fix-*.log` files. No emulator throughput run was performed: the
 runner is paused, and this change does not alter frame stepping or inference.
 
-## Deployment
+## Deployment — September 30, 2026
 
-The fix is local and tested. Cloudflare and the stopped G4 container still
-have the previous code. Keep the evaluation paused until the owner resumes it.
+The owner approved deployment and asked to take the GPU worker down.
 
-The existing deployment rules require owner approval for `wrangler deploy`
-and externally visible changes. After approval:
+- Source: `a425fc2946cda915a66bde53b9e834fa38e20999`.
+- API Worker: `hal-netplay-api`, route `20xx.xyz/v1/*`.
+- Active version: `ed23da11-c3ae-4208-aa79-586ba38feb99`, deployed at
+  `2026-09-30T14:50:49.618Z`. Wrangler confirmed 100% traffic on this version.
+- Remote bindings and route matched local configuration before deployment.
+  The existing Durable Object and secrets remain in place. Schema stays 2.
+- G4 runner source was staged at `2026-09-30T14:51:39.499698+00:00` in
+  `/var/lib/hal-netplay/hotfix/obs-v1/runner.py`. Its SHA-256 is
+  `821ea8074e731c9dba9836f2d73214adff62c052d188bfc22526e241964d9f30`.
+  The prior file matched committed source `3d2bdc40`. Both the file and the
+  systemd override have rollback copies. The override now records the full
+  new source SHA. `systemctl daemon-reload` succeeded; the runner was not started.
+- The run manifest points to `runtime-staged-a425fc29.json`. It marks this
+  source as pending, not as code that produced any completed game.
+- `sudo shutdown -h now` on `hal-netplay-g4` returned zero. SSH first remained
+  available during shutdown, then reset the connection and became unavailable.
+  The only attached disk is persistent Hyperdisk Balanced. No disk, image,
+  replay, or VM was deleted.
 
-1. Deploy `web/netplay-api` with `npm run deploy`. The schema guard remains 2.
-2. Stage the committed `hal/netplay_service/runner.py` in the G4 source mount
-   at `/var/lib/hal-netplay/hotfix/obs-v1/runner.py`. Verify its SHA-256 and
-   record the new effective source SHA in the service configuration and run
-   manifest before the next start.
-3. Keep the runner stopped while the daily quota remains exhausted. Deployment
-   does not reset the quota. The email gives October 1, 2026, 00:00 UTC
-   (September 30, 5 PM Pacific) as the reset.
-4. After quota recovery and approval to resume, start the runner, verify one
-   healthy slot and the stream, then resume the supported matchup schedule.
-   Keep all prior results and failed attempts.
+The Google login expired before the stop. `gcloud compute instances describe`
+failed with a reauthentication error. Direct SSH used the already trusted host
+key and the existing key pair. The guest accepted the documented shutdown
+command. Final `TERMINATED` status in the Google API remains **unverified**.
+After `gcloud auth login eric@20xx.xyz`, verify it with:
 
-No Worker deployment, G4 source copy, runner restart, paid plan upgrade,
-registry push, database reset, or Git push was performed for this fix.
+```sh
+gcloud compute instances describe hal-netplay-g4 \
+  --project centering-star-502613-k3 --zone us-west1-a \
+  --format='value(status)'
+```
+
+The public capacity check still returned HTTP 500 after deployment. Deployment
+does not reset the exhausted quota. The email gives October 1, 2026, 00:00 UTC
+(September 30, 5 PM Pacific) as the reset. Live API health remains unverified.
+
+Keep the evaluation, runner, and stream paused. Resume only when the owner
+asks. Before resuming, renew Google authentication, check quota recovery, and
+verify the staged source and one healthy runner slot. Record the new runtime
+snapshot and source boundary before the next game. Preserve prior results
+and failed attempts. The retained boot configuration starts the runner when
+the VM starts; a VM start is therefore also a service resume.
+
+The frontend was not redeployed. No paid plan upgrade, registry push, database
+reset, R2 upload, game request, stream restart, or Git push was performed.
 
 ## Commands and results
 
@@ -132,8 +160,47 @@ The Dolphin round-trip and cleanup integration suite was not rerun. This fix
 affects queue SQL, alarms, and the idle wait before a claim. It does not touch
 session stepping, controller input, replay extraction, or offline/live parity.
 
+## Deployment commands and results
+
+All local work used `/home/ericgu/src/hal-edge-queue` on `netplay-edge-queue`.
+Worker commands used `web/netplay-api`. SSH used the existing key at
+`~/.ssh/google_compute_engine`, `BatchMode=yes`, and strict host-key checks.
+The verified host alias was `compute.4269454647821964449` in
+`~/.ssh/google_compute_known_hosts`; the address was `34.177.115.232`.
+
+| Command or operation | Result |
+| --- | --- |
+| `cat AGENTS.md`; Git status, branch, log, and targeted source/document reads | Clean starting tree; source `a425fc29`; correct worktree and branch. |
+| Read Wrangler and commit-message skills; official Wrangler permissions/commands and Google stop documentation | Confirmed deployment checks and guest shutdown procedure. The initial Wrangler `/commands/deploy/` documentation URL was unavailable; the command index linked to `/commands/workers/`. |
+| `cat package.json`; `cat wrangler.jsonc`; `npx wrangler deploy --help`; `npx wrangler whoami` | Local Wrangler 4.124.0; existing account and OAuth scopes support deployment. |
+| `gcloud compute instances describe hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --format='json(name,status,machineType,guestAccelerators,disks.deviceName,disks.autoDelete)'` | Failed: Google reauthentication required. No resource changed. |
+| `gcloud auth list --format='table(account,status)'` | Existing active account is `eric@20xx.xyz`; no second account available. |
+| Direct `ssh ... ericgu@34.177.115.232 'hostname; id -un'` with strict checking | First attempt failed because the IP address had no known-host entry. |
+| Python `ssh-keyscan -T 10` comparison against existing Google known hosts; SSH with verified `HostKeyAlias` | Exact key match; host metadata confirmed `hal-netplay-g4`. No new key was trusted. |
+| Read-only SSH: `hostname`, `id`, instance metadata, `lsblk`, `systemctl show`, and `docker ps` | One 100 GB persistent disk; runner failed/inactive; runner container absent. Only the health container remained before shutdown. |
+| Python Cloudflare settings/route GETs using the existing OAuth token in memory | Bindings and route matched. Printed names/types only; no secret values. |
+| `npm run deploy -- --dry-run --outdir ../../runs/netplay/quota-incident/deploy-dry-run` | Passed; 73.34 KiB bundle, 17.30 KiB gzip. |
+| `npm run deploy -- --message 'Reduce queue database reads (a425fc2946cd)' --strict` | Passed; active version recorded above. |
+| `git show` plus Python SHA-256 checks; read-only SSH source/override/disk inspection | Installed source matched `3d2bdc40`; new file matched `a425fc29`; persistent disk confirmed. |
+| Python over SSH: assert stopped state and old hashes, back up files, atomically replace runner and override, `systemctl daemon-reload`, verify new hashes | Passed. Saved staged-source records on host and locally; runner stayed stopped. |
+| `curl -sS --max-time 20 -w '\nHTTP %{http_code}\n' https://20xx.xyz/v1/capacity` | Request completed; HTTP 500 with Cloudflare error 1101. Live health did not pass. |
+| SSH `sudo shutdown -h now` | Returned zero. Shutdown requested through the guest OS. |
+| Subsequent SSH `hostname` and shutdown-state checks | First probe succeeded during shutdown; next probe failed with connection reset; final probe timed out after 10 seconds. These are reachability checks, not Google API status confirmation. |
+| `npx wrangler deployments list --help`; `npx wrangler deployments list` | Confirmed version `ed23da11-c3ae-4208-aa79-586ba38feb99` at 100%. |
+| `systemctl --user show hal-xpilot-games.service -p ActiveState -p SubState`; `test -f runs/netplay/x-pilot-master120/stop-after-game` | Local scheduler remains failed/inactive; pause sentinel exists. |
+| `git diff --check`; local Markdown link check; staged diff review | Passed. |
+| `git add deploy/netplay/README.md deploy/netplay/queue-costs.md`; `git commit -m "Record queue deployment and G4 shutdown"`; final Git status | Deployment record committed on `netplay-edge-queue`; final status checked after commit. |
+
+No code changed after the passing test gates above. Broad tests and emulator
+integration were not repeated for this deployment and documentation update.
+The runner startup, stream check, and new games were skipped to preserve the
+requested pause. Google control-plane status verification was blocked by the
+expired login.
+
 ## References
 
 - [Cloudflare alarm semantics](https://developers.cloudflare.com/durable-objects/api/alarms/)
 - [Cloudflare row and alarm pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)
 - [SQL cursor row counters](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+- [Wrangler Worker commands](https://developers.cloudflare.com/workers/wrangler/commands/workers/)
+- [Google guest shutdown](https://docs.cloud.google.com/compute/docs/instances/stop-start-instance#stop_an_instance_from_the_guest_os)

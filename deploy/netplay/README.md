@@ -5,11 +5,12 @@ The runner downloads and verifies its static fixtures, starts a remote session,
 keeps that session alive while it downloads policy and account assets, qualifies
 both delay profiles, and then starts its slots.
 
-## Current deployment — 2026-09-29
+## Current deployment — 2026-09-30
 
 The eval, runner, and stream are paused after the Cloudflare daily read quota
-was exhausted. The G4 VM remains running and billable. The tested local
-[queue cost fix](queue-costs.md) is ready for deployment; it preserves schema 2.
+was exhausted. The [queue cost fix](queue-costs.md) is deployed; it preserves
+schema 2. The G4 guest accepted shutdown and SSH became unavailable. Google
+API status confirmation needs renewed login. The persistent disk is retained.
 
 - Site: [20xx.xyz](https://20xx.xyz). Cloudflare Worker `hal-netplay-web`
   serves the vinext page. Worker `hal-netplay-api` handles `/v1/*`.
@@ -20,7 +21,8 @@ was exhausted. The G4 VM remains running and billable. The tested local
   `us-west1-a`. It is a standalone `g4-standard-48` VM with exactly one RTX PRO
   6000 Blackwell GPU and one runner slot. No managed instance group is deployed.
 - Runner: systemd starts Docker container `hal-netplay-runner`. Effective
-  source is `3d2bdc40`; its Slippi account is `HAL#647`.
+  source last ran at `3d2bdc40`; `a425fc29` is staged for the next start. Its
+  Slippi account is `HAL#647`. Starting the VM also starts the runner.
 - Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
   `:90` renders Dolphin; OBS captures its window at 1080p60 and uses NVENC.
   Menus remain visible. There is no waiting card.
@@ -48,12 +50,12 @@ HAL web API. Slippi uses its own peer connection.
 
 ### Image and recovery limits
 
-The live image is `hal-netplay-runner:obs-local`, image ID `e255ef5d8a8c`.
+The retained image is `hal-netplay-runner:obs-local`, image ID `e255ef5d8a8c`.
 It adds OBS and NVIDIA EGL registration to the registry image tagged
 `728d96018e242332854a6a77ea5d2ff6eb17012c`. Eight source files are mounted from
 `/var/lib/hal-netplay/hotfix/obs-v1`. The systemd override `90-obs.conf` selects
 this image and the source mounts. The old image label alone does not identify
-the code now running.
+the effective runner source.
 
 A fresh replacement from the existing registry image will not reproduce this
 runtime. Build and publish the current committed Dockerfile before replacing
