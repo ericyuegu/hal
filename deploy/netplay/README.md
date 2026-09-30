@@ -786,3 +786,10 @@ exactly; neither run compiled or captured CUDA graphs while serving.
 
 See [Ranked deployment](ranked.md#value-meter--2026-09-30) for the 3060
 comparison, precision check, runtime files, and overlay reload procedure.
+
+
+The first live game with the meter averaged **58.914 emulator FPS**, with
+**18.053 ms frame p95** and **6.658 ms inference p95**. OBS stayed at 60 FPS
+with no encoder/network drops. An overlay restart during the game preserved
+the Ranked, Dolphin, and OBS process IDs and added no dropped stream frames.
+The completed replay uploaded, and the helper started the next game.

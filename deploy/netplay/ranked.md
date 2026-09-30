@@ -442,7 +442,8 @@ are not required. The production bundle hash remains
 Evidence is local under runs/netplay/value-meter/, and on G4 under
 /var/lib/hal-netplay/ranked-cody120/value-meter/. It includes the benchmark
 script, control/candidate commands, source hashes, timing samples, and action
-hashes. No new model, image, or replay data was uploaded to R2 for this work.
+hashes. Benchmark and source artifacts stay on disk. Completed Ranked games
+continue to upload their replay and small result metadata.
 
 ### Checks and failures
 
@@ -493,5 +494,77 @@ hashes. No new model, image, or replay data was uploaded to R2 for this work.
 - The final lifecycle test command passed all 26 tests. The independent
   OBS capture-connection test passed. Overlay CLI --help passed.
 - Worker/npm checks were not repeated; this change does not modify Worker
-  code or its network protocol. Concurrent roster edits are outside this
-  commit.
+  code or its network protocol. A concurrent roster commit (86b0e534)
+  included the staged meter implementation in this shared worktree. Commit
+  1d9e1e6a added the final validation record. History was left intact.
+
+
+### Live verification
+
+The tested source runs in hal-ranked-player-v5 from revision 1d9e1e6a.
+Its run directory is:
+
+    /var/lib/hal-netplay/ranked/20260930T220118.832519Z/
+
+The first launch failed before Dolphin started. The temporary staging
+directory retained an unrelated domain module from concurrent roster work;
+its dependency was absent from the image. The corrected launch reads an
+explicit source manifest and verifies each file hash. It does not discover
+deployment files by scanning the staging directory.
+
+The first game completed and uploaded its replay. The menu helper started
+game two automatically. No stream, OCR, or upload error record was present.
+
+| Live observation | Previous run, first game | Meter run, first game |
+| --- | ---: | ---: |
+| Average emulator FPS | 58.626 | 58.914 |
+| Frame p95 ms | 18.101 | 18.053 |
+| Inference p95 ms | 6.820 | 6.658 |
+
+These games had different opponents and stages. They show operational
+health; the matched synthetic measurements above provide the inference
+comparison. OBS output stayed at 60 FPS with zero encoder/network drops
+and two startup render skips.
+
+An authenticated GetSourceScreenshot request captured the full HAL program
+scene at 1920 by 1080. Visual inspection confirmed Dolphin gameplay, the
+right-hand bar and signed value, and removal of the old title. The meter
+sources contained no connect code.
+
+During game one, SIGTERM restarted only the overlay process. Its PID changed
+from 576 to 1007. Ranked PID 7, OBS PID 531, and Dolphin PID 586 kept the same
+process start times. Inference sequence advanced from 777 to 798. OBS stream
+duration increased, remained active without reconnect, and added zero dropped
+frames. The EMA continued across the overlay restart.
+
+Evidence in the run directory and local runs/netplay/value-meter/:
+
+- meter-before.png and meter-after.png show the actual OBS program output.
+- overlay-restart-check.json records PIDs, start times, inference sequence,
+  stream counters, and meter samples before and after restart.
+- game-0001.json records 6555 frames, normal GAME end, no transport
+  corrections, 111.248 seconds, and the performance figures above.
+- uploads/game-0001.json confirms the verified replay upload.
+
+Deployment and verification commands:
+
+- SSH tee and tar transferred the source manifest and eleven selected Python
+  files. Remote Python verified hashes and ran player-command-v5.json.
+- docker logs identified the initial import failure. docker inspect confirmed
+  that this candidate had exited. docker rm removed only that failed
+  container; the corrected docker run succeeded.
+- docker exec -w /tmp hal-ranked-player-v5 python -c ... queried OBS,
+  captured the composed scene, sent SIGTERM to the verified overlay PID,
+  and checked process identities and stream continuity. All assertions passed.
+- SSH cat copied the two PNGs, restart evidence, and benchmark results
+  locally. Local image inspection confirmed the display.
+- Remote Python read status, game metrics, OBS statistics, and upload
+  receipts. The first completed game had a receipt and game two was playing.
+- Git add, diff --check, and commit recorded implementation and validation.
+  The final documentation commit ran no code tests; its Python hooks skipped
+  because no Python files changed.
+
+The G4 VM, Ranked player, and Twitch stream remain running. No VM was stopped
+or recreated. The previous v4 container remains available for rollback.
+To roll back, drain v5 with one SIGINT, wait for its exit, then start v4.
+Replay files and receipts are on the shared persistent volume.
