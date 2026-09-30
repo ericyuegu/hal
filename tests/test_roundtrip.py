@@ -457,6 +457,8 @@ def test_analog_sweep_reads_back_grid_exact(tmp_path: Path) -> None:
         slippi_port=51449,
         tmp_home_directory=False,
         replay_dir=str(tmp_path),
+        # Exact per-frame wire checks require Dolphin to wait for each input.
+        blocking_input=True,
     ) as s:
         drive(s, matchup, sources, max_frames=len(punches))
 
