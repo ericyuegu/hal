@@ -285,7 +285,8 @@ Replays upload to R2 as today, and each upload is then reported with
 stay local and are enabled for qualification runs. Qualification summaries are
 recorded in `deploy/netplay/README.md`; production health uses runner status,
 logs, and the runner's loopback Prometheus endpoint. This keeps R2 limited to
-the replay and its small metadata JSON.
+the replay and its small metadata JSON. Replay objects have no automatic
+expiration rule (owner decision, 2026-09-30).
 
 ## Streaming
 

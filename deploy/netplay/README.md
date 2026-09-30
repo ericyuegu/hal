@@ -69,8 +69,8 @@ managed instance group replacement have not been tested.
 The image contains code and dependencies. The runner verifies downloaded
 assets by SHA-256. R2 stores the private ISO, policy bundle, account JSON, and
 replays. The official netplay emulator comes from its pinned GitHub release.
-Replay uploads contain only `.slp` files and small JSON metadata, with 30-day
-R2 retention. Video and detailed frame measurements are not uploaded to R2.
+Replay uploads contain only `.slp` files and small JSON metadata. The bucket
+has no automatic replay expiration rule. Video and detailed frame measurements are not uploaded to R2.
 
 The VM service account reads `hal-netplay-runner-env` from Secret Manager.
 Its dotenv file and Xauthority cookie are root-only files under `/run`.

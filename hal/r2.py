@@ -6,6 +6,7 @@ fixture downloads (`hal.fixtures`) and training checkpoint sync
 in exactly one place — see `.env.example` for the variables.
 """
 
+import math
 import os
 from typing import Final
 
@@ -31,16 +32,23 @@ def bucket() -> str:
     return name
 
 
-def client():  # type: ignore[no-untyped-def]
+def client(*, timeout_seconds: float | None = None):  # type: ignore[no-untyped-def]
     """boto3 S3 client against R2's endpoint. Raises `R2Error` if creds are missing."""
     missing = missing_credentials()
     if missing:
         raise R2Error(f"missing env vars for R2: {missing}. See .env.example.")
+    config = Config(signature_version="s3v4")
+    if timeout_seconds is not None:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("R2 timeout must be positive")
+        config = config.merge(
+            Config(connect_timeout=timeout_seconds, read_timeout=timeout_seconds, retries={"total_max_attempts": 1})
+        )
     return boto3.client(
         "s3",
         endpoint_url=os.environ["AWS_ENDPOINT_URL"],
         aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
         region_name="auto",
-        config=Config(signature_version="s3v4"),
+        config=config,
     )

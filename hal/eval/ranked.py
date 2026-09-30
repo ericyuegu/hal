@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import UTC
@@ -24,6 +25,7 @@ from websockets.exceptions import WebSocketException
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.eval.netplay import DolphinConnectionLost
 from hal.eval.netplay import run_netplay_match
+from hal.eval.ranked_replays import RankedReplayUploads
 from hal.eval.replays import read_new_replay_end
 from hal.eval.scheduling import FrameTiming
 from hal.fixtures import ISO
@@ -186,7 +188,8 @@ def run(config: RankedConfig) -> Path:
 
     previous_handlers = {number: signal.signal(number, request_stop) for number in (signal.SIGINT, signal.SIGTERM)}
     try:
-        _run(config, output, stop)
+        with RankedReplayUploads(config.output) as uploads:
+            _run(config, output, stop, uploads.notify)
     except BaseException as error:
         _write(output / "status.json", {"state": "failed", "at": time.time(), "type": type(error).__name__})
         raise
@@ -198,7 +201,7 @@ def run(config: RankedConfig) -> Path:
     return output
 
 
-def _run(config: RankedConfig, output: Path, stop: threading.Event) -> None:
+def _run(config: RankedConfig, output: Path, stop: threading.Event, notify_uploads: Callable[[], None]) -> None:
     iso, dolphin = ensure(ISO), ensure(NETPLAY_EMULATOR)
     account = json.loads(config.account.read_text())
     local_code = account.get("connectCode")
@@ -229,6 +232,7 @@ def _run(config: RankedConfig, output: Path, stop: threading.Event) -> None:
     source_root = Path(__file__).parents[1]
     sources = [
         Path(__file__),
+        source_root / "eval/ranked_replays.py",
         source_root / "sim/ranked.py",
         source_root / "sim/netplay.py",
         source_root / "sim/session.py",
@@ -381,6 +385,7 @@ def _run(config: RankedConfig, output: Path, stop: threading.Event) -> None:
                                         "wall_seconds": result.wall_seconds,
                                     },
                                 )
+                                notify_uploads()
                     except (DolphinConnectionLost, FrameTimeout, BrokenPipeError, EOFError) as error:
                         failures += 1
                         logger.warning("Ranked transport lost; restarting Dolphin ({}/3)", failures)

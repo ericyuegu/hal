@@ -47,7 +47,7 @@ RUN mkdir -p /usr/share/glvnd/egl_vendor.d \
 COPY --from=builder /.uv/python_install /.uv/python_install
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/hal /opt/hal
-COPY scripts/play_ranked.py /opt/hal/scripts/play_ranked.py
+COPY scripts/play_ranked.py scripts/upload_ranked_replays.py /opt/hal/scripts/
 COPY docker/entrypoint.sh /usr/local/bin/hal-netplay-entrypoint
 RUN chmod +x /usr/local/bin/hal-netplay-entrypoint
 

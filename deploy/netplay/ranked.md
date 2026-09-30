@@ -93,7 +93,8 @@ The supervised prototype records are on G4 at
 `control/` and `control-v2/`, timestamped manifests, `result-NNN.json`,
 screenshots, actions, and replays. The first manifest is preserved.
 Local inspection and validation logs are under
-`runs/netplay/ranked-cody120/`. No ranked records have been uploaded to R2.
+`runs/netplay/ranked-cody120/`. Completed ranked replays now upload to R2;
+see the upload section below.
 
 ## Observed run — 2026-09-30
 
@@ -232,3 +233,90 @@ re-queued. HAL won both games. Completed prototype replays and manifests were
 copied with SSH/tar to `runs/netplay/ranked-cody120/recordings/`.
 A local `uv run python` check verified all eight replay hashes and read the
 match IDs, game numbers, and placements with peppi.
+
+## Ranked replay uploads — 2026-09-30
+
+Completed games upload to bucket `hal` under:
+
+```text
+netplay/v1/replays/YYYY/MM/DD/HAL#647/ranked-<set-and-tiebreaker-hash>/game-NN.slp
+netplay/v1/replays/YYYY/MM/DD/HAL#647/ranked-<set-and-tiebreaker-hash>/game-NN.json
+```
+
+List this run's objects with:
+
+```sh
+rclone lsf 'r2:hal/netplay/v1/replays/2026/09/30/HAL#647/' --recursive
+```
+
+The first manual batch uploaded **21 replays, 47,955,696 replay bytes**, plus
+small JSON metadata records. Each upload checked size, SHA-256 metadata,
+and ETag for both objects. The local replays remain on disk.
+
+There is **no automatic replay expiration**. A 30-day rule was briefly
+installed during the manual batch, then removed when the owner corrected
+the retention choice. The existing seven-day abort rule applies only to
+unfinished multipart uploads. No completed replay is subject to that rule.
+
+`hal/eval/ranked_replays.py` reuses the public runner's verified uploader.
+The object key is stable across retries. It includes the Slippi set identity
+and tiebreaker, so rematches and tiebreakers cannot replace another game.
+The metadata records the local player's result, stage, policy hash, source
+revision, and game times. The replay itself retains the Slippi match ID.
+
+`play_ranked.py` starts an upload worker and wakes it after atomically
+writing each completed game record. The worker also scans earlier run
+directories every 15 seconds. It selects committed game records, never a
+replay that Dolphin is still writing. It rejects an unknown schema, a changed
+file hash, a mismatched stage or end, and a receipt for different input.
+
+The network work runs outside controller input. Each R2 connection and read
+has a five-second timeout; the upload worker owns retries. A failed upload
+leaves the local files and writes `upload-error.json`. Successful uploads
+write `uploads/game-NNNN.json` receipts. A restart reads those receipts and
+skips completed uploads. No video, screenshots, or detailed frame arrays
+are uploaded.
+
+To retry completed runs manually:
+
+```sh
+uv run python scripts/upload_ranked_replays.py --root /var/lib/hal-netplay/ranked
+```
+
+Add `--watch` to run the same upload worker beside an existing player. This
+deployment uses that mode to keep the current model and Twitch stream online;
+future launches of `play_ranked.py` start the worker themselves. The current
+player remains source `d4822adb`; uploader source is recorded separately
+under `/var/lib/hal-netplay/ranked-cody120/upload-v4/`.
+
+Validation and command results:
+
+- The manual dry run parsed completed replays, checked their recorded hashes,
+  and printed the planned records. It passed.
+- The first remote log redirection lacked write permission. It failed before
+  starting the uploader. Moving the redirection into `sudo sh -c` fixed it.
+- `docker exec ... upload-backlog.py --upload` uploaded the 21 verified pairs.
+- A remote R2 client removed only `hal-netplay-v1-replays-30d` and verified
+  that the unrelated multipart rule remained. The one-time script was then
+  changed so it cannot reinstall replay expiration.
+- `uv run pytest -q tests/test_ranked_replays.py tests/test_ranked_runner.py tests/test_netplay_replays.py`
+  passed 28 tests with the private temporary directory.
+- `uv run ruff format --check .` passed for 278 files.
+- `uv run ruff check .` and
+  `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts`
+  passed.
+- `git diff --check` passed. Targeted source reads used `rg`, `cat`, and
+  `sed`; one shell glob for absent lifecycle files failed and was replaced
+  by a repository search.
+- `tar` and `scp` staged the uploader source on G4. No registry image,
+  Cloudflare Worker, GPU allocation, or Git remote was changed.
+
+- `TMPDIR="$PWD/runs/netplay/ranked-cody120/test-tmp" uv run pytest -q -m "not integration" --basetemp="$PWD/runs/netplay/ranked-cody120/test-tmp/ranked-upload-full"`
+  passed 1550 tests, with 8 optional skips and 21 deselections, in 145.65 s.
+  Skips: two opt-in GPU qualification tests and six tests for the optional
+  local v7 subset.
+- `HAL_REQUIRE_INTEGRATION=1 TMPDIR="$PWD/runs/netplay/ranked-cody120/test-tmp" uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration --basetemp="$PWD/runs/netplay/ranked-cody120/test-tmp/ranked-upload-integration"`
+  passed 7 tests, with 6 deselections, in 55.54 s. No required fixture was missing.
+- `uv run python scripts/upload_ranked_replays.py --help` passed.
+- Worker/npm checks were not repeated for this upload change; Worker source
+  did not change. They passed in the preceding ranked milestone.

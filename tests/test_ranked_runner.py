@@ -108,7 +108,9 @@ def test_player_recovers_without_requalifying_and_records_quits(
     monkeypatch.setattr(ranked, "run_netplay_match", play)
     stop = Mock()
     stop.is_set.return_value = False
-    ranked._run(cfg, output, stop)
+    notify = Mock(side_effect=lambda: (output / "game-0001.json").is_file() or pytest.fail("record not committed"))
+    ranked._run(cfg, output, stop, notify)
+    notify.assert_called_once()
 
     assert attempts == ([False] if interruption is None else [False, interruption is CountdownEnded])
     assert len(sessions) == (2 if interruption is ranked.DolphinConnectionLost else 1)
@@ -130,6 +132,7 @@ def test_run_records_failure_and_restores_signal_handlers(tmp_path: Path, monkey
     monkeypatch.setattr(ranked.subprocess, "run", Mock())
     failure = Mock(side_effect=ValueError("bad artifact"))
     monkeypatch.setattr(ranked, "_run", failure)
+    monkeypatch.setattr(ranked, "RankedReplayUploads", lambda _root: nullcontext(Mock()))
     original = {number: ranked.signal.getsignal(number) for number in (ranked.signal.SIGINT, ranked.signal.SIGTERM)}
     with pytest.raises(ValueError, match="bad artifact"):
         ranked.run(cfg)

@@ -127,7 +127,7 @@ Check live replies because the deployed version may differ. Twitch documents
 
 The existing runner uploads each Slippi replay and its small metadata JSON to
 `r2:hal/netplay/v1/replays/YYYY/MM/DD/<opponent-code>/<job-id>/game-01.{slp,json}`.
-The R2 rule expires these objects after 30 days. Download each verified pair
+Replay objects have no automatic expiration rule. Download each verified pair
 to the local run directory so the requested games remain available. Keep the
 run manifest beside them. Do not add video uploads to R2.
 
