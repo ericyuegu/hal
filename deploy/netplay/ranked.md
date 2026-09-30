@@ -568,3 +568,118 @@ The G4 VM, Ranked player, and Twitch stream remain running. No VM was stopped
 or recreated. The previous v4 container remains available for rollback.
 To roll back, drain v5 with one SIGINT, wait for its exit, then start v4.
 Replay files and receipts are on the shared persistent volume.
+
+
+## Stream and memory monitor — September 30, 2026
+
+`hal.scripts.ranked_monitor` runs in a separate container. It reads existing
+`obs-stats.json` and `value.json` once per second. It records:
+
+- Five-second game frame progress, estimated from inference source frames.
+- OBS FPS, rendering time, bitrate, reconnects, and congestion.
+- New render, encoder, and network drops since the previous snapshot.
+- Per-process RSS, anonymous memory, CPU time, threads, PID, and start time.
+- Explicit warnings for stale or invalid telemetry and slow frame progress.
+
+Game frame progress is an estimate, not a direct measurement of displayed
+frames. A paused telemetry writer can also cause a stale warning. Menus and
+countdowns do not count as slow games. New generations reset the rolling
+window. OBS counter resets do not produce negative drops or bitrate.
+Thresholds are 55 FPS for five-second game progress, 58 FPS for OBS, two
+seconds for stale predictions, and three seconds for stale OBS data.
+
+The monitor has no GPU, network, credentials, or writable player files. It
+runs as UID 65534 in the player's PID namespace and cannot signal the
+root-owned player. It does not poll OBS, capture screenshots, or change the
+stream. Its two inputs remain owned by Ranked. Only its output directory is
+writable. The launcher refuses to start against a stopped player.
+
+After an authorized Ranked start, use the actual new run directory:
+
+```sh
+sudo /var/lib/hal-netplay/stream-monitor/deploy/netplay/run-ranked-monitor.sh \
+  hal-ranked-player-v5 /var/lib/hal-netplay/ranked/ACTUAL_RUN_DIRECTORY
+sudo docker logs --follow hal-ranked-player-v5-monitor
+```
+
+The launcher uses the player's exact local image. The staged source is under
+`/var/lib/hal-netplay/stream-monitor/hal`. It makes no registry request.
+Remove an exited monitor container before reusing the same monitor name.
+The monitor exits when the player's PID namespace ends. It never restarts
+Ranked. A monitor failure leaves the player running.
+
+Read `ACTUAL_RUN_DIRECTORY/monitor/status.json` for the latest sample.
+`history.jsonl`, `.1`, and `.2` retain at most 24 MiB in total. Docker alert
+logs retain at most 2 MiB. These records stay on disk and are not uploaded
+to R2. Alerts appear in Docker logs only when the warning set changes.
+No external alert destination is configured.
+
+OBS counter definitions follow the official
+[obs-websocket protocol](https://github.com/obsproject/obs-websocket/blob/5.5.6/docs/generated/protocol.md#getstats).
+
+### Slow final set
+
+The run `20260930T220118.832519Z` completed 32 games. All 32 have replay
+upload receipts. The first 29 games had mean FPS near 59 in each group:
+58.946 for games 1–10, 59.025 for 11–20, and 58.852 for 21–29. Games 30–32
+belonged to the next set and averaged 54.863, 55.438, and 49.257 FPS.
+Inference p95 stayed at 6.71–6.87 ms during that set. Frame interval p95
+stayed near 18.1 ms, so the aggregates do not locate the longer stalls.
+
+Game 32 ended with NO_CONTEST and an LRAS initiator of P2, the opponent's
+port. No HAL transport-disconnect record was written. The owner then sent
+the stop signal. Docker recorded the signal and a clean exit at
+23:29:11 UTC, with exit code zero and OOMKilled=false. No agent command
+stopped or restarted Ranked or Twitch during this investigation.
+
+OBS stayed at 60 FPS, with zero encoder/network drops and the same two
+startup render skips. OBS RSS was about 542–544 MiB. A live sample showed
+168 GiB of available RAM, no CPU/memory/I/O pressure, about 3.9 GiB of
+container memory, and 2.4 GiB of GPU memory at 42 degrees Celsius. Kernel
+logs showed no GPU fault or OOM event in the inspected interval. These
+samples do not establish a long-term memory trend.
+
+Saved screenshots show 26 ms ping in the preceding set and 60 ms in the
+last set; both screenshots display Dolphin FPS 60. A transient connection
+or opponent-side issue is plausible. Packet loss and short stalls were not
+recorded, so the cause remains unproven. No performance fix or gameplay
+setting change was made.
+
+Evidence is in local `runs/netplay/stream-monitor/`: `incident.json`, four
+screenshots, the full test log, and the source archive. G4 retains the original
+run and `stream-monitor/check-result.json`. The new monitor is staged for
+the next authorized Ranked start; it was not running during the incident.
+
+### Monitor checks and commands
+
+- `cat`, `sed`, `rg`, Git status/log, and Python reads inspected the runtime,
+  telemetry formats, callers, process lifecycle, and deployment configuration.
+  Some exploratory reads named absent files; corrected reads found the owners.
+- Read-only SSH `docker ps`, `inspect`, `top`, `stats`, `logs`, and `events`
+  confirmed the runtime, resource samples, signal, and clean exit. `nvidia-smi`,
+  `/proc/meminfo`, `/proc/pressure/*`, and kernel journal reads found no resource
+  exhaustion. One read was interrupted by a user message and repeated safely.
+- SSH Python reads and `cat`/tar transfers saved existing metrics and four
+  screenshots. A network-disabled, GPU-free temporary container parsed replay
+  headers with peppi. No game, account, or replay was changed.
+- The first local file-writing command used unavailable `python` and failed
+  before writing. The corrected command used `python3`.
+- `uv run pytest -q tests/test_stream_monitor.py` passed all 16 tests.
+- `uv run ruff format --check .`, `uv run ruff check .`, and
+  `uv run ty check --python-version 3.14 --error-on-warning hal
+  experiments/059_muon_action_sequence.py scripts` passed. Formatting checked
+  287 files. `bash -n deploy/netplay/run-ranked-monitor.sh` and CLI `--help`
+  passed.
+- `TMPDIR="$PWD/runs/netplay/ranked-cody120/test-tmp" uv run pytest -q
+  -m 'not integration' --basetemp="$PWD/runs/netplay/ranked-cody120/test-tmp/stream-monitor-full"`
+  passed 1598 tests, with eight skips, 21 deselections, and 26 warnings in
+  144.89 seconds. Skips remain two opt-in GPU tests and six optional v7 tests.
+- SSH mkdir/tar staged the monitor. A 25-second synthetic Docker producer
+  verified the actual launcher without GPU or network access. Eight monitor
+  samples reported 59.97 FPS, correct memory counters, and no warnings. The
+  actual Ranked container stayed exited. The fixture exited zero; its monitor
+  exited 137 when the shared PID namespace ended. Both test containers were
+  removed after exit. This expected monitor termination does not restart play.
+- Emulator integration tests were not needed for this monitor-only change;
+  it does not touch controllers, session stepping, replay extraction, or
+  inference. Live gameplay verification is deferred until an authorized start.
