@@ -186,3 +186,49 @@ is retained on the VM. Searches and source reads used `rg`, `sed`, `cat`,
 and `git diff`; two optional path searches failed because the paths did not
 exist. Formatting used `uv run ruff format`. Image inspection used Pillow
 and NumPy. `uv lock` succeeded with an existing yanked-zstd warning.
+
+Additional checks passed: `npm test` ran 110 tests in 11 files;
+`npm run typecheck` passed. The test worker logged a WebSocketPipe teardown
+message but reported no failures.
+`HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration`
+with the private temporary directory passed all 3 tests in 42.76 s.
+
+Source milestone: `d4822adb` (`Automate ranked play and menu confirmations`).
+Commit hooks passed Ruff format, Ruff check, and ty.
+
+## Maintained deployment
+
+Container `hal-ranked-player-v3` runs `scripts/play_ranked.py` from source
+commit `d4822adb`. Its current run is:
+
+`/var/lib/hal-netplay/ranked/20260930T193913.999585Z/`
+
+The Docker argument list is saved on G4 as
+`/var/lib/hal-netplay/ranked-cody120/player-command-v3.json`. Source mounts
+come from `maintained-v3/` and the existing `hotfix/obs-v1/` directory.
+This launch still uses the local OBS image. It is not a published image or a
+new boot service. The public runner remains disabled by the ranked marker.
+
+The handoff stopped the prototype at character select, after the set.
+It started the maintained player with `docker run`. Model preparation took
+about 49 seconds, and OBS resumed at about 19:40:04 UTC. The restart caused
+a brief Twitch outage. OBS then reported an active output at 60 FPS, no
+network or encoder drops, and three startup render skips. A screenshot
+confirmed the Dolphin menu, and the helper started the next ranked search.
+
+The maintained run uses the requested fixed timing and skips qualification.
+The actual source files and hashes are copied into its run directory.
+
+
+The maintained player completed its first game and entered game two without
+operator input. Its first record is `game-0001.json`: 58.72 average FPS,
+18.02 ms frame p95, 6.64 ms inference p95, one transport correction, and a
+normal GAME end. The replay hash is
+`3ecd2c80ba6e6bca0b9d6473592ba1b64f0e044a98273705c8c3d403f939e73c`.
+No stream or OCR error record was present at that check.
+
+The prototype also completed a second full set without operator input and
+re-queued. HAL won both games. Completed prototype replays and manifests were
+copied with SSH/tar to `runs/netplay/ranked-cody120/recordings/`.
+A local `uv run python` check verified all eight replay hashes and read the
+match IDs, game numbers, and placements with peppi.
