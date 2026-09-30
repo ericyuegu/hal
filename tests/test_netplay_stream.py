@@ -193,7 +193,7 @@ def test_stream_supervisor_caps_restart_backoff_at_thirty_seconds(tmp_path: Path
     assert studio.close.call_count == 7
 
 
-def test_stream_hides_connecting_and_stale_game_capture(tmp_path: Path) -> None:
+def test_overlay_hides_connecting_and_stale_game_labels(tmp_path: Path) -> None:
     from hal.netplay_service.health import SlotState
     from hal.netplay_service.health import SlotStatus
     from hal.netplay_service.health import write_slot_status
@@ -217,7 +217,6 @@ def test_stream_hides_connecting_and_stale_game_capture(tmp_path: Path) -> None:
         (SlotState.IDLE, 0, False),
     ):
         write_slot_status(slot, SlotStatus(0, status, None, None, None, None, None, 0, time.time() - age))
-        text, playing = supervisor._refresh_overlay(2)
-        assert playing is visible
+        text = supervisor._refresh_overlay(2)
         assert ("iBDW" in text) is visible
         assert "CRYO#610" not in text

@@ -258,13 +258,11 @@ class ObsStudio:
             self.close()
             raise
 
-    def _create_input(
-        self, name: str, kind: str, settings: dict[str, Json], *, enabled: bool = True, scene: str = "HAL"
-    ) -> Json:
+    def _create_input(self, name: str, kind: str, settings: dict[str, Json], *, enabled: bool = True) -> Json:
         return self.request(
             "CreateInput",
             {
-                "sceneName": scene,
+                "sceneName": "HAL",
                 "inputName": name,
                 "inputKind": kind,
                 "inputSettings": settings,
@@ -273,7 +271,6 @@ class ObsStudio:
         )["sceneItemId"]
 
     def _configure_scene(self) -> None:
-        self.configure_waiting_card()
         self._capture_id = self._create_input(
             "Dolphin",
             "xcomposite_input",
@@ -316,66 +313,25 @@ class ObsStudio:
         self._create_input("Game audio", "pulse_output_capture", {"device_id": "hal_stream.monitor"})
         self.request("SetCurrentProgramScene", {"sceneName": "HAL"})
 
-    def configure_waiting_card(self) -> None:
-        """Place a static card below the capture without showing connection menus."""
-        scene = "Waiting card"
-        self.request("CreateScene", {"sceneName": scene})
-        self._create_input(
-            "Waiting background",
-            "color_source_v3",
-            {"color": 0xFF291910, "width": 1920, "height": 1080},
-            scene=scene,
-        )
-        accent = self._create_input(
-            "Waiting accent", "color_source_v3", {"color": 0xFFB7E864, "width": 96, "height": 8}, scene=scene
-        )
-        self.request(
-            "SetSceneItemTransform",
-            {"sceneName": scene, "sceneItemId": accent, "sceneItemTransform": {"positionX": 140, "positionY": 360}},
-        )
-        for name, text, size, color, y in (
-            ("Waiting title", "NEXT MATCH", 96, 0xFFFFFFFF, 400),
-            ("Waiting message", "Getting the next game ready", 38, 0xFFDCC6B0, 548),
-            ("Waiting invitation", "Play HAL at 20xx.xyz", 30, 0xFFB7E864, 668),
-        ):
-            item = self._create_input(
-                name,
-                "text_ft2_source_v2",
-                {"text": text, "font": {"face": "DejaVu Sans", "size": size}, "color1": color, "color2": color},
-                scene=scene,
-            )
-            self.request(
-                "SetSceneItemTransform",
-                {"sceneName": scene, "sceneItemId": item, "sceneItemTransform": {"positionX": 140, "positionY": y}},
-            )
-        # Build off-air, then insert below existing sources for live updates.
-        item = self.request("CreateSceneItem", {"sceneName": "HAL", "sourceName": scene, "sceneItemEnabled": False})[
-            "sceneItemId"
-        ]
-        self.request("SetSceneItemIndex", {"sceneName": "HAL", "sceneItemId": item, "sceneItemIndex": 0})
-        self.request("SetSceneItemEnabled", {"sceneName": "HAL", "sceneItemId": item, "sceneItemEnabled": True})
-
-    def update(self, text: str, *, playing: bool) -> None:
+    def update(self, text: str) -> None:
         if self._process is None or self._process.poll() is not None:
             raise RuntimeError("OBS exited; see obs.log")
         if text != self._text:
             self.request("SetInputSettings", {"inputName": "Overlay", "inputSettings": {"text": text}})
             self._text = text
-        window = None
-        if playing:
-            window = dolphin_window(
-                self.request(
-                    "GetInputPropertiesListPropertyItems",
-                    {
-                        "inputName": "Dolphin",
-                        "propertyName": "capture_window",
-                    },
-                ).get("propertyItems")
-            )
+        window = dolphin_window(
+            self.request(
+                "GetInputPropertiesListPropertyItems",
+                {
+                    "inputName": "Dolphin",
+                    "propertyName": "capture_window",
+                },
+            ).get("propertyItems")
+        )
         if window is not None and (self._window is None or window.split("\r\n")[0] != self._window.split("\r\n")[0]):
             self.request("SetInputSettings", {"inputName": "Dolphin", "inputSettings": {"capture_window": window}})
             self._window = window
-        visible = playing and window is not None
+        visible = window is not None
         if visible != self._visible:
             self.request(
                 "SetSceneItemEnabled",

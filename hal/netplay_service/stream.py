@@ -341,7 +341,7 @@ class StreamSupervisor:
             depth = self._queue_depth()
         return depth
 
-    def _refresh_overlay(self, depth: int) -> tuple[str, bool]:
+    def _refresh_overlay(self, depth: int) -> str:
         try:
             state = read_stream_state(self._state_path)
         except ValueError:
@@ -359,7 +359,7 @@ class StreamSupervisor:
         text = overlay_text(state if playing else IdleStreamState(), depth)
         if not self._overlay_path.exists() or self._overlay_path.read_text() != text + "\n":
             write_overlay(self._overlay_path, text)
-        return text, playing
+        return text
 
     def _run(self) -> None:
         studio: obs.ObsStudio | None = None
@@ -390,8 +390,7 @@ class StreamSupervisor:
                     if now >= next_depth:
                         depth = self._read_queue_depth(depth)
                         next_depth = now + 5.0
-                    text, playing = self._refresh_overlay(depth)
-                    studio.update(text, playing=playing)
+                    studio.update(self._refresh_overlay(depth))
                     if now >= next_stats:
                         stats = studio.stats() | {"updated_at": time.time()}
                         stream_stats = stats.get("stream")

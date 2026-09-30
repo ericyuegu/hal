@@ -79,57 +79,29 @@ def test_obs_request_checks_identity_and_redacts_errors(tmp_path: Path) -> None:
         studio.request("GetStats")
 
 
-def test_capture_disables_when_window_disappears_and_does_not_rehook_each_update(tmp_path: Path) -> None:
+@pytest.mark.parametrize("text", ["HAL", "Play HAL at 20xx.xyz · 0 players waiting"])
+def test_capture_shows_menu_and_game_windows_until_they_disappear(tmp_path: Path, text: str) -> None:
     studio = obs.ObsStudio(":90", tmp_path, {})
     studio._process = Mock()
     studio._process.poll.return_value = None
     studio._capture_id = 1
     request = Mock(return_value={"propertyItems": [{"itemValue": "3\r\nDolphin\r\nAppRun.wrapped"}]})
     studio.request = request
-    studio.update("HAL", playing=True)
+    studio.update(text)
     assert request.call_args.args == (
         "SetSceneItemEnabled",
         {"sceneName": "HAL", "sceneItemId": 1, "sceneItemEnabled": True},
     )
     request.reset_mock()
-    studio.update("HAL", playing=True)
+    studio.update(text)
     assert request.call_count == 1
     assert request.call_args.args[0] == "GetInputPropertiesListPropertyItems"
     request.return_value = {"propertyItems": []}
-    studio.update("HAL", playing=True)
+    studio.update(text)
     assert request.call_args.args[1]["sceneItemEnabled"] is False
-    request.reset_mock()
-    studio.update("Play HAL at 20xx.xyz", playing=False)
-    assert all(call.args[0] != "GetInputPropertiesListPropertyItems" for call in request.call_args_list)
 
 
-def test_waiting_card_is_built_off_air_then_inserted_below_game(tmp_path: Path) -> None:
-    studio = obs.ObsStudio(":90", tmp_path, {})
-    request = Mock(return_value={"sceneItemId": 7})
-    studio.request = request
-
-    studio.configure_waiting_card()
-
-    calls = [call.args for call in request.call_args_list]
-    inputs = [data for method, data in calls if method == "CreateInput"]
-    assert all(data["sceneName"] == "Waiting card" for data in inputs)
-    assert {data["inputKind"] for data in inputs} == {"color_source_v3", "text_ft2_source_v2"}
-    background = next(data["inputSettings"] for data in inputs if data["inputName"] == "Waiting background")
-    assert (background["width"], background["height"]) == (1920, 1080)
-    assert background["color"] & 0xFFFFFF != 0
-    text = " ".join(data["inputSettings"].get("text", "") for data in inputs)
-    assert "NEXT MATCH" in text
-    assert "20xx.xyz" in text
-    assert "#" not in text
-    assert calls[-3:] == [
-        ("CreateSceneItem", {"sceneName": "HAL", "sourceName": "Waiting card", "sceneItemEnabled": False}),
-        ("SetSceneItemIndex", {"sceneName": "HAL", "sceneItemId": 7, "sceneItemIndex": 0}),
-        ("SetSceneItemEnabled", {"sceneName": "HAL", "sceneItemId": 7, "sceneItemEnabled": True}),
-    ]
-    assert all(method != "SetCurrentProgramScene" for method, _ in calls)
-
-
-def test_obs_startup_places_waiting_card_under_capture_and_overlay(tmp_path: Path) -> None:
+def test_obs_startup_has_no_waiting_card(tmp_path: Path) -> None:
     studio = obs.ObsStudio(":90", tmp_path, {})
     request = Mock(return_value={"sceneItemId": 7})
     studio.request = request
@@ -141,4 +113,4 @@ def test_obs_startup_places_waiting_card_under_capture_and_overlay(tmp_path: Pat
         for method, data in (call.args for call in request.call_args_list)
         if method in ("CreateInput", "CreateSceneItem") and data["sceneName"] == "HAL"
     ]
-    assert main_sources == ["Waiting card", "Dolphin", "Overlay", "Game audio"]
+    assert main_sources == ["Dolphin", "Overlay", "Game audio"]

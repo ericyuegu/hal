@@ -52,7 +52,7 @@ Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
 | Bot Slippi accounts | Leased to sessions by the queue |
 | Hosts | This machine (RTX 3060) and Google Cloud G4 (1x RTX PRO 6000 Blackwell); Modal later |
 | Twitch stream | One stream at a time, leased by the queue to one session, which streams its slot 0 |
-| Stream idle behavior | New reservations go to the streamed slot first; an idle card shows between games |
+| Stream idle behavior | New reservations go to the streamed slot first; show Dolphin menus between games without a waiting card |
 | Stream consent | Every game on the streamed slot is broadcast; the page says so; the overlay never shows a connect code |
 | Stream audio | Game audio on the streamed slot only; other slots stay silent and headless |
 
@@ -335,8 +335,10 @@ approved by the owner on 2026-09-29.
 - Pin OBS to the tested Ubuntu 30.2.3 package. Keep its profile and control
   password in a private temporary directory. Remove them after exit. Keep the
   control port inside the container; do not publish it.
-- Capture the exact Slippi render window through native Xcomposite capture.
-  Hide it unless the slot is playing and its status heartbeat is fresh.
+- Capture the exact Slippi render window through native Xcomposite capture
+  whenever it exists, including menus and connection screens. The owner
+  approved continuous emulator capture on 2026-09-29. Keep the launcher and
+  desktop excluded.
 - Draw the overlay with OBS's text source. Build it from HAL's character,
   imitation, desired return, and game count. It never contains a connect code.
 - Encode H.264 with OBS's texture NVENC encoder: 1080p60, CBR 6 Mb/s,
@@ -346,8 +348,9 @@ approved by the owner on 2026-09-29.
   healthy minute. Stop it on lease loss and runner shutdown.
 - Sample OBS's render, encoder, and network frame counters every five seconds.
 
-Between games, show `Play HAL at 20xx.xyz` and the queue depth. Connection
-menus and stale game windows remain hidden.
+Between games, keep Dolphin visible and show `Play HAL at 20xx.xyz` and the
+queue depth in the overlay. Do not add a waiting card. The overlay never
+contains a connect code; the emulator's own menus remain visible.
 
 ### Performance
 
@@ -480,7 +483,7 @@ the expected players.
 6. **Manual stream check** on this machine: one stream slot and one headless
    slot against local `wrangler dev`, pushing to Twitch with
    `?bandwidthtest=true` appended to the key so nothing goes live. Confirm video,
-   audio, overlay, the idle card between games, and recovery after killing
+   audio, overlay, menus between games, and recovery after killing
    OBS. Record the performance figures from "Streaming".
 7. The AGENTS handoff checks: ruff format and check, ty, pytest, and the listed
    integration tests.
