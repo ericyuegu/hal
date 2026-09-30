@@ -97,6 +97,7 @@ const PLAYER_ALIASES: Record<string, string> = {
   M2K: 'mew2king',
   Mang0: 'mango',
   Monotheon: 'mono',
+  'mr. dokie': 'moky',
   Pipsqueak: 'plup piplup',
   Siddward: 'sidd',
   Solobattle: 'solo',

@@ -10,6 +10,7 @@ from typing import Final
 from typing import cast
 
 from hal.inference.api import DESIRED_RETURN_RANGE
+from hal.netplay_service.roster import PROFESSIONAL_ROSTER
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,13 +50,7 @@ CHARACTERS: Final[tuple[Choice, ...]] = (
 
 IMITATIONS: Final[tuple[Choice, ...]] = (
     Choice("MASKED", "No player identity"),
-    Choice("IBDW#0", "iBDW"),
-    Choice("ZAIN#0", "Zain"),
-    Choice("MANG#0", "Mang0"),
-    Choice("LEFFEN#0", "Leffen"),
-    Choice("PIPLUP#0", "Pipsqueak"),
-    Choice("AMSA#0", "aMSa"),
-    Choice("HBOX#1", "Hungrybox"),
+    *(Choice(code, label) for code, label, _ in PROFESSIONAL_ROSTER),
     Choice("PLATINUM", "Platinum rank"),
     Choice("DIAMOND", "Diamond rank"),
     Choice("MASTER", "Master rank"),

@@ -56,7 +56,6 @@ def policy_config(
     delays = tuple(delay for delay in (2, 3) if delay in supported_delays)
     if capability_version < 2 or delays != (2, 3):
         raise ValueError("netplay needs a capability-v2 bundle that supports delays 2 and 3")
-    # The roster stays the current imitation list until the page redesign adds its own.
     return PolicyConfig(
         bundle_sha256=bundle_sha256,
         bundle_r2_key=policy_bundle_key(bundle_sha256),

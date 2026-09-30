@@ -554,10 +554,12 @@ redesign spec against the API above.
   cache rebuild. The job exposes `active_imitation`.
 - **Advanced:** frame delay only. Temperature and replan interval are not
   exposed; replan interval stays fixed at 4 frames.
-- **Roster:** the 38 professional players in `PROFESSIONAL_PLAYER_SLUGS` plus
-  iBDW, Leffen, Pipsqueak, and Hungrybox, and the three ranks. Each maps to the
-  connect code with the most training frames, generated from the identity
-  sidecar and checked against the bundle's vocabulary.
+- **Roster:** the 50 connect codes with the most train frames in the
+  professional manifests of the identity sidecar, excluding professionals'
+  alternate accounts, plus the three ranks. Professionals keep their tags;
+  other codes use their most common display name.
+  `hal/scripts/build_netplay_roster.py` generates `hal/netplay_service/roster.py`;
+  publishing checks it against the bundle's vocabulary.
 - **Records:** games record the imitation used; the measurement record becomes
   schema 4 with a `policy_settings` timeline; browser prefs move to a new key
   storing raw `desired_return`.

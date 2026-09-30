@@ -53,8 +53,8 @@ def test_policy_config_requires_both_netplay_delays() -> None:
 def test_imitations_must_be_in_the_bundle_vocabulary() -> None:
     codes = tuple(sorted(choice.value for choice in IMITATIONS if "#" in choice.value))
     check_imitations(IMITATIONS, codes)
-    missing = tuple(code for code in codes if code not in ("ZAIN#0", "HBOX#1"))
-    with pytest.raises(ValueError, match=r"HBOX#1, ZAIN#0"):
+    missing = tuple(code for code in codes if code not in ("ZAIN#0", "MANG#0"))
+    with pytest.raises(ValueError, match=r"MANG#0, ZAIN#0"):
         check_imitations(IMITATIONS, missing)
 
 
