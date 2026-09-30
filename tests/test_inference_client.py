@@ -50,7 +50,7 @@ def test_one_delivery_thread_handles_repeated_requests() -> None:
         for _ in range(3):
             request = parent.recv()
             delivered.append(request)
-            parent.send(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4))
+            parent.send(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0))
 
     server_thread = threading.Thread(target=server)
     server_thread.start()
@@ -114,7 +114,7 @@ def test_delivery_latency_ends_when_response_arrives_before_later_poll() -> None
 
     def reply() -> None:
         request = parent.recv()
-        parent.send(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4))
+        parent.send(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0))
 
     server = threading.Thread(target=reply)
     server.start()
@@ -147,7 +147,7 @@ def test_response_received_after_request_deadline_is_rejected_without_early_poll
         client.submit(_request(1, 0))
         request = parent.recv()
         time.sleep(0.04)
-        parent.send(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4))
+        parent.send(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0))
         deadline = time.monotonic() + 0.2
         while time.monotonic() < deadline:
             with client._lock:
@@ -219,7 +219,7 @@ def test_wrong_active_response_identity_fails_stream() -> None:
         client.submit(request)
         assert parent.poll(0.2)
         parent.recv()
-        parent.send(replace(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4), generation=2))
+        parent.send(replace(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0), generation=2))
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             try:

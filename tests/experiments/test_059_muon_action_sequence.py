@@ -540,7 +540,7 @@ def test_dense_fault_snapshot_captures_cpu_input_before_decode_failure(
     def fail_decode(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("injected decoder failure")
 
-    monkeypatch.setattr(adapter.policy.executor, "decode", fail_decode)
+    monkeypatch.setattr(adapter.policy.executor, "decode_prediction", fail_decode)
     neutral = NEUTRAL_ACTION.copy()
     with pytest.raises(RuntimeError, match="injected decoder failure"):
         adapter.plan_rows({Slot(0, 2): [ObservationRow(10, flat, neutral, reset=True)]})
@@ -768,7 +768,7 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
     def decode(context, horizon, **kwargs):
         assert kwargs["committed"].shape == (1, 1, len(ACTION_CHANNELS))
         clock.seconds += 0.25
-        return torch.zeros(1, horizon, len(ACTION_CHANNELS))
+        return torch.zeros(1, horizon, len(ACTION_CHANNELS)), torch.zeros(1)
 
     rows = [
         exp.MatchRow(1, 2, 31, 0, 0, 100, 123, 1.0, 2.0, 0, 1),
@@ -789,7 +789,7 @@ def test_evaluation_persists_emulator_and_inference_metrics_separately(tmp_path,
     monkeypatch.setattr(exp, "time", clock)
     monkeypatch.setattr("hal.inference.window_policy.time", clock)
     monkeypatch.setattr(engine, "prewarm", prewarm)
-    monkeypatch.setattr(engine, "decode", decode)
+    monkeypatch.setattr(engine, "decode_prediction", decode)
     monkeypatch.setattr(exp, "sweep_vs_cpu_prior_with_rows", sweep)
     monkeypatch.setattr(exp, "default_session_cfg", lambda *args, **kwargs: None)
     metrics = exp.eval_vs_cpu(

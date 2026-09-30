@@ -185,16 +185,17 @@ class FrameAction:
 
 @dataclass(frozen=True, slots=True)
 class ActionPlan:
-    """New predictions only; fixed actions remain on the request."""
+    """Predicted actions and ego state value at source_frame; fixed actions stay on the request."""
 
     stream_id: int
     generation: int
     sequence: int
     source_frame: int
     actions: tuple[FrameAction, ...]
+    state_value: float
 
 
-def action_plan(request: PredictionRequest, tail: Sequence[ControllerAction]) -> ActionPlan:
+def action_plan(request: PredictionRequest, tail: Sequence[ControllerAction], *, state_value: float) -> ActionPlan:
     first = request.source_frame + len(request.fixed_actions) + 1
     return ActionPlan(
         request.stream_id,
@@ -202,6 +203,7 @@ def action_plan(request: PredictionRequest, tail: Sequence[ControllerAction]) ->
         request.sequence,
         request.source_frame,
         tuple(FrameAction(first + index, action) for index, action in enumerate(tail)),
+        state_value,
     )
 
 
@@ -244,6 +246,8 @@ def validate_action_plan(request: PredictionRequest, plan: ActionPlan, horizon: 
         request.source_frame,
     ):
         raise ValueError("action plan does not match its request")
+    if type(plan.state_value) is not float or not math.isfinite(plan.state_value):
+        raise ValueError("action plan state value must be a finite float")
     if len(plan.actions) != horizon - len(request.fixed_actions):
         raise ValueError("action plan has the wrong prediction horizon")
     first = request.source_frame + len(request.fixed_actions) + 1

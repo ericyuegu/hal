@@ -60,8 +60,8 @@ def _sample_decoder(
     return_value: Tensor,
     condition_present: Tensor,
     temperature: Tensor,
-) -> Tensor:
-    return model.temporal.sample_indices(
+) -> tuple[Tensor, Tensor]:
+    indices = model.temporal.sample_indices(
         hidden,
         observed,
         offsets,
@@ -73,6 +73,7 @@ def _sample_decoder(
         ctx_pad=ctx_pad,
         forced_prefix=forced_prefix,
     )
+    return indices, model.estimate_value(hidden)
 
 
 def _sample_decoder_with_logits(
@@ -86,8 +87,8 @@ def _sample_decoder_with_logits(
     return_value: Tensor,
     condition_present: Tensor,
     temperature: Tensor,
-) -> tuple[Tensor, tuple[Tensor, ...]]:
-    return model.temporal.sample_indices_with_logits(
+) -> tuple[Tensor, tuple[Tensor, ...], Tensor]:
+    indices, logits = model.temporal.sample_indices_with_logits(
         hidden,
         observed,
         offsets,
@@ -99,6 +100,7 @@ def _sample_decoder_with_logits(
         ctx_pad=ctx_pad,
         forced_prefix=forced_prefix,
     )
+    return indices, logits, model.estimate_value(hidden)
 
 
 def _pad_context(ctx: Context, bucket: int) -> Context:
@@ -151,6 +153,7 @@ def condition_ego_players(ctx: Context, player_ids: Sequence[int]) -> Context:
 
 @dataclass(frozen=True, slots=True)
 class DecodedPlan:
+    state_values: Tensor
     actions: Tensor
     indices: Tensor
     logits: tuple[Tensor, ...]
@@ -401,6 +404,35 @@ class WindowPolicy:
         gen: torch.Generator | None = None,
         committed: Tensor | None = None,
     ) -> Tensor:
+        actions, _ = self.decode_prediction(
+            ctx,
+            horizon,
+            streams=streams,
+            stream_ids=stream_ids,
+            sampling_generations=sampling_generations,
+            desired_returns=desired_returns,
+            temperatures=temperatures,
+            argmax=argmax,
+            gen=gen,
+            committed=committed,
+        )
+        return actions
+
+    @torch.no_grad()
+    def decode_prediction(
+        self,
+        ctx: Context,
+        horizon: int,
+        *,
+        streams: StreamGroupRng | None = None,
+        stream_ids: Sequence[int] | None = None,
+        sampling_generations: Sequence[int] | None = None,
+        desired_returns: Sequence[float | None] | None = None,
+        temperatures: Sequence[float] | None = None,
+        argmax: bool = False,
+        gen: torch.Generator | None = None,
+        committed: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         prepared = self._prepare_decode(
             ctx,
             horizon,
@@ -425,8 +457,9 @@ class WindowPolicy:
                     ctx_pad=prepared.ctx_pad,
                     forced_prefix=prepared.forced_prefix,
                 )
+                state_values = self.model.estimate_value(prepared.hidden)
             else:
-                indices = self._decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
+                indices, state_values = self._decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
                     prepared.hidden,
                     prepared.ctx_pad,
                     prepared.observed,
@@ -436,7 +469,7 @@ class WindowPolicy:
                     prepared.condition_present,
                     prepared.temperature,
                 )
-        return self.model.codec.dequantize(indices[: prepared.rows])
+        return self.model.codec.dequantize(indices[: prepared.rows]), state_values[: prepared.rows]
 
     @torch.no_grad()
     def decode_with_trace(
@@ -464,7 +497,9 @@ class WindowPolicy:
             committed=committed,
         )
         with self._amp_context(ctx.ctx_pad.device):
-            indices, logits = self._trace_decoder(prepared.bucket, horizon, prepared.forced_prefix.shape[1])(
+            indices, logits, state_values = self._trace_decoder(
+                prepared.bucket, horizon, prepared.forced_prefix.shape[1]
+            )(
                 prepared.hidden,
                 prepared.ctx_pad,
                 prepared.observed,
@@ -476,6 +511,7 @@ class WindowPolicy:
             )
         real_indices = indices[: prepared.rows]
         return DecodedPlan(
+            state_values=state_values[: prepared.rows],
             actions=self.model.codec.dequantize(real_indices),
             indices=real_indices,
             logits=tuple(values[: prepared.rows] for values in logits),
@@ -741,7 +777,7 @@ class DenseWindowPredictionPolicy:
         started = time.perf_counter()
         committed_tensor = torch.from_numpy(committed).to(device)
         if self.trace_sink is None:
-            actions = self.executor.decode(
+            actions, state_values = self.executor.decode_prediction(
                 context,
                 self._horizon,
                 streams=self._rng,
@@ -763,12 +799,15 @@ class DenseWindowPredictionPolicy:
                 committed=committed_tensor,
             )
             self.trace_sink(requests, decoded)
-            actions = decoded.actions
+            actions, state_values = decoded.actions, decoded.state_values
         if self.telemetry is not None:
             self.telemetry.record(rows=len(requests), horizon=self._horizon, seconds=time.perf_counter() - started)
         plans: list[ActionPlan] = []
-        for index, request in enumerate(requests):
-            tail = tuple(action_vec_to_controller(row) for row in actions[index, self._prefix :].cpu().numpy())
-            plans.append(action_plan(request, tail))
+        delivered = (
+            torch.cat((actions[:, self._prefix :].float().flatten(1), state_values[:, None]), dim=1).cpu().numpy()
+        )
+        for request, row in zip(requests, delivered, strict=True):
+            tail = tuple(action_vec_to_controller(action) for action in row[:-1].reshape(-1, len(ACTION_CHANNELS)))
+            plans.append(action_plan(request, tail, state_value=float(row[-1])))
             self._streams[request.stream_id].reset_pending = False
         return plans

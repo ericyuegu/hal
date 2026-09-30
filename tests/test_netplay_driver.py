@@ -121,7 +121,9 @@ class _Client:
             return None
         request = self.pending
         self.pending = None
-        return action_plan(request, (ControllerAction(0.5, 0, 0, 0, 0, 0, 0),) * (8 - len(request.fixed_actions)))
+        return action_plan(
+            request, (ControllerAction(0.5, 0, 0, 0, 0, 0, 0),) * (8 - len(request.fixed_actions)), state_value=0.0
+        )
 
 
 def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,6 +136,7 @@ def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pyt
         },
     )
     monkeypatch.setattr(netplay.Trajectory, "from_capture", lambda frames, _ports: frames)
+    predictions = []
     session = _Session()
     client = _Client()
 
@@ -144,6 +147,7 @@ def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pyt
         RuntimeConfig(1, (2,)),
         FrameTiming(2, 2, 4, 2, 8),
         max_frames=10,
+        on_prediction=predictions.append,
     )
 
     assert client.requests[0].source_frame == -2
@@ -166,6 +170,9 @@ def test_netplay_countdown_frame_targets_and_constant_character(monkeypatch: pyt
         event.phase == ("countdown" if event.choice_frame < 0 else "gameplay") for event in result.schedule_events
     )
     assert result.schedule_events[-1].submission_gaps == 0
+
+    assert predictions
+    assert all(plan.state_value == 0.0 for plan in predictions)
 
 
 def test_countdown_input_mask_ends_at_negative_45() -> None:

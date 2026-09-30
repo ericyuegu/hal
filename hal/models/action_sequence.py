@@ -1177,11 +1177,16 @@ class ActionSequenceTransformer(nn.Module):
         )
         # V(s_t) predicts G_{t+1}, the return aligned with the next action. Keep
         # it last so the same seed preserves every policy parameter's draw.
-        # Closed-loop inference never reads it.
         self.value_head = SwiGLU(cfg.d_model, cfg.value_hidden_dim, 1, output_bias=True)
         initialize_action_sequence_parameters(self, cfg)
         with torch.random.fork_rng(devices=[]):
             self.temporal.return_conditioner = ReturnConditioner(cfg)
+
+    def estimate_value(self, hidden: Tensor) -> Tensor:
+        """Estimate next-action return in training reward units for each row."""
+        with torch.autocast(device_type=hidden.device.type, enabled=False):
+            features = decoder_rmsnorm(hidden[:, -1]).to(self.value_head.up.weight.dtype)
+            return self.value_head(features).squeeze(-1).float()
 
     def _per_player_features(self, features: dict[str, Tensor], prefix: str) -> Tensor:
         ref = features[f"{prefix}_position_x"]

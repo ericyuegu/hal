@@ -40,6 +40,10 @@ from hal.inference.engine import start_inference_worker
 from hal.netplay_service.obs import ObsStudio
 from hal.netplay_service.stream import DisplayGroup
 from hal.netplay_service.stream import PulseAudio
+from hal.netplay_service.value_meter import OverlayProcess
+from hal.netplay_service.value_meter import ValueMeter
+from hal.netplay_service.value_meter import ValueSample
+from hal.netplay_service.value_meter import write_value
 from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import CountdownEnded
 from hal.sim.netplay import NetplaySession
@@ -90,10 +94,6 @@ def _write(path: Path, value: object) -> None:
     temporary.replace(path)
 
 
-def overlay(advantage: float) -> str:
-    return f"HAL · Cody Fox · advantage {advantage:g} · Ranked"
-
-
 class RankedStream:
     """Stream failure can restart OBS, but cannot stop or write to the player."""
 
@@ -102,6 +102,8 @@ class RankedStream:
         self.output = output
         self.environment = environment
         self.playing = threading.Event()
+        self.meter = ValueMeter()
+        self._capture_error: Exception | None = None
         self.screen: RankedScreen | None = None
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -120,56 +122,102 @@ class RankedStream:
         if self._thread.is_alive():
             raise RuntimeError("ranked stream did not stop")
 
+    def _capture(self, studio: ObsStudio, stopped: threading.Event) -> None:
+        connection = None
+        try:
+            screenshots = self.output / "screenshots"
+            screenshots.mkdir(exist_ok=True)
+            retained: deque[Path] = deque(sorted(screenshots.glob("*.png")))
+            while len(retained) > 300:
+                retained.popleft().unlink()
+            last_saved = 0.0
+            connection = studio.capture_connection()
+            while not stopped.wait(0.35):
+                captured = time.monotonic()
+                png = connection.screenshot()
+                if png is None:
+                    self.screen = None
+                    continue
+                temporary = self.output / "latest.partial.png"
+                temporary.write_bytes(png)
+                temporary.replace(self.output / "latest.png")
+                if captured - last_saved >= 2:
+                    path = screenshots / f"{time.time_ns()}.png"
+                    path.write_bytes(png)
+                    retained.append(path)
+                    if len(retained) > 300:
+                        retained.popleft().unlink()
+                    last_saved = captured
+                if self.playing.is_set():
+                    self.screen = None
+                    continue
+                try:
+                    self.screen = read_screen(png, captured)
+                    _write(self.output / "screen.json", asdict(self.screen))
+                except (ValueError, OSError, subprocess.SubprocessError) as error:
+                    self.screen = None
+                    _write(self.output / "vision-error.json", {"at": time.time(), "type": type(error).__name__})
+        except (WebSocketException, OSError, RuntimeError, ValueError) as error:
+            self.screen = None
+            self._capture_error = error
+        finally:
+            if connection is not None:
+                connection.close()
+
     def _run(self) -> None:
-        screenshots = self.output / "screenshots"
-        screenshots.mkdir()
-        retained: deque[Path] = deque()
         backoff = 1.0
-        last_saved = 0.0
-        while not self._stop.is_set():
-            studio = ObsStudio(self.config.display, self.output / "stream", self.environment)
-            try:
-                studio.start(self.config.twitch_key.read_text().strip(), bandwidth_test=self.config.bandwidth_test)
-                self._ready.set()
-                backoff = 1
-                while not self._stop.wait(0.35):
-                    studio.update(overlay(self.config.advantage))
-                    _write(self.output / "obs-stats.json", {"at": time.time(), **studio.stats()})
-                    captured = time.monotonic()
-                    png = studio.screenshot()
-                    if png is None:
-                        self.screen = None
-                        continue
-                    temporary = self.output / "latest.partial.png"
-                    temporary.write_bytes(png)
-                    temporary.replace(self.output / "latest.png")
-                    if captured - last_saved >= 2:
-                        path = screenshots / f"{time.time_ns()}.png"
-                        path.write_bytes(png)
-                        retained.append(path)
-                        if len(retained) > 300:
-                            retained.popleft().unlink()
-                        last_saved = captured
-                    if self.playing.is_set():
-                        self.screen = None
-                        continue
-                    try:
-                        self.screen = read_screen(png, captured)
-                        _write(self.output / "screen.json", asdict(self.screen))
-                    except (ValueError, OSError, subprocess.SubprocessError) as error:
-                        self.screen = None
-                        _write(self.output / "vision-error.json", {"at": time.time(), "type": type(error).__name__})
-            except (WebSocketException, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                self.screen = None
-                _write(
-                    self.output / "stream-error.json",
-                    {"at": time.time(), "type": type(error).__name__, "message": str(error)},
-                )
-            finally:
-                studio.close()
-            if self._stop.wait(backoff):
-                return
-            backoff = min(30, backoff * 2)
+        overlay = OverlayProcess(self.output)
+        try:
+            while not self._stop.is_set():
+                studio = ObsStudio(self.config.display, self.output / "stream", self.environment)
+                capture_stop = threading.Event()
+                capture = threading.Thread(target=self._capture, args=(studio, capture_stop), daemon=True)
+                self._capture_error = None
+                try:
+                    studio.start(
+                        self.config.twitch_key.read_text().strip(),
+                        bandwidth_test=self.config.bandwidth_test,
+                        ranked=True,
+                    )
+                    studio.write_control(self.output / "obs-control.json")
+                    write_value(self.output / "value.json", None, playing=False)
+                    capture.start()
+                    self._ready.set()
+                    backoff = 1
+                    last_window = last_stats = 0.0
+                    previous: tuple[ValueSample | None, bool] | None = None
+                    while not self._stop.wait(1 / 30):
+                        now = time.monotonic()
+                        if self._capture_error is not None:
+                            raise RuntimeError("Dolphin screenshot connection failed") from self._capture_error
+                        sample, playing = self.meter.snapshot(), self.playing.is_set()
+                        if (sample, playing) != previous:
+                            write_value(self.output / "value.json", sample, playing=playing)
+                            previous = sample, playing
+                        overlay.ensure_running(now)
+                        if now - last_window >= 0.35:
+                            studio.refresh_window()
+                            last_window = now
+                        if now - last_stats >= 1:
+                            _write(self.output / "obs-stats.json", {"at": time.time(), **studio.stats()})
+                            last_stats = now
+                except (WebSocketException, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    self.screen = None
+                    _write(
+                        self.output / "stream-error.json",
+                        {"at": time.time(), "type": type(error).__name__, "message": str(error)},
+                    )
+                finally:
+                    capture_stop.set()
+                    if capture.is_alive():
+                        capture.join(timeout=8)
+                    studio.close()
+                    (self.output / "obs-control.json").unlink(missing_ok=True)
+                if self._stop.wait(backoff):
+                    return
+                backoff = min(30, backoff * 2)
+        finally:
+            overlay.close()
 
 
 def run(config: RankedConfig) -> Path:
@@ -233,6 +281,11 @@ def _run(config: RankedConfig, output: Path, stop: threading.Event, notify_uploa
     sources = [
         Path(__file__),
         source_root / "eval/ranked_replays.py",
+        source_root / "eval/netplay.py",
+        source_root / "models/action_sequence.py",
+        *sorted((source_root / "inference").glob("*.py")),
+        source_root / "netplay_service/value_meter.py",
+        source_root / "scripts/ranked_overlay.py",
         source_root / "sim/ranked.py",
         source_root / "sim/netplay.py",
         source_root / "sim/session.py",
@@ -326,6 +379,7 @@ def _run(config: RankedConfig, output: Path, stop: threading.Event, notify_uploa
                             rematch = False
                             while not stop.is_set() and (not config.max_games or games < config.max_games):
                                 stream.playing.clear()
+                                stream.meter.clear()
                                 previous = set(replay_dir.rglob("*.slp"))
                                 _write(output / "status.json", {"state": "menu", "game": games + 1, "at": time.time()})
                                 try:
@@ -340,6 +394,7 @@ def _run(config: RankedConfig, output: Path, stop: threading.Event, notify_uploa
                                         max_frames=60 * 60 * 10,
                                         rematch=rematch,
                                         on_live=on_live,
+                                        on_prediction=stream.meter.observe,
                                     )
                                 except CountdownEnded:
                                     # A new inference generation must start after a
@@ -351,8 +406,10 @@ def _run(config: RankedConfig, output: Path, stop: threading.Event, notify_uploa
                                         {"at": time.time(), "game": games + 1},
                                     )
                                     continue
+                                finally:
+                                    stream.playing.clear()
+                                    stream.meter.clear()
                                 session.submit(NEUTRAL_CONTROLLER_ACTION)
-                                stream.playing.clear()
                                 rematch = True
                                 deadline = time.monotonic() + 5
                                 while True:

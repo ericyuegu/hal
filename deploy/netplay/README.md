@@ -771,3 +771,18 @@ Markdown-only cleanup. The diff and local documentation links were checked.
 Reboot, managed replacement, stream lease transfer, matched stream-on/off
 performance controls, and viewer latency remain unverified. No image push,
 new cloud resource, R2 asset upload, Worker deployment, or Git push occurred.
+
+
+## Ranked value meter — 2026-09-30
+
+The value head now accompanies every inference response. Ranked displays
+its six-game-frame EMA in a separate OBS overlay process. Restarting that
+process reloads the meter without restarting the player or OBS.
+
+Matched G4 inference p50/p95/p99 changed from **5.051/5.085/5.095 ms** to
+**4.678/4.743/5.049 ms**. Each run used 300 measured samples and the same
+bundle, inputs, seed, conditioning, and timing. Action sequences matched
+exactly; neither run compiled or captured CUDA graphs while serving.
+
+See [Ranked deployment](ranked.md#value-meter--2026-09-30) for the 3060
+comparison, precision check, runtime files, and overlay reload procedure.

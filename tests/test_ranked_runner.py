@@ -26,8 +26,6 @@ def test_fixed_timing_and_overlay_do_not_expose_a_connect_code() -> None:
     timing = ranked.timing()
     assert (timing.physical_delay_frames, timing.inference_allowance_frames) == (2, 1)
     assert (timing.fixed_prefix_frames, timing.replan_interval_frames, timing.prediction_horizon_frames) == (3, 4, 8)
-    assert ranked.overlay(120) == "HAL · Cody Fox · advantage 120 · Ranked"
-    assert "#" not in ranked.overlay(120)
 
 
 def test_obs_failure_restarts_only_the_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,7 +71,7 @@ def test_player_recovers_without_requalifying_and_records_quits(
     monkeypatch.setattr(ranked, "start_inference_worker", lambda *_args: nullcontext(Mock()))
     monkeypatch.setattr(ranked, "DisplayGroup", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(ranked, "PulseAudio", lambda *_args: nullcontext(SimpleNamespace(environment={})))
-    stream = SimpleNamespace(playing=Event(), screen=None)
+    stream = SimpleNamespace(playing=Event(), screen=None, meter=ranked.ValueMeter())
     monkeypatch.setattr(ranked, "RankedStream", lambda *_args: nullcontext(stream))
     sessions = []
 
@@ -139,3 +137,62 @@ def test_run_records_failure_and_restores_signal_handlers(tmp_path: Path, monkey
     assert {number: ranked.signal.getsignal(number) for number in original} == original
     status = next(cfg.output.glob("*/status.json"))
     assert ranked.json.loads(status.read_text())["state"] == "failed"
+
+
+def test_blocked_menu_ocr_does_not_block_value_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    import time
+
+    from hal.inference.api import ActionPlan
+
+    cfg = config(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    entered, release = Event(), Event()
+    studio = Mock()
+    connection = Mock()
+    connection.screenshot.return_value = b"test-image"
+    studio.capture_connection.return_value = connection
+    studio.stats.return_value = {}
+    monkeypatch.setattr(ranked, "ObsStudio", Mock(return_value=studio))
+    monkeypatch.setattr(ranked, "OverlayProcess", Mock(return_value=Mock()))
+
+    from hal.sim.ranked import ScreenKind
+
+    def blocked_read(_png: bytes, captured: float):
+        entered.set()
+        assert release.wait(3)
+        return ranked.RankedScreen(captured, ScreenKind.UNKNOWN)
+
+    monkeypatch.setattr(ranked, "read_screen", blocked_read)
+    try:
+        with ranked.RankedStream(cfg, output, {}) as stream:
+            assert entered.wait(2)
+            stream.playing.set()
+            stream.meter.observe(ActionPlan(0, 1, 0, 4, (), 45.0))
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                data = json.loads((output / "value.json").read_text())
+                if data["sample"] is not None:
+                    break
+                time.sleep(0.01)
+            assert data["sample"]["ema"] == 45
+            assert stream.playing.is_set()
+            assert not release.is_set()
+            release.set()
+    finally:
+        release.set()
+    connection.close.assert_called_once()
+    studio.close.assert_called_once()
+
+
+def test_capture_setup_failure_reaches_the_stream_supervisor(tmp_path: Path) -> None:
+    cfg = config(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "screenshots").write_text("invalid directory")
+    stream = ranked.RankedStream(cfg, output, {})
+    studio = Mock()
+    stream._capture(studio, Event())
+    assert isinstance(stream._capture_error, OSError)
+    studio.capture_connection.assert_not_called()

@@ -124,24 +124,42 @@ def dolphin_window(items: Json) -> str | None:
     return matches[0] if matches else None
 
 
-class ObsStudio:
-    """Own OBS, its private profile, and its authenticated control socket."""
+class ObsConnection:
+    """One thread owns each authenticated OBS connection."""
 
-    def __init__(self, display: str, directory: Path, environment: dict[str, str]) -> None:
-        self._environment = environment | {
-            "DISPLAY": display,
-            "QT_QPA_PLATFORM": "xcb",
-            "__EGL_VENDOR_LIBRARY_FILENAMES": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
-        }
-        self._directory = directory
-        self._temporary: tempfile.TemporaryDirectory[str] | None = None
-        self._process: subprocess.Popen[bytes] | None = None
+    def __init__(self) -> None:
         self._socket: ClientConnection | None = None
         self._request_id = 0
-        self._window: str | None = None
-        self._visible = False
-        self._text = ""
-        self._capture_id: Json = None
+
+    def open(self, password: str) -> None:
+        self._socket = connect(
+            "ws://127.0.0.1:4455", open_timeout=1, close_timeout=1, proxy=None, max_size=8 * 1024 * 1024
+        )
+        try:
+            self.authenticate(password)
+        except BaseException:
+            self.close()
+            raise
+
+    def authenticate(self, password: str) -> None:
+        if self._socket is None:
+            raise RuntimeError("OBS is not connected")
+        hello = _object(json.loads(self._socket.recv(timeout=3)))
+        auth = _object(_object(hello.get("d")).get("authentication"))
+        self._socket.send(
+            json.dumps(
+                {
+                    "op": 1,
+                    "d": {
+                        "rpcVersion": 1,
+                        "eventSubscriptions": 0,
+                        "authentication": authentication(password, _string(auth["salt"]), _string(auth["challenge"])),
+                    },
+                }
+            )
+        )
+        if _object(json.loads(self._socket.recv(timeout=3))).get("op") != 2:
+            raise RuntimeError("OBS authentication failed")
 
     def request(self, method: str, data: dict[str, Json] | None = None) -> dict[str, Json]:
         if self._socket is None:
@@ -172,7 +190,47 @@ class ObsStudio:
             raise RuntimeError(f"OBS {method} failed with code {status.get('code')}")
         return _object(body.get("responseData", {}))
 
-    def start(self, key: str, *, bandwidth_test: bool) -> None:
+    def screenshot(self) -> bytes | None:
+        """Capture only the selected Dolphin window, never an unset source."""
+        settings = _object(self.request("GetInputSettings", {"inputName": "Dolphin"}).get("inputSettings"))
+        if not settings.get("capture_window"):
+            return None
+        result = self.request(
+            "GetSourceScreenshot",
+            {"sourceName": "Dolphin", "imageFormat": "png", "imageWidth": 960, "imageHeight": 720},
+        )
+        data = _string(result.get("imageData"))
+        prefix = "data:image/png;base64,"
+        if not data.startswith(prefix):
+            raise ValueError("OBS screenshot must be a PNG data URL")
+        return base64.b64decode(data[len(prefix) :], validate=True)
+
+    def close(self) -> None:
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+
+
+class ObsStudio(ObsConnection):
+    """Own OBS, its private profile, and its authenticated control socket."""
+
+    def __init__(self, display: str, directory: Path, environment: dict[str, str]) -> None:
+        super().__init__()
+        self._environment = environment | {
+            "DISPLAY": display,
+            "QT_QPA_PLATFORM": "xcb",
+            "__EGL_VENDOR_LIBRARY_FILENAMES": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+        }
+        self._directory = directory
+        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._password: str | None = None
+        self._window: str | None = None
+        self._visible = False
+        self._text = ""
+        self._capture_id: Json = None
+
+    def start(self, key: str, *, bandwidth_test: bool, ranked: bool = False) -> None:
         if not key:
             raise ValueError("Twitch key must be non-empty")
         version = subprocess.check_output(["obs", "--version"], env=self._environment, text=True).strip()
@@ -215,24 +273,8 @@ class ObsStudio:
                     if time.monotonic() >= deadline:
                         raise TimeoutError("OBS control socket did not open") from None
                     time.sleep(0.1)
-            hello = _object(json.loads(self._socket.recv(timeout=3)))
-            auth = _object(_object(hello.get("d")).get("authentication"))
-            self._socket.send(
-                json.dumps(
-                    {
-                        "op": 1,
-                        "d": {
-                            "rpcVersion": 1,
-                            "eventSubscriptions": 0,
-                            "authentication": authentication(
-                                password, _string(auth["salt"]), _string(auth["challenge"])
-                            ),
-                        },
-                    }
-                )
-            )
-            if _object(json.loads(self._socket.recv(timeout=3))).get("op") != 2:
-                raise RuntimeError("OBS authentication failed")
+            self.authenticate(password)
+            self._password = password
             while True:
                 try:
                     version_info = self.request("GetVersion")
@@ -243,7 +285,7 @@ class ObsStudio:
                     time.sleep(0.1)
             if version_info.get("obsVersion") != VERSION:
                 raise RuntimeError("OBS control socket belongs to a different release")
-            self._configure_scene()
+            self._configure_scene(ranked=ranked)
             self.request(
                 "SetStreamServiceSettings",
                 {
@@ -272,7 +314,7 @@ class ObsStudio:
             },
         )["sceneItemId"]
 
-    def _configure_scene(self) -> None:
+    def _configure_scene(self, *, ranked: bool = False) -> None:
         self._capture_id = self._create_input(
             "Dolphin",
             "xcomposite_input",
@@ -297,21 +339,26 @@ class ObsStudio:
                 },
             },
         )
-        overlay_id = self._create_input(
-            "Overlay",
-            "text_ft2_source_v2",
-            {
-                "text": "Play HAL at 20xx.xyz",
-                "font": {"face": "DejaVu Sans", "size": 32},
-                "color1": 0xFFFFFFFF,
-                "color2": 0xFFFFFFFF,
-                "outline": True,
-            },
-        )
-        self.request(
-            "SetSceneItemTransform",
-            {"sceneName": "HAL", "sceneItemId": overlay_id, "sceneItemTransform": {"positionX": 36, "positionY": 36}},
-        )
+        if not ranked:
+            overlay_id = self._create_input(
+                "Overlay",
+                "text_ft2_source_v2",
+                {
+                    "text": "Play HAL at 20xx.xyz",
+                    "font": {"face": "DejaVu Sans", "size": 32},
+                    "color1": 0xFFFFFFFF,
+                    "color2": 0xFFFFFFFF,
+                    "outline": True,
+                },
+            )
+            self.request(
+                "SetSceneItemTransform",
+                {
+                    "sceneName": "HAL",
+                    "sceneItemId": overlay_id,
+                    "sceneItemTransform": {"positionX": 36, "positionY": 36},
+                },
+            )
         self._create_input("Game audio", "pulse_output_capture", {"device_id": "hal_stream.monitor"})
         self.request("SetCurrentProgramScene", {"sceneName": "HAL"})
 
@@ -321,6 +368,11 @@ class ObsStudio:
         if text != self._text:
             self.request("SetInputSettings", {"inputName": "Overlay", "inputSettings": {"text": text}})
             self._text = text
+        self.refresh_window()
+
+    def refresh_window(self) -> None:
+        if self._process is None or self._process.poll() is not None:
+            raise RuntimeError("OBS exited; see obs.log")
         window = dolphin_window(
             self.request(
                 "GetInputPropertiesListPropertyItems",
@@ -342,18 +394,25 @@ class ObsStudio:
             self._visible = visible
 
     def screenshot(self) -> bytes | None:
-        """Capture only the selected Dolphin window, never an unset source."""
         if not self._visible:
             return None
-        result = self.request(
-            "GetSourceScreenshot",
-            {"sourceName": "Dolphin", "imageFormat": "png", "imageWidth": 960, "imageHeight": 720},
-        )
-        data = _string(result.get("imageData"))
-        prefix = "data:image/png;base64,"
-        if not data.startswith(prefix):
-            raise ValueError("OBS screenshot must be a PNG data URL")
-        return base64.b64decode(data[len(prefix) :], validate=True)
+        return super().screenshot()
+
+    def capture_connection(self) -> ObsConnection:
+        if self._password is None:
+            raise RuntimeError("OBS is not authenticated")
+        connection = ObsConnection()
+        connection.open(self._password)
+        return connection
+
+    def write_control(self, path: Path) -> None:
+        if self._password is None:
+            raise RuntimeError("OBS is not authenticated")
+        temporary = path.with_suffix(".partial")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w") as destination:
+            json.dump({"schema_version": 1, "password": self._password}, destination)
+        temporary.replace(path)
 
     def stats(self) -> dict[str, Json]:
         return {"obs": self.request("GetStats"), "stream": self.request("GetStreamStatus")}
@@ -367,9 +426,8 @@ class ObsStudio:
                 self._process.kill()
                 self._process.wait(timeout=3)
         self._process = None
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        super().close()
+        self._password = None
         if self._temporary is not None:
             self._temporary.cleanup()
             self._temporary = None

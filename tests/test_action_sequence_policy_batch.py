@@ -1,6 +1,7 @@
 """Ready streams use one cached model call while preserving stream identity."""
 
 import os
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Literal
 
@@ -16,6 +17,7 @@ from hal.eval.observations import flatten_live_frame
 from hal.eval.observations import policy_input_from_frame
 from hal.inference.action_sequence_artifact import REQUIRED_OBSERVATION_FIELDS
 from hal.inference.action_sequence_policy import ActionSequencePolicy
+from hal.inference.api import ActionPlan
 from hal.inference.api import PolicySpec
 from hal.inference.api import PredictionRequest
 from hal.inference.api import PreparedInferenceProfile
@@ -32,6 +34,16 @@ from hal.representation.features import ITEM_COLUMNS
 from hal.representation.features import feature_kind
 from hal.sim.session import canonical_frame
 from hal.wire import ACTION_DIM
+
+
+def _assert_plans_match(actual: Sequence[ActionPlan], expected: Sequence[ActionPlan]) -> None:
+    actual_by_id = {plan.stream_id: plan for plan in actual}
+    expected_by_id = {plan.stream_id: plan for plan in expected}
+    assert actual_by_id.keys() == expected_by_id.keys()
+    for stream_id, plan in actual_by_id.items():
+        reference = expected_by_id[stream_id]
+        assert replace(plan, state_value=0.0) == replace(reference, state_value=0.0)
+        assert plan.state_value == pytest.approx(reference.state_value, abs=2e-6, rel=2e-5)
 
 
 def _policy(
@@ -222,7 +234,7 @@ def test_ready_rows_keep_each_fixed_prefix_shape_and_sampling_state(delay: int, 
     )
     actual = batched.predict(requests)
     expected = tuple(serial.predict((request,))[0] for request in reversed(requests))
-    assert {plan.stream_id: plan for plan in actual} == {plan.stream_id: plan for plan in expected}
+    _assert_plans_match(actual, expected)
     assert all(plan.actions[0].target_frame == 4 + prefix for plan in actual)
     assert batched._rng.state() == serial._rng.state()
 
@@ -237,7 +249,7 @@ def test_ready_rows_keep_independent_identity_return_temperature_and_dummy_rng()
     )
     actual = batched.predict(first)
     expected = tuple(serial.predict((request,))[0] for request in reversed(first))
-    assert {plan.stream_id: plan for plan in actual} == {plan.stream_id: plan for plan in expected}
+    _assert_plans_match(actual, expected)
     assert batched._rng.state() == serial._rng.state()
     assert len({batched._prediction_streams[stream_id].player_id for stream_id, *_ in settings}) == 3
 
@@ -247,7 +259,7 @@ def test_ready_rows_keep_independent_identity_return_temperature_and_dummy_rng()
     )
     actual = batched.predict(next_requests)
     expected = tuple(serial.predict((request,))[0] for request in next_requests)
-    assert {plan.stream_id: plan for plan in actual} == {plan.stream_id: plan for plan in expected}
+    _assert_plans_match(actual, expected)
     assert batched._rng.state() == serial._rng.state()
     assert len(batched._rng.state()) == 3 * len(batched._rng.index_by_group)
 
@@ -261,7 +273,7 @@ def test_long_observation_updates_decompose_without_dummy_time_frames() -> None:
         requests = tuple(_request(batched, stream_id, source, count, sequence) for stream_id in (42, 7))
         actual = batched.predict(requests)
         expected = tuple(serial.predict((request,))[0] for request in reversed(requests))
-        assert {plan.stream_id: plan for plan in actual} == {plan.stream_id: plan for plan in expected}
+        _assert_plans_match(actual, expected)
         for stream_id in (42, 7):
             cache = batched._prediction_streams[stream_id].cache
             assert cache is not None and cache.next_position.item() == source + 1
@@ -290,7 +302,7 @@ def test_sparse_ready_pair_keeps_two_row_bucket_with_32_admitted() -> None:
     actual = sparse.predict(requests)
     expected = tuple(pair.predict((request,))[0] for request in requests)
     assert calls == [2]
-    assert actual == expected
+    _assert_plans_match(actual, expected)
     assert tuple(entry for entry in sparse._rng.state() if entry[0] not in ready) == idle_before
 
 
@@ -633,3 +645,72 @@ def test_cuda_graph_cache_matches_eager_through_wrap_reset_and_settings() -> Non
             torch.testing.assert_close(
                 cache.history[:, :, :, valid], reference.history[:, :, :, valid], atol=0.035, rtol=0.035
             )
+
+
+@pytest.mark.parametrize("history_mode", ["window", "kv_cache"])
+def test_prediction_returns_latest_value_without_changing_actions_or_rng(history_mode: str) -> None:
+    policy = _policy(2, history_mode=history_mode)
+    control = _policy(2, history_mode=history_mode)
+    requests = tuple(_request(policy, stream_id, 7, 8, 0) for stream_id in (7, 42))
+    seen: list[torch.Tensor] = []
+    estimate = policy.model.estimate_value
+
+    def record(hidden: torch.Tensor) -> torch.Tensor:
+        seen.append(hidden.detach().clone())
+        return estimate(hidden)
+
+    policy.model.estimate_value = record
+    actual = policy.predict(requests)
+    expected = control.predict(requests)
+    assert [p.actions for p in actual] == [p.actions for p in expected]
+    assert policy._rng.state() == control._rng.state()
+    assert len(seen) == 1
+    with torch.no_grad():
+        reference = policy.model.value_head(
+            torch.nn.functional.rms_norm(seen[0][:, -1], (policy.cfg.d_model,), eps=1e-6).float()
+        ).squeeze(-1)
+    assert [p.state_value for p in actual] == pytest.approx(reference.tolist(), abs=2e-6, rel=2e-5)
+
+
+def test_value_and_actions_follow_the_controlled_port() -> None:
+    first, second = _policy(1), _policy(1)
+    request = _request(first, 0, 7, 8, 0)
+    observations = tuple(
+        replace(item, observation=dict(item.observation) | {"p1_position_x": 10.0, "p2_position_x": -40.0})
+        for item in request.observations
+    )
+    swapped = tuple(
+        replace(
+            item,
+            controlled_port=2,
+            observation={
+                (
+                    "p2_" + key[3:] if key.startswith("p1_") else "p1_" + key[3:] if key.startswith("p2_") else key
+                ): value
+                for key, value in item.observation.items()
+            },
+        )
+        for item in observations
+    )
+    actual = first.predict((replace(request, observations=observations),))
+    expected = second.predict((replace(request, observations=swapped),))
+    _assert_plans_match(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_value_head_uses_serving_precision_and_returns_fp32(dtype: torch.dtype) -> None:
+    policy = _policy(1)
+    model = policy.model
+    model.value_head.to(dtype=dtype)
+    hidden = torch.randn(2, 3, model.cfg.d_model).to(dtype)
+    before = torch.get_rng_state().clone()
+    with torch.no_grad():
+        expected = (
+            model.value_head(torch.nn.functional.rms_norm(hidden[:, -1], (model.cfg.d_model,), eps=1e-6))
+            .squeeze(-1)
+            .float()
+        )
+        actual = model.estimate_value(hidden)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(torch.get_rng_state(), before, rtol=0, atol=0)

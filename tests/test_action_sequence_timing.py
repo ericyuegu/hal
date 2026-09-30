@@ -26,6 +26,6 @@ def test_netplay_timing_uses_distinct_prepared_prefix_shapes(
     request = scheduler.request_plan()
     assert request is not None
     assert len(request.fixed_actions) == timing.fixed_prefix_frames
-    plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * tail_length)
+    plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * tail_length, state_value=0.0)
     assert tuple(action.target_frame for action in plan.actions) == tuple(range(first_target, 9))
     assert scheduler.accept_plan(plan, choice_frame=1)

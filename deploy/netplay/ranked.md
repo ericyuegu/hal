@@ -370,3 +370,128 @@ Command results for this deployment:
   writing. Repeating it with `python3` succeeded.
 - This handoff changes documentation only. The code validation results
   above apply to the deployed source; no test suite was repeated.
+
+
+## Value meter — 2026-09-30
+
+Every action prediction now includes a finite ego state value. The value
+head uses the serving weights in BF16 on CUDA, as requested by the owner.
+The response scalar and EMA use FP32/Python floats. The head estimates
+future reward in training reward units. Positive values favor HAL.
+
+The Ranked stream shows a bar and signed value in the right margin.
+The old Cody Fox title is removed. The bar saturates at ±120; the number
+shows the full estimate. The EMA half-life is six game frames:
+alpha = 1 - 2 ** (-elapsed_frames / 6). At replan interval four, inference
+publishes about 15 values per second. Duplicate or old samples cannot move
+the meter. A new game or generation resets it. Menus, countdown, and
+estimates older than one second hide it.
+
+### Independent overlay process
+
+The model callback updates only memory. The stream supervisor writes an
+atomic, schema-1 snapshot to value.json. A separate process runs:
+
+    python -m hal.scripts.ranked_overlay --run-dir <run-directory>
+
+It reads that snapshot and updates four OBS sources at up to 30 Hz. The
+Ranked supervisor starts this process and restarts it after failure with
+backoff. It does not restart Ranked, Dolphin, or OBS when the overlay exits.
+
+To reload presentation code, update the mounted overlay file **in place**
+and send SIGTERM to the PID in <run-directory>/overlay.pid. The supervisor
+then launches a fresh Python process. An atomic replacement of the host
+file does not update an existing Docker file bind mount.
+
+The file obs-control.json holds only the local OBS control password. It has
+mode 0600 and is removed when OBS closes. It is not uploaded. The overlay
+receives no Slippi account data or connect code. Replay upload continues to
+select only completed replay records and their small metadata files.
+
+Screenshot capture and OCR use a separate thread and OBS connection.
+They cannot block value publication or share response IDs with the overlay.
+OBS still owns Dolphin window capture and audio; the Ranked process owns
+inference and controller input.
+
+### Matched inference measurement
+
+Control and candidate use the same bundle, GPU, software, seed 120647,
+IBDW#0 identity, advantage 120, and timing 2/1/3/4/8. Each run measures 300
+request-to-response samples after 20 warm-up calls, with synthetic fixed
+observations. These are inference measurements, not emulator FPS.
+
+| GPU | Version | p50 ms | p95 ms | p99 ms |
+| --- | --- | ---: | ---: | ---: |
+| RTX 3060 | Control | 9.802 | 11.147 | 11.727 |
+| RTX 3060 | BF16 value output | 9.048 | 9.519 | 10.661 |
+| G4 RTX PRO 6000 Blackwell | Control | 5.051 | 5.085 | 5.095 |
+| G4 RTX PRO 6000 Blackwell | BF16 value output | 4.678 | 4.743 | 5.049 |
+
+All 320 sampled action sequences matched the control exactly on each GPU.
+There were no compilation starts or new CUDA graph captures during sampling.
+Both candidates met the one-frame inference allowance. A single matched
+pair does not establish a speed improvement.
+
+On the 3060 synthetic state, the provisional FP32 head produced 15.177 and
+the selected BF16 head produced 15.688, a difference of 0.510 reward units.
+This is a precision spot check on one state, not a calibration result.
+The BF16 G4 value was 16.125; exact values across different GPU architectures
+are not required. The production bundle hash remains
+0ff1daf80caa36a94a713c4ccba9223db8d7ba7c1379b5865bbc40b8a8c2f3ec.
+
+Evidence is local under runs/netplay/value-meter/, and on G4 under
+/var/lib/hal-netplay/ranked-cody120/value-meter/. It includes the benchmark
+script, control/candidate commands, source hashes, timing samples, and action
+hashes. No new model, image, or replay data was uploaded to R2 for this work.
+
+### Checks and failures
+
+- cat, sed, rg, and Git status/diff reads inspected the affected code and
+  callers. An initial cache path was absent; the production bundle was found
+  at /tmp/hal-o59-production.halpolicy.
+- Sandboxed nvidia-smi could not access the driver. The authorized host
+  command succeeded and identified the RTX 3060.
+- uv run python runs/netplay/value-meter/benchmark.py ran the control,
+  provisional FP32 candidate, and final BF16 candidate. The first candidate
+  failed because FP32 head input met BF16 weights. The owner chose BF16;
+  the head now uses its serving weight dtype. The final runs passed.
+- The first G4 benchmark finished inference but failed to read Git metadata
+  inside the image. Supplying the recorded source revision fixed it.
+- An intermediate ty check found four indentation errors while extracting
+  the OBS connection class. The correction passed ty.
+- The first focused run had ten failures: three direct lifecycle test
+  constructors needed the optional callback default, and seven whole-plan
+  equality checks needed a separate floating-point tolerance for the value.
+  Action and identity comparisons remain exact.
+- A later focused run had one failure because its new callback assertion
+  lacked callback registration. The test was corrected.
+- Final focused API/stream checks passed 81 tests. Additional lifecycle
+  tests cover overlay spawn failure and screenshot setup failure.
+- uv run ruff format --check ., uv run ruff check ., and the full
+  AGENTS.md ty check passed. git diff --check passed.
+- HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py
+  tests/test_session_cleanup.py -m integration, with the private temporary
+  directory, passed 7 tests, with 6 deselections, in 57.14 seconds.
+  No required fixture was missing.
+- SSH docker kill --signal SIGINT hal-ranked-player-v4 stopped Ranked
+  cleanly with exit code zero. All 24 completed games in that run have upload
+  receipts. The G4 VM stayed running.
+- SSH mkdir, tee, and tar staged isolated candidate source. Python executed
+  the saved Docker benchmark argument lists. No registry push, Cloudflare
+  deployment, VM allocation, or Git push occurred.
+- One documentation tool request had a JavaScript syntax error before any
+  command ran. The corrected request wrote the notes.
+
+- The final full command was:
+
+      TMPDIR="$PWD/runs/netplay/ranked-cody120/test-tmp" uv run pytest -q -m "not integration" --basetemp="$PWD/runs/netplay/ranked-cody120/test-tmp/value-full-final"
+
+  It passed 1582 tests, with 8 skips and 21 deselections, in 150.02 seconds.
+  Skips were two opt-in hardware qualification tests and six optional v7
+  subset tests. The preceding full run passed 1580 tests; the repeat covered
+  two added lifecycle tests and the final cleanup changes.
+- The final lifecycle test command passed all 26 tests. The independent
+  OBS capture-connection test passed. Overlay CLI --help passed.
+- Worker/npm checks were not repeated; this change does not modify Worker
+  code or its network protocol. Concurrent roster edits are outside this
+  commit.

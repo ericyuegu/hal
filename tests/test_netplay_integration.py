@@ -222,6 +222,7 @@ def test_realtime_dolphin_advances_during_inference_and_delivery(tmp_path: Path,
                         ControllerAction(0.8 if (request.source_frame + offset) % 24 < 12 else -0.8, 0, 0, 0, 0, 0, 0)
                         for offset in range(len(request.fixed_actions) + 1, 13)
                     ),
+                    state_value=0.0,
                 )
                 for request in requests
             )

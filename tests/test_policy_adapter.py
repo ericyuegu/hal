@@ -113,7 +113,10 @@ def test_official_dense_adapter_keeps_two_frame_process_stride_and_intended_acti
 
         def predict(self, requests: tuple[PredictionRequest, ...]):
             self.batches.append(tuple(requests))
-            return tuple(action_plan(request, (ControllerAction(0.3, 0, 0, 0, 0, 0, 0),) * 2) for request in requests)
+            return tuple(
+                action_plan(request, (ControllerAction(0.3, 0, 0, 0, 0, 0, 0),) * 2, state_value=0.0)
+                for request in requests
+            )
 
     policy = ChunkPolicy()
     adapter = PolicyBatchAdapter(
@@ -150,7 +153,10 @@ def test_process_adapter_observes_real_dolphin_inputs(tmp_path) -> None:
         context_frames = 4
 
         def predict(self, requests):
-            return tuple(action_plan(request, (ControllerAction(0.5, 0, 0, 0, 0, 0, 0),)) for request in requests)
+            return tuple(
+                action_plan(request, (ControllerAction(0.5, 0, 0, 0, 0, 0, 0),), state_value=0.0)
+                for request in requests
+            )
 
         def reset_prediction(self):
             pass
@@ -207,7 +213,7 @@ class _TaggedPolicy:
         self.requests.extend(requests)
         self.inputs.extend(request.observations[-1] for request in requests)
         return tuple(
-            action_plan(request, (ControllerAction((len(self.inputs) % 10) / 10, 0, 0, 0, 0, 0, 0),))
+            action_plan(request, (ControllerAction((len(self.inputs) % 10) / 10, 0, 0, 0, 0, 0, 0),), state_value=0.0)
             for request in requests
         )
 

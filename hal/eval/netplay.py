@@ -16,6 +16,7 @@ from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
 from hal.eval.scheduling import PlanDecision
 from hal.eval.scheduling import PlanProtocolError
+from hal.inference.api import ActionPlan
 from hal.inference.api import RuntimeConfig
 from hal.inference.client import InferenceClient
 from hal.inference.client import InferenceUnavailable
@@ -51,6 +52,7 @@ class _NetplayLifecycle:
         observer: results.PlayObserver | None,
         schedule_observer: ScheduleObserver | None,
         stream_id: int,
+        on_prediction: Callable[[ActionPlan], None] | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -60,6 +62,7 @@ class _NetplayLifecycle:
         self.observer = observer
         self.schedule_observer = schedule_observer
         self.stream_id = stream_id
+        self.on_prediction = on_prediction
         self.inference_seconds: list[float] = []
         self.inference_source_frames: list[int] = []
         self.plan_decisions: list[PlanDecision] = []
@@ -107,6 +110,8 @@ class _NetplayLifecycle:
                     decision = self.schedule.last_decision
                     if decision is None:
                         raise PlanProtocolError("inference response had no active request")
+                    if self.on_prediction is not None:
+                        self.on_prediction(response)
                     self.plan_decisions.append(decision)
                     self.inference_seconds.append(self.client.last_latency)
                     self.inference_source_frames.append(response.source_frame)
@@ -282,6 +287,7 @@ def run_netplay_match(
     max_frames: int = 28_800,
     rematch: bool = False,
     on_live: Callable[[], None] | None = None,
+    on_prediction: Callable[[ActionPlan], None] | None = None,
     on_failure: Callable[[results.NetplayProgress, BaseException], None] | None = None,
     observer: results.PlayObserver | None = None,
     schedule_observer: ScheduleObserver | None = None,
@@ -304,6 +310,7 @@ def run_netplay_match(
             observer=observer,
             schedule_observer=schedule_observer,
             stream_id=stream_id,
+            on_prediction=on_prediction,
         )
         result = lifecycle.run(setup, max_frames=max_frames, rematch=rematch, on_live=on_live)
     except BaseException as error:

@@ -96,7 +96,7 @@ def test_delivery_does_not_block_worker_and_engine_loss_is_explicit() -> None:
     def engine() -> None:
         received = parent.recv()
         gate.wait(2)
-        parent.send(action_plan(received, (action(0.5),) * 4))
+        parent.send(action_plan(received, (action(0.5),) * 4, state_value=0.0))
 
     thread = threading.Thread(target=engine)
     thread.start()
@@ -128,7 +128,7 @@ def test_worker_rejects_invalid_plan_and_notifies_client() -> None:
     parent, child = Pipe()
     policy = Mock()
     request = PredictionRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4)
-    policy.predict.return_value = (action_plan(request, (NEUTRAL,)),)
+    policy.predict.return_value = (action_plan(request, (NEUTRAL,), state_value=0.0),)
     worker = InferenceWorker({PROFILE: policy}, {0: parent}, batch_wait_seconds=0)
     try:
         child.send(StreamAdmission(0, 1, PROFILE))
@@ -149,7 +149,10 @@ def test_worker_validates_entire_batch_before_sending_any_plan() -> None:
     first = PredictionRequest(0, 1, 0, 0, (observation(0),), (NEUTRAL,) * 4)
     second = PredictionRequest(1, 1, 0, 0, (replace(observation(0), stream_id=1),), (NEUTRAL,) * 4)
     policy = Mock()
-    policy.predict.return_value = (action_plan(first, (NEUTRAL,) * 4), action_plan(second, (NEUTRAL,)))
+    policy.predict.return_value = (
+        action_plan(first, (NEUTRAL,) * 4, state_value=0.0),
+        action_plan(second, (NEUTRAL,), state_value=0.0),
+    )
     worker = InferenceWorker({PROFILE: policy}, {0: first_parent, 1: second_parent}, batch_wait_seconds=0)
     try:
         first_child.send(StreamAdmission(0, 1, PROFILE))
@@ -263,7 +266,10 @@ def test_incremental_benchmark_uses_one_declared_prefix_shape(monkeypatch: pytes
             self.sources.append(requests[0].source_frame)
             self.observation_counts.append(len(requests[0].observations))
             self.reset_flags.append(requests[0].observations[0].reset)
-            return tuple(action_plan(request, (NEUTRAL,) * (8 - len(request.fixed_actions))) for request in requests)
+            return tuple(
+                action_plan(request, (NEUTRAL,) * (8 - len(request.fixed_actions)), state_value=0.0)
+                for request in requests
+            )
 
         def release_stream(self, _stream_id):
             pass
@@ -353,7 +359,7 @@ def test_worker_drains_chunk_and_flushes_neutral_on_confirmed_engine_loss(monkey
             if self.request is not None and not self.delivered:
                 self.delivered = True
                 self.busy = False
-                return action_plan(self.request, (action(0.5),) * 4)
+                return action_plan(self.request, (action(0.5),) * 4, state_value=0.0)
             return None
 
     client = Client()
@@ -437,7 +443,7 @@ def test_neutral_fallback_counts_reserved_startup_and_exhausted_tail_once() -> N
     schedule.action_to_submit(0)
     schedule.action_to_submit(1)
     assert schedule.neutral_fallback_frames == 2
-    schedule.accept_plan(action_plan(request, (NEUTRAL,) * 4), 2)
+    schedule.accept_plan(action_plan(request, (NEUTRAL,) * 4, state_value=0.0), 2)
     for frame in range(2, 6):
         schedule.action_to_submit(frame)
     assert schedule.neutral_fallback_frames == 2  # these neutral actions came from a usable plan

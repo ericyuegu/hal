@@ -42,7 +42,7 @@ def test_policy_contract_is_model_independent_and_batched() -> None:
     for item in inputs:
         request = PredictionRequest(item.stream_id, 1, 0, item.frame_id, (item,), (NEUTRAL_CONTROLLER_ACTION,) * 2)
         validate_prediction_request(spec, config, request, context_frames=8, prefix_frames=2)
-        plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4)
+        plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0)
         validate_action_plan(request, plan, horizon=6)
         assert [action.target_frame for action in plan.actions] == [13, 14, 15, 16]
 
@@ -50,7 +50,7 @@ def test_policy_contract_is_model_independent_and_batched() -> None:
 def test_prediction_rejects_a_plan_for_another_stream() -> None:
     item = _input(0)
     request = PredictionRequest(0, 1, 0, item.frame_id, (item,), (NEUTRAL_CONTROLLER_ACTION,) * 2)
-    plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,))
+    plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,), state_value=0.0)
     with pytest.raises(ValueError, match="does not match"):
         validate_action_plan(request, replace(plan, stream_id=1), horizon=3)
 
@@ -142,7 +142,7 @@ def test_policy_contract_accepts_native_and_extended_numeric_observations(value:
 def test_policy_contract_rejects_pause_button() -> None:
     item = _input(0)
     request = PredictionRequest(item.stream_id, 1, 0, item.frame_id, (item,), (NEUTRAL_CONTROLLER_ACTION,) * 2)
-    plan = action_plan(request, (ControllerAction(0, 0, 0, 0, 0, 0, 0x1000),))
+    plan = action_plan(request, (ControllerAction(0, 0, 0, 0, 0, 0, 0x1000),), state_value=0.0)
     with pytest.raises(ValueError, match="unsupported bits"):
         validate_action_plan(request, plan, horizon=3)
 
@@ -156,3 +156,13 @@ def test_transport_returns_actions_for_the_corresponding_future_state(delay: int
     assert due == expected
     expected_pending = tuple(submitted[-delay:]) if delay else ()
     assert transport.pending == expected_pending
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, 5])
+def test_action_plan_rejects_invalid_state_value(value) -> None:
+    from hal.inference.api import ActionPlan
+
+    request = PredictionRequest(0, 1, 0, 0, (PolicyInput(0, 0, 1, {}, NEUTRAL_CONTROLLER_ACTION),), ())
+    plan = ActionPlan(0, 1, 0, 0, (), value)
+    with pytest.raises(ValueError, match="state value"):
+        validate_action_plan(request, plan, horizon=0)

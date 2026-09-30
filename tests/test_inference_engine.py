@@ -123,7 +123,7 @@ def test_engine_batches_only_ready_requests_with_the_same_prepared_prefix() -> N
                 early_delivery.append(pairs[2][1].poll())
             self.batches.append(tuple(request.stream_id for request in requests))
             return tuple(
-                action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * (8 - len(request.fixed_actions)))
+                action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * (8 - len(request.fixed_actions)), state_value=0.0)
                 for request in requests
             )
 
@@ -234,7 +234,9 @@ def test_dead_or_invalid_client_does_not_interrupt_a_ready_peer() -> None:
 
         def predict(self, requests: tuple[PredictionRequest, ...]):
             self.batches.append(tuple(request.stream_id for request in requests))
-            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+            return tuple(
+                action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5, state_value=0.0) for request in requests
+            )
 
     profile = PreparedInferenceProfile("two", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 2)
     policy = Policy()
@@ -279,7 +281,9 @@ def test_engine_invalidates_dead_slot_and_reuses_its_row_with_peer_unchanged() -
 
         def predict(self, requests: tuple[PredictionRequest, ...]):
             self.batches.append(tuple(request.stream_id for request in requests))
-            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+            return tuple(
+                action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5, state_value=0.0) for request in requests
+            )
 
     profile = PreparedInferenceProfile("two", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 2)
     policy = Policy()
@@ -350,7 +354,9 @@ def test_standby_reset_cancels_old_arrival_without_losing_healthy_peer(order: st
 
         def predict(self, requests: tuple[PredictionRequest, ...]):
             self.batches.append(tuple(request.stream_id for request in requests))
-            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+            return tuple(
+                action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5, state_value=0.0) for request in requests
+            )
 
     profile = PreparedInferenceProfile("two", "a" * 64, "kv_cache", 8, 3, (1, 2, 4), 2)
     policy = Policy()
@@ -406,7 +412,9 @@ def test_sparse_ready_pair_does_not_wait_for_idle_admissions(monkeypatch: pytest
         def predict(self, requests: tuple[PredictionRequest, ...]):
             assert len(requests) == 2
             stop.set()
-            return tuple(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5) for request in requests)
+            return tuple(
+                action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 5, state_value=0.0) for request in requests
+            )
 
         def release_stream(self, _stream_id: int) -> None:
             pass

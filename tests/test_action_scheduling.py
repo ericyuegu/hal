@@ -51,7 +51,7 @@ def test_local_zero_delay_zero_prefix_targets_next_frame() -> None:
     schedule.observe(_observation(10))
     request = schedule.request_plan()
     assert request is not None and request.fixed_actions == ()
-    plan = action_plan(request, (_action(0.5),) * 4)
+    plan = action_plan(request, (_action(0.5),) * 4, state_value=0.0)
     assert tuple(item.target_frame for item in plan.actions) == (11, 12, 13, 14)
     assert schedule.accept_plan(plan, 10)
     decision = schedule.last_decision
@@ -68,7 +68,7 @@ def test_matching_active_response_rejects_boolean_frame_identity(malformed: str)
     schedule.observe(_observation(0))
     request = schedule.request_plan()
     assert request is not None
-    plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4)
+    plan = action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0)
     if malformed == "identity":
         plan = replace(plan, source_frame=False)
     else:
@@ -86,7 +86,7 @@ def test_deadline_equality_accepts_and_one_frame_late_rejects_whole_tail() -> No
     assert request is not None
     schedule.action_to_submit(0)
     schedule.observe(_observation(1))
-    first = action_plan(request, tuple(_action(index / 10) for index in range(4, 9)))
+    first = action_plan(request, tuple(_action(index / 10) for index in range(4, 9)), state_value=0.0)
     assert schedule.accept_plan(first, 1)
     first_decision = schedule.last_decision
     assert first_decision is not None and first_decision.accepted
@@ -100,7 +100,8 @@ def test_deadline_equality_accepts_and_one_frame_late_rejects_whole_tail() -> No
     assert second_request is not None
     assert tuple(item.frame_id for item in second_request.observations) == (1, 2, 3, 4)
     assert tuple(
-        item.target_frame for item in action_plan(second_request, (NEUTRAL_CONTROLLER_ACTION,) * 5).actions
+        item.target_frame
+        for item in action_plan(second_request, (NEUTRAL_CONTROLLER_ACTION,) * 5, state_value=0.0).actions
     ) == (
         8,
         9,
@@ -112,7 +113,7 @@ def test_deadline_equality_accepts_and_one_frame_late_rejects_whole_tail() -> No
     schedule.action_to_submit(5)
     schedule.observe(_observation(6))
     prior = dict(schedule.planned)
-    assert not schedule.accept_plan(action_plan(second_request, (_action(0.9),) * 5), 6)
+    assert not schedule.accept_plan(action_plan(second_request, (_action(0.9),) * 5, state_value=0.0), 6)
     late = schedule.last_decision
     assert late is not None and not late.accepted and late != first_decision
     assert late.generated_target_frames[0] == 8 < late.first_submittable_target == 9
@@ -133,7 +134,7 @@ def test_prefix_mismatch_rejects_tail_at_controller_wire_precision() -> None:
     assert request is not None
     schedule.submitted[1] = _action(0.519)
     prior = dict(schedule.planned)
-    assert not schedule.accept_plan(action_plan(request, (_action(0.7),) * 2), 1)
+    assert not schedule.accept_plan(action_plan(request, (_action(0.7),) * 2, state_value=0.0), 1)
     decision = schedule.last_decision
     assert decision is not None and not decision.accepted
     assert decision.request_prefix_wire[0] == controller_action_wire_values(_action(0.5))
@@ -150,7 +151,7 @@ def test_malformed_active_response_fails_protocol_and_releases_request() -> None
     schedule.observe(_observation(0))
     request = schedule.request_plan()
     assert request is not None
-    invalid = replace(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4), generation=2)
+    invalid = replace(action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0), generation=2)
     with pytest.raises(PlanProtocolError, match="malformed"):
         schedule.accept_plan(invalid, 0)
     assert schedule.inference_failed

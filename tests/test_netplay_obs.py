@@ -142,6 +142,8 @@ def test_gameplay_screenshot_can_exceed_one_megabyte(tmp_path: Path, monkeypatch
                 data = {"sceneItemId": 1}
                 if request["requestType"] == "GetVersion":
                     data = {"obsVersion": obs.VERSION}
+                if request["requestType"] == "GetInputSettings":
+                    data = {"inputSettings": {"capture_window": "3\\r\\nDolphin\\r\\nAppRun.wrapped"}}
                 if request["requestType"] == "GetSourceScreenshot":
                     data = {"imageData": "data:image/png;base64," + base64.b64encode(png).decode()}
                 socket.send(
@@ -173,6 +175,11 @@ def test_gameplay_screenshot_can_exceed_one_megabyte(tmp_path: Path, monkeypatch
             studio.start("test-key", bandwidth_test=True)
             studio._visible = True
             assert studio.screenshot() == png
+            capture = studio.capture_connection()
+            try:
+                assert capture.screenshot() == png
+            finally:
+                capture.close()
             assert studio.stats()["stream"] == {"sceneItemId": 1}
         finally:
             studio.close()

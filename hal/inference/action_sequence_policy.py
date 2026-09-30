@@ -73,7 +73,7 @@ def _validate_prepared_observation(item: PolicyInput) -> None:
             raise ValueError(f"observation field {relative!r} has a noncanonical scalar type")
 
 
-def _decode_cached(policy: ActionSequencePolicy, cache: KVCache, inputs: tuple[Tensor, ...]) -> Tensor:
+def _decode_cached(policy: ActionSequencePolicy, cache: KVCache, inputs: tuple[Tensor, ...]) -> tuple[Tensor, Tensor]:
     return policy._kv_decoder(cache.hidden, cache.memory(), *inputs)
 
 
@@ -140,8 +140,8 @@ class ActionSequencePolicy:
         self._cache_pool: KVCachePool | None = None
         self._free_rows: set[int] = set()
         self._observation_batches: dict[tuple[int, int], GpuObservationBatch] = {}
-        self._update_calls: dict[tuple[int, int], CapturedCall] = {}
-        self._decoder_calls: dict[int, CapturedCall] = {}
+        self._update_calls: dict[tuple[int, int], CapturedCall[Tensor]] = {}
+        self._decoder_calls: dict[int, CapturedCall[tuple[Tensor, Tensor]]] = {}
         self._decode_inputs: dict[int, tuple[Tensor, ...]] = {}
         self._kv_decoder = self._sample_with_kv_cache
         self._prediction_streams: dict[int, _Stream] = {}
@@ -249,8 +249,8 @@ class ActionSequencePolicy:
         return_value: Tensor,
         condition_present: Tensor,
         temperature: Tensor,
-    ) -> Tensor:
-        return self.model.temporal.sample_indices(
+    ) -> tuple[Tensor, Tensor]:
+        indices = self.model.temporal.sample_indices(
             hidden,
             observed,
             self.model.head_offsets[: self._prediction_frames],
@@ -262,6 +262,7 @@ class ActionSequencePolicy:
             forced_prefix=forced,
             history=memory,
         )
+        return indices, self.model.estimate_value(hidden)
 
     def _prepare_kv_cache(self) -> None:
         if self._compiled:
@@ -345,19 +346,17 @@ class ActionSequencePolicy:
                     self._decoder_calls[bucket] = CapturedCall(
                         operation, (), cache.buffers(), device=self.device, counter=self.capture_counter
                     )
-                    sampled = self._decoder_calls[bucket](())
+                    sampled, state_values = self._decoder_calls[bucket](())
                 else:
-                    sampled = operation()
+                    sampled, state_values = operation()
                 # Torch 2.11 lazily initializes controller dequantization kernels
                 # on their first shape. Prepare the full delivered-action path.
-                decoded = (
-                    self.model.codec.dequantize(sampled)[:, self._prefix_frames : self._prediction_frames]
-                    .float()
-                    .cpu()
-                    .numpy()
-                )
-                for row in decoded:
-                    for action in row:
+                decoded = self.model.codec.dequantize(sampled)[
+                    :, self._prefix_frames : self._prediction_frames
+                ].float()
+                delivered = torch.cat((decoded.flatten(1), state_values[:, None]), dim=1).cpu().numpy()
+                for row in delivered:
+                    for action in row[:-1].reshape(-1, len(ACTION_CHANNELS)):
                         action_vec_to_controller(action)
                 cache.reset()
             pool.storage.reset()
@@ -433,7 +432,7 @@ class ActionSequencePolicy:
     @torch.inference_mode()
     def _plan_cached_batch(
         self, requests: tuple[PredictionRequest, ...], streams: tuple[_Stream, ...]
-    ) -> tuple[tuple[ControllerAction, ...], ...]:
+    ) -> tuple[tuple[tuple[ControllerAction, ...], float], ...]:
         pool = self._cache_pool
         if pool is None:
             raise RuntimeError("KV cache was not prepared")
@@ -488,16 +487,20 @@ class ActionSequencePolicy:
             if self.kv_cuda_graphs:
                 for target, source in zip(self._decode_inputs[bucket], inputs, strict=True):
                     target.copy_(source)
-                indices = self._decoder_calls[bucket](())
+                indices, state_values = self._decoder_calls[bucket](())
             else:
-                indices = self._kv_decoder(cache.hidden, cache.memory(), *inputs)
-            planned = (
-                self.model.codec.dequantize(indices[: len(streams)])[:, self._prefix_frames : self._prediction_frames]
-                .float()
-                .cpu()
-                .numpy()
+                indices, state_values = self._kv_decoder(cache.hidden, cache.memory(), *inputs)
+            actions = self.model.codec.dequantize(indices[: len(streams)])[
+                :, self._prefix_frames : self._prediction_frames
+            ].float()
+            delivered = torch.cat((actions.flatten(1), state_values[: len(streams), None]), dim=1).cpu().numpy()
+        return tuple(
+            (
+                tuple(action_vec_to_controller(row) for row in plan[:-1].reshape(-1, len(ACTION_CHANNELS))),
+                float(plan[-1]),
             )
-        return tuple(tuple(action_vec_to_controller(row) for row in plan) for plan in planned)
+            for plan in delivered
+        )
 
     @property
     def sampling_seed(self) -> int:
@@ -624,11 +627,11 @@ class ActionSequencePolicy:
             elif remainder:
                 self._advance_batch(streams, remainder)
             tails = self._plan_cached_batch(tuple(entry[1] for entry in group), streams)
-            for (index, request, _, _), stream, tail in zip(group, streams, tails, strict=True):
+            for (index, request, _, _), stream, (tail, state_value) in zip(group, streams, tails, strict=True):
                 if stream.last_frame != request.source_frame:
                     raise ValueError("obsolete action sequence prediction request")
                 stream.generation = request.generation
                 stream.sequence = request.sequence
                 self._prediction_streams[request.stream_id] = stream
-                plans[index] = action_plan(request, tail)
+                plans[index] = action_plan(request, tail, state_value=state_value)
         return tuple(plans[index] for index in range(len(ordered)))

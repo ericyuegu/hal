@@ -70,7 +70,7 @@ def test_cached_prefix_two_applies_the_frozen_control_actions_at_the_same_frames
             assert [controller_action_wire_values(action) for action in tail] == [
                 controller_action_wire_values(_action(record)) for record in reference["generated"]
             ]
-            assert scheduler.accept_plan(action_plan(request, tail), frame)
+            assert scheduler.accept_plan(action_plan(request, tail, state_value=0.0), frame)
             request_index += 1
         applied = transport.submit(scheduler.action_to_submit(frame))
         expected = control["frames"][frame]

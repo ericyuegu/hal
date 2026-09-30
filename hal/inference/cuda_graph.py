@@ -81,12 +81,12 @@ def count_compilation_starts() -> Iterator[CompilationStartCounter]:
             raise RuntimeError("Torch removed the post-preparation compilation listener") from error
 
 
-class CapturedCall:
+class CapturedCall[T]:
     """Replay an operation on fixed input storage without copying its persistent state."""
 
     def __init__(
         self,
-        operation: Callable[[], Tensor],
+        operation: Callable[[], T],
         inputs: tuple[Tensor, ...],
         state: tuple[Tensor, ...] = (),
         *,
@@ -120,7 +120,7 @@ class CapturedCall:
         if counter is not None:
             counter.completed += 1
 
-    def __call__(self, inputs: tuple[Tensor, ...]) -> Tensor:
+    def __call__(self, inputs: tuple[Tensor, ...]) -> T:
         with torch.cuda.device(self.device):
             for target, source in zip(self.inputs, inputs, strict=True):
                 target.copy_(source)

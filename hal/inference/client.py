@@ -196,6 +196,8 @@ class InferenceClient:
                     response.source_frame,
                 )
                 != (request.stream_id, request.generation, request.sequence, request.source_frame)
+                or type(response.state_value) is not float
+                or not math.isfinite(response.state_value)
                 or any(
                     type(value) is not int
                     for value in (response.stream_id, response.generation, response.sequence, response.source_frame)
