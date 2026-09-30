@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from numbers import Real
+from typing import Final
 from typing import Literal
 from typing import Protocol
 from typing import runtime_checkable
@@ -15,6 +16,7 @@ from hal.controller import ControllerAction
 from hal.controller import validate_controller_action
 
 ObservationScalar = float | int
+DESIRED_RETURN_RANGE: Final[tuple[float, float]] = (-20.0, 140.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,9 +339,9 @@ def validate_policy_inputs(spec: PolicySpec, config: RuntimeConfig, inputs: Sequ
             not isinstance(item.desired_return, Real)
             or isinstance(item.desired_return, bool)
             or not math.isfinite(float(item.desired_return))
-            or not 0.0 <= item.desired_return <= 40.0
+            or not DESIRED_RETURN_RANGE[0] <= item.desired_return <= DESIRED_RETURN_RANGE[1]
         ):
-            raise ValueError(f"stream {item.stream_id} desired return must be in [0, 40] or null")
+            raise ValueError(f"stream {item.stream_id} desired return must be in [-20, 140] or null")
         if (
             not isinstance(item.temperature, Real)
             or isinstance(item.temperature, bool)

@@ -17,6 +17,7 @@ from hal.controller import controller_to_action_vec
 from hal.eval.observations import applied_action_from_frame
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
+from hal.inference.api import DESIRED_RETURN_RANGE
 from hal.inference.api import PolicyInput
 from hal.inference.api import PredictionPolicy
 from hal.inference.api import PredictionRequest
@@ -41,9 +42,10 @@ class PolicySettings:
         if self.player_identity is not None and not self.player_identity:
             raise ValueError("player identity must be non-empty")
         if self.desired_return is not None and (
-            not math.isfinite(self.desired_return) or not 0.0 <= self.desired_return <= 40.0
+            not math.isfinite(self.desired_return)
+            or not DESIRED_RETURN_RANGE[0] <= self.desired_return <= DESIRED_RETURN_RANGE[1]
         ):
-            raise ValueError("desired return must be in [0, 40] or null")
+            raise ValueError("desired return must be in [-20, 140] or null")
         if not math.isfinite(self.temperature) or not 0.8 <= self.temperature <= 1.1:
             raise ValueError("temperature must be in [0.8, 1.1]")
 

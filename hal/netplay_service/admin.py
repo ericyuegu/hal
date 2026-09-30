@@ -13,12 +13,12 @@ from typing import Final
 from hal import r2
 from hal.data.schema import Rank
 from hal.inference.action_sequence_artifact import read_action_sequence_artifact
+from hal.inference.api import DESIRED_RETURN_RANGE
 from hal.netplay_service.assets import account_key
 from hal.netplay_service.assets import ensure_uploaded
 from hal.netplay_service.assets import policy_bundle_key
 from hal.netplay_service.assets import sha256_file
 from hal.netplay_service.domain import CHARACTERS
-from hal.netplay_service.domain import DESIRED_RETURN_RANGE
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
 from hal.netplay_service.domain import Choice

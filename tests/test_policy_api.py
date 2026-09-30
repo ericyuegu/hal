@@ -55,6 +55,22 @@ def test_prediction_rejects_a_plan_for_another_stream() -> None:
         validate_action_plan(request, replace(plan, stream_id=1), horizon=3)
 
 
+@pytest.mark.parametrize("value", [None, -20.0, 120.0, 140.0])
+def test_prediction_accepts_master_conditioning_across_the_return_range(value: float | None) -> None:
+    spec = PolicySpec("fake", "tests.fake.v1", ("position",), (2,), requires_player_identity=True)
+    item = replace(_input(0), player_identity="MASTER", desired_return=value)
+    request = PredictionRequest(0, 1, 0, item.frame_id, (item,), (NEUTRAL_CONTROLLER_ACTION,) * 2)
+    validate_prediction_request(spec, RuntimeConfig(1, (2,)), request, context_frames=8, prefix_frames=2)
+
+
+@pytest.mark.parametrize("value", [-20.01, 140.01, True, float("inf"), float("nan")])
+def test_prediction_rejects_invalid_return_targets(value: float) -> None:
+    spec = PolicySpec("fake", "tests.fake.v1", ("position",), (2,))
+    item = replace(_input(0), desired_return=value)
+    with pytest.raises(ValueError, match="desired return"):
+        validate_policy_inputs(spec, RuntimeConfig(1, (2,)), [item])
+
+
 def test_runtime_delays_are_explicit_and_canonical() -> None:
     assert RuntimeConfig(2, (2,)).require_single_delay() == 2
     with pytest.raises(ValueError, match="requires one"):

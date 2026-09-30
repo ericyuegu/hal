@@ -230,7 +230,7 @@ def test_ready_rows_keep_each_fixed_prefix_shape_and_sampling_state(delay: int, 
 def test_ready_rows_keep_independent_identity_return_temperature_and_dummy_rng() -> None:
     batched = _policy(4)
     serial = _policy(4)
-    settings = ((42, "PLATINUM", None, 0.8), (7, "DIAMOND", 40.0, 1.1), (9001, "MASTER", 15.0, 1.0))
+    settings = ((42, "PLATINUM", None, 0.8), (7, "DIAMOND", 140.0, 1.1), (9001, "MASTER", 120.0, 1.0))
     first = tuple(
         _conditioned_request(batched, stream_id, 3, 4, 0, identity=identity, desired_return=value, temperature=temp)
         for stream_id, identity, value, temp in settings

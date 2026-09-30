@@ -10,6 +10,7 @@ from hal.eval.harness import SessionConfig
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import run_matches_vec
 from hal.eval.policy import PolicyBatchAdapter
+from hal.eval.policy import PolicySettings
 from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PolicyInput
 from hal.inference.api import PolicySpec
@@ -25,6 +26,18 @@ from hal.sim.session import PlayerSetup
 
 def _timing(delay: int = 2) -> FrameTiming:
     return FrameTiming(delay, 0, delay, 1, delay + 1)
+
+
+@pytest.mark.parametrize("value", [None, -20.0, 120.0, 140.0])
+def test_local_policy_settings_accept_the_live_return_range(value: float | None) -> None:
+    settings = PolicySettings("MASTER", value)
+    assert settings.desired_return == value
+
+
+@pytest.mark.parametrize("value", [-20.01, 140.01, float("inf"), float("nan")])
+def test_local_policy_settings_reject_invalid_returns(value: float) -> None:
+    with pytest.raises(ValueError, match="desired return"):
+        PolicySettings("MASTER", value)
 
 
 def test_conditioned_adapter_routes_to_process_driver(monkeypatch: pytest.MonkeyPatch) -> None:
