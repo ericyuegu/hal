@@ -524,6 +524,8 @@ for controls, credential handling, all commands, test results, and limits.
 
 ## Waiting card — 2026-09-29
 
+Superseded by the continuous emulator capture change below.
+
 Source `f5976b7c` replaces the empty background between games with a navy
 1080p card: `NEXT MATCH`, `Getting the next game ready`, and the site link.
 The existing overlay still shows queue depth. OBS builds the card in a
@@ -576,3 +578,58 @@ with an absent optional local v7 subset. Warnings concern Python 3.14
 TorchScript, uncompiled flex attention, and fork from a threaded process.
 No new cloud resource, Worker deployment, registry push, R2 asset upload,
 or Git push was performed.
+
+## Continuous emulator capture — 2026-09-29
+
+The owner requested that Dolphin remain visible in menus and during
+connection, with no waiting card. Source `3d2bdc40` implements that request.
+OBS now selects the exact Dolphin render window whenever it exists. Window
+visibility no longer depends on the game's state or heartbeat. The launcher
+and desktop remain outside the capture. When Dolphin exits between
+reservations, there is no emulator window to capture until the next launch.
+
+The waiting-card scene and its code were removed. The overlay still uses
+HAL's labels and queue depth without adding a connect code. Dolphin's own
+menus are visible as requested. The spec records this approved change.
+
+The rollout used the existing `obs.py` and `stream.py` source mounts. The
+scheduler saved row 47 and paused before row 49; row 48 is unsupported.
+All 46 completed recordings were retained before the runner restart.
+
+The live check captured Dolphin's name-entry menu while the slot was
+`connecting`, then confirmed normal gameplay. The resumed game measured
+59.94 FPS, frame interval p95 18.00 ms, and policy round-trip p95 7.58 ms.
+OBS measured 60.00 FPS with zero encoder skips and zero network drops over
+roughly 12,500 frames. Its four render skips include startup.
+Before the restart, idle OBS measured 60.00 FPS with zero encoder skips,
+five render skips, and 39 network drops over roughly 435,600 frames.
+Counters reset on restart; these samples are not a controlled comparison.
+
+### Commands and checks
+
+| Command or operation | Result |
+| --- | --- |
+| `cat AGENTS.md`; `git status --short`; targeted `sed`, `cat`, and `rg` over OBS, its supervisor, tests, spec, and README | Confirmed the existing capture gate, card, callers, and clean worktree. |
+| `uv run pytest -q tests/test_netplay_obs.py tests/test_netplay_stream.py` | 16 passed. Covers capture with game and waiting labels, window loss, no card at startup, and overlay privacy. |
+| `uv run ruff format hal/netplay_service/obs.py hal/netplay_service/stream.py tests/test_netplay_obs.py tests/test_netplay_stream.py` | Four files already formatted. |
+| `uv run ruff format --check .` | 270 files passed. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed with zero diagnostics. |
+| `uv run pytest -q -m 'not integration'` | 1,493 passed, 8 skipped, 21 deselected, 24 warnings in 141.67 s. |
+| `npm test` in `web/netplay-api` | 105 passed in 10 files. workerd printed its WebSocketPipe disconnect diagnostic; no tests failed. |
+| `npm run typecheck` in `web/netplay-api` | Passed. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_netplay_queue_integration.py -m integration` | 3 passed in 41.64 s. |
+| Dolphin round-trip and cleanup integration suite | Not rerun: this change affects OBS capture selection and overlay dispatch only. Session stepping, controller input, replay extraction, and Dolphin configuration are unchanged. |
+| `touch runs/netplay/x-pilot-master120/stop-after-game`; `tail` of its event log | Stopped at the completed-game boundary after row 47. |
+| `gcloud compute ssh hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --command ...` with authenticated OBS requests | Removed the live waiting-card scene and selected Dolphin if present. At that moment the prior game had closed Dolphin. Saved baseline counters without printing credentials. |
+| `gcloud compute scp hal/netplay_service/obs.py hal/netplay_service/stream.py hal-netplay-g4:/tmp/ --project centering-star-502613-k3 --zone us-west1-a` | Staged the source modules. Remote SHA-256 checks matched the committed local files. |
+| Remote `systemctl daemon-reload`, runner stop/start, and readiness polling | Loaded the persistent source mounts with effective source `3d2bdc40` after the recording was saved. |
+| Python run-manifest update and runtime download; `systemd-run --user --unit=hal-xpilot-games ... hal_xpilot_run.py --first-job .../private/first-game.json`; `journalctl --user -u hal-xpilot-games -n 5 --no-pager` | Recorded the source change and new sampling seeds. Resumed at row 49 with `MASTER`/120 unchanged. |
+| Authenticated OBS menu-to-game probe; `gcloud compute scp hal-netplay-g4:/var/lib/hal-netplay/continuous-menu.png /tmp/ --project centering-star-502613-k3 --zone us-west1-a`; local image inspection | Verified the actual name-entry menu during connection, no waiting-card scene, and normal gameplay. Saved performance counters in `continuous-capture-after.json` on G4. |
+| `git diff --check`; `git diff --stat`; `sha256sum` of both source files; focused `git add`; `git commit -m 'Keep Dolphin menus on stream'` | Passed. Created `3d2bdc40`; format, lint, and type commit hooks passed. No attribution trailers. |
+
+No command failed. The eight skips remain two opt-in production GPU checks
+and six tests with an absent optional local v7 subset. Warnings concern
+Python 3.14 TorchScript, uncompiled flex attention, and threaded fork.
+No cloud resource, Worker deployment, registry push, R2 asset upload, or Git
+push was added.
