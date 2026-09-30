@@ -5,6 +5,78 @@ The runner downloads and verifies its static fixtures, starts a remote session,
 keeps that session alive while it downloads policy and account assets, qualifies
 both delay profiles, and then starts its slots.
 
+## Current deployment — 2026-09-29
+
+- Site: [20xx.xyz](https://20xx.xyz). Cloudflare Worker `hal-netplay-web`
+  serves the vinext page. Worker `hal-netplay-api` handles `/v1/*`.
+- Queue: one SQLite-backed Durable Object, class `Queue`, instance name
+  `global`, storage schema 2. It owns reservations, sessions, account leases,
+  the active policy, the stream lease, and events.
+- GPU: `hal-netplay-g4` in project `centering-star-502613-k3`, zone
+  `us-west1-a`. It is a standalone `g4-standard-48` VM with exactly one RTX PRO
+  6000 Blackwell GPU and one runner slot. No managed instance group is deployed.
+- Runner: systemd starts Docker container `hal-netplay-runner`. Effective
+  source is `3d2bdc40`; its Slippi account is `HAL#647`.
+- Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
+  `:90` renders Dolphin; OBS captures its window at 1080p60 and uses NVENC.
+  Menus remain visible. There is no waiting card.
+
+```text
+Browser -> page Worker + API Worker -> Durable Object
+                                ^
+                                | HTTPS transitions + WebSocket settings
+                                v
+                      G4 runner supervisor
+                         |            |
+                  GPU inference <-> Dolphin <-> Slippi peer (UDP)
+                                      |
+                                      v
+                                OBS -> Twitch
+
+Runner <- verified fixtures / policy / account assets
+Runner -> R2 replay + metadata -> local matchup recordings
+```
+
+The runner starts one shared GPU inference process and one Dolphin process
+per slot. Frame observations and actions stay on the GPU host. Cloudflare
+handles queue state, settings, and health reports. The GPU host has no public
+HAL web API. Slippi uses its own peer connection.
+
+### Image and recovery limits
+
+The live image is `hal-netplay-runner:obs-local`, image ID `e255ef5d8a8c`.
+It adds OBS and NVIDIA EGL registration to the registry image tagged
+`728d96018e242332854a6a77ea5d2ff6eb17012c`. Eight source files are mounted from
+`/var/lib/hal-netplay/hotfix/obs-v1`. The systemd override `90-obs.conf` selects
+this image and the source mounts. The old image label alone does not identify
+the code now running.
+
+A fresh replacement from the existing registry image will not reproduce this
+runtime. Build and publish the current committed Dockerfile before replacing
+the host. The local image, source patches, and override must remain available
+until then. Registry publication requires owner approval. Reboot recovery and
+managed instance group replacement have not been tested.
+
+### Assets, secrets, and operator state
+
+The image contains code and dependencies. The runner verifies downloaded
+assets by SHA-256. R2 stores the private ISO, policy bundle, account JSON, and
+replays. The official netplay emulator comes from its pinned GitHub release.
+Replay uploads contain only `.slp` files and small JSON metadata, with 30-day
+R2 retention. Video and detailed frame measurements are not uploaded to R2.
+
+The VM service account reads `hal-netplay-runner-env` from Secret Manager.
+Its dotenv file and Xauthority cookie are root-only files under `/run`.
+Cloudflare Access and bearer tokens protect runner and admin operations.
+The API Worker holds the Twitch key and releases it only to the stream lease
+holder. Keys are not built into images or committed to Git.
+
+The local RTX 3060 machine runs the x_pilot chat listener and matchup
+scheduler. These operator services use encrypted credentials and retain
+verified recordings under `runs/netplay/x-pilot-master120/`. They are separate
+from the public service: stopping them stops the campaign, while G4 and the
+site can keep running. See [the run protocol](x-pilot.md).
+
 ## Static fixtures
 
 `hal/fixtures.py` owns both static runtime files.
@@ -198,7 +270,9 @@ OBS encodes 1920×1080 at 60 fps using texture NVENC, 6 Mb/s CBR, P5,
 two-second keyframes, two B frames, and no lookahead. Audio comes only from
 `hal_stream.monitor` at AAC 160 kb/s. The overlay uses an OBS text source.
 It contains HAL's settings and game count; it has no connect-code field.
-Connecting, idle, missing, and stale game windows are hidden.
+Dolphin stays visible whenever its render window exists, including menus and
+connection. The desktop and launcher are excluded. When Dolphin exits between
+reservations, the background is empty until the next window opens.
 
 The stream lease owns the OBS process. Its profile and credentials live in a
 private temporary directory and are removed on shutdown. Do not publish the
@@ -216,11 +290,12 @@ owner explicitly approves a public stream. Confirm the OBS stream key ends in
   peer and region, driver, and OBS package version.
 - [ ] Start the runner with `HAL_TWITCH_BANDWIDTH_TEST=1`. Confirm admin status
   shows one stream holder and that no second session receives the lease.
-- [ ] While slot 0 is idle, confirm the video shows `Play HAL at 20xx.xyz` and
-  the public queue depth. Confirm a waiting job goes to slot 0 before another
+- [ ] During connection and menus, confirm the Dolphin window remains visible
+  with no waiting card. Confirm a waiting job goes to slot 0 before another
   idle slot.
 - [ ] Play a game on slot 0. Confirm 1920×1080 video, game audio, the HAL setting
-  line, and no player or bot connect code anywhere in the picture.
+  line, and no connect code in the overlay. Dolphin menus may show their own
+  codes under the approved continuous-capture behavior.
 - [ ] Run `pkill -TERM obs` inside the runner container. Confirm the
   supervisor restarts it with bounded backoff and the runner keeps its game.
 - [ ] Drain the holder. Confirm OBS stops, the lease becomes free, and the
@@ -228,10 +303,10 @@ owner explicitly approves a public stream. Confirm the OBS stream key ends in
 - [ ] Stop every runner. Confirm runner-owned Xvfb, Openbox, PulseAudio, Dolphin, and OBS processes
   are gone.
 
-The owner approved a public stream for the 2026-09-29 G4 test. Twitch showed
-the live 1280x720 game. The active-game display contained no connect code.
-ffmpeg 6.1.1 used NVENC while the policy ran. The idle-card, restart, and
-lease-transfer checks remain pending.
+The owner approved the public stream. The current OBS rollout passed the
+1080p60 game capture, menu capture, overlay privacy, and OBS restart checks.
+Stream lease transfer and full host shutdown checks remain pending. The
+verification record below preserves the earlier 720p ffmpeg measurements.
 
 ### Performance measurement
 
@@ -275,6 +350,9 @@ deploy/netplay/deploy-web.sh
 ```
 
 ## Verification record
+
+The entries below are milestone records. Their source SHA and date determine
+which runtime they describe; the current deployment is summarized above.
 
 The [x_pilot run protocol](x-pilot.md) records the requested `gm-v2` matchup
 schedule, missing characters, authentication requirements, and replay checks.
@@ -352,9 +430,10 @@ the OBS controller explicitly selects it.
 
 The live game window and OBS output are both 1920×1080. A program screenshot
 confirmed game video, black aspect-ratio bars, and the HAL overlay. It showed
-no desktop, launcher, or connect code. OBS has exactly three inputs: the
-Dolphin window, the overlay, and `hal_stream.monitor`. The window is hidden
-outside a fresh playing state. The first-run wizard is disabled in the OBS
+no desktop, launcher, or connect code. At this milestone, OBS had three
+inputs: the Dolphin window, the overlay, and `hal_stream.monitor`. It hid the window
+outside a fresh playing state; the later continuous-capture change removes
+that restriction. The first-run wizard is disabled in the OBS
 profile. Openbox forces the exact Dolphin render window to fullscreen.
 
 ### Measurements
@@ -633,3 +712,55 @@ and six tests with an absent optional local v7 subset. Warnings concern
 Python 3.14 TorchScript, uncompiled flex attention, and threaded fork.
 No cloud resource, Worker deployment, registry push, R2 asset upload, or Git
 push was added.
+
+## Deployment cleanup — 2026-09-29
+
+This cleanup updates the current deployment summary and the spec's Plans table.
+It removes stale instructions for hiding menus and showing a waiting card.
+Runtime source remains `3d2bdc40`. No runner restart or deployment was needed.
+
+Three duplicate operator scripts were removed from `/tmp` after SHA-256
+comparison with their retained `control/` copies and a process-argument check.
+The active services use the retained copies. Recordings, credentials, runtime
+snapshots, screenshots, and remote rollback files were preserved.
+
+The matchup service had stopped after row 49 because x_pilot did not
+acknowledge the next play command. The canceled attempt had zero completed
+games. Its failure was recorded before resuming the same row. Row 50 then
+reached `playing`; both local operator services were active. At that point,
+47 completed recordings were verified. Progress continues in the local log.
+
+A read-only G4 sample after recovery reported 59.94 game FPS, frame interval
+p95 18.13 ms, and policy round-trip p95 6.80 ms. OBS reported 60.00 FPS, zero
+encoder skips, zero network drops, and four render misses since startup over
+roughly 36,700 frames. This was a health check, not a performance treatment.
+
+### Commands, failures, and skips
+
+Commands ran in this worktree. Repeated inspections are grouped by purpose.
+
+| Command or operation | Result |
+| --- | --- |
+| `cat AGENTS.md`; `git status --short`; `git branch --show-current`; `git log -12 --oneline` | Confirmed the required worktree, `netplay-edge-queue`, and clean starting state. |
+| Targeted `cat`, `sed`, `rg`, and Python reads of the spec, README, run protocol, Worker routing/schema, Vite/generated Wrangler config, runner, OBS, fixtures, replay uploader, Compose, and GCE startup | Checked the architecture against source and found stale deployment text. |
+| `cat web/netplay/wrangler.jsonc` | Failed: that file does not exist. The page uses `vite.config.ts` and generated `dist/server/wrangler.json`; both were read successfully. |
+| `gcloud compute instances describe hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --format='json(name,status,machineType,guestAccelerators,networkInterfaces[].accessConfigs[].natIP)'` | Running `g4-standard-48`, exactly one RTX PRO 6000, external IP `34.177.115.232`. |
+| `gcloud compute ssh hal-netplay-g4 --project centering-star-502613-k3 --zone us-west1-a --command=...` with filtered Python `docker inspect`, `systemctl is-active`, `dpkg-query -W`, `obs --version`, and status-file reads | Runner active. Verified local image, eight source mounts, source SHA, OBS package/binary versions, and live metrics. No credentials were printed. |
+| `uv run python` with public HTTP GETs of `https://20xx.xyz/` and `/v1/capacity` | Both HTTP 200; one healthy slot. |
+| `systemctl --user is-active`, `systemctl --user show`, `journalctl --user -u hal-xpilot-games.service`, and local event/chat reads | Found the scheduler's exit-code failure after the unacknowledged play command. The chat listener remained active. |
+| `uv run python` with an authenticated GET of the failed job and an append to `events.jsonl` | Confirmed `canceled`, zero games; retained the failed attempt before recovery. |
+| `systemctl --user restart hal-xpilot-games.service`; subsequent service and event checks | Resumed row 50; both services active and the game reached `playing`. |
+| Python SHA-256, `/proc` argument, and service `ExecStart` checks; removal of `/tmp/hal_credentials.py`, `/tmp/hal_xpilot_chat.py`, `/tmp/hal_xpilot_run.py` | All three were unused duplicate copies. The active `control/` files were preserved. |
+| Python updates to README, spec, and run protocol | Corrected deployment facts without changing runtime code or configuration. |
+| `git diff --check`; `git diff --stat`; review of the full documentation diff | Passed; changes are limited to three Markdown files. |
+| Python local Markdown link and schema/capture checks | Passed: four local links, schema 2, instance name `global`, and current capture instructions. |
+
+The runtime gates are recorded under Continuous emulator capture above:
+1,493 Python tests and 105 Worker tests passed; all format, lint, type, and
+queue integration checks passed. Eight Python tests were skipped: two opt-in
+GPU qualification checks and six tests with the absent optional local v7
+subset. These remain skips, not passes. No tests were rerun for this
+Markdown-only cleanup. The diff and local documentation links were checked.
+Reboot, managed replacement, stream lease transfer, matched stream-on/off
+performance controls, and viewer latency remain unverified. No image push,
+new cloud resource, R2 asset upload, Worker deployment, or Git push occurred.

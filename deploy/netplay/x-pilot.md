@@ -145,11 +145,18 @@ The local run directory is `runs/netplay/x-pilot-master120/`:
 - `private/` contains reservation tokens with mode 600.
 - `control/` retains the local operator scripts used for this run.
 
-Two attempts are excluded: the canceled `IBDW#0`/20 reservation
+The initial excluded attempts were the canceled `IBDW#0`/20 reservation
 `oNHh0qZ14F2pg27ZOQc5cZpQ`, and `D54iIcqY1Z7RCUIQ-S9kigOz`, which failed
 before completing a game because inference still enforced the old return cap.
 The fix shares `[-20, 140]` across the inference, evaluation, and queue
 boundaries. Tests now perform actual predictions with `MASTER`/120.
+
+During the deployment cleanup, 47 games had been verified through schedule
+row 49. The first attempt at row 50 received no x_pilot acknowledgment for
+`!play HAL#647` and stopped the scheduler. Its reservation
+`w_yrF_Mg8NlTpMhjy1lkGFgN` was confirmed canceled with zero completed games.
+The failed attempt remains in the event log and private reservation records.
+The same row was resumed and reached `playing`, with `MASTER`/120 unchanged.
 
 ## Local operation and credentials
 

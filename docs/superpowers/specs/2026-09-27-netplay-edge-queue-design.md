@@ -1,7 +1,7 @@
 # Netplay edge queue
 
 Date: 2026-09-27
-Status: Plans 1–5 implemented; external deployment and live host and stream checks are owner-gated.
+Status: Plans 1–5 implemented and deployed with owner approval. Remaining recovery and performance checks are recorded in `deploy/netplay/README.md`.
 
 ## Goal
 
@@ -21,8 +21,8 @@ two.
 | 1 | API Worker and Durable Object (`web/netplay-api`), golden transcripts | done |
 | 2 | Runner and admin clients, retry-safe runner routes, shared queue contract | done |
 | 3 | Runner cutover to `RemoteQueue`; delete the Python service; page and deploy scripts | done |
-| 4 | Host bring-up: image, `gce-up.sh`, G4 verification | done; live G4 check owner-gated |
-| 5 | Twitch streaming: stream lease, claim preference, displays, OBS | done; manual stream check owner-gated |
+| 4 | Host bring-up: image, `gce-up.sh`, G4 verification | done; one G4 deployed and live game verified; replacement and shutdown checks pending |
+| 5 | Twitch streaming: stream lease, claim preference, displays, OBS | done; live OBS stream and restart verified; lease transfer and matched performance controls pending |
 
 Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
 
@@ -35,8 +35,8 @@ Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
   work.
 - No bot check (Turnstile). Rate limits and a queue cap are the only abuse
   controls on player routes.
-- No backward compatibility. Nothing has been deployed, so old databases,
-  status files, and environment files are discarded, not migrated.
+- No backward compatibility. Old database schemas, status files, and
+  environment files are not migrated. Schema mismatches are rejected.
 
 ## Decisions
 
@@ -61,17 +61,19 @@ Plans 1, 2, and 3 run in order. Plans 4 and 5 each need Plan 3.
 ```
 browser ─▶ 20xx.xyz/*     page Worker (web/netplay, vinext, static client)
         ─▶ 20xx.xyz/v1/*  API Worker (web/netplay-api, TypeScript)
-                            └─▶ Durable Object "queue" (single instance, SQLite)
+                            └─▶ Durable Object Queue, name "global" (single instance, SQLite)
                                   jobs · games · sessions · accounts · stream · policy · events
 
 GPU box: hal-netplay-runner ── outbound HTTPS + WebSocket ──▶ 20xx.xyz/v1/runner/*
-         downloads policy, ISO, emulator, account JSON from private R2
+         downloads policy, ISO, account JSON from private R2
+         downloads the pinned official emulator from GitHub through hal/fixtures.py
          uploads replay files and their small metadata records to private R2
          stream holder only: OBS ── RTMP ──▶ twitch.tv
 ```
 
 The page and API share an origin, so the API sends no CORS headers and the page
-needs no build-time API URL. GPU boxes accept no inbound connections.
+needs no build-time API URL. GPU boxes expose no public HAL web API. Slippi
+uses direct peer traffic; runner control traffic is outbound HTTPS and WSS.
 
 ## API Worker and Durable Object
 
@@ -79,9 +81,11 @@ needs no build-time API URL. GPU boxes accept no inbound connections.
 
 `web/netplay-api/` is a new Worker project:
 
-- `src/index.ts`: routing, auth checks, rate limiting; forwards to the Durable Object.
+- `src/index.ts`: Worker entry point and Durable Object export.
+- `src/http.ts`: routing, auth checks, rate limiting; forwards to the Durable Object.
 - `src/queue.ts`: the Durable Object class and its SQLite schema.
-- `src/state.ts`: the job state machine as plain functions over a storage handle.
+- `src/store.ts`: the job state machine and job/game schema.
+- `src/sessions.ts`: sessions, account leases, and stream ownership.
 - `wrangler.jsonc`: route `20xx.xyz/v1/*`, the Durable Object binding and its
   migration, a rate-limit binding, and secret names.
 - `test/`: vitest tests in Cloudflare's local Workers runtime, and `test/transcripts/`.
@@ -92,10 +96,10 @@ All queue state lives in one Durable Object instance, addressed by a fixed name.
 Requests to it run one at a time, and each request runs in one storage
 transaction.
 
-Tables (schema version 1 of the new store; no migrations):
+Tables (storage schema version 2; no migrations):
 
-- `jobs`, `games`: the same columns and meanings as the current
-  `hal/netplay_service/queue.py` v3 schema.
+- `jobs`, `games`: ported from the removed Python `queue.py` v3 schema, with
+  session ownership and the fields required for idempotent runner requests.
 - `sessions`: `id`, `host` (free text from the runner), `bundle_sha256`,
   `git_sha`, `slots`, `wants_stream`, `started_at`, `last_seen_at`, `draining`,
   latest `RunnerStatus` payload, `ended_at`.
@@ -107,6 +111,7 @@ Tables (schema version 1 of the new store; no migrations):
   "Publishing a policy").
 - `events`: `at`, `kind`, `job_id`, `session_id`, `detail` (JSON). Rows older
   than 30 days are deleted by the alarm.
+- `settings`: schema version and queue pause state.
 
 ### Alarm
 
