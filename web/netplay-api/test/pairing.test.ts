@@ -50,8 +50,7 @@ describe("shared account pairing", () => {
     expect((await claim(session, 1)).status).toBe(204);
     expect((await claim(session, 0)).body).toEqual(held.body);
     await play(session, 0, first.id);
-    expect((await claim(session, 1)).status).toBe(204);
-    await cleanup(session, 0, held.body);
+    // A live game releases the pairing gate, so the session's other slots can claim.
     expect((await claim(session, 1)).body.id).toBe(second.id);
     // A late cleanup from the first game cannot clear the second pairing.
     expect((await cleanup(session, 0, held.body)).status).toBe(200);

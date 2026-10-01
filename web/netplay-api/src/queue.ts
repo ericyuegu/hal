@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   HttpError,
+  IN_GAME_PHASES,
   QUEUE_CAP,
   RUNNER_PROTOCOL_VERSION,
   randomToken,
@@ -394,6 +395,8 @@ export class Queue extends DurableObject<Env> {
       return this.tx(() => {
         const worker = this.sessions.jobWorker(sessionId, slot);
         const { view, phaseChanged, newGames } = this.jobs.report(jobId, worker, observed);
+        // A live game no longer needs the session's one pairing, so other slots may claim.
+        if (IN_GAME_PHASES.has(observed.phase)) this.sessions.finishPairing(sessionId, slot, jobId, view.attempt);
         if (phaseChanged) {
           this.events.log("phase_changed", { job: jobId, session: sessionId, slot, phase: observed.phase });
         }
