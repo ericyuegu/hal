@@ -13,7 +13,7 @@ cleanup finishes. Cleanup includes the attempt number, so an old retry cannot
 release a newer pairing. The supervisor handles dead slots and engine recovery.
 
 Runner protocol is 2. Storage schema is 3, at instance `global-v3`. Deployment
-will use a fresh queue and republish the existing policy and account references.
+uses a fresh queue and republishes the existing policy and account references.
 The former `global` instance retains its historical state. There is no migration.
 No reservation was active or queued at preparation time; admissions were paused.
 
@@ -38,7 +38,8 @@ The control used image/source `8831869a7b315fc2755f895b399c4f84a968a84a`.
 The treatment used a source archive based on `fb4316cb`, with the pending
 timing and pairing changes. Archive SHA-256:
 `237b75c9d6c5ad36db0e3a9fb8f8fb9e193fbbeebe906c6bda6829126ee26325`.
-The production image will repeat qualification from its committed source.
+The production image repeated qualification from its committed source; see
+the final deployment result below.
 
 Policy SHA-256:
 `0ff1daf80caa36a94a713c4ccba9223db8d7ba7c1379b5865bbc40b8a8c2f3ec`.
@@ -126,10 +127,10 @@ mode-700 `private/` directory and are not committed.
 
 ## Deployment status
 
-The existing one-GPU G4 is running at 8.229.68.10. The game runner is stopped;
-the health container remains up. Eight-slot source is validated, but its image
-and schema cutover are not deployed yet. Ranked and local player loops remain
-paused. No Git push was made.
+The existing one-GPU G4 is running at 8.229.68.10. The new image and schema
+are deployed. The runner reports eight healthy slots, zero recoveries, and
+zero service restarts after the socket fix. Admissions are open. OBS is live.
+Ranked and local player loops remain stopped. No Git push was made.
 
 ## Automatic GPU setup
 
@@ -206,3 +207,124 @@ warnings about unsupported key names.
   Evidence: `/var/lib/hal-netplay/direct8-check/socket-{before,after}.log`.
 - `uv run pytest -q tests/test_netplay_gce.py` passed **20** tests.
 - `bash -n deploy/netplay/gce-startup.sh` and `git diff --check` passed.
+
+## Release and final checks
+
+Image source is `6c79d130582f52495f226d261a48877049981175`.
+The complete release image was built and pushed to the existing Artifact
+Registry repository. Its manifest digest is
+`sha256:b00e4c9911d8183891e777744c47c55316759ba75da8ca0ec62f121430212c4a`.
+The startup script adds the socket fix from `6860af82`. This host script
+change does not require another image build.
+
+- `docker build --file deploy/netplay/Dockerfile --build-arg HAL_GIT_SHA=<full-sha> --tag <registry-image> .`
+  and `docker push <registry-image>` succeeded. An isolated image check
+  verified installed source hashes, protocol 2, the approved timing profile,
+  and the absence of bundled ISO and emulator fixtures.
+- `gcloud compute instances add-metadata hal-netplay-g4 --project=centering-star-502613-k3 --zone=us-west1-a --metadata=hal-netplay-image=<image>,hal-netplay-git-sha=<sha>,hal-netplay-slots=8 --metadata-from-file=startup-script=deploy/netplay/gce-startup.sh`
+  succeeded. The second metadata update changed only the startup script.
+- Remote `systemctl restart google-startup-scripts.service` completed with
+  exit zero on both attempts. The first runner then failed on Xvfb :101.
+  The corrected launch created X90 and X101 through X107, with zero runner
+  restarts during preparation.
+- `uv run ruff format --check .`, `uv run ruff check .`, the required
+  `uv run ty check ...`, and `git diff --check` passed after the socket fix.
+- A repeated `uv run pytest -q -rs -m 'not integration'` failed with
+  `ValueError('I/O operation on closed file.')` and `lost sys.stderr`.
+  Read-only sandbox calls also failed with mount quota errors at that time.
+  The precise cause of the pytest capture failure was not established.
+  The earlier complete run had passed.
+- `TMPDIR="$PWD/runs/tmp8" uv run pytest -q -x -rs -m 'not integration' --basetemp="$PWD/runs/tmp8/handoff"`
+  passed **1,627** tests, with eight skips, 21 deselections, and 27 warnings
+  in 332.79 seconds. The separate 20-test GCE run includes the new socket
+  regression. Skip reasons were unchanged; no required fixture was missing.
+- An initial `vkcube --c 120 --width 640 --height 480` check failed with
+  reduced driver capabilities. Repeating it with production capabilities
+  `compute,graphics,utility,video,display` passed on NVIDIA under Xvfb.
+- Automatic approval review rejected a proposed private account-file copy.
+  Instead, the already-present VM account was updated only in its public
+  connect code. Its exact SHA-256 matched the published R2 object. No new
+  credential transfer was needed.
+- Automatic approval review initially rejected the live Vulkan test because
+  the original instructions required owner approval for live G4 verification.
+  The owner then explicitly approved one 60-second test game.
+- The test container downloaded and verified its fixtures. Its first path
+  diagnostic incorrectly called `is_file()` on a string. Wrapping paths in
+  `Path` fixed the diagnostic and confirmed HAL#9000 and both fixtures.
+- An admin status diagnostic incorrectly used `AdminClient` as a context
+  manager. Repeating it with the explicit `close()` lifecycle succeeded.
+- Remote `journalctl`, `systemctl show`, `docker ps/top/logs`,
+  `nvidia-smi`, and selected JSON reads tracked startup. A status-file read
+  before preparation failed because the file did not yet exist. An old budget
+  file still named the former image and was not treated as new evidence.
+- Local `df -h`, `free -h`, and process inspection checked the test host.
+  A broad process filter matched old unrelated wrappers; they were left alone.
+- Commits `9817205a`, `6c79d130`, and `6860af82` passed their pre-commit
+  hooks. Separate frontend wording and spec changes remain unstaged.
+
+## Final deployment result
+
+The production image qualified all eight inference streams while OBS was
+running. Its 200 measurements gave 16.617 ms p50, 20.807 ms p95,
+**21.148 ms p99**, and 21.434 ms maximum. Percentiles use linear interpolation.
+The allowance is 33.333 ms. The exact report is
+`runs/netplay/direct8/production-budget.json`; it records the image SHA,
+policy, checkpoint, environment, timing, and generated sampling seed.
+This is an additional qualification run, not the fixed-seed control comparison.
+
+The owner-approved test paired G4 **HAL#9000** with local **CRYO#610**.
+Both processes exited zero after the observation window. G4 advanced 3,597
+frames in 60.009 seconds: **59.941 FPS**. Its five-second samples ranged from
+59.865 to 59.967 FPS. Both sides used neutral input; this test checked the
+renamed account and renderer, not model gameplay or eight-game throughput.
+
+The running Dolphin mapped `libvulkan.so`, the NVIDIA 580.173.02 libraries,
+and NVIDIA device nodes. `nvidia-smi pmon` showed Dolphin on GPU 0.
+No llvmpipe or swrast library appeared in the recorded renderer mappings.
+The test used the release image, Vulkan, an isolated Xvfb display, and delay 2.
+
+Both replays are retained locally:
+
+- `runs/netplay/direct8/render-check/g4/live-1/replays/Game_20261001T193637.slp`
+- `runs/netplay/direct8/render-check/local-live-1/replays/Game_20261001T123638.slp`
+
+The G4 copy also remains under `/var/lib/hal-netplay/direct8-check/live-1/`.
+These diagnostic replays were not uploaded to R2. Production queue jobs use
+the normal replay uploader.
+
+OBS reported 1920×1080 at 60 FPS, an active stream, no reconnect, zero output
+skips, and zero congestion. It recorded four rendering skips out of 16,921
+frames during startup and qualification. No game occupied the production
+stream slot during this check; the separate Vulkan test was not broadcast.
+
+Final commands:
+
+- `scp ... probe.py ...:/var/lib/hal-netplay/direct8-check/probe.py`
+  staged only public test code. `scp ... runner-status.budget.json ...`
+  saved the production measurements.
+- Remote `docker run -d --name hal-netplay-render-check ...` and
+  `docker exec ... python -c '... ensure(ISO); ensure(NETPLAY_EMULATOR)'`
+  prepared the approved test. Its private account was a read-only mount of
+  the existing VM cache.
+- On each machine, `timeout --signal=TERM --kill-after=5s 210s xvfb-run -a ... probe.py ...`
+  ran the synchronized 60-second game. Both commands exited zero.
+  The G4 used port 51460 and Vulkan; the local peer used port 52460 and OGL.
+- Remote `awk ... /proc/<dolphin-pid>/maps` and `nvidia-smi pmon -c 1`
+  recorded the active driver and GPU process.
+- Remote OBS `GetStats`, `GetStreamStatus`, and `GetVideoSettings`
+  requests succeeded through its authenticated local socket. No key or
+  control password was printed. The result is `obs-ready.json`.
+- Remote `tar -czf - ...` through SSH and local `tar --no-same-owner -xzf ...`
+  saved the game and renderer evidence. `docker rm -f hal-netplay-render-check`
+  removed only the completed diagnostic container.
+- `AdminClient.status()` verified eight real healthy slots and delay 2.
+  `AdminClient.set_paused(False)` reopened admissions.
+  `curl --fail --silent --show-error https://20xx.xyz/v1/capacity`
+  confirmed public capacity 8, healthy slots 8, state ready, and zero recoveries.
+- The final source and documentation diff was checked before commit.
+  No frontend deploy, Git push, VM replacement, or new billable resource
+  was needed for this final verification.
+
+The Cloudflare billing-plan query from the previous deployment was denied
+with HTTP 403. Its plan remains unverified. See `direct16.md` for the request
+quota estimate; the SQL read-cost fix alone does not raise request quotas.

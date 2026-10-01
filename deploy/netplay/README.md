@@ -13,44 +13,41 @@ replays and reports retain the code used when those games were played.
 
 ## Current status — 2026-10-01 UTC
 
-The owner stopped the G4 at 07:04 UTC. Compute Engine confirms
-**TERMINATED**; the instance and its 100 GB disk are retained. Direct play,
-the local test player, and Twitch are stopped. The page and API remain
-deployed at [20xx.xyz](https://20xx.xyz), with queue admissions paused.
-The final game replay uploaded before shutdown. See the
-[stop record](g4-stop.md) for commands and a runner shutdown defect.
-
-Before stopping, the replacement G4 served one validated slot using
-`HAL#647`. The expanded player list remains published. Ranked and the
-Phillip campaign remain paused.
-
-The code accepts up to sixteen slots, but sixteen are **not live**. The
-sixteen-stream prediction check failed: p99 was 33.812 ms against a 16.667 ms
-limit. A later [live account-reuse test](account-reuse.md) ran two simultaneous
-games with the same account after sequential pairing. HAL still requires a
-distinct account per slot; changing that rule needs a matchmaking gate.
-Inference performance work, a suitable Cloudflare plan, and a full concurrent
-model-game check remain required. See the
-[capacity and deployment report](direct16.md) for evidence and commands.
+Direct play is live with **eight healthy slots**, one shared **HAL#9000**
+account, and one RTX PRO 6000 Blackwell GPU. Admissions are open. Ranked,
+the Phillip campaign, and the local test player remain stopped.
 
 - Site: [20xx.xyz](https://20xx.xyz). Worker `hal-netplay-web` serves the page;
   `hal-netplay-api` handles `/v1/*`. The queue cost fix remains deployed.
-- Queue: one SQLite-backed Durable Object, class `Queue`, instance `global`,
-  storage schema 2. It owns reservations, sessions, account leases, policy
-  settings, the stream lease, and events.
+- Queue: one SQLite-backed Durable Object, class `Queue`, instance
+  `global-v3`, storage schema 3, runner protocol 2. The former instance
+  retains its historical state; there is no migration.
 - GPU: `hal-netplay-g4`, project `centering-star-502613-k3`, zone
-  `us-west1-a`, last running address `34.83.210.75`. It is a standalone
-  `g4-standard-48` with exactly one RTX PRO 6000 Blackwell GPU and a 100 GB
-  boot disk. No managed instance group is deployed.
-- Runner configuration: systemd starts `hal-netplay-runner` and `hal-netplay-health`
-  containers. The complete runner image uses commit `8831869a`. The host
-  startup script includes fixes through `6ec246ff`.
-- Video configuration (currently stopped): [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
-  `:90` renders Dolphin. OBS captures only its render window at 1080p60
-  and uses NVENC. Menus remain visible while a reservation owns Dolphin.
-- Live check: 1,800 frames in 30.019 seconds, or 59.96 FPS, against the
-  owner's local peer. Both one-slot timing profiles passed. The short test
-  ended by deliberate disconnect and freed the slot.
+  `us-west1-a`, address `8.229.68.10`. It is a standalone
+  `g4-standard-48` with exactly one GPU and a 100 GB boot disk.
+  No managed instance group is deployed.
+- Runner: systemd starts the runner and health containers. The complete
+  image uses commit `6c79d130`. The automatic host startup script includes
+  the private display socket fix in `6860af82`.
+- Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). Slot 0 uses
+  NVIDIA OpenGL on Xorg :90. OBS captures only Dolphin at 1080p60 with NVENC.
+  The other seven slots use NVIDIA Vulkan on private Xvfb displays.
+  Dolphins start when the runner assigns a reservation.
+- Timing: physical delay 2, inference allowance 2, prefix 4, replan 4,
+  horizon 8. Delay 3 is not admitted. The production eight-stream check
+  measured **21.148 ms p99** against **33.333 ms**.
+- Pairing: one new search runs at a time. Connected games continue
+  concurrently. Initial connection timeout is 60 seconds; rematches retain
+  600 seconds. Cleanup releases the pairing gate.
+- Live verification: HAL#9000 paired with CRYO#610 using Vulkan. The
+  60-second neutral-input game ran at **59.94 FPS**. OBS separately reported
+  60 FPS, no output skips, no reconnect, and no congestion.
+
+The [eight-slot report](direct8.md) records the release, measurements, commands,
+failures, skips, and local replay paths. Eight simultaneous model games have
+not been measured. The earlier [account-reuse test](account-reuse.md) ran two
+concurrent neutral-input games after sequential pairing. Unrestricted parallel
+searches [paired HAL with itself](parallel-pairing.md), so the gate remains.
 
 The former VM and disk were deleted before this replacement. All 105 Ranked
 replays and its one unfinished direct-play replay remain verified in R2.
@@ -73,8 +70,9 @@ Runner -> R2 replay + metadata -> local matchup recordings
 ```
 
 The runner starts one shared GPU inference process and one Dolphin process
-per slot. Frame observations and actions stay on the GPU host. Cloudflare
-handles queue state, settings, and health reports. The GPU host has no public
+per occupied slot. Inference batches incoming requests; idle slots do not
+continuously run the model. Frame observations and actions stay on the GPU
+host. Cloudflare handles queue state, settings, and health reports. The GPU host has no public
 HAL web API. Slippi uses its own peer connection.
 
 ### Image and recovery limits
@@ -82,11 +80,11 @@ HAL web API. Slippi uses its own peer connection.
 The current registry image is:
 
 ```text
-us-west1-docker.pkg.dev/centering-star-502613-k3/hal-netplay/hal-netplay-runner:8831869a7b315fc2755f895b399c4f84a968a84a
+us-west1-docker.pkg.dev/centering-star-502613-k3/hal-netplay/hal-netplay-runner:6c79d130582f52495f226d261a48877049981175
 ```
 
 Its manifest digest is
-`sha256:b3f341cd60e15df2c899d6b2bf6bce50afe0297d3b8d03762d40252e59d9a501`.
+`sha256:b00e4c9911d8183891e777744c47c55316759ba75da8ca0ec62f121430212c4a`.
 It contains the maintained runtime, OBS, and ranked scripts. No source
 override mounts are required. ISO, policy, accounts, and credentials are
 fetched at runtime.
@@ -94,8 +92,9 @@ fetched at runtime.
 Fresh-host bring-up was tested. The startup script installs missing Docker
 and matching NVIDIA GLX/video libraries before creating the services.
 It mounts the host's Vulkan driver manifest and checks the NVIDIA device
-inside the image before starting the runner. Reapplying startup metadata
-drains existing services first, then recreates the display authorization
+inside the image before starting the runner. Only the X90 socket is shared
+read-only; the container owns the other display sockets. Reapplying startup
+metadata drains existing services first, then recreates the display authorization
 and restarts the services with the new image and slot count.
 Reboot recovery and managed instance group replacement have not been tested.
 
