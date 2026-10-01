@@ -7,9 +7,16 @@ both delay profiles, and then starts its slots.
 
 ## Current status — 2026-10-01 UTC
 
-Direct play is back online at [20xx.xyz](https://20xx.xyz). The replacement
-G4 runs **one validated slot**, using `HAL#647`. The expanded player list is
-published. Ranked and the Phillip campaign remain paused.
+The owner stopped the G4 at 07:04 UTC. Compute Engine confirms
+**TERMINATED**; the instance and its 100 GB disk are retained. Direct play,
+the local test player, and Twitch are stopped. The page and API remain
+deployed at [20xx.xyz](https://20xx.xyz), with queue admissions paused.
+The final game replay uploaded before shutdown. See the
+[stop record](g4-stop.md) for commands and a runner shutdown defect.
+
+Before stopping, the replacement G4 served one validated slot using
+`HAL#647`. The expanded player list remains published. Ranked and the
+Phillip campaign remain paused.
 
 The code accepts up to sixteen slots, but sixteen are **not live**. The
 sixteen-stream prediction check failed: p99 was 33.812 ms against a 16.667 ms
@@ -26,13 +33,13 @@ model-game check remain required. See the
   storage schema 2. It owns reservations, sessions, account leases, policy
   settings, the stream lease, and events.
 - GPU: `hal-netplay-g4`, project `centering-star-502613-k3`, zone
-  `us-west1-a`, external address `34.83.210.75`. It is a standalone
+  `us-west1-a`, last running address `34.83.210.75`. It is a standalone
   `g4-standard-48` with exactly one RTX PRO 6000 Blackwell GPU and a 100 GB
   boot disk. No managed instance group is deployed.
-- Runner: systemd starts `hal-netplay-runner` and `hal-netplay-health`
+- Runner configuration: systemd starts `hal-netplay-runner` and `hal-netplay-health`
   containers. The complete runner image uses commit `8831869a`. The host
   startup script includes fixes through `6ec246ff`.
-- Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
+- Video configuration (currently stopped): [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
   `:90` renders Dolphin. OBS captures only its render window at 1080p60
   and uses NVENC. Menus remain visible while a reservation owns Dolphin.
 - Live check: 1,800 frames in 30.019 seconds, or 59.96 FPS, against the
