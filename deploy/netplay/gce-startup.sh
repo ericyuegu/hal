@@ -35,7 +35,7 @@ nvidia-smi
 install -d -m 0700 /run/hal-netplay
 install -d -m 0755 /var/cache/hal-netplay /var/lib/hal-netplay/replays
 
-# CUDA and NVENC alone do not supply the GLX libraries needed by Dolphin.
+# Match the GLX and video libraries to the running NVIDIA driver.
 driver_version=$(dpkg-query -W -f='${Version}' libnvidia-compute-580-server)
 [[ $(nvidia-smi --query-gpu=driver_version --format=csv,noheader) == "${driver_version%%-*}" ]] || {
   log "expected one GPU with the installed NVIDIA 580 server driver"; exit 1;
@@ -44,6 +44,7 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   xserver-xorg-core "xserver-xorg-video-nvidia-580-server=$driver_version" \
   "libnvidia-gl-580-server=$driver_version" "libnvidia-common-580-server=$driver_version" \
+  "libnvidia-encode-580-server=$driver_version" "libnvidia-decode-580-server=$driver_version" \
   xauth mesa-utils
 systemctl restart nvidia-cdi-refresh.service
 pci=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader)

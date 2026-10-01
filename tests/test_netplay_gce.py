@@ -177,10 +177,12 @@ def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Pa
         'if [[ $1 == install ]]; then /bin/cp "$DOCKER_TEMPLATE" "$MOCK_BIN/docker"; '
         '/bin/chmod +x "$MOCK_BIN/docker"; fi\n',
     )
-    for name in ("nvidia-ctk", "nvidia-smi", "systemctl"):
-        command(name, "exit 0\n")
-    # Stop before filesystem, display, or credential setup on the test host.
-    command("install", "exit 91\n")
+    command("nvidia-ctk", "exit 0\n")
+    command("nvidia-smi", "if [[ $# != 0 ]]; then echo 580.173.02; fi\n")
+    command("dpkg-query", "echo 580.173.02-0ubuntu0.24.04.1\n")
+    command("install", "exit 0\n")
+    # Stop before display files or credentials are written on the test host.
+    command("systemctl", 'if [[ $* == "restart nvidia-cdi-refresh.service" ]]; then exit 91; fi\n')
     environment = os.environ | {
         "PATH": str(commands),
         "STARTUP_LOG": str(log),
@@ -194,9 +196,15 @@ def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Pa
     assert result.returncode == 91, result.stderr
     calls = log.read_text().splitlines()
     installs = [call for call in calls if call.startswith("apt-get ")]
-    assert installs == (
+    docker_installs = installs[:-2]
+    assert docker_installs == (
         [] if docker_installed else ["apt-get update", "apt-get install -y --no-install-recommends docker.io"]
     )
+    assert installs[-2] == "apt-get update"
+    packages = installs[-1].split()
+    for package in ("gl", "common", "encode", "decode"):
+        assert f"libnvidia-{package}-580-server=580.173.02-0ubuntu0.24.04.1" in packages
+    assert calls.index(installs[-1]) < calls.index("systemctl restart nvidia-cdi-refresh.service")
     configure = calls.index("nvidia-ctk runtime configure --runtime=docker")
     restart = calls.index("systemctl restart docker")
     assert configure < restart < calls.index("docker info") < calls.index("nvidia-smi ")
