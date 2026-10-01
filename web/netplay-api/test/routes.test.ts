@@ -42,7 +42,7 @@ describe("security and shape", () => {
       ["POST", "/v1/jobs", { rawBody: "{not json" }, {}],
       ["POST", "/v1/jobs", { rawBody: big }, {}],
       ["POST", "/v1/jobs", { body: [1, 2] }, {}],
-      ["PATCH", "/v1/jobs/x/policy", { rawBody: "[" }, { token: "t" }],
+      ["PATCH", "/v1/jobs/x/settings", { rawBody: "[" }, { token: "t" }],
       ["POST", `/v1/runner/sessions/${session}/claim`, { body: { slot: "zero" } }, { runner: true }],
       ["POST", `/v1/runner/sessions/${session}/status`, { body: null }, { runner: true }],
       ["POST", "/v1/runner/sessions", { rawBody: "{" }, { runner: true }],
@@ -68,8 +68,8 @@ describe("security and shape", () => {
     expect(await count()).toBe(before);
   });
 
-  it("requires a runner token before the live socket reaches the queue", async () => {
-    expect((await call("GET", "/v1/runner/jobs/x/live")).status).toBe(401);
+  it("requires a runner token before a runner job read reaches the queue", async () => {
+    expect((await call("GET", "/v1/runner/jobs/x")).status).toBe(401);
   });
 
   it("validates event query parameters", async () => {
@@ -89,7 +89,7 @@ describe("security and shape", () => {
     const result = await call("POST", "/v1/runner/sessions", {
       runner: true,
       runnerToken: OTHER_RUNNER_TOKEN,
-      body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "b", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 1, stream: false },
+      body: { protocol_version: 3, session_id: crypto.randomUUID(), host: "b", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 1, stream: false },
     });
     expect(result.status).toBe(201);
   });
@@ -102,7 +102,7 @@ describe("player routes", () => {
     const result = await call("GET", "/v1/options");
     expect(result.status).toBe(200);
     expect(result.body.imitations.some((choice: { value: string }) => choice.value === "MASKED")).toBe(false);
-    expect(result.body.max_games).toBe(5);
+    expect(result.body).not.toHaveProperty("max_games");
   });
 
   it("refuses jobs without a live session, while paused, and at the cap", async () => {
@@ -155,29 +155,17 @@ describe("runner routes", () => {
     await publish();
     await seedAccounts(1);
     const session = crypto.randomUUID();
-    const body = { protocol_version: 2, session_id: session, host: "sixteen-slots", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots: 16, stream: false };
+    const body = { protocol_version: 3, session_id: session, host: "sixteen-slots", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots: 16, stream: false };
     const started = await call("POST", "/v1/runner/sessions", { runner: true, body });
     expect(started.status).toBe(201);
     expect(started.body.accounts.map((account: { slot: number }) => account.slot)).toEqual(Array.from({ length: 16 }, (_, i) => i));
     expect(new Set(started.body.accounts.map((account: { connect_code: string }) => account.connect_code)).size).toBe(1);
     expect((await call("POST", "/v1/runner/sessions", { runner: true, body })).body).toEqual(started.body);
     await report(session, 16);
-    const claimed = new Set<string>();
-    for (let slot = 0; slot < 16; slot++) {
-      const created = await call("POST", "/v1/jobs", { ip: `198.18.0.${slot + 1}`, body: { ...CREATE, player_code: `PLAYER${slot}#1` } });
-      expect(created.status).toBe(201);
-      const claim = await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot } });
-      expect(claim).toMatchObject({ status: 200, body: { id: created.body.id } });
-      expect((await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot } })).body.id).toBe(created.body.id);
-      claimed.add(claim.body.id);
-      const runner = { session, slot };
-      expect((await call("POST", `/v1/runner/jobs/${claim.body.id}/connecting`, {
-        runner, body: { connect_code: started.body.accounts[slot].connect_code },
-      })).status).toBe(200);
-      expect((await call("POST", `/v1/runner/jobs/${claim.body.id}/playing`, { runner })).status).toBe(200);
-    }
-    expect(claimed.size).toBe(16);
-    expect((await call("GET", "/v1/capacity")).body).toMatchObject({ capacity: 16, healthy_slots: 16, active: 16, queued: 0 });
+    const created = await call("POST", "/v1/jobs", { body: CREATE });
+    const claim = await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 15 } });
+    expect(claim).toMatchObject({ status: 200, body: { id: created.body.id, status: "assigned" } });
+    expect((await call("GET", "/v1/capacity")).body).toMatchObject({ capacity: 16, healthy_slots: 16, active: 1, queued: 0 });
     expect((await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 16 } })).status).toBe(422);
     expect((await call("DELETE", `/v1/runner/sessions/${session}`, { runner: true })).status).toBe(200);
     const status = (await call("GET", "/v1/admin/status", { admin: true })).body;
@@ -189,7 +177,7 @@ describe("runner routes", () => {
     await publish();
     await seedAccounts(1);
     const result = await call("POST", "/v1/runner/sessions", { runner: true,
-      body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "bad", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots, stream: false },
+      body: { protocol_version: 3, session_id: crypto.randomUUID(), host: "bad", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots, stream: false },
     });
     expect(result).toMatchObject({ status: 422, body: { detail: "slots must be in [1, 16]" } });
     const status = (await call("GET", "/v1/admin/status", { admin: true })).body;
@@ -197,31 +185,43 @@ describe("runner routes", () => {
     expect(status.accounts.every((account: { session_id: string | null }) => account.session_id === null)).toBe(true);
   });
 
-  it("runs a reservation through claim, connect, play, and finish", async () => {
+  it("runs a reservation through claim, report, and end", async () => {
     const session = await ready();
     const job = (await call("POST", "/v1/jobs", { body: CREATE })).body;
     const runner = { session, slot: 0 };
     const claimed = await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
-    expect(claimed).toMatchObject({ status: 200, body: { id: job.id, status: "leased" } });
+    expect(claimed).toMatchObject({ status: 200, body: { id: job.id, status: "assigned" } });
     expect((await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 1 } })).status).toBe(204);
     const path = `/v1/runner/jobs/${job.id}`;
-    expect((await call("POST", `${path}/connecting`, { runner, body: { connect_code: "HALBOT#1" } })).body.status).toBe(
-      "connecting",
-    );
-    expect((await call("POST", `${path}/playing`, { runner })).body.status).toBe("playing");
-    const finished = await call("POST", `${path}/finish-game`, {
+    const reported = await call("POST", `${path}/report`, {
       runner,
-      body: { game_number: 1, actual_stage: "BATTLEFIELD", result: "win" },
+      body: {
+        seq: 1,
+        phase: "character_select",
+        phase_seconds_left: 5,
+        bot_code: "HALBOT#1",
+        seen_revision: 1,
+        locked_revision: 1,
+        finished_games: [{ number: 1, stage: "BATTLEFIELD", result: "win" }],
+      },
     });
-    expect(finished.body).toMatchObject({ status: "rematch_wait", game_count: 1 });
-    expect((await call("GET", path, { runner })).body.status).toBe("rematch_wait");
+    expect(reported.body).toMatchObject({ status: "assigned", games: [{ number: 1, result: "win" }] });
+    expect((await call("GET", path, { runner })).body.status).toBe("assigned");
+    expect(
+      (
+        await call("POST", `${path}/end`, {
+          runner,
+          body: { reason: "player_disconnected", retryable: false },
+        })
+      ).body.status,
+    ).toBe("ended");
     const events = await call("GET", `/v1/admin/events?job=${job.id}`, { admin: true });
     expect(events.body.events.map((event: { kind: string }) => event.kind)).toEqual([
       "job_created",
       "job_claimed",
-      "job_connecting",
-      "job_playing",
+      "phase_changed",
       "game_finished",
+      "job_ended",
     ]);
   });
 
@@ -230,7 +230,7 @@ describe("runner routes", () => {
     await seedAccounts(2);
     const result = await call("POST", "/v1/runner/sessions", {
       runner: true,
-      body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "b", bundle_sha256: "f".repeat(64), git_sha: "g", slots: 1, stream: false },
+      body: { protocol_version: 3, session_id: crypto.randomUUID(), host: "b", bundle_sha256: "f".repeat(64), git_sha: "g", slots: 1, stream: false },
     });
     expect(result.status).toBe(409);
   });
@@ -240,17 +240,23 @@ describe("runner routes", () => {
     const job = (await call("POST", "/v1/jobs", { body: CREATE })).body;
     const runner = { session, slot: 0 };
     await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
-    await call("POST", `/v1/runner/jobs/${job.id}/connecting`, { runner, body: { connect_code: "HALBOT#1" } });
-    await call("POST", `/v1/runner/jobs/${job.id}/playing`, { runner });
     await publish({ ...POLICY, bundle_sha256: "e".repeat(64) });
-    const finished = await call("POST", `/v1/runner/jobs/${job.id}/finish-game`, {
+    const finished = await call("POST", `/v1/runner/jobs/${job.id}/report`, {
       runner,
-      body: { game_number: 1, actual_stage: "BATTLEFIELD", result: "win" },
+      body: {
+        seq: 1,
+        phase: "in_game",
+        phase_seconds_left: null,
+        bot_code: "HALBOT#1",
+        seen_revision: 1,
+        locked_revision: 1,
+        finished_games: [{ number: 1, stage: "BATTLEFIELD", result: "win" }],
+      },
     });
     expect(finished.status).toBe(200);
-    const fail = await call("POST", `/v1/runner/jobs/${job.id}/fail`, {
+    const fail = await call("POST", `/v1/runner/jobs/${job.id}/end`, {
       runner,
-      body: { error_code: "policy_changed", retryable: false },
+      body: { reason: "service_failure", retryable: false },
     });
     expect(fail.status).toBe(200);
     expect((await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } })).status).toBe(409);
@@ -262,39 +268,23 @@ describe("runner routes", () => {
     await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
     await setClock(START + 30);
     expect(await runAlarm()).toBe(true);
-    expect((await call("GET", `/v1/jobs/${job.id}`, { token: job.token })).body.status).toBe("failed");
+    expect((await call("GET", `/v1/jobs/${job.id}`, { token: job.token })).body.status).toBe("queued");
     expect((await call("POST", `/v1/runner/sessions/${session}/status`, { runner: true, body: {} })).status).toBe(410);
     const ended = (await call("GET", `/v1/admin/events?session=${session}`, { admin: true })).body.events;
     expect(ended).toContainEqual(expect.objectContaining({ kind: "session_ended", detail: { reason: "silent" } }));
     const failed = (await call("GET", `/v1/admin/events?job=${job.id}`, { admin: true })).body.events;
-    expect(failed).toContainEqual(expect.objectContaining({ kind: "job_failed", detail: { reason: "session_silent" } }));
+    expect(failed).toContainEqual(expect.objectContaining({ kind: "job_released", detail: expect.objectContaining({ reason: "session_silent" }) }));
   });
 
-  it("frees the slot when the player's page leaves a rematch", async () => {
-    const session = await ready(1);
+  it("ends a queued job when the player's page stops polling", async () => {
+    await ready(1);
     const job = (await call("POST", "/v1/jobs", { body: CREATE })).body;
-    const runner = { session, slot: 0 };
-    await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
-    await call("POST", `/v1/runner/jobs/${job.id}/connecting`, { runner, body: { connect_code: "BOT0#1" } });
-    await call("POST", `/v1/runner/jobs/${job.id}/playing`, { runner });
-    const finished = await call("POST", `/v1/runner/jobs/${job.id}/finish-game`, {
-      runner,
-      body: { game_number: 1, actual_stage: "BATTLEFIELD", result: "win" },
+    await setClock(START + 121);
+    expect(await runAlarm()).toBe(true);
+    expect((await call("GET", `/v1/jobs/${job.id}`, { token: job.token })).body).toMatchObject({
+      status: "ended",
+      end_reason: "player_left",
     });
-    expect(finished.body.status).toBe("rematch_wait");
-    // The runner keeps its session and lease alive; only the page goes quiet.
-    for (let t = 15; t <= 120; t += 15) {
-      await setClock(START + t);
-      await report(session, 1);
-      await call("POST", `/v1/runner/jobs/${job.id}/heartbeat`, { runner });
-      await runAlarm();
-    }
-    expect((await call("GET", `/v1/runner/jobs/${job.id}`, { runner })).status).toBe(409);
-    const released = (await call("GET", `/v1/jobs/${job.id}`, { token: job.token })).body;
-    expect(released).toMatchObject({ status: "canceled", error_code: "player_left", last_result: "win" });
-    const next = (await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "NEXT#2" } })).body;
-    const claimed = await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
-    expect(claimed.body.id).toBe(next.id);
   });
 
   it("drains and ends a session on request", async () => {
@@ -307,8 +297,17 @@ describe("runner routes", () => {
 
   it("requires session and slot headers on job routes", async () => {
     const session = await ready(1);
-    expect((await call("POST", "/v1/runner/jobs/x/playing", { runner: true })).status).toBe(400);
-    expect((await call("POST", "/v1/runner/jobs/x/playing", { runner: { session, slot: 5 } })).status).toBe(422);
-    expect((await call("POST", "/v1/runner/jobs/x/playing", { runner: { session: "nope", slot: 0 } })).status).toBe(404);
+    const body = {
+      seq: 1,
+      phase: "booting",
+      phase_seconds_left: null,
+      bot_code: null,
+      seen_revision: 1,
+      locked_revision: null,
+      finished_games: [],
+    };
+    expect((await call("POST", "/v1/runner/jobs/x/report", { runner: true, body })).status).toBe(400);
+    expect((await call("POST", "/v1/runner/jobs/x/report", { runner: { session, slot: 5 }, body })).status).toBe(422);
+    expect((await call("POST", "/v1/runner/jobs/x/report", { runner: { session: "nope", slot: 0 }, body })).status).toBe(404);
   });
 });

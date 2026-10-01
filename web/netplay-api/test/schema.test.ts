@@ -33,11 +33,7 @@ describe("store schema version", () => {
     await reopen(change, async (queue) => {
       expect(await queue.capacity()).toMatchObject({ status: 503, body: { detail } });
       expect(await queue.startSession({})).toMatchObject({ status: 503, body: { detail } });
-      const live = await queue.fetch(
-        new Request("https://20xx.xyz/v1/runner/jobs/j/live", { headers: { Upgrade: "websocket" } }),
-      );
-      expect(live.status).toBe(503);
-      expect(await live.json()).toEqual({ detail });
+      expect(await queue.workerJob("session", 0, "job")).toMatchObject({ status: 503, body: { detail } });
       await expect(queue.alarm()).rejects.toThrow(detail);
     });
   });

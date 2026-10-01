@@ -6,7 +6,7 @@ import { parsePolicyConfig } from "../src/policy";
 import { Queue, type ApiResult } from "../src/queue";
 import { SessionStore } from "../src/sessions";
 import { JobStore, type Row } from "../src/store";
-import { CHOICES, POLICY, runnerStatus } from "./helpers";
+import { NEW_JOB, POLICY, runnerStatus } from "./helpers";
 
 const SESSION = "cost-test-session";
 const TOKEN = "cost-test-job-token";
@@ -29,10 +29,10 @@ async function world(history: number, use: (world: World) => Promise<void>, slot
     if (history > 0) {
       sql.exec(
         `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?)
-         INSERT INTO jobs(id, token_digest, player_code, character, imitation, online_delay,
-                          temperature, status, queue_seq, player_seen_at, created_at, updated_at)
-         SELECT 'old-job-' || x, 'digest', 'OLD' || x || '#1', 'FOX', 'IBDW#0', 2,
-                1, 'complete', x, ?, ?, ? FROM n`, history, NOW - 100, NOW - 100, NOW - 100,
+         INSERT INTO jobs(id, token_digest, player_code, online_delay, status, end_reason, queue_seq,
+                          settings_revision, character, imitation, temperature, player_seen_at, created_at, updated_at)
+         SELECT 'old-job-' || x, 'digest', 'OLD' || x || '#1', 2, 'ended', 'player_canceled', x,
+                1, 'FOX', 'IBDW#0', 1, ?, ?, ? FROM n`, history, NOW - 100, NOW - 100, NOW - 100,
       );
       sql.exec(
         `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?)
@@ -46,11 +46,18 @@ async function world(history: number, use: (world: World) => Promise<void>, slot
     const sessions = new SessionStore(sql, jobs, () => NOW);
     sessions.putAccounts(Array.from({ length: slots }, (_, i) => ({ connect_code: `BOT${i}#1`, r2_key: `accounts/${i}`, sha256: "a".repeat(64) })));
     sessions.start(SESSION, { host: "probe", bundle_sha256: policy.bundle_sha256, git_sha: "probe", slots, stream: false }, policy);
-    jobs.createJob("live-job", await sha256Hex(TOKEN), "PLAYER#1", CHOICES);
+    jobs.createJob("live-job", await sha256Hex(TOKEN), { ...NEW_JOB, player_code: "PLAYER#1" });
     const worker = workerId(SESSION, 0);
     jobs.claimNext(worker);
-    jobs.markConnecting("live-job", worker, "BOT0#1");
-    jobs.markPlaying("live-job", worker);
+    jobs.report("live-job", worker, {
+      seq: 1,
+      phase: "in_game",
+      phase_seconds_left: null,
+      bot_code: "BOT0#1",
+      seen_revision: 1,
+      locked_revision: 1,
+      finished_games: [],
+    });
     await queue.reportStatus(SESSION, runnerStatus(slots));
     await use({ queue, state, jobs, sessions });
   });
@@ -116,14 +123,14 @@ describe("recurring queue costs", () => {
         "report": {
           "alarmReads": 1,
           "alarmWrites": 0,
-          "rowsRead": 28,
+          "rowsRead": 26,
           "rowsWritten": 1,
         },
       }
     `);
   });
 
-  it("keeps poll, heartbeat, and alarm reads bounded with 10,000 completed jobs and sessions", async () => {
+  it("keeps poll, snapshot, and alarm reads bounded with 10,000 completed jobs and sessions", async () => {
     const totals: Record<string, Awaited<ReturnType<typeof measure>>>[] = [];
     for (const history of [0, 10_000]) {
       await world(history, async ({ queue, state }) => {
@@ -133,7 +140,16 @@ describe("recurring queue costs", () => {
           capacity: () => queue.capacity(),
           playerJob: () => queue.getJob("live-job", TOKEN),
           workerJob: () => queue.workerJob(SESSION, 0, "live-job"),
-          heartbeat: () => queue.runnerJob(SESSION, 0, "live-job", "heartbeat", {}),
+          snapshot: () =>
+            queue.report(SESSION, 0, "live-job", {
+              seq: 2,
+              phase: "in_game",
+              phase_seconds_left: null,
+              bot_code: "BOT0#1",
+              seen_revision: 1,
+              locked_revision: 1,
+              finished_games: [],
+            }),
           alarm: () => queue.alarm(),
         };
         const costs: Record<string, Awaited<ReturnType<typeof measure>>> = {};
@@ -174,7 +190,7 @@ describe("recurring queue costs", () => {
 });
 
 describe("alarm writes", () => {
-  it("keeps an earlier alarm across heartbeats and reconstruction, then schedules a new earlier deadline", async () => {
+  it("keeps an earlier alarm across reports and reconstruction, then schedules a new earlier deadline", async () => {
     const stub = env.QUEUE.get(env.QUEUE.idFromName(crypto.randomUUID()));
     await runInDurableObject(stub, async (_instance, state) => {
       const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 86_400_000);
@@ -197,7 +213,7 @@ describe("alarm writes", () => {
         const cost = await measure(state, () => reopened.reportStatus(SESSION, runnerStatus(1)));
         expect(cost.alarmWrites).toBe(0);
         expect(await state.storage.getAlarm()).toBe(firstAlarm);
-        jobs.createJob("early-job", "digest", "PLAYER#2", CHOICES);
+        jobs.createJob("early-job", "digest", { ...NEW_JOB, player_code: "PLAYER#2" });
         expect(await reopened.claim(SESSION, { slot: 0 })).toMatchObject({ status: 200 });
         expect(await state.storage.getAlarm()).toBe((now + 22) * 1000);
         clock.mockReturnValue((now + 22) * 1000);

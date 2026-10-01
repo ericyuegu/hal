@@ -22,10 +22,22 @@ function cleanup(session: string, slot: number, job: { id: string; attempt: numb
 }
 async function play(session: string, slot: number, id: string) {
   const runner = { session, slot };
-  expect((await call("POST", `/v1/runner/jobs/${id}/connecting`, {
-    runner, body: { connect_code: "BOT0#1" },
-  })).status).toBe(200);
-  expect((await call("POST", `/v1/runner/jobs/${id}/playing`, { runner })).status).toBe(200);
+  expect(
+    (
+      await call("POST", `/v1/runner/jobs/${id}/report`, {
+        runner,
+        body: {
+          seq: 1,
+          phase: "in_game",
+          phase_seconds_left: null,
+          bot_code: "BOT0#1",
+          seen_revision: 1,
+          locked_revision: 1,
+          finished_games: [],
+        },
+      })
+    ).status,
+  ).toBe(200);
 }
 
 describe("shared account pairing", () => {
@@ -38,6 +50,8 @@ describe("shared account pairing", () => {
     expect((await claim(session, 1)).status).toBe(204);
     expect((await claim(session, 0)).body).toEqual(held.body);
     await play(session, 0, first.id);
+    expect((await claim(session, 1)).status).toBe(204);
+    await cleanup(session, 0, held.body);
     expect((await claim(session, 1)).body.id).toBe(second.id);
     // A late cleanup from the first game cannot clear the second pairing.
     expect((await cleanup(session, 0, held.body)).status).toBe(200);
@@ -52,6 +66,14 @@ describe("shared account pairing", () => {
     const held = await claim(session, 0);
     expect((await call("DELETE", `/v1/jobs/${first.id}`, { token: first.token })).status).toBe(200);
     expect((await claim(session, 1)).status).toBe(204);
+    expect(
+      (
+        await call("POST", `/v1/runner/jobs/${first.id}/end`, {
+          runner: { session, slot: 0 },
+          body: { reason: "player_canceled", retryable: false },
+        })
+      ).status,
+    ).toBe(200);
     expect((await cleanup(session, 0, held.body)).status).toBe(200);
     expect((await cleanup(session, 0, held.body)).status).toBe(200);
     expect((await claim(session, 1)).body.id).toBe(second.id);
@@ -61,9 +83,14 @@ describe("shared account pairing", () => {
     const session = await startSession(8);
     const job = await create("RETRY#1");
     const first = await claim(session, 0);
-    expect((await call("POST", `/v1/runner/jobs/${job.id}/fail`, {
-      runner: { session, slot: 0 }, body: { error_code: "test", retryable: true },
-    })).status).toBe(200);
+    expect(
+      (
+        await call("POST", `/v1/runner/jobs/${job.id}/end`, {
+          runner: { session, slot: 0 },
+          body: { reason: "service_failure", retryable: true },
+        })
+      ).status,
+    ).toBe(200);
     await cleanup(session, 0, first.body);
     const second = await claim(session, 0);
     expect(second.body.attempt).toBe(first.body.attempt + 1);

@@ -1,7 +1,7 @@
 import { QUEUE_INSTANCE } from "./queue";
 import { HttpError, MAX_BODY_BYTES, sameDigest, sha256Hex } from "./domain";
 import type { Env } from "./env";
-import type { ApiResult, RunnerAction } from "./queue";
+import type { ApiResult } from "./queue";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store",
@@ -9,17 +9,6 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
 };
-const RUNNER_ACTIONS = new Set<RunnerAction>([
-  "heartbeat",
-  "connecting",
-  "playing",
-  "no-show",
-  "no-contest",
-  "finish-game",
-  "fail",
-  "forfeit",
-  "replay",
-]);
 
 function respond(result: ApiResult): Response {
   const headers = new Headers({ ...SECURITY_HEADERS, ...result.headers });
@@ -143,23 +132,17 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       }
       return respond(await queue.createJob(await readBody(request)));
     }
-    const job = path.match(/^\/v1\/jobs\/([^/]+)(\/policy|\/rematch)?$/);
+    const job = path.match(/^\/v1\/jobs\/([^/]+)(\/settings|\/lock)?$/);
     if (job) {
       const [, id, suffix] = job as [string, string, string | undefined];
-      // The bearer dependency is resolved before body validation.
       const token = bearer(request);
-      if (method === "PATCH" && suffix === "/policy") {
-        if (token === null) return failure(401, "job token is required");
-        return respond(await queue.updatePolicy(id, token, await readBody(request)));
+      if (token === null) return failure(401, "job token is required");
+      if (method === "PATCH" && suffix === "/settings") {
+        return respond(await queue.updateSettings(id, token, await readBody(request)));
       }
-      if (method === "POST" && suffix === "/rematch") {
-        if (token === null) return failure(401, "job token is required");
-        return respond(await queue.rematch(id, token, await readBody(request)));
-      }
-      if (suffix === undefined && (method === "GET" || method === "DELETE")) {
-        if (token === null) return failure(401, "job token is required");
-        return respond(method === "GET" ? await queue.getJob(id, token) : await queue.cancelJob(id, token));
-      }
+      if (method === "POST" && suffix === "/lock") return respond(await queue.requestLock(id, token));
+      if (method === "GET" && suffix === undefined) return respond(await queue.getJob(id, token));
+      if (method === "DELETE" && suffix === undefined) return respond(await queue.leaveJob(id, token));
     }
 
     // Runner routes
@@ -182,14 +165,19 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         if (method === "POST" && suffix === "/drain") return respond(await queue.drain(id));
         if (method === "DELETE" && suffix === undefined) return respond(await queue.endSession(id));
       }
-      const runnerJob = path.match(/^\/v1\/runner\/jobs\/([^/]+)(?:\/([a-z-]+))?$/);
+      const runnerJob = path.match(/^\/v1\/runner\/jobs\/([^/]+)(?:\/(report|end|replay))?$/);
       if (runnerJob) {
         const [, id, action] = runnerJob as [string, string, string | undefined];
-        if (action === "live") return queue.fetch(request);
         const { session: sessionId, slot } = runnerSlot(request);
         if (method === "GET" && action === undefined) return respond(await queue.workerJob(sessionId, slot, id));
-        if (method === "POST" && action !== undefined && RUNNER_ACTIONS.has(action as RunnerAction)) {
-          return respond(await queue.runnerJob(sessionId, slot, id, action as RunnerAction, await readBody(request)));
+        if (method === "POST" && action === "report") {
+          return respond(await queue.report(sessionId, slot, id, await readBody(request)));
+        }
+        if (method === "POST" && action === "end") {
+          return respond(await queue.endJob(sessionId, slot, id, await readBody(request)));
+        }
+        if (method === "POST" && action === "replay") {
+          return respond(await queue.recordReplay(sessionId, slot, id, await readBody(request)));
         }
       }
     }

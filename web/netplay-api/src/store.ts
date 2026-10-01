@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_player ON jobs(player_code) WHERE status IN ('queued', 'assigned');
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(retry_front DESC, queue_seq) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_jobs_assigned ON jobs(lease_expires_at, assigned_at) WHERE status = 'assigned';
 CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(lease_expires_at) WHERE lease_owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS games (
   job_id TEXT NOT NULL REFERENCES jobs(id),
@@ -139,9 +140,9 @@ export class JobStore {
       const ahead = this.first(
         `SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'
            AND (retry_front > ? OR (retry_front = ? AND queue_seq < ?))`,
-        row.retry_front,
-        row.retry_front,
-        row.queue_seq,
+        row.retry_front as SqlStorageValue,
+        row.retry_front as SqlStorageValue,
+        row.queue_seq as SqlStorageValue,
       );
       position = 1 + Number(ahead?.n ?? 0);
     }

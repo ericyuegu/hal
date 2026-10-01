@@ -5,7 +5,7 @@ import { EVENT_SCHEMA, EventLog } from "../src/events";
 import { parsePolicyConfig } from "../src/policy";
 import { SESSION_SCHEMA, SessionStore } from "../src/sessions";
 import { JOB_SCHEMA, JobStore } from "../src/store";
-import { CHOICES, Clock } from "./helpers";
+import { Clock, NEW_JOB } from "./helpers";
 import policyJson from "./transcripts/policy.json";
 
 const policy = parsePolicyConfig(policyJson);
@@ -155,11 +155,11 @@ describe("sessions", () => {
   it("ends a silent session, failing its leases and freeing its accounts", () =>
     world(({ jobs, sessions, clock }) => {
       sessions.start("s1", START, policy);
-      jobs.createJob("j1", "d1", "CRYO#610", CHOICES);
+      jobs.createJob("j1", "d1", NEW_JOB);
       jobs.claimNext(sessions.claimWorker("s1", 0, policy));
       clock.advance(30);
       expect(sessions.endSilent()).toEqual({ sessions: ["s1"], jobs: ["j1"] });
-      expect(jobs.row("j1")?.error_code).toBe("service_generation_aborted");
+      expect(jobs.row("j1")?.status).toBe("queued");
       expect(sessions.start("s2", START, policy).accounts).toHaveLength(2);
     }));
 

@@ -3,7 +3,6 @@ import {
   HttpError,
   QUEUE_CAP,
   RUNNER_PROTOCOL_VERSION,
-  TERMINAL_STATUSES,
   randomToken,
   sha256Hex,
   validatePlayerCode,
@@ -11,7 +10,7 @@ import {
 import type { Env } from "./env";
 import { EVENT_SCHEMA, EventLog } from "./events";
 import { type PolicyConfig, checkChoice, optionsBody, parsePolicyConfig } from "./policy";
-import { bool, fields, int, parseCreate, parsePolicyUpdate, parseRematch, str } from "./requests";
+import { bool, fields, int, parseCreate, parseEnd, parseReport, parseSettingsUpdate, str } from "./requests";
 import { SESSION_SCHEMA, SessionStore, type StartRequest } from "./sessions";
 import { JOB_SCHEMA, JobStore } from "./store";
 
@@ -26,7 +25,7 @@ const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 // Every table is created with CREATE TABLE IF NOT EXISTS, which keeps an older
 // table unchanged. Bump this with any table change and use a fresh instance.
 // A mismatched store refuses every request; there are no migrations.
-export const STORE_SCHEMA_VERSION = 4;
+export const STORE_SCHEMA_VERSION = 5;
 export const QUEUE_INSTANCE = `global-v${STORE_SCHEMA_VERSION}`;
 const STORE_TABLES = ["games", "jobs", "pairings", "sessions", "accounts", "stream", "events", "policy", "settings"];
 
@@ -38,23 +37,6 @@ CREATE TABLE IF NOT EXISTS policy (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
-
-export type RunnerAction =
-  | "heartbeat"
-  | "connecting"
-  | "playing"
-  | "no-show"
-  | "no-contest"
-  | "finish-game"
-  | "fail"
-  | "forfeit"
-  | "replay";
-
-interface LiveAttachment {
-  jobId: string;
-  worker: string;
-  released: boolean;
-}
 
 export class Queue extends DurableObject<Env> {
   private readonly jobs: JobStore;
@@ -169,20 +151,31 @@ export class Queue extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     if (this.schemaError !== null) throw new Error(this.schemaError);
-    const changed = this.tx(() => {
+    this.tx(() => {
       const streamHolder = this.sessions.streamHolder();
       const ended = this.sessions.endSilent();
       for (const id of ended.sessions) this.events.log("session_ended", { session: id, reason: "silent" });
-      for (const id of ended.jobs) this.events.log("job_failed", { job: id, reason: "session_silent" });
+      for (const id of ended.jobs) {
+        this.events.log("job_released", {
+          job: id,
+          status: this.jobs.row(id)?.status,
+          reason: "session_silent",
+        });
+      }
       if (streamHolder !== null && ended.sessions.includes(streamHolder)) {
         this.events.log("stream_lease_released", { session: streamHolder, reason: "session_silent" });
       }
-      const expired = this.jobs.reapExpired();
+      for (const id of this.jobs.reapExpired()) {
+        const row = this.jobs.row(id);
+        this.events.log("job_released", {
+          job: id,
+          status: row?.status,
+          reason: row?.end_reason ?? "lease_expired",
+        });
+      }
+      for (const id of this.jobs.applyYield()) this.events.log("wind_down", { job: id, reason: "yield" });
       this.events.prune();
-      for (const id of expired) this.events.log("job_expired", { job: id, status: this.jobs.row(id)?.status });
-      return [...ended.jobs, ...expired];
     });
-    this.release(changed);
     await this.scheduleAlarm();
   }
 
@@ -219,9 +212,10 @@ export class Queue extends DurableObject<Env> {
       if (capacity.healthy_slots === 0) throw new HttpError(503, capacity.service_message);
       checkChoice(policy.characters, request.character, "character");
       checkChoice(policy.imitations, request.imitation, "imitation");
+      if (request.stage !== null) checkChoice(policy.stages, request.stage, "stage");
       validatePlayerCode(request.player_code);
       const job = this.tx(() => {
-        const created = this.jobs.createJob(id, digest, request.player_code, request);
+        const created = this.jobs.createJob(id, digest, request);
         this.events.log("job_created", { job: id, character: request.character, imitation: request.imitation });
         return created;
       });
@@ -231,54 +225,40 @@ export class Queue extends DurableObject<Env> {
 
   async getJob(id: string, token: string): Promise<ApiResult> {
     const digest = await sha256Hex(token);
-    return this.run(() => this.jobs.getJob(id, digest), { alarm: false });
+    return this.run(() => this.tx(() => this.jobs.getJob(id, digest)), { alarm: false });
   }
 
-  async updatePolicy(id: string, token: string, raw: unknown): Promise<ApiResult> {
+  async updateSettings(id: string, token: string, raw: unknown): Promise<ApiResult> {
     const digest = await sha256Hex(token);
     return this.run(() => {
-      const update = parsePolicyUpdate(raw, this.requirePolicy());
-      const job = this.tx(() => {
-        const current = this.jobs.getJob(id, digest);
-        const desired = "desired_return" in update ? update.desired_return ?? null : current.desired_return;
-        const temperature = "temperature" in update ? update.temperature : current.temperature;
-        if (temperature === null || temperature === undefined) throw new HttpError(422, "temperature cannot be null");
-        const updated = this.jobs.updatePolicy(id, digest, desired, temperature);
-        this.events.log("policy_updated", { job: id, revision: updated.policy_revision });
-        return updated;
-      });
-      this.broadcastSettings(id);
-      return job;
-    });
-  }
-
-  async cancelJob(id: string, token: string): Promise<ApiResult> {
-    const digest = await sha256Hex(token);
-    return this.run(() => {
-      const job = this.tx(() => {
-        const canceled = this.jobs.cancel(id, digest);
-        this.events.log("job_cancel_requested", { job: id, status: canceled.status });
-        return canceled;
-      });
-      this.release([id]);
-      return job;
-    });
-  }
-
-  async rematch(id: string, token: string, raw: unknown): Promise<ApiResult> {
-    const digest = await sha256Hex(token);
-    return this.run(() => {
-      const policy = this.requirePolicy();
-      const request = parseRematch(raw, policy);
-      checkChoice(policy.characters, request.character, "character");
-      checkChoice(policy.imitations, request.imitation, "imitation");
-      checkChoice(policy.stages, request.stage, "stage");
+      const update = parseSettingsUpdate(raw, this.requirePolicy());
       return this.tx(() => {
-        const job = this.jobs.requestRematch(id, digest, request.character, request.imitation, request.stage);
-        this.events.log("rematch_ready", { job: id, character: request.character, stage: request.stage });
+        const job = this.jobs.updateSettings(id, digest, update);
+        this.events.log("settings_updated", { job: id, revision: job.settings.revision });
         return job;
       });
-    });
+    }, { alarm: false });
+  }
+
+  async requestLock(id: string, token: string): Promise<ApiResult> {
+    const digest = await sha256Hex(token);
+    return this.run(() => this.tx(() => {
+      const job = this.jobs.requestLock(id, digest);
+      this.events.log("lock_requested", { job: id, count: job.lock_requests });
+      return job;
+    }), { alarm: false });
+  }
+
+  async leaveJob(id: string, token: string): Promise<ApiResult> {
+    const digest = await sha256Hex(token);
+    return this.run(() => this.tx(() => {
+      const job = this.jobs.leave(id, digest);
+      this.events.log(job.status === "ended" ? "job_ended" : "wind_down", {
+        job: id,
+        reason: job.end_reason ?? "player",
+      });
+      return job;
+    }));
   }
 
   // Runner routes
@@ -396,95 +376,75 @@ export class Queue extends DurableObject<Env> {
         const released = this.sessions.streamHolder() === sessionId;
         const ids = this.sessions.end(sessionId, "ended");
         this.events.log("session_ended", { session: sessionId, failed: ids.length });
+        for (const id of ids) {
+          this.events.log("job_released", { job: id, status: this.jobs.row(id)?.status, reason: "session_ended" });
+        }
         if (released) this.events.log("stream_lease_released", { session: sessionId, reason: "ended" });
         return ids;
       });
-      this.release(failed);
       return { failed: failed.length };
     });
   }
 
-  async workerJob(sessionId: string, slot: number, jobId: string): Promise<ApiResult> {
-    return this.run(() => this.jobs.workerJob(jobId, this.sessions.jobWorker(sessionId, slot)), { alarm: false });
+  async report(sessionId: string, slot: number, jobId: string, raw: unknown): Promise<ApiResult> {
+    return this.run(() => {
+      const observed = parseReport(raw);
+      const policy = this.requirePolicy();
+      for (const game of observed.finished_games) checkChoice(policy.stages, game.stage, "stage");
+      return this.tx(() => {
+        const worker = this.sessions.jobWorker(sessionId, slot);
+        const { view, phaseChanged, newGames } = this.jobs.report(jobId, worker, observed);
+        if (phaseChanged) {
+          this.events.log("phase_changed", { job: jobId, session: sessionId, slot, phase: observed.phase });
+        }
+        for (const game of newGames) {
+          this.events.log("game_finished", { job: jobId, session: sessionId, slot, ...game });
+        }
+        const yielded = this.jobs.applyYield();
+        for (const id of yielded) this.events.log("wind_down", { job: id, reason: "yield" });
+        // applyYield may have just set this job's wind_down; answer with the current row.
+        return yielded.includes(jobId) ? this.jobs.view(this.jobs.row(jobId)!) : view;
+      });
+    });
   }
 
-  async runnerJob(sessionId: string, slot: number, jobId: string, action: RunnerAction, raw: unknown): Promise<ApiResult> {
+  async endJob(sessionId: string, slot: number, jobId: string, raw: unknown): Promise<ApiResult> {
     return this.run(() => {
-      const policy = this.requirePolicy();
-      const job = this.tx(() => {
-        const worker =
-          action === "replay" ? this.sessions.recordingWorker(sessionId, slot) : this.sessions.jobWorker(sessionId, slot);
-        const log = (kind: string, detail: Record<string, unknown> = {}) =>
-          this.events.log(kind, { job: jobId, session: sessionId, slot, ...detail });
-        switch (action) {
-          case "heartbeat":
-            return this.jobs.heartbeat(jobId, worker);
-          case "connecting": {
-            const code = validatePlayerCode(str(fields(raw, ["connect_code"], ["connect_code"]).connect_code, "connect_code"));
-            const result = this.jobs.markConnecting(jobId, worker, code);
-            log("job_connecting");
-            return result;
-          }
-          case "playing": {
-            const result = this.jobs.markPlaying(jobId, worker);
-            this.sessions.finishPairing(sessionId, slot, jobId, result.attempt);
-            log("job_playing");
-            return result;
-          }
-          case "no-show": {
-            const result = this.jobs.markNoShow(jobId, worker);
-            log("job_no_show");
-            return result;
-          }
-          case "no-contest": {
-            const result = this.jobs.markNoContest(jobId, worker);
-            log("job_no_contest");
-            return result;
-          }
-          case "finish-game": {
-            const value = fields(raw, ["game_number", "actual_stage", "result"], ["game_number", "actual_stage", "result"]);
-            const stage = checkChoice(policy.stages, str(value.actual_stage, "actual_stage"), "stage");
-            const number = int(value.game_number, "game_number");
-            const result = this.jobs.finishGame(jobId, worker, number, stage, str(value.result, "result"));
-            log("game_finished", { game_number: number, stage, result: value.result });
-            return result;
-          }
-          case "fail": {
-            const value = fields(raw, ["error_code", "retryable"], ["error_code", "retryable"]);
-            const code = str(value.error_code, "error_code");
-            const result = this.jobs.fail(jobId, worker, code, bool(value.retryable, "retryable"));
-            log("job_failed", { error_code: code, status: result.status });
-            return result;
-          }
-          case "forfeit": {
-            const result = this.jobs.forfeit(jobId, worker);
-            log("job_forfeited");
-            return result;
-          }
-          case "replay": {
-            const value = fields(
-              raw,
-              ["game_number", "key", "sha256", "size", "etag"],
-              ["game_number", "key", "sha256", "size", "etag"],
-            );
-            const number = int(value.game_number, "game_number");
-            const result = this.jobs.recordReplay(
-              jobId,
-              worker,
-              number,
-              str(value.key, "key"),
-              str(value.sha256, "sha256"),
-              int(value.size, "size"),
-              str(value.etag, "etag"),
-            );
-            log("replay_recorded", { game_number: number, key: value.key });
-            return result;
-          }
-        }
+      const { reason, retryable } = parseEnd(raw);
+      return this.tx(() => {
+        const worker = this.sessions.jobWorker(sessionId, slot);
+        const job = this.jobs.end(jobId, worker, reason, retryable);
+        this.events.log("job_ended", { job: jobId, session: sessionId, slot, reason, status: job.status });
+        return job;
       });
-      if (TERMINAL_STATUSES.has(job.status) || job.status === "queued") this.release([jobId]);
-      return job;
     });
+  }
+
+  async recordReplay(sessionId: string, slot: number, jobId: string, raw: unknown): Promise<ApiResult> {
+    return this.run(() => this.tx(() => {
+      const value = fields(
+        raw,
+        ["game_number", "key", "sha256", "size", "etag"],
+        ["game_number", "key", "sha256", "size", "etag"],
+      );
+      const worker = this.sessions.recordingWorker(sessionId, slot);
+      const number = int(value.game_number, "game_number");
+      const job = this.jobs.recordReplay(
+        jobId,
+        worker,
+        number,
+        str(value.key, "key"),
+        str(value.sha256, "sha256"),
+        int(value.size, "size"),
+        str(value.etag, "etag"),
+      );
+      this.events.log("replay_recorded", { job: jobId, session: sessionId, slot, game_number: number, key: value.key });
+      return job;
+    }), { alarm: false });
+  }
+
+  async workerJob(sessionId: string, slot: number, jobId: string): Promise<ApiResult> {
+    return this.run(() => this.jobs.workerJob(jobId, this.sessions.jobWorker(sessionId, slot)), { alarm: false });
   }
 
   // Admin routes
@@ -558,85 +518,4 @@ export class Queue extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
   }
 
-  // Live settings
-
-  private settingsMessage(jobId: string): string | null {
-    const row = this.jobs.row(jobId);
-    if (row === null) return null;
-    return JSON.stringify({
-      type: "settings",
-      revision: row.policy_revision,
-      desired_return: row.desired_return,
-      temperature: row.temperature,
-    });
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    if (this.schemaError !== null) return Response.json({ detail: this.schemaError }, { status: 503 });
-    const match = new URL(request.url).pathname.match(/^\/v1\/runner\/jobs\/([^/]+)\/live$/);
-    if (match === null || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return Response.json({ detail: "not found" }, { status: 404 });
-    }
-    const jobId = match[1]!;
-    const slot = request.headers.get("X-HAL-Slot");
-    const session = request.headers.get("X-HAL-Session");
-    if (!session || slot === null || !/^\d+$/.test(slot)) {
-      return Response.json({ detail: "X-HAL-Session and X-HAL-Slot headers are required" }, { status: 400 });
-    }
-    let worker: string;
-    try {
-      worker = this.sessions.jobWorker(session, Number(slot));
-    } catch (error) {
-      if (error instanceof HttpError) return Response.json({ detail: error.detail }, { status: error.status });
-      throw error;
-    }
-    const row = this.jobs.row(jobId);
-    if (row === null || row.lease_owner !== worker) {
-      return Response.json({ detail: "worker does not own this job" }, { status: 409 });
-    }
-    const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
-    this.ctx.acceptWebSocket(server, [`job:${jobId}`]);
-    server.serializeAttachment({ jobId, worker, released: false } satisfies LiveAttachment);
-    server.send(this.settingsMessage(jobId)!);
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  // getWebSockets still lists a socket the server closed until the client
-  // acknowledges the close, and send() on it throws.
-  private openSockets(jobId: string): { socket: WebSocket; worker: string }[] {
-    return this.ctx.getWebSockets(`job:${jobId}`).flatMap((socket) => {
-      const attachment = socket.deserializeAttachment() as LiveAttachment;
-      if (attachment.released || socket.readyState !== WebSocket.READY_STATE_OPEN) return [];
-      return [{ socket, worker: attachment.worker }];
-    });
-  }
-
-  private broadcastSettings(jobId: string): void {
-    const message = this.settingsMessage(jobId);
-    if (message === null) return;
-    for (const { socket } of this.openSockets(jobId)) socket.send(message);
-  }
-
-  // A socket's runner no longer owns its job: tell it, then close.
-  private release(jobIds: readonly string[]): void {
-    for (const jobId of new Set(jobIds)) {
-      const row = this.jobs.row(jobId);
-      for (const { socket, worker } of this.openSockets(jobId)) {
-        if (row === null || TERMINAL_STATUSES.has(row.status as string) || row.lease_owner !== worker) {
-          socket.send(JSON.stringify({ type: "released" }));
-          socket.close(1000, "released");
-          socket.serializeAttachment({ jobId, worker, released: true } satisfies LiveAttachment);
-        }
-      }
-    }
-  }
-
-  async webSocketMessage(_socket: WebSocket, _message: string | ArrayBuffer): Promise<void> {
-    // Runners only listen on this socket.
-  }
-
-  async webSocketClose(socket: WebSocket, code: number): Promise<void> {
-    // 1005, 1006, and 1015 are reserved: a peer reports them but must never send them.
-    socket.close(code === 1005 || code === 1006 || code === 1015 ? 1000 : code, "closed");
-  }
 }
