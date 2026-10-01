@@ -68,28 +68,49 @@ STAGES: Final[tuple[Choice, ...]] = (
 CHARACTER_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in CHARACTERS)
 IMITATION_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in IMITATIONS)
 STAGE_VALUES: Final[frozenset[str]] = frozenset(choice.value for choice in STAGES)
-# One window bounds both connecting and choosing a rematch; a player may idle this long before the slot is released.
 CONNECT_TIMEOUT_SECONDS: Final[int] = 60
-IDLE_TIMEOUT_SECONDS: Final[int] = 600
+IDLE_TIMEOUT_SECONDS: Final[int] = 300
+PAUSE_TIMEOUT_SECONDS: Final[int] = 60
+LOCK_HOLD_SECONDS: Final[float] = 5.0
+LOCK_HOLD_CAP_SECONDS: Final[float] = 30.0
+CONNECTION_PROBE_SECONDS: Final[float] = 2.0
+REPORT_INTERVAL_SECONDS: Final[float] = 2.0
 _PLAYER_CODE = re.compile(r"[A-Z0-9]{1,8}#[0-9]{1,4}")
 
 
 class JobStatus(StrEnum):
     QUEUED = "queued"
-    LEASED = "leased"
-    CONNECTING = "connecting"
-    PLAYING = "playing"
-    REMATCH_WAIT = "rematch_wait"
-    REMATCH_READY = "rematch_ready"
-    COMPLETE = "complete"
-    FAILED = "failed"
-    CANCELED = "canceled"
+    ASSIGNED = "assigned"
+    ENDED = "ended"
+
+
+class Phase(StrEnum):
+    BOOTING = "booting"
+    WAITING_FOR_PLAYER = "waiting_for_player"
+    CHARACTER_SELECT = "character_select"
+    IN_GAME = "in_game"
+    PAUSED = "paused"
+
+
+class EndReason(StrEnum):
+    PLAYER_CANCELED = "player_canceled"
+    PLAYER_LEFT = "player_left"
+    PLAYER_DISCONNECTED = "player_disconnected"
     NO_SHOW = "no_show"
+    IDLE_TIMEOUT = "idle_timeout"
+    YIELDED = "yielded"
+    SERVICE_FAILURE = "service_failure"
 
 
-TERMINAL_STATUSES: Final[frozenset[JobStatus]] = frozenset(
-    (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELED, JobStatus.NO_SHOW)
-)
+class WindDown(StrEnum):
+    PLAYER = "player"
+    YIELD = "yield"
+
+
+class GameResult(StrEnum):
+    WIN = "win"
+    LOSS = "loss"
+    NO_CONTEST = "no_contest"
 
 
 def validate_player_code(value: str) -> str:
@@ -151,7 +172,7 @@ class MatchChoices:
     character: str
     imitation: str
     online_delay: int
-    requested_stage: str | None = None
+    stage: str | None = None
     desired_return: float | None = 20.0
     temperature: float = 1.0
 
@@ -159,29 +180,86 @@ class MatchChoices:
         validate_character(self.character)
         validate_imitation(self.imitation)
         validate_delay(self.online_delay)
-        if self.requested_stage is not None:
-            validate_stage(self.requested_stage)
+        if self.stage is not None:
+            validate_stage(self.stage)
         validate_desired_return(self.desired_return)
         validate_temperature(self.temperature)
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    revision: int
+    character: str
+    imitation: str
+    stage: str | None
+    desired_return: float | None
+    temperature: float
+
+    def __post_init__(self) -> None:
+        if self.revision < 1:
+            raise ValueError("settings revision must be positive")
+        validate_character(self.character)
+        validate_imitation(self.imitation)
+        if self.stage is not None:
+            validate_stage(self.stage)
+        validate_desired_return(self.desired_return)
+        validate_temperature(self.temperature)
+
+
+@dataclass(frozen=True, slots=True)
+class FinishedGame:
+    number: int
+    stage: str
+    result: GameResult
+
+    def __post_init__(self) -> None:
+        if self.number < 1:
+            raise ValueError("game number must be positive")
+        validate_stage(self.stage)
+
+
+@dataclass(frozen=True, slots=True)
+class Observed:
+    """The runner's complete view of its reservation; the Worker keeps the newest by seq."""
+
+    seq: int
+    phase: Phase
+    phase_seconds_left: float | None
+    bot_code: str | None
+    seen_revision: int
+    locked_revision: int | None
+    finished_games: tuple[FinishedGame, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "seq": self.seq,
+            "phase": self.phase.value,
+            "phase_seconds_left": self.phase_seconds_left,
+            "bot_code": self.bot_code,
+            "seen_revision": self.seen_revision,
+            "locked_revision": self.locked_revision,
+            "finished_games": [
+                {"number": game.number, "stage": game.stage, "result": game.result.value}
+                for game in self.finished_games
+            ],
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class Job:
     id: str
     player_code: str
-    choices: MatchChoices
+    online_delay: int
     status: JobStatus
+    end_reason: EndReason | None
     queue_position: int | None
     attempt: int
-    game_count: int
-    connect_code: str | None
-    actual_stage: str | None
-    last_result: str | None
-    error_code: str | None
-    connect_deadline: float | None
-    rematch_deadline: float | None
-    cancel_after_game: bool
-    policy_revision: int = 0
+    settings: Settings
+    phase: Phase | None
+    phase_deadline: float | None
+    games: tuple[FinishedGame, ...]
+    wind_down: WindDown | None
+    lock_requests: int
 
 
 @dataclass(frozen=True, slots=True)

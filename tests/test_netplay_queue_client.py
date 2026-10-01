@@ -6,14 +6,17 @@ from pathlib import Path
 
 import httpx
 import pytest
-from websockets.sync.server import ServerConnection
-from websockets.sync.server import serve
 
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
-from hal.netplay_service.domain import JobStatus
+from hal.netplay_service.domain import EndReason
+from hal.netplay_service.domain import FinishedGame
+from hal.netplay_service.domain import GameResult
+from hal.netplay_service.domain import Observed
+from hal.netplay_service.domain import Phase
 from hal.netplay_service.domain import PolicyConfig
+from hal.netplay_service.domain import Settings
 from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
@@ -47,24 +50,30 @@ def _job_body(**changes: object) -> dict[str, object]:
     body: dict[str, object] = {
         "id": "job-1",
         "player_code": "CRYO#610",
-        "character": "FOX",
-        "imitation": "IBDW#0",
         "online_delay": 2,
-        "desired_return": 20,
-        "temperature": 1,
-        "policy_revision": 0,
-        "requested_stage": None,
-        "status": "leased",
+        "status": "assigned",
+        "end_reason": None,
         "queue_position": None,
         "attempt": 1,
-        "game_count": 0,
-        "connect_code": None,
-        "actual_stage": None,
-        "last_result": None,
-        "error_code": None,
-        "connect_deadline": None,
-        "rematch_deadline": None,
-        "cancel_after_game": False,
+        "settings": {
+            "revision": 2,
+            "character": "FALCO",
+            "imitation": "MANG#0",
+            "stage": None,
+            "desired_return": 20.0,
+            "temperature": 1.0,
+        },
+        "observed": {
+            "seq": 3,
+            "phase": "in_game",
+            "bot_code": "HAL#9000",
+            "seen_revision": 2,
+            "locked_revision": 2,
+        },
+        "phase_deadline": None,
+        "games": [{"number": 1, "stage": "BATTLEFIELD", "result": "win"}],
+        "wind_down": None,
+        "lock_requests": 0,
     }
     body.update(changes)
     return body
@@ -101,14 +110,23 @@ def test_claim_sends_auth_access_and_slot_and_maps_204_to_none() -> None:
     assert request.headers["CF-Access-Client-Secret"] == "cf-secret"
 
 
-def test_job_routes_name_the_session_and_slot() -> None:
-    script = _Script(httpx.Response(200, json=_job_body(status="rematch_wait", game_count=1)))
-    status = _queue(script, []).finish_game("job-1", WORKER, game_number=1, actual_stage="BATTLEFIELD", result="win")
-    assert status is JobStatus.REMATCH_WAIT
+def test_report_posts_the_snapshot_with_slot_headers() -> None:
+    script = _Script(httpx.Response(200, json=_job_body()))
+    observed = Observed(
+        4,
+        Phase.CHARACTER_SELECT,
+        3.0,
+        "HAL#9000",
+        2,
+        1,
+        (FinishedGame(1, "BATTLEFIELD", GameResult.WIN),),
+    )
+    job = _queue(script, []).report("job-1", WORKER, observed)
+    assert job.id == "job-1"
     request = script.requests[0]
-    assert request.url.path == "/v1/runner/jobs/job-1/finish-game"
+    assert request.url.path == "/v1/runner/jobs/job-1/report"
     assert (request.headers["X-HAL-Session"], request.headers["X-HAL-Slot"]) == ("sess", "1")
-    assert json.loads(request.content) == {"game_number": 1, "actual_stage": "BATTLEFIELD", "result": "win"}
+    assert json.loads(request.content) == observed.to_payload()
 
 
 def test_connection_errors_and_5xx_retry_with_backoff_then_succeed() -> None:
@@ -116,9 +134,10 @@ def test_connection_errors_and_5xx_retry_with_backoff_then_succeed() -> None:
     script = _Script(
         httpx.ConnectError("refused"),
         httpx.Response(502),
-        httpx.Response(200, json=_job_body(status="connecting", connect_code="HAL#1")),
+        httpx.Response(200, json=_job_body()),
     )
-    _queue(script, sleeps).mark_connecting("job-1", WORKER, "HAL#1")
+    observed = Observed(1, Phase.BOOTING, None, None, 1, None, ())
+    _queue(script, sleeps).report("job-1", WORKER, observed)
     assert sleeps == [0.25, 0.5]
     assert len(script.requests) == 3
 
@@ -132,7 +151,7 @@ def test_retries_are_bounded() -> None:
         )
     )
     with pytest.raises(QueueUnavailableError, match="after 6 attempts: HTTP 503: no policy has been published$"):
-        _queue(script, sleeps).heartbeat("job-1", WORKER)
+        _queue(script, sleeps).report("job-1", WORKER, Observed(1, Phase.BOOTING, None, None, 1, None, ()))
     assert sleeps == list(RETRY_DELAYS_SECONDS)
 
 
@@ -144,7 +163,7 @@ def test_4xx_is_not_retried_and_maps_to_errors(status: int, error: type[Exceptio
     sleeps: list[float] = []
     script = _Script(httpx.Response(status, json={"detail": "worker does not own this job"}))
     with pytest.raises(error, match="worker does not own this job"):
-        _queue(script, sleeps).mark_playing("job-1", WORKER)
+        _queue(script, sleeps).end("job-1", WORKER, EndReason.NO_SHOW, retryable=False)
     assert sleeps == []
     assert len(script.requests) == 1
 
@@ -163,19 +182,30 @@ def test_session_end_is_a_lost_lease() -> None:
 def test_worker_from_another_session_is_rejected_before_a_request() -> None:
     script = _Script()
     with pytest.raises(ValueError, match="does not belong to session sess"):
-        _queue(script, []).mark_no_show("job-1", slot_worker_id("other", 0))
+        _queue(script, []).end("job-1", slot_worker_id("other", 0), EndReason.NO_SHOW, retryable=False)
     assert script.requests == []
 
 
+def test_parse_job_reads_protocol_3() -> None:
+    job = parse_job(_job_body())
+    assert job.settings == Settings(2, "FALCO", "MANG#0", None, 20.0, 1.0)
+    assert job.phase is Phase.IN_GAME
+    assert job.games == (FinishedGame(1, "BATTLEFIELD", GameResult.WIN),)
+
+
 def test_parse_job_rejects_drift() -> None:
-    job = parse_job(_job_body(desired_return=None))
-    assert job.choices.desired_return is None and job.status is JobStatus.LEASED
     with pytest.raises(QueueProtocolError, match="fields changed"):
         parse_job({**_job_body(), "lease_owner": "x"})
     with pytest.raises(QueueProtocolError, match="invalid values"):
-        parse_job(_job_body(status="paused"))
+        parse_job(_job_body(status="playing"))
     with pytest.raises(QueueProtocolError, match="invalid values"):
         parse_job(_job_body(attempt=True))
+
+
+def test_end_maps_409_to_invalid_transition() -> None:
+    script = _Script(httpx.Response(409, json={"detail": "worker does not own this job"}))
+    with pytest.raises(InvalidTransitionError):
+        _queue(script, []).end("job-1", WORKER, EndReason.NO_SHOW, retryable=False)
 
 
 @pytest.mark.parametrize(
@@ -494,28 +524,6 @@ def test_admin_routes() -> None:
     ]
     assert script.requests[2].url.path == "/v1/admin/pause"
     assert dict(script.requests[3].url.params) == {"job": "j1", "since": "12.5"}
-
-
-def test_live_socket_sends_auth_and_slot_headers() -> None:
-    seen: dict[str, str | None] = {}
-
-    def handler(connection: ServerConnection) -> None:
-        seen["path"] = connection.request.path if connection.request is not None else None
-        headers = connection.request.headers if connection.request is not None else {}
-        seen["auth"] = headers.get("Authorization")
-        seen["slot"] = headers.get("X-HAL-Slot")
-        connection.send('{"type": "released"}')
-
-    with serve(handler, "127.0.0.1", 0) as server:
-        port = server.socket.getsockname()[1]
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        endpoint = QueueEndpoint(f"http://127.0.0.1:{port}", "runner-token")
-        queue = RemoteQueue(endpoint, "sess")
-        with queue.connect_live("job-1", slot_worker_id("sess", 1)) as socket:
-            assert json.loads(socket.recv(timeout=2)) == {"type": "released"}
-        server.shutdown()
-    assert seen == {"path": "/v1/runner/jobs/job-1/live", "auth": "Bearer runner-token", "slot": "1"}
 
 
 def test_pairing_cleanup_retries_with_the_same_attempt() -> None:

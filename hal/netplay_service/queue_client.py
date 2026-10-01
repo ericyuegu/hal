@@ -15,15 +15,18 @@ from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
-from websockets.sync.client import ClientConnection
-from websockets.sync.client import connect
 
+from hal.netplay_service.domain import EndReason
+from hal.netplay_service.domain import FinishedGame
+from hal.netplay_service.domain import GameResult
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
-from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.domain import Observed
+from hal.netplay_service.domain import Phase
 from hal.netplay_service.domain import PolicyConfig
+from hal.netplay_service.domain import Settings
+from hal.netplay_service.domain import WindDown
 from hal.netplay_service.domain import validate_player_code
-from hal.netplay_service.domain import validate_stage
 from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.queue_contract import InvalidTransitionError
 from hal.netplay_service.queue_contract import QueueError
@@ -34,7 +37,7 @@ from hal.netplay_service.queue_contract import SessionEndedError
 # Must equal RUNNER_PROTOCOL_VERSION in web/netplay-api/src/domain.ts; the two change
 # together with any change to a runner route's request or response shape, because
 # parse_job refuses a job body with any field added or removed.
-RUNNER_PROTOCOL_VERSION: Final = 2
+RUNNER_PROTOCOL_VERSION: Final = 3
 RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0, 2.0, 4.0)
 _TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(10.0, connect=5.0)
 # The bearer token travels in the clear over http, so http is only for a Worker on this machine.
@@ -44,26 +47,24 @@ _JOB_FIELDS: Final[frozenset[str]] = frozenset(
     (
         "id",
         "player_code",
-        "character",
-        "imitation",
         "online_delay",
-        "desired_return",
-        "temperature",
-        "policy_revision",
-        "requested_stage",
         "status",
+        "end_reason",
         "queue_position",
         "attempt",
-        "game_count",
-        "connect_code",
-        "actual_stage",
-        "last_result",
-        "error_code",
-        "connect_deadline",
-        "rematch_deadline",
-        "cancel_after_game",
+        "settings",
+        "observed",
+        "phase_deadline",
+        "games",
+        "wind_down",
+        "lock_requests",
     )
 )
+_SETTINGS_FIELDS: Final[frozenset[str]] = frozenset(
+    ("revision", "character", "imitation", "stage", "desired_return", "temperature")
+)
+_OBSERVED_FIELDS: Final[frozenset[str]] = frozenset(("seq", "phase", "bot_code", "seen_revision", "locked_revision"))
+_GAME_FIELDS: Final[frozenset[str]] = frozenset(("number", "stage", "result"))
 
 
 class QueueRejectedError(QueueError):
@@ -246,35 +247,47 @@ def _boolean(value: object) -> bool:
     return value
 
 
+def _object(payload: object, fields: frozenset[str], name: str) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise QueueProtocolError(f"{name} response fields changed")
+    return cast(dict[str, object], payload)
+
+
 def parse_job(payload: object) -> Job:
     """Read one job body; the player and runner routes return the same shape."""
     if not isinstance(payload, dict) or set(payload) != _JOB_FIELDS:
         raise QueueProtocolError("job response fields changed")
     fields = cast(dict[str, object], payload)
     try:
+        settings = _object(fields["settings"], _SETTINGS_FIELDS, "settings")
+        observed = None if fields["observed"] is None else _object(fields["observed"], _OBSERVED_FIELDS, "observed")
+        games = fields["games"]
+        if not isinstance(games, list):
+            raise TypeError("games must be a list")
         return Job(
             id=_text(fields["id"]),
             player_code=validate_player_code(_text(fields["player_code"])),
-            choices=MatchChoices(
-                character=_text(fields["character"]),
-                imitation=_text(fields["imitation"]),
-                online_delay=_integer(fields["online_delay"]),
-                requested_stage=_optional_text(fields["requested_stage"]),
-                desired_return=_optional_number(fields["desired_return"]),
-                temperature=_number(fields["temperature"]),
-            ),
+            online_delay=_integer(fields["online_delay"]),
             status=JobStatus(_text(fields["status"])),
+            end_reason=None if fields["end_reason"] is None else EndReason(_text(fields["end_reason"])),
             queue_position=_optional_integer(fields["queue_position"]),
             attempt=_integer(fields["attempt"]),
-            game_count=_integer(fields["game_count"]),
-            connect_code=_optional_text(fields["connect_code"]),
-            actual_stage=_optional_text(fields["actual_stage"]),
-            last_result=_optional_text(fields["last_result"]),
-            error_code=_optional_text(fields["error_code"]),
-            connect_deadline=_optional_number(fields["connect_deadline"]),
-            rematch_deadline=_optional_number(fields["rematch_deadline"]),
-            cancel_after_game=_boolean(fields["cancel_after_game"]),
-            policy_revision=_integer(fields["policy_revision"]),
+            settings=Settings(
+                revision=_integer(settings["revision"]),
+                character=_text(settings["character"]),
+                imitation=_text(settings["imitation"]),
+                stage=_optional_text(settings["stage"]),
+                desired_return=_optional_number(settings["desired_return"]),
+                temperature=_number(settings["temperature"]),
+            ),
+            phase=None if observed is None else Phase(_text(observed["phase"])),
+            phase_deadline=_optional_number(fields["phase_deadline"]),
+            games=tuple(
+                FinishedGame(_integer(game["number"]), _text(game["stage"]), GameResult(_text(game["result"])))
+                for game in (_object(item, _GAME_FIELDS, "game") for item in games)
+            ),
+            wind_down=None if fields["wind_down"] is None else WindDown(_text(fields["wind_down"])),
+            lock_requests=_integer(fields["lock_requests"]),
         )
     except (TypeError, ValueError) as error:
         raise QueueProtocolError(f"job response contains invalid values: {error}") from error
@@ -314,20 +327,11 @@ class RemoteQueue:
     def _slot_headers(self, worker_id: str) -> dict[str, str]:
         return {"X-HAL-Session": self.session_id, "X-HAL-Slot": str(self._slot(worker_id))}
 
-    def _transition(self, job_id: str, worker_id: str, action: str, body: object = None) -> Job:
-        response = self._api.request(
-            "POST", f"/v1/runner/jobs/{job_id}/{action}", body=body, headers=self._slot_headers(worker_id)
-        )
-        return parse_job(_json(response))
-
     def claim_next(self, worker_id: str) -> Job | None:
         response = self._api.request(
             "POST", f"/v1/runner/sessions/{self.session_id}/claim", body={"slot": self._slot(worker_id)}
         )
         return None if response.status_code == 204 else parse_job(_json(response))
-
-    def heartbeat(self, job_id: str, worker_id: str) -> None:
-        self._transition(job_id, worker_id, "heartbeat")
 
     def finish_pairing(self, job_id: str, worker_id: str, attempt: int) -> None:
         slot = self._slot(worker_id)
@@ -337,45 +341,33 @@ class RemoteQueue:
             body={"slot": slot, "job_id": job_id, "attempt": attempt},
         )
 
-    def mark_connecting(self, job_id: str, worker_id: str, connect_code: str) -> None:
-        self._transition(job_id, worker_id, "connecting", {"connect_code": validate_player_code(connect_code)})
+    def report(self, job_id: str, worker_id: str, observed: Observed) -> Job:
+        response = self._api.request(
+            "POST",
+            f"/v1/runner/jobs/{job_id}/report",
+            body=observed.to_payload(),
+            headers=self._slot_headers(worker_id),
+        )
+        return parse_job(_json(response))
 
-    def mark_playing(self, job_id: str, worker_id: str) -> None:
-        self._transition(job_id, worker_id, "playing")
-
-    def mark_no_show(self, job_id: str, worker_id: str) -> None:
-        self._transition(job_id, worker_id, "no-show")
-
-    def mark_no_contest(self, job_id: str, worker_id: str) -> None:
-        self._transition(job_id, worker_id, "no-contest")
-
-    def finish_game(
-        self, job_id: str, worker_id: str, *, game_number: int, actual_stage: str, result: str
-    ) -> JobStatus:
-        body = {"game_number": game_number, "actual_stage": validate_stage(actual_stage), "result": result}
-        return self._transition(job_id, worker_id, "finish-game", body).status
-
-    def fail(self, job_id: str, worker_id: str, error_code: str, *, retryable: bool) -> JobStatus:
-        return self._transition(job_id, worker_id, "fail", {"error_code": error_code, "retryable": retryable}).status
-
-    def forfeit_service_failure(self, job_id: str, worker_id: str) -> None:
-        self._transition(job_id, worker_id, "forfeit")
+    def end(self, job_id: str, worker_id: str, reason: EndReason, *, retryable: bool) -> Job:
+        response = self._api.request(
+            "POST",
+            f"/v1/runner/jobs/{job_id}/end",
+            body={"reason": reason.value, "retryable": retryable},
+            headers=self._slot_headers(worker_id),
+        )
+        return parse_job(_json(response))
 
     def record_replay(
         self, job_id: str, worker_id: str, game_number: int, *, key: str, sha256: str, size: int, etag: str
     ) -> None:
         body = {"game_number": game_number, "key": key, "sha256": sha256, "size": size, "etag": etag}
-        self._transition(job_id, worker_id, "replay", body)
+        self._api.request("POST", f"/v1/runner/jobs/{job_id}/replay", body=body, headers=self._slot_headers(worker_id))
 
     def get_worker_job(self, job_id: str, worker_id: str) -> Job:
         response = self._api.request("GET", f"/v1/runner/jobs/{job_id}", headers=self._slot_headers(worker_id))
         return parse_job(_json(response))
-
-    def connect_live(self, job_id: str, worker_id: str, *, open_timeout: float = 2.0) -> ClientConnection:
-        """Open the job's settings socket; `https` becomes `wss` and `http` becomes `ws`."""
-        url = "ws" + self.endpoint.url.removeprefix("http") + f"/v1/runner/jobs/{job_id}/live"
-        headers = {**self.endpoint.headers(), **self._slot_headers(worker_id)}
-        return connect(url, additional_headers=headers, open_timeout=open_timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,12 +413,6 @@ class SessionState:
 
 def new_session_id() -> str:
     return secrets.token_urlsafe(12)
-
-
-def _object(payload: object, fields: frozenset[str], name: str) -> dict[str, object]:
-    if not isinstance(payload, dict) or set(payload) != fields:
-        raise QueueProtocolError(f"{name} response fields changed")
-    return cast(dict[str, object], payload)
 
 
 def _grant(payload: object) -> AccountGrant:
