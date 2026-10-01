@@ -51,7 +51,7 @@ def test_ready_update_batch_preserves_stream_rows_and_dummy_inputs() -> None:
     assert bool((batch.player[2:] == 0).all())
     assert bool((batch.floats[2:] == 0).all())
     assert bool((batch.cats[2:] == 0).all())
-    assert bool((batch.actions[2:] == 0).all())
+    torch.testing.assert_close(batch.actions[2:], codec.quantize(torch.zeros_like(batch.raw_actions[2:])))
     with pytest.raises(ValueError, match="fit"):
         batch.gather((), ())
 
