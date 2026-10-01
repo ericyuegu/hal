@@ -7,44 +7,39 @@ both delay profiles, and then starts its slots.
 
 ## Current status — 2026-10-01 UTC
 
-The owner requested teardown. `hal-netplay-g4` and its 100 GB boot disk are
-deleted. Ranked and the Twitch stream are offline. All 105 Ranked replays
-and one unfinished direct-play replay are verified in R2. A verified local
-backup also preserves the game records, receipts, and monitoring history.
-See the [teardown report](g4-teardown.md) for locations and command results.
+Direct play is back online at [20xx.xyz](https://20xx.xyz). The replacement
+G4 runs **one validated slot**, using `HAL#647`. The expanded player list is
+published. Ranked and the Phillip campaign remain paused.
 
-The frontend and API Worker remain deployed. There is no running G4 backend.
-The configuration below records the last deployment; the host-only image and
-source mounts no longer exist on G4. Rebuild them before a future launch.
+The code accepts up to sixteen slots, but sixteen are **not live**. Only one
+bot account is available, and the sixteen-stream prediction check failed:
+p99 was 33.812 ms against a 16.667 ms limit. Additional accounts, inference
+performance work, a suitable Cloudflare plan, and a full concurrent gameplay
+check are required before opening more slots. See the
+[capacity and deployment report](direct16.md) for evidence and commands.
 
-## Last G4 deployment — 2026-09-30
-
-The public runner and Phillip evaluation remain paused after the Cloudflare
-quota incident. The [queue cost fix](queue-costs.md) is deployed; it preserves
-schema 2. G4 now runs a separate [ranked player](ranked.md) with Cody Fox,
-advantage 120, and live Twitch video. This path does not use the public queue.
-The new frontend is live. The owner deferred the direct-play restart and policy
-publication. See the [deployment report](public-relaunch.md).
-
-- Site: [20xx.xyz](https://20xx.xyz). Cloudflare Worker `hal-netplay-web`
-  serves the vinext page. Worker `hal-netplay-api` handles `/v1/*`.
-- Queue: one SQLite-backed Durable Object, class `Queue`, instance name
-  `global`, storage schema 2. It owns reservations, sessions, account leases,
-  the active policy, the stream lease, and events.
-- GPU: `hal-netplay-g4` in project `centering-star-502613-k3`, zone
-  `us-west1-a`. It is a standalone `g4-standard-48` VM with exactly one RTX PRO
-  6000 Blackwell GPU and one runner slot. No managed instance group is deployed.
-- Runner: systemd starts Docker container `hal-netplay-runner`. Effective
-  source last ran at `3d2bdc40`; `298b3506` is staged for the next start. Its
-  Slippi account is `HAL#647`. The `ranked-active` marker and `95-ranked.conf`
-  systemd condition keep the public runner stopped during ranked play.
-- Ranked: `hal-ranked-player-v5` resumed at 23:56:25 UTC. Its run directory is
-  `/var/lib/hal-netplay/ranked/20260930T235630.598726Z`. A separate container,
-  `hal-ranked-player-v5-monitor`, records FPS, OBS drops, and process memory
-  under that run's `monitor/` directory.
+- Site: [20xx.xyz](https://20xx.xyz). Worker `hal-netplay-web` serves the page;
+  `hal-netplay-api` handles `/v1/*`. The queue cost fix remains deployed.
+- Queue: one SQLite-backed Durable Object, class `Queue`, instance `global`,
+  storage schema 2. It owns reservations, sessions, account leases, policy
+  settings, the stream lease, and events.
+- GPU: `hal-netplay-g4`, project `centering-star-502613-k3`, zone
+  `us-west1-a`, external address `34.83.210.75`. It is a standalone
+  `g4-standard-48` with exactly one RTX PRO 6000 Blackwell GPU and a 100 GB
+  boot disk. No managed instance group is deployed.
+- Runner: systemd starts `hal-netplay-runner` and `hal-netplay-health`
+  containers. The complete runner image uses commit `8831869a`. The host
+  startup script includes fixes through `6ec246ff`.
 - Video: [hal_20xx on Twitch](https://www.twitch.tv/hal_20xx). NVIDIA Xorg
-  `:90` renders Dolphin; OBS captures its window at 1080p60 and uses NVENC.
-  Menus remain visible. There is no waiting card.
+  `:90` renders Dolphin. OBS captures only its render window at 1080p60
+  and uses NVENC. Menus remain visible while a reservation owns Dolphin.
+- Live check: 1,800 frames in 30.019 seconds, or 59.96 FPS, against the
+  owner's local peer. Both one-slot timing profiles passed. The short test
+  ended by deliberate disconnect and freed the slot.
+
+The former VM and disk were deleted before this replacement. All 105 Ranked
+replays and its one unfinished direct-play replay remain verified in R2.
+The [teardown report](g4-teardown.md) records their locations and local backup.
 
 ```text
 Browser -> page Worker + API Worker -> Durable Object
@@ -69,19 +64,21 @@ HAL web API. Slippi uses its own peer connection.
 
 ### Image and recovery limits
 
-The retained image is `hal-netplay-runner:obs-local`, image ID `e255ef5d8a8c`.
-It adds OBS and NVIDIA EGL registration to the registry image tagged
-`728d96018e242332854a6a77ea5d2ff6eb17012c`. The staged public runner mounts
-the complete HAL package from `/var/lib/hal-netplay/releases/298b35062d29bbb497b07a4e41a4171c0ac3cbc3/`.
-The systemd override `99-current-source.conf` selects that source. Ranked v5
-keeps its separately verified value-meter source mounts. The old image label
-alone does not identify the effective source of either player.
+The current registry image is:
 
-A fresh replacement from the existing registry image will not reproduce this
-runtime. Build and publish the current committed Dockerfile before replacing
-the host. The local image, source patches, and override must remain available
-until then. Registry publication requires owner approval. Reboot recovery and
-managed instance group replacement have not been tested.
+```text
+us-west1-docker.pkg.dev/centering-star-502613-k3/hal-netplay/hal-netplay-runner:8831869a7b315fc2755f895b399c4f84a968a84a
+```
+
+Its manifest digest is
+`sha256:b3f341cd60e15df2c899d6b2bf6bce50afe0297d3b8d03762d40252e59d9a501`.
+It contains the maintained runtime, OBS, and ranked scripts. No source
+override mounts are required. ISO, policy, accounts, and credentials are
+fetched at runtime.
+
+Fresh-host bring-up was tested. The startup script installs missing Docker
+and matching NVIDIA GLX/video libraries before creating the services.
+Reboot recovery and managed instance group replacement have not been tested.
 
 ### Assets, secrets, and operator state
 
@@ -97,11 +94,10 @@ Cloudflare Access and bearer tokens protect runner and admin operations.
 The API Worker holds the Twitch key and releases it only to the stream lease
 holder. Keys are not built into images or committed to Git.
 
-The local RTX 3060 machine runs the x_pilot chat listener and matchup
-scheduler. These operator services use encrypted credentials and retain
-verified recordings under `runs/netplay/x-pilot-master120/`. They are separate
-from the public service: stopping them stops the campaign, while G4 and the
-site can keep running. See [the run protocol](x-pilot.md).
+The paused Phillip campaign uses operator scripts on the local RTX 3060
+machine. Its encrypted credentials and verified recordings remain under
+`runs/netplay/x-pilot-master120/`. These tools are separate from the public
+service. See [the run protocol](x-pilot.md).
 
 ## Static fixtures
 
