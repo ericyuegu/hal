@@ -1,5 +1,11 @@
 # Direct-play capacity — October 1, 2026 UTC
 
+A subsequent [account-reuse experiment](account-reuse.md) established two
+simultaneous Slippi games with the same account after sequential pairing.
+The account requirements below describe HAL's current implementation.
+They are not an established Slippi limit. The sixteen-stream inference
+failure remains unresolved.
+
 The owner requested restoration of direct play with up to 16 simultaneous
 matches. Commit `8831869a` raises the per-host admission limit from eight to
 sixteen in the runner CLI, Worker, and GCE scripts. Each slot keeps its own

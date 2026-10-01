@@ -11,11 +11,13 @@ Direct play is back online at [20xx.xyz](https://20xx.xyz). The replacement
 G4 runs **one validated slot**, using `HAL#647`. The expanded player list is
 published. Ranked and the Phillip campaign remain paused.
 
-The code accepts up to sixteen slots, but sixteen are **not live**. Only one
-bot account is available, and the sixteen-stream prediction check failed:
-p99 was 33.812 ms against a 16.667 ms limit. Additional accounts, inference
-performance work, a suitable Cloudflare plan, and a full concurrent gameplay
-check are required before opening more slots. See the
+The code accepts up to sixteen slots, but sixteen are **not live**. The
+sixteen-stream prediction check failed: p99 was 33.812 ms against a 16.667 ms
+limit. A later [live account-reuse test](account-reuse.md) ran two simultaneous
+games with the same account after sequential pairing. HAL still requires a
+distinct account per slot; changing that rule needs a matchmaking gate.
+Inference performance work, a suitable Cloudflare plan, and a full concurrent
+model-game check remain required. See the
 [capacity and deployment report](direct16.md) for evidence and commands.
 
 - Site: [20xx.xyz](https://20xx.xyz). Worker `hal-netplay-web` serves the page;
