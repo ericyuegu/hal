@@ -1,5 +1,11 @@
 # Ranked play on G4
 
+**Current status:** The G4 VM and its boot disk were deleted on October 1,
+2026 UTC, at the owner's request. Ranked and Twitch are offline. All 106
+saved replay files are verified in R2. The [teardown report](g4-teardown.md)
+records the replay locations, local backup, and deletion checks. The runtime
+paths below describe the former host.
+
 Run the maintained entry point from the checkout:
 
 ```sh

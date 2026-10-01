@@ -5,7 +5,19 @@ The runner downloads and verifies its static fixtures, starts a remote session,
 keeps that session alive while it downloads policy and account assets, qualifies
 both delay profiles, and then starts its slots.
 
-## Current deployment — 2026-09-30
+## Current status — 2026-10-01 UTC
+
+The owner requested teardown. `hal-netplay-g4` and its 100 GB boot disk are
+deleted. Ranked and the Twitch stream are offline. All 105 Ranked replays
+and one unfinished direct-play replay are verified in R2. A verified local
+backup also preserves the game records, receipts, and monitoring history.
+See the [teardown report](g4-teardown.md) for locations and command results.
+
+The frontend and API Worker remain deployed. There is no running G4 backend.
+The configuration below records the last deployment; the host-only image and
+source mounts no longer exist on G4. Rebuild them before a future launch.
+
+## Last G4 deployment — 2026-09-30
 
 The public runner and Phillip evaluation remain paused after the Cloudflare
 quota incident. The [queue cost fix](queue-costs.md) is deployed; it preserves
