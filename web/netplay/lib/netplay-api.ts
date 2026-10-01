@@ -9,9 +9,6 @@ export type Options = {
   default_desired_return: number;
   temperature_range: [number, number];
   default_temperature: number;
-  max_games: number;
-  no_show_seconds: number;
-  rematch_seconds: number;
 };
 
 export type Capacity = {
@@ -31,27 +28,57 @@ export type Capacity = {
   recoveries: number;
 };
 
+export type Phase =
+  | 'booting'
+  | 'waiting_for_player'
+  | 'character_select'
+  | 'in_game'
+  | 'paused';
+
+export type EndReason =
+  | 'player_canceled'
+  | 'player_left'
+  | 'player_disconnected'
+  | 'no_show'
+  | 'idle_timeout'
+  | 'yielded'
+  | 'service_failure';
+
+export type Settings = {
+  revision: number;
+  character: string;
+  imitation: string;
+  stage: string | null;
+  desired_return: number | null;
+  temperature: number;
+};
+
+export type FinishedGame = {
+  number: number;
+  stage: string;
+  result: 'win' | 'loss' | 'no_contest';
+};
+
 export type Job = {
   id: string;
   player_code: string;
-  character: string;
-  imitation: string;
   online_delay: number;
-  desired_return: number | null;
-  temperature: number;
-  policy_revision: number;
-  requested_stage: string | null;
-  status: string;
+  status: 'queued' | 'assigned' | 'ended';
+  end_reason: EndReason | null;
   queue_position: number | null;
   attempt: number;
-  game_count: number;
-  connect_code: string | null;
-  actual_stage: string | null;
-  last_result: string | null;
-  error_code: string | null;
-  connect_deadline: number | null;
-  rematch_deadline: number | null;
-  cancel_after_game: boolean;
+  settings: Settings;
+  observed: {
+    seq: number;
+    phase: Phase;
+    bot_code: string | null;
+    seen_revision: number;
+    locked_revision: number | null;
+  } | null;
+  phase_deadline: number | null;
+  games: FinishedGame[];
+  wind_down: 'player' | 'yield' | null;
+  lock_requests: number;
 };
 
 export type JobCredentials = Job & { token: string };
@@ -61,20 +88,12 @@ export type CreateJob = {
   character: string;
   imitation: string;
   online_delay: number;
+  stage?: string | null;
   desired_return?: number | null;
   temperature?: number;
 };
 
-export type PolicySettings = {
-  desired_return?: number | null;
-  temperature?: number;
-};
-
-export type Rematch = {
-  character: string;
-  imitation: string;
-  stage: string;
-};
+export type SettingsUpdate = Partial<Omit<Settings, 'revision'>>;
 
 export class ApiError extends Error {
   constructor(
@@ -129,30 +148,23 @@ export function getJob(id: string, token: string): Promise<Job> {
   return request(`/v1/jobs/${id}`, authorized(token));
 }
 
-export function cancelJob(id: string, token: string): Promise<Job> {
+export function leaveJob(id: string, token: string): Promise<Job> {
   return request(`/v1/jobs/${id}`, authorized(token, { method: 'DELETE' }));
 }
 
-export function updatePolicy(
+export function updateSettings(
   id: string,
   token: string,
-  values: PolicySettings,
+  values: SettingsUpdate,
 ): Promise<Job> {
   return request(
-    `/v1/jobs/${id}/policy`,
+    `/v1/jobs/${id}/settings`,
     authorized(token, { method: 'PATCH', body: JSON.stringify(values) }),
   );
 }
 
-export function requestRematch(
-  id: string,
-  token: string,
-  values: Rematch,
-): Promise<Job> {
-  return request(
-    `/v1/jobs/${id}/rematch`,
-    authorized(token, { method: 'POST', body: JSON.stringify(values) }),
-  );
+export function requestLock(id: string, token: string): Promise<Job> {
+  return request(`/v1/jobs/${id}/lock`, authorized(token, { method: 'POST' }));
 }
 
 export const fallbackOptions: Options = {
@@ -204,7 +216,4 @@ export const fallbackOptions: Options = {
   default_desired_return: 20,
   temperature_range: [0.8, 1.1],
   default_temperature: 1,
-  max_games: 5,
-  no_show_seconds: 600,
-  rematch_seconds: 600,
 };

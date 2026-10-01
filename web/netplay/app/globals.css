@@ -819,14 +819,29 @@ kbd {
 .countdown[data-urgent='true'] .meter span {
   background: var(--acc);
 }
-.rematch {
-  padding: 22px 24px;
+.lock-now {
+  margin-top: 20px;
+}
+.game-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
   border-top: var(--bw) solid var(--ink);
   background: var(--paper);
 }
-.rematch .sentence.small {
-  margin: 0;
-  font-size: clamp(22px, 3vw, 32px);
+.game-list li {
+  display: grid;
+  grid-template-columns: 6rem 1fr auto;
+  gap: 16px;
+  padding: 11px 24px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.game-list li + li {
+  border-top: 1px solid var(--line);
+}
+.game-list strong {
+  color: var(--acc);
 }
 .actions {
   display: flex;
@@ -891,9 +906,15 @@ kbd {
   .progress li {
     padding: 10px 8px;
   }
-  .status-panel,
-  .rematch {
+  .status-panel {
     padding: 20px 16px;
+  }
+  .game-list li {
+    grid-template-columns: auto 1fr;
+    padding: 11px 16px;
+  }
+  .game-list strong {
+    grid-column: 2;
   }
 }
 @media (prefers-reduced-motion: reduce) {

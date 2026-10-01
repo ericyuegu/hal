@@ -15,19 +15,22 @@ import { Sentence, ShortcutSheet, useHotkeys } from '@/components/sentence';
 import type { Panel } from '@/components/sentence';
 import {
   ApiError,
-  cancelJob,
   Capacity,
   Choice,
   createJob,
   CreateJob,
+  EndReason,
   fallbackOptions,
   getCapacity,
   getJob,
   getOptions,
   Job,
+  leaveJob,
   Options,
-  requestRematch,
-  updatePolicy,
+  requestLock,
+  Settings,
+  SettingsUpdate,
+  updateSettings,
 } from '@/lib/netplay-api';
 import {
   clampReturn,
@@ -49,7 +52,6 @@ type Prefs = {
 const savedJobKey = 'hal-netplay-job-v1';
 // v2 stores raw desired_return and drops temperature.
 const prefsKey = 'hal-netplay-prefs-v2';
-const terminal = new Set(['complete', 'failed', 'canceled', 'no_show']);
 // Mirrors hal/netplay_service/domain.py validate_player_code.
 const playerCodePattern = /^[A-Z0-9]{1,8}#[0-9]{1,4}$/;
 const defaultCharacter = 'FALCO';
@@ -174,7 +176,8 @@ export default function Home() {
         character: values.character,
         imitation: values.imitation,
         online_delay: values.online_delay,
-        desired_return: values.desired_return ?? created.desired_return ?? 0,
+        desired_return:
+          values.desired_return ?? created.settings.desired_return ?? 0,
       };
       writeStored(savedJobKey, credentials);
       writeStored(prefsKey, nextPrefs);
@@ -238,7 +241,7 @@ export default function Home() {
     };
   }, [saved, forget]);
 
-  useStatusAlerts(job, options);
+  useStatusAlerts(job);
 
   useEffect(() => {
     const context = document.modelContext;
@@ -289,12 +292,12 @@ export default function Home() {
     return () => lifecycle.abort();
   }, [join, options]);
 
-  async function cancel() {
+  async function leave() {
     if (!saved) return;
     setBusy(true);
     setError('');
     try {
-      setJob(await cancelJob(saved.id, saved.token));
+      setJob(await leaveJob(saved.id, saved.token));
     } catch (cause) {
       setError(errorText(cause, 'Could not cancel the reservation.'));
     } finally {
@@ -317,11 +320,12 @@ export default function Home() {
         saved={saved}
         busy={busy}
         error={error}
-        cancel={cancel}
+        leave={leave}
         forget={forget}
         requeue={() => {
           forget();
-          if (prefs) void join(prefs).catch(() => undefined);
+          if (prefs)
+            void join({ ...prefs, stage: null }).catch(() => undefined);
         }}
         update={setJob}
         setBusy={setBusy}
@@ -357,19 +361,21 @@ function requestNotifications() {
 }
 
 /** Keeps the tab title current and pings the player when they must act. */
-function useStatusAlerts(job: Job | null, options: Options) {
+function useStatusAlerts(job: Job | null) {
   const previous = useRef<string | null>(null);
   useEffect(() => {
-    const status = job?.status ?? null;
+    const status = job
+      ? `${job.status}:${job.observed?.phase ?? 'unobserved'}`
+      : null;
     document.title = job ? `${tabTitle(job)} · HAL` : 'HAL';
     const from = previous.current;
     previous.current = status;
     if (!job || from === null || from === status) return;
     const message =
-      status === 'connecting'
-        ? `Direct-connect to ${job.connect_code ?? 'HAL'} in Slippi.`
-        : status === 'rematch_wait'
-          ? `Game ${job.game_count} done. Choose a rematch within ${minutes(options.rematch_seconds)}.`
+      job.observed?.phase === 'waiting_for_player'
+        ? `Direct-connect to ${job.observed.bot_code ?? 'HAL'} in Slippi.`
+        : job.observed?.phase === 'character_select'
+          ? 'Pick your character in Slippi.'
           : null;
     if (
       !message ||
@@ -379,13 +385,13 @@ function useStatusAlerts(job: Job | null, options: Options) {
     )
       return;
     new Notification(statusTitle(job), { body: message, tag: 'hal-netplay' });
-  }, [job, options.rematch_seconds]);
+  }, [job]);
 }
 
 function tabTitle(job: Job): string {
   if (job.status === 'queued') return `#${job.queue_position ?? '–'} in queue`;
-  if (job.status === 'connecting') return '● Connect now';
-  if (job.status === 'rematch_wait') return '● Rematch?';
+  if (job.observed?.phase === 'waiting_for_player') return '● Connect now';
+  if (job.observed?.phase === 'character_select') return 'Pick your character';
   return statusTitle(job);
 }
 
@@ -562,6 +568,7 @@ function JoinForm({
       character: characterValue,
       imitation: imitationValue,
       online_delay: delayValue,
+      stage: null,
       desired_return: desiredValue,
     }).catch(() => undefined);
   }
@@ -669,7 +676,7 @@ function JoinForm({
             {busy ? 'Joining…' : 'Play →'}
           </button>
           <div className="line">
-            {queueLine(capacity, options)}
+            {queueLine(capacity)}
             <span className="kbtn-sep"> · </span>
             <button
               type="button"
@@ -694,13 +701,12 @@ function JoinForm({
   );
 }
 
-function queueLine(capacity: Capacity | null, options: Options): string {
-  const games = `up to ${options.max_games} games`;
-  if (capacity === null) return `Checking the queue · ${games}`;
-  if (capacity.healthy_slots === 0) return `Servers unavailable · ${games}`;
+function queueLine(capacity: Capacity | null): string {
+  if (capacity === null) return 'Checking the queue';
+  if (capacity.healthy_slots === 0) return 'Servers unavailable';
   if (capacity.queued === 0 && openSlots(capacity) > 0)
-    return `You’re first in line · ${games}`;
-  return `${capacity.queued} waiting · ${games}`;
+    return 'You’re first in line';
+  return `${capacity.queued} waiting`;
 }
 
 function StreamNotice() {
@@ -719,47 +725,79 @@ function StreamNotice() {
   );
 }
 
-/** Difficulty edits apply mid-game without an Apply button. */
-function useLiveDifficulty(
+type EditableField = 'character' | 'imitation' | 'stage' | 'desired_return';
+type SettingsChange = { revision: number; kind: 'selection' | 'difficulty' };
+
+function useSettingsEditor(
   job: Job,
   saved: SavedJob,
-  options: Options,
   update: (job: Job) => void,
   setError: (value: string) => void,
 ) {
-  const range = options.desired_return_range;
-  // Only a user edit is sent; the job's own value is never echoed back.
-  const [edit, setEdit] = useState<number | null>(null);
-  const [applied, setApplied] = useState(false);
-  const desired = edit ?? job.desired_return ?? options.default_desired_return;
+  const [draft, setDraft] = useState<SettingsUpdate>({});
+  const [sending, setSending] = useState(false);
+  const [change, setChange] = useState<SettingsChange | null>(null);
 
   useEffect(() => {
-    if (edit === null || edit === job.desired_return) return;
+    if (sending) return;
+    const values = Object.fromEntries(
+      Object.entries(draft).filter(
+        ([field, value]) => value !== job.settings[field as keyof Settings],
+      ),
+    ) as SettingsUpdate;
+    if (Object.keys(values).length === 0) {
+      if (Object.keys(draft).length === 0) return;
+      const cleanup = window.setTimeout(() => setDraft({}), 0);
+      return () => window.clearTimeout(cleanup);
+    }
     const timer = window.setTimeout(() => {
-      updatePolicy(saved.id, saved.token, { desired_return: edit })
+      setSending(true);
+      updateSettings(saved.id, saved.token, values)
         .then((next) => {
           update(next);
-          setApplied(true);
+          const selection = ['character', 'imitation', 'stage'].some((field) =>
+            Object.hasOwn(values, field),
+          );
+          setChange({
+            revision: next.settings.revision,
+            kind: selection ? 'selection' : 'difficulty',
+          });
+          setDraft((current) => {
+            const remaining = Object.entries(current).filter(
+              ([field, value]) =>
+                !Object.hasOwn(values, field) ||
+                values[field as keyof SettingsUpdate] !== value,
+            );
+            return Object.fromEntries(remaining) as SettingsUpdate;
+          });
         })
-        .catch((cause: unknown) =>
-          setError(errorText(cause, 'Could not update the difficulty.')),
-        );
+        .catch((cause: unknown) => {
+          setDraft({});
+          setError(errorText(cause, 'Could not update HAL’s settings.'));
+        })
+        .finally(() => setSending(false));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [edit, job.desired_return, saved, update, setError]);
+  }, [draft, job.settings, saved, sending, setError, update]);
 
-  useEffect(() => {
-    if (!applied) return;
-    const timer = window.setTimeout(() => setApplied(false), 2000);
-    return () => window.clearTimeout(timer);
-  }, [applied]);
+  function value<Field extends EditableField>(field: Field): Settings[Field] {
+    return (
+      Object.hasOwn(draft, field) ? draft[field] : job.settings[field]
+    ) as Settings[Field];
+  }
 
-  const difficulty = toDifficulty(clampReturn(desired, range), range);
+  function set<Field extends EditableField>(
+    field: Field,
+    next: Settings[Field],
+  ) {
+    setDraft((current) => ({ ...current, [field]: next }));
+  }
+
   return {
-    difficulty,
-    setDifficulty: (value: number) =>
-      setEdit(toReturn(Math.max(0, Math.min(100, value)), range)),
-    applied,
+    value,
+    set,
+    pending: sending || Object.keys(draft).length > 0,
+    change,
   };
 }
 
@@ -769,7 +807,7 @@ function Reservation({
   saved,
   busy,
   error,
-  cancel,
+  leave,
   forget,
   requeue,
   update,
@@ -781,27 +819,53 @@ function Reservation({
   saved: SavedJob;
   busy: boolean;
   error: string;
-  cancel: () => Promise<void>;
+  leave: () => Promise<void>;
   forget: () => void;
   requeue: () => void;
   update: (job: Job) => void;
   setBusy: (value: boolean) => void;
   setError: (value: string) => void;
 }) {
-  const ended = terminal.has(job.status);
+  const ended = job.status === 'ended';
   const [open, setOpen] = useState<Panel | null>(null);
-  const live = useLiveDifficulty(job, saved, options, update, setError);
-  const rematch = job.status === 'rematch_wait';
+  const editor = useSettingsEditor(job, saved, update, setError);
+  const range = options.desired_return_range;
+  const difficulty = toDifficulty(
+    clampReturn(
+      editor.value('desired_return') ?? options.default_desired_return,
+      range,
+    ),
+    range,
+  );
+
+  function setDifficulty(value: number) {
+    editor.set(
+      'desired_return',
+      toReturn(Math.max(0, Math.min(100, value)), range),
+    );
+  }
+
+  async function lockNow() {
+    setBusy(true);
+    setError('');
+    try {
+      update(await requestLock(saved.id, saved.token));
+    } catch (cause) {
+      setError(errorText(cause, 'Could not lock in HAL.'));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useHotkeys({
     d: ended ? undefined : () => setOpen('diff'),
     '3': ended ? undefined : () => setOpen('diff'),
-    '[': ended ? undefined : () => live.setDifficulty(live.difficulty - 5),
-    ']': ended ? undefined : () => live.setDifficulty(live.difficulty + 5),
-    p: rematch ? () => setOpen('player') : undefined,
-    '1': rematch ? () => setOpen('player') : undefined,
-    c: rematch ? () => setOpen('char') : undefined,
-    '2': rematch ? () => setOpen('char') : undefined,
+    '[': ended ? undefined : () => setDifficulty(difficulty - 5),
+    ']': ended ? undefined : () => setDifficulty(difficulty + 5),
+    p: ended ? undefined : () => setOpen('player'),
+    '1': ended ? undefined : () => setOpen('player'),
+    c: ended ? undefined : () => setOpen('char'),
+    '2': ended ? undefined : () => setOpen('char'),
     escape: () => setOpen(null),
   });
 
@@ -810,13 +874,23 @@ function Reservation({
       <p className="eyebrow">{statusTitle(job)}</p>
       <Sentence
         small
-        lead={ended ? 'HAL played like' : 'HAL is playing like'}
+        lead={ended ? 'HAL played like' : 'HAL plays like'}
         options={options}
-        imitation={{ value: job.imitation }}
-        character={{ value: job.character }}
+        imitation={{
+          value: editor.value('imitation'),
+          set: ended ? undefined : (value) => editor.set('imitation', value),
+        }}
+        character={{
+          value: editor.value('character'),
+          set: ended ? undefined : (value) => editor.set('character', value),
+        }}
         difficulty={{
-          value: live.difficulty,
-          set: ended ? undefined : live.setDifficulty,
+          value: difficulty,
+          set: ended ? undefined : setDifficulty,
+        }}
+        stage={{
+          value: editor.value('stage'),
+          set: ended ? undefined : (value) => editor.set('stage', value),
         }}
         open={open}
         setOpen={setOpen}
@@ -826,41 +900,21 @@ function Reservation({
         <span className="tag">{job.online_delay}f delay</span>
         {!ended && (
           <span className="tag quiet" aria-live="polite">
-            {live.applied ? (
-              <>
-                <Check size={12} /> Applied at the next replan
-              </>
-            ) : (
-              'Difficulty applies mid-game'
-            )}
+            {settingsStatus(job, editor.pending, editor.change)}
           </span>
         )}
       </div>
       <div className="card">
-        <Progress job={job} options={options} />
+        <Progress job={job} />
         <div className="status-panel" data-status={job.status}>
-          <StatusBody job={job} options={options} />
+          <StatusBody job={job} busy={busy} lockNow={lockNow} />
         </div>
-        {rematch && (
-          <RematchForm
-            key={job.game_count}
-            job={job}
-            saved={saved}
-            options={options}
-            busy={busy}
-            open={open}
-            setOpen={setOpen}
-            cancel={cancel}
-            update={update}
-            setBusy={setBusy}
-            setError={setError}
-          />
-        )}
+        <GameList games={job.games} options={options} />
         <div className="card-footer">
           <p className="muted">
-            {ended
-              ? `${job.game_count} of ${options.max_games} games played`
-              : `Game ${Math.min(job.game_count + 1, options.max_games)} of up to ${options.max_games}`}
+            {job.games.length === 0
+              ? 'No finished games yet'
+              : `${job.games.length} game${job.games.length === 1 ? '' : 's'} finished`}
           </p>
           {ended ? (
             <div className="actions">
@@ -877,16 +931,14 @@ function Reservation({
               </button>
             </div>
           ) : (
-            !rematch && (
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => void cancel()}
-                disabled={busy || job.cancel_after_game}
-              >
-                {cancelLabel(job)}
-              </button>
-            )
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void leave()}
+              disabled={busy || job.wind_down === 'player'}
+            >
+              {leaveLabel(job)}
+            </button>
           )}
         </div>
       </div>
@@ -895,22 +947,29 @@ function Reservation({
   );
 }
 
-function cancelLabel(job: Job): string {
-  if (job.cancel_after_game) return 'Ending after this game';
-  if (job.status === 'playing') return 'Stop after this game';
+function leaveLabel(job: Job): string {
+  if (job.wind_down === 'player') return 'Ending after this game';
   if (job.status === 'queued') return 'Leave queue';
-  return 'Cancel';
+  if (job.observed?.phase === 'in_game' || job.observed?.phase === 'paused')
+    return 'Stop after this game';
+  return 'Leave';
 }
 
 const steps = [
-  { label: 'Queue', statuses: ['queued', 'leased'] },
-  { label: 'Connect', statuses: ['connecting'] },
-  { label: 'Play', statuses: ['playing', 'rematch_wait', 'rematch_ready'] },
-  { label: 'Done', statuses: ['complete', 'failed', 'canceled', 'no_show'] },
+  { label: 'Queue', states: ['queued', 'booting'] },
+  { label: 'Connect', states: ['waiting_for_player'] },
+  { label: 'Play', states: ['character_select', 'in_game', 'paused'] },
+  { label: 'Done', states: ['ended'] },
 ];
 
-function Progress({ job, options }: { job: Job; options: Options }) {
-  const current = steps.findIndex((step) => step.statuses.includes(job.status));
+function Progress({ job }: { job: Job }) {
+  const state =
+    job.status === 'ended'
+      ? 'ended'
+      : job.status === 'queued'
+        ? 'queued'
+        : (job.observed?.phase ?? 'booting');
+  const current = steps.findIndex((step) => step.states.includes(state));
   return (
     <ol className="progress" aria-label="Reservation progress">
       {steps.map((step, index) => (
@@ -921,8 +980,8 @@ function Progress({ job, options }: { job: Job; options: Options }) {
           }
           aria-current={index === current ? 'step' : undefined}
         >
-          {step.label === 'Play' && job.game_count > 0
-            ? `Game ${Math.min(job.game_count + (job.status === 'rematch_wait' ? 0 : 1), options.max_games)}`
+          {step.label === 'Play' && job.games.length > 0
+            ? `Game ${job.games.length + 1}`
             : step.label}
         </li>
       ))}
@@ -930,7 +989,15 @@ function Progress({ job, options }: { job: Job; options: Options }) {
   );
 }
 
-function StatusBody({ job, options }: { job: Job; options: Options }) {
+function StatusBody({
+  job,
+  busy,
+  lockNow,
+}: {
+  job: Job;
+  busy: boolean;
+  lockNow: () => Promise<void>;
+}) {
   if (job.status === 'queued') {
     return (
       <BigStatus
@@ -940,20 +1007,30 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
       />
     );
   }
-  if (job.status === 'leased') {
+  if (job.status === 'ended') {
     return (
       <BigStatus
-        icon={<LoaderCircle className="spin" size={40} />}
-        label="Booting HAL’s Dolphin"
-        detail="Your slot is reserved. Open Slippi so you’re ready to connect."
+        icon={<X size={40} />}
+        label={statusTitle(job)}
+        detail={endText(job.end_reason)}
       />
     );
   }
-  if (job.status === 'connecting') {
+  const observed = job.observed;
+  if (observed === null || observed.phase === 'booting') {
+    return (
+      <BigStatus
+        icon={<LoaderCircle className="spin" size={40} />}
+        label="Starting HAL"
+        detail="Your slot is reserved. Open Slippi so you are ready to connect."
+      />
+    );
+  }
+  if (observed.phase === 'waiting_for_player') {
     return (
       <div>
         <p className="lbl">Direct-connect to</p>
-        <CopyCode code={job.connect_code} />
+        <CopyCode code={observed.bot_code} />
         <ol className="connect-steps">
           <li>
             In Slippi, open <b>Online → Direct</b>.
@@ -962,80 +1039,125 @@ function StatusBody({ job, options }: { job: Job; options: Options }) {
           <li>HAL joins automatically.</li>
         </ol>
         <Countdown
-          deadline={job.connect_deadline}
-          total={options.no_show_seconds}
+          deadline={job.phase_deadline}
+          total={60}
           suffix="left to connect"
         />
       </div>
     );
   }
-  if (job.status === 'playing') {
+  if (observed.phase === 'character_select') {
+    if (observed.locked_revision !== null) {
+      return (
+        <BigStatus
+          icon={<Gamepad2 size={40} />}
+          label="HAL is locked in"
+          detail="Lock in on Slippi to start."
+        />
+      );
+    }
+    return (
+      <div>
+        <BigStatus
+          icon={<Gamepad2 size={40} />}
+          label="Pick your character in Slippi"
+          detail="HAL waits briefly for your selection before it locks in."
+        />
+        <Countdown
+          deadline={job.phase_deadline}
+          total={30}
+          suffix="until HAL locks in"
+        />
+        <button
+          type="button"
+          className="play small lock-now"
+          disabled={busy}
+          onClick={() => void lockNow()}
+        >
+          Lock in now
+        </button>
+      </div>
+    );
+  }
+  if (observed.phase === 'in_game') {
     return (
       <BigStatus
         icon={<Gamepad2 size={40} />}
-        label={`Game ${job.game_count + 1} in progress`}
+        label={`Game ${job.games.length + 1}`}
         detail={
-          job.cancel_after_game
-            ? 'The set ends after this game.'
-            : 'This page updates when the game ends.'
+          job.wind_down === 'player'
+            ? 'The session ends after this game.'
+            : 'Playing now.'
         }
       />
     );
   }
-  if (job.status === 'rematch_wait') {
+  if (observed.phase === 'paused') {
     return (
       <div>
         <BigStatus
-          value={resultText(job.last_result)}
-          label={
-            job.actual_stage
-              ? `Game ${job.game_count} · ${label(options.stages, job.actual_stage)}`
-              : `Game ${job.game_count} complete`
-          }
-          detail="Stay on the Slippi results screen while you choose."
+          icon={<Gamepad2 size={40} />}
+          label="Game paused"
+          detail="Resume in Slippi to continue."
         />
         <Countdown
-          deadline={job.rematch_deadline}
-          total={options.rematch_seconds}
-          suffix="to start the next game"
+          deadline={job.phase_deadline}
+          total={60}
+          suffix="until the session ends"
         />
       </div>
     );
   }
-  if (job.status === 'rematch_ready') {
-    return (
-      <BigStatus
-        icon={<LoaderCircle className="spin" size={40} />}
-        label="Setting up the rematch"
-        detail="Keep the Slippi connection open."
-      />
-    );
-  }
+  return null;
+}
+
+function GameList({
+  games,
+  options,
+}: {
+  games: Job['games'];
+  options: Options;
+}) {
+  if (games.length === 0) return null;
   return (
-    <BigStatus
-      icon={job.status === 'complete' ? <Check size={40} /> : <X size={40} />}
-      label={statusTitle(job)}
-      detail={terminalDetail(job)}
-    />
+    <ol className="game-list" aria-label="Finished games">
+      {games.map((game) => (
+        <li key={game.number}>
+          <span>Game {game.number}</span>
+          <span>{label(options.stages, game.stage)}</span>
+          <strong>{resultText(game.result)}</strong>
+        </li>
+      ))}
+    </ol>
   );
 }
 
-// last_result is from the human player's perspective.
-function resultText(result: string | null): string {
+function resultText(result: Job['games'][number]['result']): string {
   if (result === 'win') return 'You won';
   if (result === 'loss') return 'HAL won';
-  if (result === 'tie') return 'Tie';
-  return 'Game over';
+  return 'No contest';
 }
 
-function terminalDetail(job: Job): string {
-  if (job.status === 'no_show')
-    return 'HAL waited but no connection arrived. Queue again when you are ready.';
-  if (job.error_code === 'player_left')
-    return 'This page was closed for two minutes, so your spot went to the next player.';
-  if (job.error_code) return `Reason: ${pretty(job.error_code)}.`;
-  if (job.status === 'complete') return 'Thanks for playing.';
-  return 'Queue again whenever you like.';
+function settingsStatus(
+  job: Job,
+  pending: boolean,
+  change: SettingsChange | null,
+): string {
+  if (pending) return 'Saving…';
+  if (change?.kind === 'selection') {
+    if (
+      job.observed?.phase === 'character_select' &&
+      job.observed.locked_revision === null
+    )
+      return 'Applies to this game';
+    if ((job.observed?.locked_revision ?? 0) >= change.revision)
+      return 'In effect';
+    return 'Applies next game';
+  }
+  const revision = change?.revision ?? job.settings.revision;
+  return (job.observed?.seen_revision ?? 0) >= revision
+    ? 'In effect'
+    : 'Applies shortly';
 }
 
 function CopyCode({ code }: { code: string | null }) {
@@ -1072,91 +1194,6 @@ function CopyCode({ code }: { code: string | null }) {
         )}
       </span>
     </button>
-  );
-}
-
-function RematchForm({
-  job,
-  saved,
-  options,
-  busy,
-  open,
-  setOpen,
-  cancel,
-  update,
-  setBusy,
-  setError,
-}: {
-  job: Job;
-  saved: SavedJob;
-  options: Options;
-  busy: boolean;
-  open: Panel | null;
-  setOpen: (panel: Panel | null) => void;
-  cancel: () => Promise<void>;
-  update: (job: Job) => void;
-  setBusy: (value: boolean) => void;
-  setError: (value: string) => void;
-}) {
-  const [character, setCharacter] = useState(job.character);
-  const [imitation, setImitation] = useState(job.imitation);
-  const [stage, setStage] = useState(
-    job.requested_stage ?? job.actual_stage ?? 'BATTLEFIELD',
-  );
-
-  async function submit() {
-    setBusy(true);
-    setError('');
-    try {
-      update(
-        await requestRematch(saved.id, saved.token, {
-          character,
-          imitation,
-          stage,
-        }),
-      );
-    } catch (cause) {
-      setError(errorText(cause, 'Could not request the rematch.'));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="rematch">
-      <Sentence
-        small
-        lead="Next, I want HAL to play like"
-        options={options}
-        imitation={{ value: imitation, set: setImitation }}
-        character={{ value: character, set: setCharacter }}
-        stage={{ value: stage, set: setStage }}
-        open={open}
-        setOpen={setOpen}
-      />
-      <p className="hint">
-        HAL picks the stage only if it lost the last game. If you lost, pick it
-        in Slippi.
-      </p>
-      <div className="actions">
-        <button
-          type="button"
-          className="ghost"
-          disabled={busy}
-          onClick={() => void cancel()}
-        >
-          End set
-        </button>
-        <button
-          type="button"
-          className="play small"
-          disabled={busy}
-          onClick={() => void submit()}
-        >
-          {busy ? 'Starting…' : `Play game ${job.game_count + 1} →`}
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -1232,20 +1269,35 @@ function ErrorMessage({
 }
 
 function statusTitle(job: Job): string {
+  if (job.status === 'queued') return 'In the queue';
+  if (job.status === 'ended') return 'Session ended';
   return (
     {
-      queued: 'In the queue',
-      leased: 'Starting HAL',
-      connecting: 'Your slot is ready',
-      playing: 'Game on',
-      rematch_wait: 'Run it back?',
-      rematch_ready: 'Preparing rematch',
-      complete: 'Set complete',
-      failed: 'Something went wrong',
-      canceled: 'Reservation ended',
-      no_show: 'Connection timed out',
-    }[job.status] ?? pretty(job.status)
+      booting: 'Starting HAL',
+      waiting_for_player: 'Your slot is ready',
+      character_select: 'Choose your character',
+      in_game: 'Game on',
+      paused: 'Game paused',
+    }[job.observed?.phase ?? 'booting'] ?? 'Starting HAL'
   );
+}
+
+const END_TEXT: Record<EndReason, string> = {
+  player_canceled: 'You ended the session.',
+  player_left:
+    'This page was closed for two minutes, so your spot went to the next player.',
+  player_disconnected: 'You left the Slippi session.',
+  no_show:
+    'HAL waited but no connection arrived. Queue again when you are ready.',
+  idle_timeout: 'No game started for a while, so HAL freed the slot.',
+  yielded:
+    'Others were waiting, so HAL moved on after your game. Thanks for playing.',
+  service_failure:
+    'HAL had a problem it could not recover from. Queue again whenever you like.',
+};
+
+function endText(reason: EndReason | null): string {
+  return reason === null ? 'The session ended.' : END_TEXT[reason];
 }
 
 function has(choices: Choice[], value: string): boolean {
@@ -1267,12 +1319,6 @@ function pretty(value: string): string {
 
 function clock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-}
-
-function minutes(seconds: number): string {
-  return seconds % 60 === 0 && seconds >= 60
-    ? `${seconds / 60} minute${seconds === 60 ? '' : 's'}`
-    : `${seconds} seconds`;
 }
 
 function validateToolInput(input: unknown, options: Options): CreateJob {
@@ -1303,6 +1349,7 @@ function validateToolInput(input: unknown, options: Options): CreateJob {
     character: values.character as string,
     imitation: values.imitation as string,
     online_delay: values.online_delay as number,
+    stage: null,
     desired_return:
       desired === undefined ? options.default_desired_return : desired,
   };

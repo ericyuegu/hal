@@ -36,7 +36,7 @@ export function Sentence({
   imitation: Slot<string>;
   character: Slot<string>;
   difficulty?: Slot<number>;
-  stage?: Slot<string>;
+  stage?: Slot<string | null>;
   open: Panel | null;
   setOpen: (panel: Panel | null) => void;
   small?: boolean;
@@ -89,10 +89,10 @@ export function Sentence({
     options.characters.find((choice) => choice.value === character.value)
       ?.label ?? character.value;
   const icon = iconSrc(character.value);
-  const stageName =
-    stage &&
-    (options.stages.find((choice) => choice.value === stage.value)?.label ??
-      stage.value);
+  const stageName = stage
+    ? (options.stages.find((choice) => choice.value === stage.value)?.label ??
+      'a random stage')
+    : undefined;
 
   return (
     <>
@@ -166,16 +166,19 @@ export function Sentence({
           label="stages"
           groups={[
             {
-              items: options.stages.map((choice) => ({
-                value: choice.value,
-                name: choice.label,
-                alias: '',
-              })),
+              items: [
+                { value: '', name: 'Random', alias: '' },
+                ...options.stages.map((choice) => ({
+                  value: choice.value,
+                  name: choice.label,
+                  alias: '',
+                })),
+              ],
             },
           ]}
-          selected={stage.value}
+          selected={stage.value ?? ''}
           pick={(value) => {
-            stage.set!(value);
+            stage.set!(value || null);
             close();
           }}
           close={close}
