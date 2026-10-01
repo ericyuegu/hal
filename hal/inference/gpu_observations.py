@@ -8,7 +8,6 @@ from torch import Tensor
 
 from hal.inference.observation_history import ObservationHistory
 from hal.inference.observation_history import ObservationLayout
-from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
 from hal.models.controller_codec import DiscreteControllerCodec
 from hal.representation.features import NEUTRAL_ACTION
 from hal.representation.features import Context
@@ -113,10 +112,19 @@ class GpuObservationBatch:
         self.bucket = bucket
         self.update_frames = frames
         self.layout = example.history.layout
+        self.codec = example.codec
+        self._float_host = np.zeros((bucket, example.floats.shape[0], frames), dtype=np.float32)
+        self._cat_host = np.zeros((bucket, example.cats.shape[0], frames), dtype=np.int64)
+        self._action_host = np.zeros((bucket, frames, len(NEUTRAL_ACTION)), dtype=np.float32)
+        self._player_host = np.zeros((bucket, 1), dtype=np.int64)
         self.floats = example.floats.new_zeros((bucket, example.floats.shape[0], frames))
         self.cats = example.cats.new_zeros((bucket, example.cats.shape[0], frames))
-        self.actions = example.actions.new_zeros((bucket, frames, CONTROLLER_GROUP_COUNT))
+        self.raw_actions = torch.zeros_like(torch.from_numpy(self._action_host), device=example.device)
         self.player = example.player.new_zeros((bucket, 1))
+
+    @property
+    def actions(self) -> Tensor:
+        return self.codec.quantize(self.raw_actions)
 
     def gather(
         self,
@@ -136,18 +144,22 @@ class GpuObservationBatch:
                 or stage_layout.cat_names != self.layout.cat_names
             ):
                 raise ValueError("ready observation layouts or update shapes do not match")
-            stage.upload(player_id)
-            if stage.floats[:, columns].shape[1] != self.update_frames:
+            if stage._float_host[:, columns].shape[1] != self.update_frames:
                 raise ValueError("selected observation columns do not match the prepared update shape")
-            self.floats[row].copy_(stage.floats[:, columns])
-            self.cats[row].copy_(stage.cats[:, columns])
-            self.actions[row].copy_(stage.actions[0, columns])
-            self.player[row].copy_(stage.player[0])
+            self._float_host[row] = stage._float_host[:, columns]
+            self._cat_host[row] = stage._cat_host[:, columns]
+            self._action_host[row] = stage._action_host[columns]
+            self._player_host[row, 0] = player_id
         if len(updates) < self.bucket:
-            self.floats[len(updates) :].zero_()
-            self.cats[len(updates) :].zero_()
-            self.actions[len(updates) :].zero_()
-            self.player[len(updates) :].zero_()
+            self._float_host[len(updates) :] = 0
+            self._cat_host[len(updates) :] = 0
+            self._action_host[len(updates) :] = 0
+            self._player_host[len(updates) :] = 0
+        # One upload per packed column type; quantization runs inside the model graph.
+        self.floats.copy_(torch.from_numpy(self._float_host))
+        self.cats.copy_(torch.from_numpy(self._cat_host))
+        self.raw_actions.copy_(torch.from_numpy(self._action_host))
+        self.player.copy_(torch.from_numpy(self._player_host))
 
     def features(self) -> dict[str, Tensor]:
         return packed_features(self.layout, self.floats, self.cats, self.player)

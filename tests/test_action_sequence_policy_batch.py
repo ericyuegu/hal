@@ -22,6 +22,7 @@ from hal.inference.api import PolicySpec
 from hal.inference.api import PredictionRequest
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
+from hal.inference.cuda_graph import count_compilation_starts
 from hal.inference.kv_cache import KVCache
 from hal.inference.observation_history import ObservationHistory
 from hal.inference.warmup import make_warmup_observations
@@ -304,6 +305,96 @@ def test_sparse_ready_pair_keeps_two_row_bucket_with_32_admitted() -> None:
     assert calls == [2]
     _assert_plans_match(actual, expected)
     assert tuple(entry for entry in sparse._rng.state() if entry[0] not in ready) == idle_before
+
+
+@pytest.mark.parametrize("cuda_graphs", [False, True])
+def test_full_and_partial_batches_share_persistent_cache_through_wrap_and_reuse(
+    cuda_graphs: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if cuda_graphs and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    device = torch.device("cuda" if cuda_graphs else "cpu")
+    batched = _policy(4, device=device, compiled=cuda_graphs, cuda_graphs=cuda_graphs, horizon=8, prefix=3)
+    serial = _policy(4, device=device, horizon=8, prefix=3)
+    pool = batched._cache_pool
+    assert pool is not None
+    transfers: list[str] = []
+    gather = pool.gather
+    scatter = pool.scatter
+
+    def record_gather(rows: tuple[int, ...], bucket: int, *, direct: bool = True) -> KVCache:
+        transfers.append("gather")
+        return gather(rows, bucket, direct=direct)
+
+    def record_scatter(rows: tuple[int, ...], cache: KVCache) -> None:
+        transfers.append("scatter")
+        scatter(rows, cache)
+
+    monkeypatch.setattr(pool, "gather", record_gather)
+    monkeypatch.setattr(pool, "scatter", record_scatter)
+    addresses = tuple(value.data_ptr() for value in pool.storage.buffers())
+    frames = {stream: -1 for stream in (42, 7, 9001, 80, 123)}
+    sequences = dict.fromkeys(frames, 0)
+    waves = (
+        ((42, 7, 9001, 80), 4),
+        ((80, 9001, 7, 42), 4),
+        ((7, 42, 80, 9001), 4),
+        ((9001, 42), 3),
+        ((80, 42, 9001, 7), 7),
+        ((123, 9001, 80, 42), 2),
+    )
+    with count_compilation_starts() as compilation, torch.compiler.set_stance("fail_on_recompile"):
+        for wave, (ready, count) in enumerate(waves):
+            if wave == len(waves) - 1:
+                batched.release_stream(7)
+                serial.release_stream(7)
+            requests = tuple(
+                _conditioned_request(
+                    batched,
+                    stream,
+                    frames[stream] + count,
+                    count,
+                    sequences[stream],
+                    identity="PLATINUM" if stream % 2 else "MASTER",
+                    desired_return=None if stream % 2 else 30.0,
+                    temperature=0.8 if stream % 2 else 1.1,
+                    prefix=3,
+                )
+                for stream in ready
+            )
+            before = tuple(value.clone() for value in pool.storage.buffers())
+            transfers.clear()
+            actual = batched.predict(requests)
+            expected = tuple(serial.predict((request,))[0] for request in requests)
+            assert transfers == ([] if len(ready) == 4 else ["gather", "scatter"])
+            assert [plan.stream_id for plan in actual] == list(ready)
+            if not cuda_graphs:
+                _assert_plans_match(actual, expected)
+            assert batched._rng.state() == serial._rng.state()
+            assert tuple(value.data_ptr() for value in pool.storage.buffers()) == addresses
+            for stream, state in batched._prediction_streams.items():
+                reference = serial._prediction_streams[stream].cache
+                assert state.cache is not None and reference is not None
+                torch.testing.assert_close(state.cache.positions, reference.positions, rtol=0, atol=0)
+                torch.testing.assert_close(state.cache.next_position, reference.next_position, rtol=0, atol=0)
+                valid = state.cache.positions[0] >= 0
+                tolerance = 0.035 if cuda_graphs else 2e-5
+                torch.testing.assert_close(state.cache.hidden, reference.hidden, atol=tolerance, rtol=tolerance)
+                for value, control in zip(
+                    (*state.cache.layers, state.cache.history), (*reference.layers, reference.history), strict=True
+                ):
+                    torch.testing.assert_close(
+                        value[:, :, :, valid], control[:, :, :, valid], atol=tolerance, rtol=tolerance
+                    )
+                if stream not in ready:
+                    row = state.row
+                    for old, new in zip(before, pool.storage.buffers(), strict=True):
+                        axis = 1 if new.ndim == 5 else 0
+                        torch.testing.assert_close(new.select(axis, row), old.select(axis, row), rtol=0, atol=0)
+            for stream in ready:
+                frames[stream] += count
+                sequences[stream] += 1
+        assert compilation.snapshot() == 0
 
 
 def test_arbitrary_ids_release_reuse_and_capacity() -> None:
