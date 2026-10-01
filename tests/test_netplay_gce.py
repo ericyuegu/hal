@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import threading
 import urllib.error
@@ -150,6 +151,17 @@ def test_gce_shell_scripts_parse_and_startup_has_required_boundaries() -> None:
         "/var/lib/hal-netplay:/var/lib/hal-netplay",
     ):
         assert text in source
+
+
+def test_runner_keeps_managed_display_sockets_private() -> None:
+    source = (_DEPLOY / "gce-startup.sh").read_text()
+    command = next(
+        line for line in source.splitlines() if line.startswith("ExecStart=") and "--name hal-netplay-runner " in line
+    )
+    arguments = shlex.split(command)
+    mounts = [arguments[index + 1] for index, argument in enumerate(arguments) if argument == "-v"]
+    display_mounts = [mount for mount in mounts if "/tmp/.X11-unix" in mount]
+    assert display_mounts == ["/tmp/.X11-unix/X90:/tmp/.X11-unix/X90:ro"]
 
 
 @pytest.mark.parametrize("docker_installed", [False, True])

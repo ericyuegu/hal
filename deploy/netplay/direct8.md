@@ -185,3 +185,24 @@ Validation:
 
 Separate frontend wording and spec edits appeared during this work. They are
 outside this GPU setup commit.
+
+## Private display socket fix
+
+The first eight-slot launch failed before inference preparation. The runner
+mounted the complete host X11 socket directory read-only. Xvfb could start
+an abstract listener but could not create its filesystem socket. The runner
+therefore timed out on display :101 and restarted.
+
+The launch script now mounts only the host Xorg socket, X90. The remaining
+socket directory belongs to the container. A G4 reproduction with the former
+mount logged a Unix listener failure. The corrected mount created X151 and
+passed an actual `xsetroot` request. Both runs emitted nonfatal xkbcomp
+warnings about unsupported key names.
+
+- Remote `systemctl stop hal-netplay-runner.service` stopped the empty restart
+  loop. No game was active and admissions remained paused.
+- Remote `docker run --rm --network none ... Xvfb :151 ... xsetroot`
+  reproduced the failure and verified the corrected socket mount.
+  Evidence: `/var/lib/hal-netplay/direct8-check/socket-{before,after}.log`.
+- `uv run pytest -q tests/test_netplay_gce.py` passed **20** tests.
+- `bash -n deploy/netplay/gce-startup.sh` and `git diff --check` passed.
