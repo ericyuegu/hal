@@ -26,9 +26,11 @@ export async function withStore(fn: (store: JobStore, clock: Clock, sql: SqlStor
   });
 }
 
-export const CHOICES = {
+export const NEW_JOB = {
+  player_code: "CRYO#610",
   character: "FOX",
   imitation: "IBDW#0",
+  stage: null,
   online_delay: 2,
   desired_return: 20,
   temperature: 1,

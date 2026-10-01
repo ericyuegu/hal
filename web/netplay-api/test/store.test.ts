@@ -1,75 +1,227 @@
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../src/domain";
-import { CHOICES, withStore } from "./helpers";
+import type { ObservedReport } from "../src/requests";
+import { NEW_JOB, withStore } from "./helpers";
 
-function status(fn: () => unknown): number {
+function refused(fn: () => unknown): { status: number; detail: string } {
   try {
     fn();
   } catch (error) {
-    if (error instanceof HttpError) return error.status;
+    if (error instanceof HttpError) return { status: error.status, detail: error.detail };
     throw error;
   }
-  return 200;
+  throw new Error("expected an HttpError");
 }
 
-describe("JobStore player operations", () => {
-  it("creates queued jobs with FIFO positions", () =>
+function snapshot(seq: number, extra: Partial<ObservedReport> = {}): ObservedReport {
+  return {
+    seq,
+    phase: "character_select",
+    phase_seconds_left: 5,
+    bot_code: "HAL#9000",
+    seen_revision: 1,
+    locked_revision: null,
+    finished_games: [],
+    ...extra,
+  };
+}
+
+describe("job lifecycle", () => {
+  it("creates settings at revision 1 and bumps it on each change", () =>
     withStore((store) => {
-      const first = store.createJob("j1", "d1", "AAAA#1", CHOICES);
-      const second = store.createJob("j2", "d2", "BBBB#2", CHOICES);
-      expect(first).toMatchObject({ id: "j1", status: "queued", queue_position: 1, attempt: 0, cancel_after_game: false });
-      expect(second.queue_position).toBe(2);
-      expect(store.queueDepth()).toBe(2);
-      expect(store.activeCount()).toBe(0);
+      store.createJob("j1", "d1", NEW_JOB);
+      expect(store.getJob("j1", "d1").settings).toMatchObject({ revision: 1, character: "FOX", stage: null });
+      const next = store.updateSettings("j1", "d1", { character: "FALCO", stage: "POKEMON_STADIUM" });
+      expect(next.settings).toMatchObject({ revision: 2, character: "FALCO", stage: "POKEMON_STADIUM" });
     }));
 
-  it("allows one active job per player", () =>
+  it("claims FIFO with a fresh snapshot and a 20 s lease", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.createJob("j2", "d2", { ...NEW_JOB, player_code: "AAAA#1" });
+      expect(store.claimNext("w0")).toMatchObject({ id: "j1", status: "assigned", attempt: 1, observed: null });
+      expect(store.row("j1")).toMatchObject({
+        lease_owner: "w0",
+        lease_expires_at: clock.now + 20,
+        assigned_at: clock.now,
+      });
+    }));
+
+  it("keeps the newest snapshot by seq and lengthens the lease in game", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      store.report("j1", "w0", snapshot(2, { phase: "in_game", phase_seconds_left: null }));
+      expect(store.row("j1")?.lease_expires_at).toBe(clock.now + 60);
+      const stale = store.report("j1", "w0", snapshot(1));
+      expect(stale.view.observed?.phase).toBe("in_game");
+      expect(stale.phaseChanged).toBe(false);
+    }));
+
+  it("converts the phase's seconds left to an absolute deadline", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      expect(store.report("j1", "w0", snapshot(1, { phase_seconds_left: 4.5 })).view.phase_deadline).toBe(
+        clock.now + 4.5,
+      );
+    }));
+
+  it("records each game once and refuses a changed result", () =>
     withStore((store) => {
-      store.createJob("j1", "d1", "CRYO#610", CHOICES);
-      let caught: unknown;
-      try {
-        store.createJob("j2", "d2", "CRYO#610", CHOICES);
-      } catch (error) {
-        caught = error;
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      const game = { number: 1, stage: "BATTLEFIELD", result: "win" as const };
+      expect(store.report("j1", "w0", snapshot(1, { finished_games: [game] })).newGames).toEqual([game]);
+      expect(store.report("j1", "w0", snapshot(2, { finished_games: [game] })).newGames).toEqual([]);
+      expect(
+        refused(() =>
+          store.report("j1", "w0", snapshot(3, { finished_games: [{ ...game, result: "loss" }] })),
+        ).status,
+      ).toBe(409);
+      expect(store.getJob("j1", "d1").games).toEqual([game]);
+    }));
+
+  it("refuses a seen revision that does not exist yet", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      expect(refused(() => store.report("j1", "w0", snapshot(1, { seen_revision: 2 }))).status).toBe(422);
+    }));
+
+  it("refuses reports and ends from another worker or after the end", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      expect(refused(() => store.report("j1", "w1", snapshot(1))).status).toBe(409);
+      store.end("j1", "w0", "no_show", false);
+      expect(refused(() => store.report("j1", "w0", snapshot(2))).status).toBe(409);
+      expect(refused(() => store.end("j1", "w1", "no_show", false)).status).toBe(409);
+    }));
+
+  it("returns the current job when the same worker repeats an end", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      store.end("j1", "w0", "player_disconnected", false);
+      expect(store.end("j1", "w0", "player_disconnected", false)).toMatchObject({
+        status: "ended",
+        end_reason: "player_disconnected",
+      });
+      store.createJob("j2", "d2", { ...NEW_JOB, player_code: "AAAA#1" });
+      store.claimNext("w0");
+      expect(store.end("j2", "w0", "service_failure", true).status).toBe("queued");
+      expect(store.end("j2", "w0", "service_failure", true).status).toBe("queued");
+    }));
+
+  it("requeues a retryable failure at the front once, then ends it", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.createJob("j2", "d2", { ...NEW_JOB, player_code: "AAAA#1" });
+      store.claimNext("w0");
+      expect(store.end("j1", "w0", "service_failure", true)).toMatchObject({ status: "queued", queue_position: 1 });
+      expect(store.claimNext("w0")?.id).toBe("j1");
+      expect(store.end("j1", "w0", "service_failure", true)).toMatchObject({
+        status: "ended",
+        end_reason: "service_failure",
+      });
+    }));
+
+  it("does not requeue a failed reservation the player asked to stop", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      store.leave("j1", "d1");
+      expect(store.end("j1", "w0", "service_failure", true)).toMatchObject({
+        status: "ended",
+        end_reason: "player_canceled",
+      });
+    }));
+
+  it("ends a queued job on leave and winds down an assigned one", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      expect(store.leave("j1", "d1")).toMatchObject({ status: "ended", end_reason: "player_canceled" });
+      store.createJob("j2", "d2", NEW_JOB);
+      store.claimNext("w0");
+      expect(store.leave("j2", "d2")).toMatchObject({ status: "assigned", wind_down: "player" });
+    }));
+
+  it("counts lock requests while assigned", () =>
+    withStore((store) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      expect(refused(() => store.requestLock("j1", "d1")).status).toBe(409);
+      store.claimNext("w0");
+      expect(store.requestLock("j1", "d1").lock_requests).toBe(1);
+    }));
+
+  it("requeues an expired lease once, then ends it", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      clock.advance(21);
+      store.getJob("j1", "d1");
+      expect(store.reapExpired()).toEqual(["j1"]);
+      expect(store.row("j1")).toMatchObject({ status: "queued", retry_front: 1, lease_owner: null, phase: null });
+      store.claimNext("w0");
+      clock.advance(21);
+      store.getJob("j1", "d1");
+      store.reapExpired();
+      expect(store.row("j1")).toMatchObject({ status: "ended", end_reason: "service_failure" });
+    }));
+
+  it("releases a queued job whose page stopped polling, but never an assigned one", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.createJob("j2", "d2", { ...NEW_JOB, player_code: "AAAA#1" });
+      store.claimNext("w0");
+      for (let t = 0; t < 120; t += 10) {
+        clock.advance(10);
+        store.report("j1", "w0", snapshot(t + 1));
       }
-      expect(caught).toMatchObject({ status: 409, detail: "player CRYO#610 already has an active reservation" });
-      store.cancel("j1", "d1");
-      expect(store.createJob("j3", "d3", "CRYO#610", CHOICES).status).toBe("queued");
+      expect(store.reapExpired()).toEqual(["j2"]);
+      expect(store.row("j2")).toMatchObject({ status: "ended", end_reason: "player_left" });
+      expect(store.row("j1")?.status).toBe("assigned");
     }));
 
-  it("hides jobs behind their token digest", () =>
-    withStore((store) => {
-      store.createJob("j1", "d1", "CRYO#610", CHOICES);
-      expect(status(() => store.getJob("j1", "wrong"))).toBe(404);
-      expect(status(() => store.getJob("missing", "d1"))).toBe(404);
-      expect(store.getJob("j1", "d1").id).toBe("j1");
+  it("records a poll at most every 10 s", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      const created = clock.now;
+      clock.advance(9);
+      store.getJob("j1", "d1");
+      expect(store.row("j1")?.player_seen_at).toBe(created);
+      clock.advance(1);
+      store.getJob("j1", "d1");
+      expect(store.row("j1")?.player_seen_at).toBe(clock.now);
     }));
 
-  it("advances the policy revision and refuses finished jobs", () =>
-    withStore((store) => {
-      store.createJob("j1", "d1", "CRYO#610", CHOICES);
-      const updated = store.updatePolicy("j1", "d1", null, 0.9);
-      expect(updated).toMatchObject({ desired_return: null, temperature: 0.9, policy_revision: 1 });
-      store.cancel("j1", "d1");
-      expect(status(() => store.updatePolicy("j1", "d1", 10, 1))).toBe(409);
+  it("winds down a long reservation only when someone is waiting", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("w0");
+      clock.advance(900);
+      expect(store.applyYield()).toEqual([]);
+      store.createJob("j2", "d2", { ...NEW_JOB, player_code: "AAAA#1" });
+      expect(store.applyYield()).toEqual(["j1"]);
+      expect(store.row("j1")?.wind_down).toBe("yield");
+      expect(store.applyYield()).toEqual([]);
     }));
 
-  it("cancels queued jobs and returns terminal jobs unchanged", () =>
+  it("fails held jobs of an ended session by the same requeue rule", () =>
     withStore((store) => {
-      store.createJob("j1", "d1", "CRYO#610", CHOICES);
-      expect(store.cancel("j1", "d1").status).toBe("canceled");
-      expect(store.cancel("j1", "d1").status).toBe("canceled");
+      store.createJob("j1", "d1", NEW_JOB);
+      store.claimNext("s/slot-0");
+      expect(store.failWorkers(["s/slot-0"])).toEqual(["j1"]);
+      expect(store.row("j1")?.status).toBe("queued");
     }));
 
-  it("refuses a rematch unless the job waits for one", () =>
-    withStore((store) => {
-      store.createJob("j1", "d1", "CRYO#610", CHOICES);
-      let caught: unknown;
-      try {
-        store.requestRematch("j1", "d1", "FALCO", "ZAIN#0", "BATTLEFIELD");
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toMatchObject({ status: 409, detail: "job is not waiting for a rematch" });
+  it("reports the earliest deadline", () =>
+    withStore((store, clock) => {
+      expect(store.nextDeadline()).toBeNull();
+      store.createJob("j1", "d1", NEW_JOB);
+      expect(store.nextDeadline()).toBe(clock.now + 120);
+      store.claimNext("w0");
+      expect(store.nextDeadline()).toBe(clock.now + 20);
     }));
 });

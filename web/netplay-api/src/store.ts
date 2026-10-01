@@ -1,98 +1,94 @@
 import {
   HttpError,
-  CONNECT_TIMEOUT_SECONDS,
-  IDLE_TIMEOUT_SECONDS,
-  type JobStatus,
+  IN_GAME_PHASES,
   LEASE_SECONDS,
   MAX_ATTEMPTS,
-  MAX_GAMES,
   PLAYER_PRESENCE_SECONDS,
   PLAYING_LEASE_SECONDS,
   PRESENCE_WRITE_SECONDS,
-  TERMINAL_STATUSES,
+  YIELD_AFTER_SECONDS,
   sameDigest,
+  type EndReason,
+  type GameResult,
+  type JobStatus,
+  type Phase,
+  type WindDown,
 } from "./domain";
+import type { CreateRequest, FinishedGame, ObservedReport, SettingsUpdate } from "./requests";
 
 export type Row = Record<string, SqlStorageValue>;
 
-export interface MatchChoices {
+export interface Settings {
+  revision: number;
   character: string;
   imitation: string;
-  online_delay: number;
+  stage: string | null;
   desired_return: number | null;
   temperature: number;
 }
 
-export interface JobResponse {
+export interface JobView {
   id: string;
   player_code: string;
-  character: string;
-  imitation: string;
   online_delay: number;
-  desired_return: number | null;
-  temperature: number;
-  policy_revision: number;
-  requested_stage: string | null;
   status: JobStatus;
+  end_reason: EndReason | null;
   queue_position: number | null;
   attempt: number;
-  game_count: number;
-  connect_code: string | null;
-  actual_stage: string | null;
-  last_result: string | null;
-  error_code: string | null;
-  connect_deadline: number | null;
-  rematch_deadline: number | null;
-  cancel_after_game: boolean;
+  settings: Settings;
+  observed: {
+    seq: number;
+    phase: Phase;
+    bot_code: string | null;
+    seen_revision: number;
+    locked_revision: number | null;
+  } | null;
+  phase_deadline: number | null;
+  games: FinishedGame[];
+  wind_down: WindDown | null;
+  lock_requests: number;
 }
 
-const ACTIVE = "'queued','leased','connecting','playing','rematch_wait','rematch_ready'";
-const IN_SERVICE = "'leased','connecting','playing','rematch_wait','rematch_ready'";
-const TERMINAL = "'complete','failed','canceled','no_show'";
-// States where only the player's page can move the job forward. Connecting and
-// playing are excluded: the player may close the page and still be in Slippi.
-const PRESENCE = "'queued','leased','rematch_wait'";
-
-// Same columns and meanings as hal/netplay_service/queue.py schema v3, plus
-// last_worker, which lets a retried runner call recognize its own applied change.
 export const JOB_SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   token_digest TEXT NOT NULL,
   player_code TEXT NOT NULL,
-  character TEXT NOT NULL,
-  imitation TEXT NOT NULL,
   online_delay INTEGER NOT NULL CHECK (online_delay IN (2, 3)),
-  desired_return REAL,
-  temperature REAL NOT NULL,
-  policy_revision INTEGER NOT NULL DEFAULT 0,
-  requested_stage TEXT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'assigned', 'ended')),
+  end_reason TEXT,
   queue_seq INTEGER NOT NULL,
   retry_front INTEGER NOT NULL DEFAULT 0 CHECK (retry_front IN (0, 1)),
   attempt INTEGER NOT NULL DEFAULT 0,
-  game_count INTEGER NOT NULL DEFAULT 0,
-  connect_code TEXT,
-  actual_stage TEXT,
-  last_result TEXT,
-  error_code TEXT,
-  connect_deadline REAL,
-  rematch_deadline REAL,
-  cancel_after_game INTEGER NOT NULL DEFAULT 0 CHECK (cancel_after_game IN (0, 1)),
+  settings_revision INTEGER NOT NULL,
+  character TEXT NOT NULL,
+  imitation TEXT NOT NULL,
+  stage TEXT,
+  desired_return REAL,
+  temperature REAL NOT NULL,
+  observed_seq INTEGER NOT NULL DEFAULT 0,
+  phase TEXT,
+  bot_code TEXT,
+  seen_revision INTEGER,
+  locked_revision INTEGER,
+  phase_deadline REAL,
+  wind_down TEXT CHECK (wind_down IN ('player', 'yield')),
+  lock_requests INTEGER NOT NULL DEFAULT 0,
   lease_owner TEXT,
   lease_expires_at REAL,
   last_worker TEXT,
+  assigned_at REAL,
   player_seen_at REAL NOT NULL,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_player ON jobs(player_code) WHERE status IN (${ACTIVE});
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_player ON jobs(player_code) WHERE status IN ('queued', 'assigned');
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(retry_front DESC, queue_seq) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(lease_expires_at) WHERE lease_owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS games (
   job_id TEXT NOT NULL REFERENCES jobs(id),
   game_number INTEGER NOT NULL,
-  actual_stage TEXT NOT NULL,
+  stage TEXT NOT NULL,
   result TEXT NOT NULL,
   worker TEXT NOT NULL,
   replay_key TEXT,
@@ -104,6 +100,10 @@ CREATE TABLE IF NOT EXISTS games (
 );
 `;
 
+// Clears everything the runner owned, for a requeue or a fresh claim.
+const CLEAR_OBSERVED = `observed_seq = 0, phase = NULL, bot_code = NULL, seen_revision = NULL,
+  locked_revision = NULL, phase_deadline = NULL`;
+
 export class JobStore {
   constructor(
     private readonly sql: SqlStorage,
@@ -111,12 +111,11 @@ export class JobStore {
   ) {}
 
   protected first(query: string, ...params: SqlStorageValue[]): Row | null {
-    const rows = this.sql.exec<Row>(query, ...params).toArray();
-    return rows[0] ?? null;
+    return this.sql.exec<Row>(query, ...params).toArray()[0] ?? null;
   }
 
-  protected exec(query: string, ...params: SqlStorageValue[]): number {
-    return this.sql.exec(query, ...params).rowsWritten;
+  protected exec(query: string, ...params: SqlStorageValue[]): void {
+    this.sql.exec(query, ...params);
   }
 
   protected time(): number {
@@ -127,77 +126,95 @@ export class JobStore {
     return this.first("SELECT * FROM jobs WHERE id = ?", id);
   }
 
-  protected reload(id: string): Row {
+  private reload(id: string): Row {
     const row = this.row(id);
     if (row === null) throw new Error(`job ${id} vanished inside its transaction`);
     return row;
   }
 
-  response(row: Row): JobResponse {
+  view(row: Row): JobView {
     const status = row.status as JobStatus;
     let position: number | null = null;
     if (status === "queued") {
       const ahead = this.first(
         `SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'
            AND (retry_front > ? OR (retry_front = ? AND queue_seq < ?))`,
-        row.retry_front as number,
-        row.retry_front as number,
-        row.queue_seq as number,
+        row.retry_front,
+        row.retry_front,
+        row.queue_seq,
       );
       position = 1 + Number(ahead?.n ?? 0);
     }
+    const games = this.sql
+      .exec<Row>("SELECT game_number, stage, result FROM games WHERE job_id = ? ORDER BY game_number", row.id)
+      .toArray()
+      .map((game) => ({
+        number: game.game_number as number,
+        stage: game.stage as string,
+        result: game.result as GameResult,
+      }));
     return {
       id: row.id as string,
       player_code: row.player_code as string,
-      character: row.character as string,
-      imitation: row.imitation as string,
       online_delay: row.online_delay as number,
-      desired_return: row.desired_return as number | null,
-      temperature: row.temperature as number,
-      policy_revision: row.policy_revision as number,
-      requested_stage: row.requested_stage as string | null,
       status,
+      end_reason: row.end_reason as EndReason | null,
       queue_position: position,
       attempt: row.attempt as number,
-      game_count: row.game_count as number,
-      connect_code: row.connect_code as string | null,
-      actual_stage: row.actual_stage as string | null,
-      last_result: row.last_result as string | null,
-      error_code: row.error_code as string | null,
-      connect_deadline: row.connect_deadline as number | null,
-      rematch_deadline: row.rematch_deadline as number | null,
-      cancel_after_game: row.cancel_after_game === 1,
+      settings: {
+        revision: row.settings_revision as number,
+        character: row.character as string,
+        imitation: row.imitation as string,
+        stage: row.stage as string | null,
+        desired_return: row.desired_return as number | null,
+        temperature: row.temperature as number,
+      },
+      observed:
+        row.phase === null
+          ? null
+          : {
+              seq: row.observed_seq as number,
+              phase: row.phase as Phase,
+              bot_code: row.bot_code as string | null,
+              seen_revision: row.seen_revision as number,
+              locked_revision: row.locked_revision as number | null,
+            },
+      phase_deadline: row.phase_deadline as number | null,
+      games,
+      wind_down: row.wind_down as WindDown | null,
+      lock_requests: row.lock_requests as number,
     };
   }
 
-  createJob(id: string, tokenDigest: string, playerCode: string, choices: MatchChoices): JobResponse {
+  createJob(id: string, tokenDigest: string, request: CreateRequest): JobView {
     const now = this.time();
     const seq = Number(this.first("SELECT COALESCE(MAX(queue_seq), 0) + 1 AS seq FROM jobs")?.seq);
     try {
       this.exec(
-        `INSERT INTO jobs(id, token_digest, player_code, character, imitation, online_delay,
-           desired_return, temperature, requested_stage, status, queue_seq, player_seen_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', ?, ?, ?, ?)`,
+        `INSERT INTO jobs(id, token_digest, player_code, online_delay, status, queue_seq, settings_revision,
+           character, imitation, stage, desired_return, temperature, player_seen_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         tokenDigest,
-        playerCode,
-        choices.character,
-        choices.imitation,
-        choices.online_delay,
-        choices.desired_return,
-        choices.temperature,
+        request.player_code,
+        request.online_delay,
         seq,
+        request.character,
+        request.imitation,
+        request.stage,
+        request.desired_return,
+        request.temperature,
         now,
         now,
         now,
       );
     } catch (error) {
       if (error instanceof Error && error.message.includes("jobs.player_code")) {
-        throw new HttpError(409, `player ${playerCode} already has an active reservation`);
+        throw new HttpError(409, `player ${request.player_code} already has an active reservation`);
       }
       throw error;
     }
-    return this.response(this.reload(id));
+    return this.view(this.reload(id));
   }
 
   authenticated(id: string, digest: string): Row {
@@ -206,63 +223,45 @@ export class JobStore {
     return row;
   }
 
-  getJob(id: string, digest: string): JobResponse {
+  getJob(id: string, digest: string): JobView {
     const row = this.authenticated(id, digest);
     const now = this.time();
-    if (now - (row.player_seen_at as number) < PRESENCE_WRITE_SECONDS) return this.response(row);
+    if (now - (row.player_seen_at as number) < PRESENCE_WRITE_SECONDS) return this.view(row);
     this.exec("UPDATE jobs SET player_seen_at = ? WHERE id = ?", now, id);
-    return this.response(this.reload(id));
+    return this.view(this.reload(id));
   }
 
-  updatePolicy(id: string, digest: string, desiredReturn: number | null, temperature: number): JobResponse {
+  updateSettings(id: string, digest: string, update: SettingsUpdate): JobView {
     const row = this.authenticated(id, digest);
-    if (TERMINAL_STATUSES.has(row.status as string)) throw new HttpError(409, "cannot update a finished reservation");
+    if (row.status === "ended") throw new HttpError(409, "cannot change a finished reservation");
     this.exec(
-      `UPDATE jobs SET desired_return = ?, temperature = ?, policy_revision = policy_revision + 1,
-         updated_at = ? WHERE id = ?`,
-      desiredReturn,
-      temperature,
+      `UPDATE jobs SET character = ?, imitation = ?, stage = ?, desired_return = ?, temperature = ?,
+         settings_revision = settings_revision + 1, updated_at = ? WHERE id = ?`,
+      update.character ?? (row.character as string),
+      update.imitation ?? (row.imitation as string),
+      "stage" in update ? (update.stage ?? null) : (row.stage as string | null),
+      "desired_return" in update ? (update.desired_return ?? null) : (row.desired_return as number | null),
+      update.temperature ?? (row.temperature as number),
       this.time(),
       id,
     );
-    return this.response(this.reload(id));
+    return this.view(this.reload(id));
   }
 
-  cancel(id: string, digest: string): JobResponse {
+  requestLock(id: string, digest: string): JobView {
     const row = this.authenticated(id, digest);
-    const status = row.status as string;
-    if (TERMINAL_STATUSES.has(status)) return this.response(row);
-    if (status === "playing") {
-      this.exec("UPDATE jobs SET cancel_after_game = 1, updated_at = ? WHERE id = ?", this.time(), id);
-    } else {
-      this.exec(
-        `UPDATE jobs SET status = 'canceled', lease_owner = NULL, lease_expires_at = NULL,
-           connect_deadline = NULL, rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
-        this.time(),
-        id,
-      );
+    if (row.status !== "assigned") throw new HttpError(409, "only an assigned reservation can lock in");
+    this.exec("UPDATE jobs SET lock_requests = lock_requests + 1, updated_at = ? WHERE id = ?", this.time(), id);
+    return this.view(this.reload(id));
+  }
+
+  leave(id: string, digest: string): JobView {
+    const row = this.authenticated(id, digest);
+    if (row.status === "queued") this.finish(id, "player_canceled");
+    else if (row.status === "assigned" && row.wind_down !== "player") {
+      this.exec("UPDATE jobs SET wind_down = 'player', updated_at = ? WHERE id = ?", this.time(), id);
     }
-    return this.response(this.reload(id));
-  }
-
-  // Throws inside the caller's transaction on expiry, so the completion is rolled
-  // back exactly as in the Python service; the alarm completes the job.
-  requestRematch(id: string, digest: string, character: string, imitation: string, stage: string): JobResponse {
-    const now = this.time();
-    const row = this.authenticated(id, digest);
-    if (row.status !== "rematch_wait") throw new HttpError(409, "job is not waiting for a rematch");
-    const deadline = row.rematch_deadline as number | null;
-    if (deadline === null || deadline <= now) throw new HttpError(409, "rematch window expired");
-    this.exec(
-      `UPDATE jobs SET status = 'rematch_ready', character = ?, imitation = ?, requested_stage = ?,
-         rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
-      character,
-      imitation,
-      stage,
-      now,
-      id,
-    );
-    return this.response(this.reload(id));
+    return this.view(this.reload(id));
   }
 
   queueDepth(): number {
@@ -270,216 +269,148 @@ export class JobStore {
   }
 
   activeCount(): number {
-    // Repeat the partial-index predicate: SQLite does not infer it from a subset of statuses.
-    return Number(this.first(`SELECT COUNT(*) AS n FROM jobs WHERE status IN (${ACTIVE}) AND status != 'queued'`)?.n);
+    return Number(this.first("SELECT COUNT(*) AS n FROM jobs WHERE status = 'assigned'")?.n);
   }
 
-  private owned(id: string, worker: string, expected: readonly JobStatus[]): Row {
+  private owned(id: string, worker: string): Row {
     const row = this.row(id);
-    if (row === null || row.lease_owner !== worker) throw new HttpError(409, "worker does not own this job");
-    if (!expected.includes(row.status as JobStatus)) {
-      throw new HttpError(409, `job status '${row.status}' is not valid for this operation`);
+    if (row === null || row.lease_owner !== worker || row.status !== "assigned") {
+      throw new HttpError(409, "worker does not own this job");
     }
     return row;
   }
 
-  // A runner retries a call whose response it lost. When this worker already
-  // applied the change, the retry returns the current job instead of a 409.
-  private applied(id: string, worker: string, done: (row: Row) => boolean): JobResponse | null {
-    const row = this.row(id);
-    return row !== null && row.last_worker === worker && done(row) ? this.response(row) : null;
+  workerJob(id: string, worker: string): JobView {
+    return this.view(this.owned(id, worker));
   }
 
-  private leaseSeconds(status: string): number {
-    return status === "playing" ? PLAYING_LEASE_SECONDS : LEASE_SECONDS;
-  }
-
-  workerJob(id: string, worker: string): JobResponse {
-    const row = this.row(id);
-    if (row === null || row.lease_owner !== worker) throw new HttpError(409, "worker does not own this job");
-    return this.response(row);
-  }
-
-  // A repeated claim after a lost response must not give the slot a second job.
-  // Callers check this before claimNext, which leases without regard to held jobs.
-  heldLease(worker: string): JobResponse | null {
-    const held = this.first(`SELECT id, status FROM jobs WHERE lease_owner = ? AND status IN (${IN_SERVICE})`, worker);
+  // A repeated claim after a lost response returns the job the slot already holds,
+  // but only before the runner reported progress; afterwards the slot is busy.
+  heldLease(worker: string): JobView | null {
+    const held = this.first("SELECT * FROM jobs WHERE lease_owner = ? AND status = 'assigned'", worker);
     if (held === null) return null;
-    if (held.status === "leased") return this.response(this.reload(held.id as string));
+    if (held.phase === null) return this.view(held);
     throw new HttpError(409, `slot already holds job ${held.id}`);
   }
 
   hasLease(worker: string): boolean {
-    return this.first(`SELECT 1 FROM jobs WHERE lease_owner = ? AND status IN (${IN_SERVICE})`, worker) !== null;
+    return this.first("SELECT 1 FROM jobs WHERE lease_owner = ? AND status = 'assigned'", worker) !== null;
   }
 
-  claimNext(worker: string): JobResponse | null {
+  claimNext(worker: string): JobView | null {
     const now = this.time();
-    const row = this.first("SELECT id FROM jobs WHERE status = 'queued' ORDER BY retry_front DESC, queue_seq ASC LIMIT 1");
+    const row = this.first(
+      "SELECT id FROM jobs WHERE status = 'queued' ORDER BY retry_front DESC, queue_seq ASC LIMIT 1",
+    );
     if (row === null) return null;
     this.exec(
-      `UPDATE jobs SET status = 'leased', retry_front = 0, attempt = attempt + 1, lease_owner = ?,
-         last_worker = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE jobs SET status = 'assigned', retry_front = 0, attempt = attempt + 1, lease_owner = ?, last_worker = ?,
+         lease_expires_at = ?, assigned_at = ?, ${CLEAR_OBSERVED}, updated_at = ? WHERE id = ?`,
       worker,
       worker,
       now + LEASE_SECONDS,
       now,
+      now,
       row.id as string,
     );
-    return this.response(this.reload(row.id as string));
+    return this.view(this.reload(row.id as string));
   }
 
-  heartbeat(id: string, worker: string): JobResponse {
+  report(
+    id: string,
+    worker: string,
+    report: ObservedReport,
+  ): { view: JobView; phaseChanged: boolean; newGames: FinishedGame[] } {
+    const row = this.owned(id, worker);
+    if (report.seen_revision > (row.settings_revision as number)) {
+      throw new HttpError(422, "seen_revision is ahead of the reservation's settings");
+    }
     const now = this.time();
+    const fresh = report.seq > (row.observed_seq as number);
+    const phase = fresh ? report.phase : (row.phase as Phase | null);
+    if (fresh) {
+      this.exec(
+        `UPDATE jobs SET observed_seq = ?, phase = ?, bot_code = ?, seen_revision = ?, locked_revision = ?,
+           phase_deadline = ? WHERE id = ?`,
+        report.seq,
+        report.phase,
+        report.bot_code,
+        report.seen_revision,
+        report.locked_revision,
+        report.phase_seconds_left === null ? null : now + report.phase_seconds_left,
+        id,
+      );
+    }
+    const newGames = report.finished_games.filter((game) => this.recordGame(id, worker, game, now));
+    const lease = phase !== null && IN_GAME_PHASES.has(phase) ? PLAYING_LEASE_SECONDS : LEASE_SECONDS;
+    this.exec("UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?", now + lease, now, id);
+    return { view: this.view(this.reload(id)), phaseChanged: fresh && report.phase !== row.phase, newGames };
+  }
+
+  // Returns true when the game is new.
+  private recordGame(id: string, worker: string, game: FinishedGame, now: number): boolean {
+    const stored = this.first("SELECT stage, result FROM games WHERE job_id = ? AND game_number = ?", id, game.number);
+    if (stored !== null) {
+      if (stored.stage === game.stage && stored.result === game.result) return false;
+      throw new HttpError(409, `game ${game.number} is already recorded with a different result`);
+    }
+    this.exec(
+      "INSERT INTO games(job_id, game_number, stage, result, worker, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      id,
+      game.number,
+      game.stage,
+      game.result,
+      worker,
+      now,
+    );
+    return true;
+  }
+
+  end(id: string, worker: string, reason: EndReason, retryable: boolean): JobView {
     const row = this.row(id);
-    if (row === null || row.lease_owner !== worker || TERMINAL_STATUSES.has(row.status as string)) {
-      throw new HttpError(409, "worker does not own an active job lease");
+    if (row !== null && row.last_worker === worker && row.lease_owner === null) {
+      // A retry after a lost response: the first call already ended or requeued the job.
+      if (row.status === "ended" || (row.status === "queued" && row.retry_front === 1)) return this.view(row);
     }
-    this.exec(
-      "UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?",
-      now + this.leaseSeconds(row.status as string),
-      now,
-      id,
-    );
-    return this.response(this.reload(id));
+    this.owned(id, worker);
+    if (reason === "service_failure" && retryable) this.requeueOrEnd(id);
+    else this.finish(id, reason);
+    return this.view(this.reload(id));
   }
 
-  markConnecting(id: string, worker: string, connectCode: string): JobResponse {
-    const done = this.applied(id, worker, (row) => row.status === "connecting" && row.connect_code === connectCode);
-    if (done) return done;
-    this.owned(id, worker, ["leased"]);
-    const now = this.time();
+  private finish(id: string, reason: EndReason): void {
     this.exec(
-      "UPDATE jobs SET status = 'connecting', connect_code = ?, connect_deadline = ?, updated_at = ? WHERE id = ?",
-      connectCode,
-      now + CONNECT_TIMEOUT_SECONDS,
-      now,
-      id,
-    );
-    return this.response(this.reload(id));
-  }
-
-  markPlaying(id: string, worker: string): JobResponse {
-    const done = this.applied(id, worker, (row) => row.status === "playing" && row.lease_owner === worker);
-    if (done) return done;
-    this.owned(id, worker, ["connecting", "rematch_ready"]);
-    const now = this.time();
-    this.exec(
-      `UPDATE jobs SET status = 'playing', connect_deadline = NULL, rematch_deadline = NULL,
-         lease_expires_at = ?, updated_at = ? WHERE id = ?`,
-      now + PLAYING_LEASE_SECONDS,
-      now,
-      id,
-    );
-    return this.response(this.reload(id));
-  }
-
-  markNoShow(id: string, worker: string): JobResponse {
-    const done = this.applied(id, worker, (row) => row.status === "no_show");
-    if (done) return done;
-    this.owned(id, worker, ["connecting"]);
-    this.exec(
-      `UPDATE jobs SET status = 'no_show', connect_deadline = NULL, lease_owner = NULL,
-         lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+      `UPDATE jobs SET status = 'ended', end_reason = ?, lease_owner = NULL, lease_expires_at = NULL,
+         phase_deadline = NULL, updated_at = ? WHERE id = ?`,
+      reason,
       this.time(),
       id,
     );
-    return this.response(this.reload(id));
   }
 
-  markNoContest(id: string, worker: string): JobResponse {
-    const done = this.applied(id, worker, (row) => row.status === "canceled" && row.lease_owner === null);
-    if (done) return done;
-    this.owned(id, worker, ["playing"]);
+  // One rule for every runner failure: requeue at the front once, unless the player asked to stop.
+  private requeueOrEnd(id: string): void {
+    const row = this.reload(id);
+    if (row.wind_down === "player") return this.finish(id, "player_canceled");
+    if (row.wind_down === "yield") return this.finish(id, "yielded");
+    if ((row.attempt as number) >= MAX_ATTEMPTS) return this.finish(id, "service_failure");
     this.exec(
-      `UPDATE jobs SET status = 'canceled', connect_deadline = NULL, rematch_deadline = NULL,
-         lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+      `UPDATE jobs SET status = 'queued', retry_front = 1, lease_owner = NULL, lease_expires_at = NULL,
+         assigned_at = NULL, ${CLEAR_OBSERVED}, updated_at = ? WHERE id = ?`,
       this.time(),
       id,
     );
-    return this.response(this.reload(id));
   }
 
-  finishGame(id: string, worker: string, gameNumber: number, stage: string, result: string): JobResponse {
-    if (!result) throw new HttpError(422, "game result must be non-empty");
-    const recorded = this.first("SELECT actual_stage, result FROM games WHERE job_id = ? AND game_number = ?", id, gameNumber);
-    if (recorded !== null && this.row(id)?.last_worker === worker) {
-      if (recorded.actual_stage === stage && recorded.result === result) return this.response(this.reload(id));
-      throw new HttpError(409, "game already recorded with a different result");
-    }
-    const row = this.owned(id, worker, ["playing"]);
-    const played = row.game_count as number;
-    if (gameNumber !== played + 1) throw new HttpError(409, `game_number ${gameNumber} does not follow game ${played}`);
-    const now = this.time();
-    const terminal = gameNumber >= MAX_GAMES || row.cancel_after_game === 1;
-    this.exec(
-      `UPDATE jobs SET status = ?, game_count = ?, actual_stage = ?, last_result = ?, rematch_deadline = ?,
-         lease_owner = CASE WHEN ? THEN NULL ELSE lease_owner END,
-         lease_expires_at = CASE WHEN ? THEN NULL ELSE lease_expires_at END, updated_at = ?
-       WHERE id = ?`,
-      terminal ? "complete" : "rematch_wait",
-      gameNumber,
-      stage,
-      result,
-      terminal ? null : now + IDLE_TIMEOUT_SECONDS,
-      terminal ? 1 : 0,
-      terminal ? 1 : 0,
-      now,
-      id,
-    );
-    this.exec(
-      "INSERT INTO games(job_id, game_number, actual_stage, result, worker, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      id,
-      gameNumber,
-      stage,
-      result,
-      worker,
-      now,
-    );
-    return this.response(this.reload(id));
-  }
-
-  fail(id: string, worker: string, errorCode: string, retryable: boolean): JobResponse {
-    if (!errorCode) throw new HttpError(422, "error_code must be non-empty");
-    const done = this.applied(
-      id,
-      worker,
-      (row) => row.lease_owner === null && row.error_code === errorCode && (row.status === "queued" || row.status === "failed"),
-    );
-    if (done) return done;
-    const row = this.owned(id, worker, ["leased", "connecting", "playing", "rematch_wait", "rematch_ready"]);
-    const retry = retryable && (row.attempt as number) < MAX_ATTEMPTS;
-    this.exec(
-      `UPDATE jobs SET status = ?, retry_front = ?, error_code = ?, lease_owner = NULL, lease_expires_at = NULL,
-         connect_deadline = NULL, rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
-      retry ? "queued" : "failed",
-      retry ? 1 : 0,
-      errorCode,
-      this.time(),
-      id,
-    );
-    return this.response(this.reload(id));
-  }
-
-  forfeit(id: string, worker: string): JobResponse {
-    const done = this.applied(
-      id,
-      worker,
-      (row) => row.status === "failed" && row.error_code === "service_failure_bot_forfeit",
-    );
-    if (done) return done;
-    this.owned(id, worker, ["connecting", "playing"]);
-    this.exec(
-      `UPDATE jobs SET status = 'failed', last_result = 'win', error_code = 'service_failure_bot_forfeit',
-         lease_owner = NULL, lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL,
-         updated_at = ? WHERE id = ?`,
-      this.time(),
-      id,
-    );
-    return this.response(this.reload(id));
-  }
-
-  recordReplay(id: string, worker: string, gameNumber: number, key: string, sha256: string, size: number, etag: string): JobResponse {
+  recordReplay(
+    id: string,
+    worker: string,
+    gameNumber: number,
+    key: string,
+    sha256: string,
+    size: number,
+    etag: string,
+  ): JobView {
     const game = this.first(
       "SELECT worker, replay_key, replay_sha256, replay_size, replay_etag FROM games WHERE job_id = ? AND game_number = ?",
       id,
@@ -488,7 +419,10 @@ export class JobStore {
     if (game === null) throw new HttpError(409, "game is absent");
     if (game.worker !== worker) throw new HttpError(409, "worker did not play this game");
     const same =
-      game.replay_key === key && game.replay_sha256 === sha256 && game.replay_size === size && game.replay_etag === etag;
+      game.replay_key === key &&
+      game.replay_sha256 === sha256 &&
+      game.replay_size === size &&
+      game.replay_etag === etag;
     if (!same) {
       if (game.replay_key !== null) throw new HttpError(409, "game already has a different replay");
       this.exec(
@@ -502,7 +436,7 @@ export class JobStore {
         gameNumber,
       );
     }
-    return this.response(this.reload(id));
+    return this.view(this.reload(id));
   }
 
   // Returns the IDs of jobs whose leases were closed.
@@ -511,100 +445,54 @@ export class JobStore {
     const marks = workers.map(() => "?").join(",");
     const ids = this.sql
       .exec<Row>(
-        `SELECT id FROM jobs WHERE lease_owner IN (${marks})
-           AND status IN ('leased','connecting','playing','rematch_wait','rematch_ready') ORDER BY queue_seq`,
+        `SELECT id FROM jobs WHERE status = 'assigned' AND lease_owner IN (${marks}) ORDER BY queue_seq`,
         ...workers,
       )
       .toArray()
       .map((row) => row.id as string);
-    this.exec(
-      `UPDATE jobs SET status = 'failed',
-         last_result = CASE WHEN status IN ('connecting','playing') THEN 'win' ELSE last_result END,
-         error_code = CASE WHEN status IN ('connecting','playing')
-           THEN 'service_failure_bot_forfeit' ELSE 'service_generation_aborted' END,
-         lease_owner = NULL, lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL,
-         updated_at = ?
-       WHERE lease_owner IN (${marks})
-         AND status IN ('leased','connecting','playing','rematch_wait','rematch_ready')`,
-      this.time(),
-      ...workers,
-    );
+    for (const id of ids) this.requeueOrEnd(id);
     return ids;
   }
 
   // Returns the IDs of jobs that changed.
   reapExpired(): string[] {
     const now = this.time();
-    const changed: string[] = [];
-    const ids = (query: string, at = now): string[] =>
-      this.sql.exec<Row>(query, at).toArray().map((row) => row.id as string);
-    for (const id of ids(
-      `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status IN (${PRESENCE}) AND player_seen_at <= ?`,
-      now - PLAYER_PRESENCE_SECONDS,
-    )) {
-      this.exec(
-        `UPDATE jobs SET status = 'canceled', error_code = 'player_left', lease_owner = NULL, lease_expires_at = NULL,
-           rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
-        now,
-        id,
-      );
-      changed.push(id);
-    }
-    for (const id of ids(
-      `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status = 'connecting' AND connect_deadline <= ?`,
-    )) {
-      this.exec(
-        `UPDATE jobs SET status = 'no_show', lease_owner = NULL, lease_expires_at = NULL,
-           connect_deadline = NULL, updated_at = ? WHERE id = ?`,
-        now,
-        id,
-      );
-      changed.push(id);
-    }
-    for (const id of ids(
-      `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status = 'rematch_wait' AND rematch_deadline <= ?`,
-    )) {
-      this.exec(
-        `UPDATE jobs SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL,
-           rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
-        now,
-        id,
-      );
-      changed.push(id);
-    }
+    const gone = this.sql
+      .exec<Row>("SELECT id FROM jobs WHERE status = 'queued' AND player_seen_at <= ?", now - PLAYER_PRESENCE_SECONDS)
+      .toArray()
+      .map((row) => row.id as string);
+    for (const id of gone) this.finish(id, "player_left");
     const expired = this.sql
+      .exec<Row>("SELECT id FROM jobs WHERE status = 'assigned' AND lease_expires_at <= ?", now)
+      .toArray()
+      .map((row) => row.id as string);
+    for (const id of expired) this.requeueOrEnd(id);
+    return [...gone, ...expired];
+  }
+
+  // Returns the IDs of jobs newly asked to yield.
+  applyYield(): string[] {
+    if (this.queueDepth() === 0) return [];
+    const ids = this.sql
       .exec<Row>(
-        `SELECT id, attempt FROM jobs WHERE lease_owner IS NOT NULL AND lease_expires_at <= ?
-           AND status NOT IN (${TERMINAL})`,
-        now,
+        "SELECT id FROM jobs WHERE status = 'assigned' AND wind_down IS NULL AND assigned_at <= ?",
+        this.time() - YIELD_AFTER_SECONDS,
       )
-      .toArray();
-    for (const row of expired) {
-      const retry = (row.attempt as number) < MAX_ATTEMPTS;
-      this.exec(
-        `UPDATE jobs SET status = ?, retry_front = ?, error_code = 'lease_expired', lease_owner = NULL,
-           lease_expires_at = NULL, connect_deadline = NULL, rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
-        retry ? "queued" : "failed",
-        retry ? 1 : 0,
-        now,
-        row.id as string,
-      );
-      changed.push(row.id as string);
+      .toArray()
+      .map((row) => row.id as string);
+    for (const id of ids) {
+      this.exec("UPDATE jobs SET wind_down = 'yield', updated_at = ? WHERE id = ?", this.time(), id);
     }
-    return changed;
+    return ids;
   }
 
   nextDeadline(): number | null {
     const row = this.first(
       `SELECT MIN(t) AS t FROM (
-         SELECT connect_deadline AS t FROM jobs
-           WHERE status IN (${ACTIVE}) AND status = 'connecting' AND connect_deadline IS NOT NULL
-         UNION ALL SELECT rematch_deadline FROM jobs
-           WHERE status IN (${ACTIVE}) AND status = 'rematch_wait' AND rematch_deadline IS NOT NULL
-         UNION ALL SELECT lease_expires_at FROM jobs
-           WHERE lease_owner IS NOT NULL AND status NOT IN (${TERMINAL})
-         UNION ALL SELECT player_seen_at + ${PLAYER_PRESENCE_SECONDS} FROM jobs
-           WHERE status IN (${ACTIVE}) AND status IN (${PRESENCE}))`,
+         SELECT lease_expires_at AS t FROM jobs WHERE status = 'assigned' AND lease_expires_at IS NOT NULL
+         UNION ALL SELECT player_seen_at + ${PLAYER_PRESENCE_SECONDS} FROM jobs WHERE status = 'queued'
+         UNION ALL SELECT assigned_at + ${YIELD_AFTER_SECONDS} FROM jobs
+           WHERE status = 'assigned' AND wind_down IS NULL AND assigned_at IS NOT NULL)`,
     );
     return (row?.t as number | null) ?? null;
   }
