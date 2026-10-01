@@ -20,10 +20,12 @@ from unittest.mock import Mock
 import pytest
 
 from hal.eval.scheduling import FrameTiming
+from hal.netplay_service.domain import EndReason
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobCredentials
 from hal.netplay_service.domain import JobStatus
-from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.domain import Phase
+from hal.netplay_service.domain import Settings
 from hal.netplay_service.health import ChunkHealth
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -35,23 +37,22 @@ sys.modules[_SPEC.name] = qualify_netplay_059
 _SPEC.loader.exec_module(qualify_netplay_059)
 
 
-def _credentials(status: JobStatus) -> JobCredentials:
+def _credentials(status: JobStatus, phase: Phase | None = None) -> JobCredentials:
     return JobCredentials(
         Job(
             id="job",
             player_code="TEST#1",
-            choices=MatchChoices("FOX", "IBDW#0", 2),
+            online_delay=2,
             status=status,
+            end_reason=EndReason.SERVICE_FAILURE if status is JobStatus.ENDED else None,
             queue_position=None,
             attempt=1,
-            game_count=0,
-            connect_code=None,
-            actual_stage=None,
-            last_result=None,
-            error_code="engine_unavailable" if status is JobStatus.FAILED else None,
-            connect_deadline=None,
-            rematch_deadline=None,
-            cancel_after_game=False,
+            settings=Settings(1, "FOX", "IBDW#0", None, 20.0, 1.0),
+            phase=phase,
+            phase_deadline=None,
+            games=(),
+            wind_down=None,
+            lock_requests=0,
         ),
         "token",
     )
@@ -263,16 +264,29 @@ def test_gpu_memory_requires_valid_matching_processes(
     assert qualify_netplay_059._gpu_memory(owned) == expected
 
 
-@pytest.mark.parametrize("status", [JobStatus.PLAYING, JobStatus.FAILED, JobStatus.QUEUED])
-def test_smoke_requires_a_healthy_bot_reservation(status: JobStatus) -> None:
-    credentials = _credentials(status)
+@pytest.mark.parametrize(
+    ("status", "phase", "healthy"),
+    [
+        (JobStatus.ASSIGNED, Phase.IN_GAME, True),
+        (JobStatus.ASSIGNED, Phase.PAUSED, True),
+        (JobStatus.ASSIGNED, Phase.CHARACTER_SELECT, False),
+        (JobStatus.ENDED, Phase.IN_GAME, False),
+        (JobStatus.QUEUED, None, False),
+    ],
+)
+def test_smoke_requires_a_healthy_bot_reservation(
+    status: JobStatus,
+    phase: Phase | None,
+    healthy: bool,
+) -> None:
+    credentials = _credentials(status, phase)
     observed_store = Mock(spec=qualify_netplay_059._PlayerQueue)
     observed_store.get_job.return_value = credentials.job
     session = Mock()
     session.step.return_value = ({"id": 600}, True)
     runner = Mock()
     runner.is_alive.return_value = True
-    if status is JobStatus.PLAYING:
+    if healthy:
         result = qualify_netplay_059._play_peer_game(
             session, {"id": 0}, credentials, 1, 600, store=observed_store, runner=runner
         )
@@ -285,11 +299,29 @@ def test_smoke_requires_a_healthy_bot_reservation(status: JobStatus) -> None:
 
 
 def test_live_reservation_rejects_an_exited_runner() -> None:
-    credentials = _credentials(JobStatus.PLAYING)
+    credentials = _credentials(JobStatus.ASSIGNED, Phase.IN_GAME)
     with pytest.raises(RuntimeError, match="service exited"):
-        qualify_netplay_059._validate_live_reservation(
-            replace(credentials.job, status=JobStatus.PLAYING), is_runner_alive=False
-        )
+        qualify_netplay_059._validate_live_reservation(credentials.job, is_runner_alive=False)
+
+
+def test_player_queue_leave_uses_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    job = _credentials(JobStatus.ENDED).job
+    response = Mock()
+    response.json.return_value = {"id": job.id}
+    client = Mock()
+    client.delete.return_value = response
+    queue = qualify_netplay_059._PlayerQueue.__new__(qualify_netplay_059._PlayerQueue)
+    queue._client = client
+    parsed = Mock(return_value=job)
+    monkeypatch.setattr(qualify_netplay_059, "parse_job", parsed)
+
+    assert queue.leave("job", "token") is job
+
+    client.delete.assert_called_once_with(
+        "/v1/jobs/job",
+        headers={"Authorization": "Bearer token"},
+    )
+    response.raise_for_status.assert_called_once_with()
 
 
 def test_resource_sampler_finishes_its_inflight_gpu_sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

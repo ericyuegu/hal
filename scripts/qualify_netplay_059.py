@@ -39,10 +39,12 @@ from hal.eval.scheduling import FrameTiming
 from hal.netplay_service.admin import policy_config_for
 from hal.netplay_service.assets import account_key
 from hal.netplay_service.assets import sha256_file
+from hal.netplay_service.domain import EndReason
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobCredentials
 from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.domain import Phase
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import RunnerState
@@ -156,6 +158,7 @@ class _PlayerQueue:
                 "character": choices.character,
                 "imitation": choices.imitation,
                 "online_delay": choices.online_delay,
+                "stage": None,
                 "desired_return": choices.desired_return,
                 "temperature": choices.temperature,
             },
@@ -172,19 +175,10 @@ class _PlayerQueue:
         response.raise_for_status()
         return parse_job(response.json())
 
-    def request_rematch(
-        self,
-        job_id: str,
-        token: str,
-        *,
-        character: str,
-        imitation: str,
-        stage: str,
-    ) -> Job:
-        response = self._client.post(
-            f"/v1/jobs/{job_id}/rematch",
+    def leave(self, job_id: str, token: str) -> Job:
+        response = self._client.delete(
+            f"/v1/jobs/{job_id}",
             headers=self._authorization(token),
-            json={"character": character, "imitation": imitation, "stage": stage},
         )
         response.raise_for_status()
         return parse_job(response.json())
@@ -751,16 +745,39 @@ def _wait_ready(process: BaseProcess, status_path: Path, timeout_seconds: float)
     raise TimeoutError(f"netplay service did not prepare within {timeout_seconds:g} seconds")
 
 
-def _wait_job(store: _PlayerQueue, credentials: JobCredentials, process: BaseProcess, timeout_seconds: float) -> Job:
+def _wait_game(
+    store: _PlayerQueue,
+    credentials: JobCredentials,
+    process: BaseProcess,
+    game_number: int,
+    timeout_seconds: float,
+) -> Job:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if not process.is_alive():
             raise RuntimeError(f"netplay service exited during a reservation: {process.exitcode}")
         job = store.get_job(credentials.job.id, credentials.token)
-        if job.status in (JobStatus.REMATCH_WAIT, JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELED):
+        if len(job.games) >= game_number or job.status is JobStatus.ENDED:
             return job
         time.sleep(0.1)
-    raise TimeoutError("reservation did not finish or enter rematch wait")
+    raise TimeoutError(f"reservation did not record game {game_number}")
+
+
+def _wait_ended(
+    store: _PlayerQueue,
+    credentials: JobCredentials,
+    process: BaseProcess,
+    timeout_seconds: float,
+) -> Job:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not process.is_alive():
+            raise RuntimeError(f"netplay service exited during a reservation: {process.exitcode}")
+        job = store.get_job(credentials.job.id, credentials.token)
+        if job.status is JobStatus.ENDED:
+            return job
+        time.sleep(0.1)
+    raise TimeoutError("reservation did not end")
 
 
 def _play_peer_game(
@@ -797,9 +814,10 @@ def _play_peer_game(
 def _validate_live_reservation(job: Job, *, is_runner_alive: bool) -> None:
     if not is_runner_alive:
         raise RuntimeError("netplay service exited while the peer was still playing")
-    if job.status not in (JobStatus.PLAYING, JobStatus.REMATCH_WAIT, JobStatus.COMPLETE):
+    if job.status is not JobStatus.ASSIGNED or job.phase not in (Phase.IN_GAME, Phase.PAUSED):
         raise RuntimeError(
-            f"bot reservation stopped while the peer was still playing: {job.status.value}: {job.error_code}"
+            f"bot reservation stopped while the peer was still playing: "
+            f"{job.status.value}: {job.phase}: {job.end_reason}"
         )
 
 
@@ -989,10 +1007,10 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                         _write_json(config.output / f"peer-game-{len(games):03d}.json", asdict(game))
                         if not game.ended:
                             break
-                        job = _wait_job(store, credentials, process, 60)
-                        if job.status not in (JobStatus.REMATCH_WAIT, JobStatus.COMPLETE):
-                            raise RuntimeError(f"reservation ended as {job.status.value}: {job.error_code}")
-                        measurement = config.output / "match-measurements" / f"{job.id}-game-{job.game_count}.json"
+                        job = _wait_game(store, credentials, process, game_number, 60)
+                        if len(job.games) < game_number:
+                            raise RuntimeError(f"reservation ended as {job.status.value}: {job.end_reason}")
+                        measurement = config.output / "match-measurements" / f"{job.id}-game-{game_number}.json"
                         assessment = _assess_match(
                             measurement,
                             reservation_id=job.id,
@@ -1007,20 +1025,22 @@ def qualify(config: QualificationConfig) -> dict[str, object]:
                         gameplay_seconds += assessment.gameplay_seconds
                         if assessment.failures:
                             raise RuntimeError(f"match failed measured qualification checks: {assessment.failures}")
-                        if job.status is JobStatus.COMPLETE:
+                        is_complete = (
+                            len(games) >= config.minimum_games and gameplay_seconds >= config.minimum_gameplay_seconds
+                        )
+                        if is_complete:
+                            store.leave(job.id, credentials.token)
+                            ended = _wait_ended(store, credentials, process, 60)
+                            if ended.end_reason is not EndReason.PLAYER_CANCELED:
+                                raise RuntimeError(f"reservation ended as {ended.status.value}: {ended.end_reason}")
                             break
-                        assert job.actual_stage is not None
-                        store.request_rematch(
-                            job.id,
-                            credentials.token,
-                            character="FOX",
-                            imitation="IBDW#0",
-                            stage=job.actual_stage,
-                        )
                         setup = NetplaySetup(
-                            melee.Character.FOX, bot_code, costume=1, stage=melee.Stage[job.actual_stage]
+                            melee.Character.FOX,
+                            bot_code,
+                            costume=1,
+                            stage=melee.Stage.BATTLEFIELD,
                         )
-                        game_number = job.game_count + 1
+                        game_number += 1
                         first = peer.start_rematch(setup)
                 is_complete = (
                     len(games) >= config.minimum_games and gameplay_seconds >= config.minimum_gameplay_seconds
