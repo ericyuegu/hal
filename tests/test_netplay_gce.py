@@ -147,6 +147,61 @@ def test_gce_shell_scripts_parse_and_startup_has_required_boundaries() -> None:
         assert text in source
 
 
+@pytest.mark.parametrize("docker_installed", [False, True])
+def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Path, docker_installed: bool) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    log = tmp_path / "startup.log"
+
+    def command(name: str, body: str) -> Path:
+        path = commands / name
+        path.write_text(f'#!/bin/bash\nprintf "%s\\n" "{name} $*" >> "$STARTUP_LOG"\n{body}')
+        path.chmod(0o755)
+        return path
+
+    command(
+        "curl",
+        'case "${@: -1}" in\n'
+        '*/hal-netplay-git-sha) printf "%s\\n" "$STARTUP_SHA" ;;\n'
+        "*/hal-netplay-slots) echo 16 ;;\n"
+        "*/hal-netplay-drain-timeout) echo 900 ;;\n"
+        "*) echo test ;;\nesac\n",
+    )
+    docker = command("docker", "exit 0\n")
+    template = tmp_path / "docker-template"
+    template.write_bytes(docker.read_bytes())
+    if not docker_installed:
+        docker.unlink()
+    command(
+        "apt-get",
+        'if [[ $1 == install ]]; then /bin/cp "$DOCKER_TEMPLATE" "$MOCK_BIN/docker"; '
+        '/bin/chmod +x "$MOCK_BIN/docker"; fi\n',
+    )
+    for name in ("nvidia-ctk", "nvidia-smi", "systemctl"):
+        command(name, "exit 0\n")
+    # Stop before filesystem, display, or credential setup on the test host.
+    command("install", "exit 91\n")
+    environment = os.environ | {
+        "PATH": str(commands),
+        "STARTUP_LOG": str(log),
+        "STARTUP_SHA": _SHA,
+        "DOCKER_TEMPLATE": str(template),
+        "MOCK_BIN": str(commands),
+    }
+    result = subprocess.run(
+        ["/bin/bash", str(_DEPLOY / "gce-startup.sh")], env=environment, capture_output=True, text=True
+    )
+    assert result.returncode == 91, result.stderr
+    calls = log.read_text().splitlines()
+    installs = [call for call in calls if call.startswith("apt-get ")]
+    assert installs == (
+        [] if docker_installed else ["apt-get update", "apt-get install -y --no-install-recommends docker.io"]
+    )
+    configure = calls.index("nvidia-ctk runtime configure --runtime=docker")
+    restart = calls.index("systemctl restart docker")
+    assert configure < restart < calls.index("docker info") < calls.index("nvidia-smi ")
+
+
 def test_gce_up_renders_standalone_g4_command(tmp_path: Path) -> None:
     log, environment = _stub_gcloud(tmp_path)
     subprocess.run(_up_args(), check=True, env=environment, capture_output=True, text=True)

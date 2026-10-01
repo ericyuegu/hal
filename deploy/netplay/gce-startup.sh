@@ -19,9 +19,16 @@ drain_timeout=$(metadata hal-netplay-drain-timeout)
 [[ $slots =~ ^([1-9]|1[0-6])$ ]] || { log "invalid slot count"; exit 2; }
 [[ $drain_timeout =~ ^[1-9][0-9]*$ ]] || { log "invalid drain timeout"; exit 2; }
 
-command -v docker >/dev/null || { log "Docker is missing from the selected GPU image"; exit 1; }
 command -v nvidia-smi >/dev/null || { log "the NVIDIA driver is missing from the selected GPU image"; exit 1; }
-systemctl start docker
+command -v nvidia-ctk >/dev/null || { log "the NVIDIA container toolkit is missing from the selected GPU image"; exit 1; }
+# The Deep Learning VM image supplies the driver and toolkit, but not Docker.
+if ! command -v docker >/dev/null; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io
+fi
+nvidia-ctk runtime configure --runtime=docker
+systemctl enable docker
+systemctl restart docker
 docker info >/dev/null
 nvidia-smi
 
