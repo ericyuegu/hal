@@ -32,6 +32,7 @@ from hal.netplay_service.health import RuntimeHealth
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.sim.netplay import NetplaySession
+from hal.sim.session import FrameTimeout
 
 PROFILE = PreparedInferenceProfile("test-delay-2", "a" * 64, "kv_cache", 8, 4, (1, 2, 4), 2)
 
@@ -509,3 +510,105 @@ def test_realtime_request_preserves_required_fields_and_omits_unused_fields(miss
     flat = flatten_canonical_frame({**frame, "_matchup": {"stage": 31, "character": {1: 1, 2: 1}}})
     assert len(flat) > len(required)
     assert request.observations[0].observation == {name: flat[name] for name in required}
+
+
+def _pause_frame(frame_id: int) -> dict:
+    return {
+        "id": frame_id,
+        "stage": 31,
+        "ports": {
+            port: {
+                "leader": {
+                    "pre": {
+                        "joystick": {"x": 0.0, "y": 0.0},
+                        "cstick": {"x": 0.0, "y": 0.0},
+                        "triggers_physical": {"l": 0.0, "r": 0.0},
+                        "buttons_physical": 0,
+                    },
+                    "post": {"character": 1},
+                }
+            }
+            for port in (1, 2)
+        },
+    }
+
+
+class _PauseClient:
+    spec = PolicySpec("test", "test", (), (2,))
+    context_frames = 8
+    busy = False
+    last_latency = 0.0
+
+    def start_match(self, _stream_id: int, _prefix_frames: int) -> int:
+        return 1
+
+    def submit(self, _request: PredictionRequest) -> None:
+        self.busy = True
+
+    def poll(self):
+        return None
+
+    def close_match(self) -> None:
+        self.busy = False
+
+
+class _FakeRealtimeSession:
+    realtime = True
+    online_delay = 2
+    ego_port = 1
+    opponent_port = 2
+
+    def __init__(self, *, stalls_after_frame: int, stall_reads: int) -> None:
+        self.frame = 0
+        self.stalls_after_frame = stalls_after_frame
+        self.stall_reads = stall_reads
+        self.frame_times: list[float] = []
+
+    def start_match(self, *_args, **_kwargs) -> dict:
+        return _pause_frame(0)
+
+    def submit(self, _action: ControllerAction) -> None:
+        pass
+
+    def read_frames(self, timeout_seconds: float | None = None) -> tuple[list[dict], bool]:
+        assert timeout_seconds == 2.0
+        if self.frame >= self.stalls_after_frame and self.stall_reads > 0:
+            self.stall_reads -= 1
+            raise FrameTimeout("paused")
+        self.frame += 1
+        self.frame_times = [time.perf_counter()]
+        return [_pause_frame(self.frame)], self.frame < 5
+
+
+def _run_paused(session: _FakeRealtimeSession, **kwargs):
+    from hal.eval.netplay import run_netplay_match
+    from hal.inference.api import RuntimeConfig
+    from hal.sim.netplay import NetplaySetup
+
+    return run_netplay_match(
+        session,  # type: ignore[arg-type]
+        NetplaySetup(melee.Character.FOX, "TEST#1"),
+        _PauseClient(),  # type: ignore[arg-type]
+        RuntimeConfig(1, (2,)),
+        FrameTiming(2, 2, 4, 2, 8),
+        max_frames=20,
+        **kwargs,
+    )
+
+
+def test_pause_is_reported_and_resumes() -> None:
+    session = _FakeRealtimeSession(stalls_after_frame=3, stall_reads=2)
+    events: list[bool] = []
+    result = _run_paused(session, pause_seconds=60, on_pause=events.append)
+    assert events == [True, False]
+    assert result.trajectory is not None
+
+
+def test_pause_past_the_limit_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal.eval.netplay as netplay
+
+    clock = iter(float(value) for value in range(0, 1_000, 30))
+    monkeypatch.setattr(netplay.time, "monotonic", lambda: next(clock, 990.0))
+    session = _FakeRealtimeSession(stalls_after_frame=3, stall_reads=100)
+    with pytest.raises(netplay.PausedTooLong):
+        _run_paused(session, pause_seconds=60, on_pause=lambda _paused: None)

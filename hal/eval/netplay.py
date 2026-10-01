@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
+from typing import Final
 from typing import Protocol
 
 from loguru import logger
@@ -38,6 +39,14 @@ class NoUsableActionPlan(RuntimeError):
     """Valid inference replies could not provide actions before the match deadline."""
 
 
+# A paused netplay game emits no frames; this much silence counts as a pause.
+_PAUSE_DETECT_SECONDS: Final[float] = 2.0
+
+
+class PausedTooLong(RuntimeError):
+    """The game stayed paused past the allowed pause."""
+
+
 class _NetplayLifecycle:
     """Hold the per-match observation, request, and exhaustion state."""
 
@@ -52,6 +61,8 @@ class _NetplayLifecycle:
         observer: results.PlayObserver | None,
         schedule_observer: ScheduleObserver | None,
         stream_id: int,
+        pause_seconds: float | None = None,
+        on_pause: Callable[[bool], None] | None = None,
         on_prediction: Callable[[ActionPlan], None] | None = None,
     ) -> None:
         self.session = session
@@ -62,6 +73,8 @@ class _NetplayLifecycle:
         self.observer = observer
         self.schedule_observer = schedule_observer
         self.stream_id = stream_id
+        self.pause_seconds = pause_seconds
+        self.on_pause = on_pause
         self.on_prediction = on_prediction
         self.inference_seconds: list[float] = []
         self.inference_source_frames: list[int] = []
@@ -219,15 +232,37 @@ class _NetplayLifecycle:
         captured = [first]
         self.advance(first)
         current = first
+        stalled_since: float | None = None
         while len(captured) < max_frames:
             try:
-                self.session.submit(self.choose(int(current["id"])))
+                if stalled_since is None:
+                    self.session.submit(self.choose(int(current["id"])))
                 step_started = time.perf_counter()
-                frames, in_game = self.session.read_frames()
-            except (OSError, EOFError, FrameTimeout) as error:
+                if self.pause_seconds is None:
+                    frames, in_game = self.session.read_frames()
+                else:
+                    frames, in_game = self.session.read_frames(timeout_seconds=_PAUSE_DETECT_SECONDS)
+            except FrameTimeout as error:
+                if self.pause_seconds is None:
+                    with suppress(OSError, EOFError):
+                        self.session.submit(NEUTRAL_CONTROLLER_ACTION)
+                    raise DolphinConnectionLost("Dolphin connection lost during netplay") from error
+                now = time.monotonic()
+                if stalled_since is None:
+                    stalled_since = now - _PAUSE_DETECT_SECONDS
+                    if self.on_pause is not None:
+                        self.on_pause(True)
+                if now - stalled_since >= self.pause_seconds:
+                    raise PausedTooLong(f"no frames for {now - stalled_since:.0f}s") from error
+                continue
+            except (OSError, EOFError) as error:
                 with suppress(OSError, EOFError):
                     self.session.submit(NEUTRAL_CONTROLLER_ACTION)
                 raise DolphinConnectionLost("Dolphin connection lost during netplay") from error
+            if stalled_since is not None:
+                stalled_since = None
+                if self.on_pause is not None:
+                    self.on_pause(False)
             self.dolphin_step_seconds.append(time.perf_counter() - step_started)
             # Every received observation is retained, but only the latest can select an input.
             for frame in frames if in_game else frames[:-1]:
@@ -289,6 +324,8 @@ def run_netplay_match(
     on_live: Callable[[], None] | None = None,
     on_prediction: Callable[[ActionPlan], None] | None = None,
     on_failure: Callable[[results.NetplayProgress, BaseException], None] | None = None,
+    pause_seconds: float | None = None,
+    on_pause: Callable[[bool], None] | None = None,
     observer: results.PlayObserver | None = None,
     schedule_observer: ScheduleObserver | None = None,
     stream_id: int = 0,
@@ -310,6 +347,8 @@ def run_netplay_match(
             observer=observer,
             schedule_observer=schedule_observer,
             stream_id=stream_id,
+            pause_seconds=pause_seconds,
+            on_pause=on_pause,
             on_prediction=on_prediction,
         )
         result = lifecycle.run(setup, max_frames=max_frames, rematch=rematch, on_live=on_live)
