@@ -20,7 +20,7 @@ the Phillip campaign, and the local test player remain stopped.
 - Site: [20xx.xyz](https://20xx.xyz). Worker `hal-netplay-web` serves the page;
   `hal-netplay-api` handles `/v1/*`. The queue cost fix remains deployed.
 - Queue: one SQLite-backed Durable Object, class `Queue`, instance
-  `global-v3`, storage schema 3, runner protocol 2. The former instance
+  `global-v5`, storage schema 5, runner protocol 3. The former instance
   retains its historical state; there is no migration.
 - GPU: `hal-netplay-g4`, project `centering-star-502613-k3`, zone
   `us-west1-a`, address `8.229.68.10`. It is a standalone
@@ -36,9 +36,9 @@ the Phillip campaign, and the local test player remain stopped.
 - Timing: physical delay 2, inference allowance 2, prefix 4, replan 4,
   horizon 8. Delay 3 is not admitted. The production eight-stream check
   measured **21.148 ms p99** against **33.333 ms**.
-- Pairing: one new search runs at a time. Connected games continue
-  concurrently. Initial connection timeout is 60 seconds; rematches retain
-  600 seconds. Cleanup releases the pairing gate.
+- Pairing: one initial search runs at a time. Connected reservations continue
+  concurrently across games. The initial connection timeout is 60 seconds.
+  Cleanup releases the pairing gate.
 - Live verification: HAL#9000 paired with CRYO#610 using Vulkan. The
   60-second neutral-input game ran at **59.94 FPS**. OBS separately reported
   60 FPS, no output skips, no reconnect, and no congestion.
@@ -52,6 +52,15 @@ searches [paired HAL with itself](parallel-pairing.md), so the gate remains.
 The former VM and disk were deleted before this replacement. All 105 Ranked
 replays and its one unfinished direct-play replay remain verified in R2.
 The [teardown report](g4-teardown.md) records their locations and local backup.
+
+### Continuous reservations
+
+A direct reservation has no set or game cap. Dolphin keeps the player connected
+between games, when they can change HAL's character, identity, stage, or play
+style. If someone is waiting after a reservation has held a slot for 15 minutes,
+HAL finishes the current game and yields the slot. A reservation records one of
+these end reasons: player canceled, page left while queued, player disconnected,
+no show, idle timeout, yielded, or service failure.
 
 ```text
 Browser -> page Worker + API Worker -> Durable Object

@@ -3,19 +3,27 @@
 ## Configuration
 
 The owner approved eight slots sharing one Slippi account, a 60-second initial
-connection deadline, and delay-2-only admission. Rematches retain 600 seconds.
+connection deadline, and delay-2-only admission.
 The owner then renamed the account from HAL#647 to **HAL#9000**.
 
 The queue leases one account per session. A persistent pairing row permits one
-new search at a time. Playing games and their rematches continue concurrently.
+initial search at a time. Connected reservations continue concurrently.
 Cancellation, failed connection, and lease expiry keep that row until Dolphin
 cleanup finishes. Cleanup includes the attempt number, so an old retry cannot
 release a newer pairing. The supervisor handles dead slots and engine recovery.
 
-Runner protocol is 2. Storage schema is 3, at instance `global-v3`. Deployment
+Runner protocol is 3. Storage schema is 5, at instance `global-v5`. Deployment
 uses a fresh queue and republishes the existing policy and account references.
-The former `global` instance retains its historical state. There is no migration.
+The former instances retain their historical state. There is no migration.
 No reservation was active or queued at preparation time; admissions were paused.
+
+## Continuous reservations
+
+A direct reservation has no set or game cap, and Dolphin keeps the player
+connected between games. If the queue is non-empty after 15 minutes assigned,
+the current game is the last before the reservation yields. Its end reason is
+player canceled, page left while queued, player disconnected, no show, idle
+timeout, yielded, or service failure.
 
 ## Inference measurement
 
@@ -100,8 +108,9 @@ mode-700 `private/` directory and are not committed.
 - API `npm test` passed **118** tests in twelve files. Earlier runs failed
   expectations for protocol version, parallel claims, and missing pairing
   cleanup in old traces. The traces now contain explicit cleanup steps and
-  check the new connection deadline at 59 and 60 seconds. Their rematch
-  deadline remains unchanged. An unrelated proposed code check was removed.
+  check the new connection deadline at 59 and 60 seconds. These protocol-2
+  traces also record the former rematch deadline, which protocol 3 removes.
+  An unrelated proposed code check was removed.
   Workerd printed its existing WebSocket shutdown diagnostic.
 - API `npm run typecheck` and `npx wrangler deploy --dry-run` passed.
 - `python3 -m py_compile` passed for the two updated x_pilot operator controls.
@@ -179,7 +188,8 @@ Validation:
   The new queue was paused, the same policy was published with only
   `online_delays` changed to `[2]`, and HAL#9000 was registered.
   A temporary session received eight grants for that one account and ended
-  cleanly. Public options report delay 2, no-show 60 seconds, rematch 600.
+  cleanly. At that release, public options reported delay 2, no-show 60 seconds,
+  and the former 600-second rematch deadline.
   This check did not report fabricated healthy capacity.
 - `docker build --file deploy/netplay/Dockerfile --build-arg HAL_GIT_SHA=9817205a --tag hal-netplay-runner:direct8-prebuild .`
   prepares the build cache. That temporary tag is not a release or deployment.
