@@ -304,7 +304,7 @@ export class Queue extends DurableObject<Env> {
         slots: int(value.slots, "slots"),
         stream: bool(value.stream, "stream"),
       };
-      if (input.slots < 1 || input.slots > 8) throw new HttpError(422, "slots must be in [1, 8]");
+      if (input.slots < 1 || input.slots > 16) throw new HttpError(422, "slots must be in [1, 16]");
       return this.tx(() => {
         const repeated = this.sessions.exists(id);
         const started = this.sessions.start(id, input, this.policy());

@@ -11,7 +11,7 @@ Options:
   --zone ZONE                 Compute zone (default: us-central1-a)
   --machine-type TYPE         Machine type (default: g4-standard-48)
   --git-sha SHA               Full image Git SHA; default is the image tag
-  --slots N                   Runner slots, 1-8 (default: 1)
+  --slots N                   Runner slots, 1-16 (default: 1)
   --drain-timeout SECONDS     Graceful drain deadline (default: 900)
   --image-family FAMILY       GPU-ready boot image family
   --image-project PROJECT     Boot image project
@@ -59,7 +59,7 @@ for required in project image secret service_account; do
 done
 if [[ -z $git_sha ]]; then git_sha=${image##*:}; fi
 [[ $git_sha =~ ^[0-9a-f]{40}$ ]] || { echo "image must have a full Git SHA tag, or pass --git-sha" >&2; exit 2; }
-[[ $slots =~ ^[1-8]$ ]] || { echo "--slots must be between 1 and 8" >&2; exit 2; }
+[[ $slots =~ ^([1-9]|1[0-6])$ ]] || { echo "--slots must be between 1 and 16" >&2; exit 2; }
 [[ $drain_timeout =~ ^[1-9][0-9]*$ ]] || { echo "--drain-timeout must be a positive integer" >&2; exit 2; }
 command -v gcloud >/dev/null || { echo "gcloud is not installed" >&2; exit 2; }
 

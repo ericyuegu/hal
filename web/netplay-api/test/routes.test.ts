@@ -151,6 +151,52 @@ describe("player routes", () => {
 });
 
 describe("runner routes", () => {
+  it("leases and serves sixteen isolated slots and releases all accounts on shutdown", async () => {
+    await publish();
+    await seedAccounts(16);
+    const session = crypto.randomUUID();
+    const body = { protocol_version: 1, session_id: session, host: "sixteen-slots", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots: 16, stream: false };
+    const started = await call("POST", "/v1/runner/sessions", { runner: true, body });
+    expect(started.status).toBe(201);
+    expect(started.body.accounts.map((account: { slot: number }) => account.slot)).toEqual(Array.from({ length: 16 }, (_, i) => i));
+    expect(new Set(started.body.accounts.map((account: { connect_code: string }) => account.connect_code)).size).toBe(16);
+    expect((await call("POST", "/v1/runner/sessions", { runner: true, body })).body).toEqual(started.body);
+    await report(session, 16);
+    const claimed = new Set<string>();
+    for (let slot = 0; slot < 16; slot++) {
+      const created = await call("POST", "/v1/jobs", { ip: `198.18.0.${slot + 1}`, body: { ...CREATE, player_code: `PLAYER${slot}#1` } });
+      expect(created.status).toBe(201);
+      const claim = await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot } });
+      expect(claim).toMatchObject({ status: 200, body: { id: created.body.id } });
+      expect((await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot } })).body.id).toBe(created.body.id);
+      claimed.add(claim.body.id);
+      const runner = { session, slot };
+      expect((await call("POST", `/v1/runner/jobs/${claim.body.id}/connecting`, {
+        runner, body: { connect_code: started.body.accounts[slot].connect_code },
+      })).status).toBe(200);
+      expect((await call("POST", `/v1/runner/jobs/${claim.body.id}/playing`, { runner })).status).toBe(200);
+    }
+    expect(claimed.size).toBe(16);
+    expect((await call("GET", "/v1/capacity")).body).toMatchObject({ capacity: 16, healthy_slots: 16, active: 16, queued: 0 });
+    expect((await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 16 } })).status).toBe(422);
+    expect((await call("DELETE", `/v1/runner/sessions/${session}`, { runner: true })).status).toBe(200);
+    const status = (await call("GET", "/v1/admin/status", { admin: true })).body;
+    expect(status.accounts.every((account: { session_id: string | null }) => account.session_id === null)).toBe(true);
+    expect(status.capacity).toMatchObject({ capacity: 0, active: 0 });
+  });
+
+  it.each([0, 17])("rejects %i slots before leasing accounts", async slots => {
+    await publish();
+    await seedAccounts(16);
+    const result = await call("POST", "/v1/runner/sessions", { runner: true,
+      body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "bad", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots, stream: false },
+    });
+    expect(result).toMatchObject({ status: 422, body: { detail: "slots must be in [1, 16]" } });
+    const status = (await call("GET", "/v1/admin/status", { admin: true })).body;
+    expect(status.sessions).toEqual([]);
+    expect(status.accounts.every((account: { session_id: string | null }) => account.session_id === null)).toBe(true);
+  });
+
   it("runs a reservation through claim, connect, play, and finish", async () => {
     const session = await ready();
     const job = (await call("POST", "/v1/jobs", { body: CREATE })).body;

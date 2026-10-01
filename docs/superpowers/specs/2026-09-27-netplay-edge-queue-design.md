@@ -246,6 +246,10 @@ terminal state after a reconnect.
 
 ### Startup
 
+A runner accepts 1–16 slots. Each slot needs a distinct Slippi account.
+Startup qualifies both delay profiles at the requested capacity before any
+slot accepts a match.
+
 `hal-netplay-runner --slots N` needs only:
 
 - `HAL_NETPLAY_API_URL` (for example `https://20xx.xyz`)

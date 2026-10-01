@@ -668,9 +668,10 @@ def _run_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *extra: str,
+    slots: int = 1,
 ) -> tuple[runner.RunnerConfig, Mock]:
     policy = tmp_path / "policy.halpolicy"
-    account = tmp_path / "account.json"
+    accounts = tuple(tmp_path / f"account-{slot}.json" for slot in range(slots))
     started = SimpleNamespace(policy=SimpleNamespace(bundle_sha256="a" * 64))
     client = Mock()
     client.active_policy.return_value = started.policy
@@ -692,12 +693,26 @@ def _run_cli(
     monkeypatch.setattr(runner, "runner_endpoint", lambda _environment: _ENDPOINT)
     monkeypatch.setattr(runner, "RunnerClient", lambda _endpoint: client)
     monkeypatch.setattr(runner, "SessionReporter", reporting)
-    monkeypatch.setattr(runner, "_download_session_assets", lambda *_args, **_kwargs: (policy, (account,)))
+    monkeypatch.setattr(runner, "_download_session_assets", lambda *_args, **_kwargs: (policy, accounts))
     monkeypatch.setattr(runner, "run", run)
     monkeypatch.setattr(runner, "new_session_id", lambda: _SESSION_ID)
 
-    runner.main(["--slots", "1", "--git-sha", "test-sha", "--stream-display", ":90", *extra])
+    runner.main(["--slots", str(slots), "--git-sha", "test-sha", "--stream-display", ":90", *extra])
     return captured[0], client
+
+
+def test_runner_cli_allocates_sixteen_distinct_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, client = _run_cli(tmp_path, monkeypatch, slots=16)
+    assert client.start_session.call_args.kwargs["slots"] == 16
+    assert len(set(config.user_jsons)) == 16
+    assert config.slippi_ports == tuple(range(51441, 51457))
+
+
+@pytest.mark.parametrize("slots", [0, 17])
+def test_runner_cli_rejects_unsupported_capacity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slots: int) -> None:
+    with pytest.raises(SystemExit) as error:
+        _run_cli(tmp_path, monkeypatch, slots=slots)
+    assert error.value.code == 2
 
 
 def test_runner_cli_disables_compilation_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

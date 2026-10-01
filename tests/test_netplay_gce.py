@@ -5,6 +5,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from hal.netplay_service.health import RunnerState
 from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.health import write_runner_status
@@ -158,6 +160,22 @@ def test_gce_up_renders_standalone_g4_command(tmp_path: Path) -> None:
     assert "--service-account=runner@hal-project.iam.gserviceaccount.com" in command
     assert "hal-netplay-secret=hal-netplay-runner-env" in command
     assert "startup-script=" in command
+
+
+@pytest.mark.parametrize("slots", [1, 8, 9, 16])
+def test_gce_up_accepts_capacity_through_sixteen(tmp_path: Path, slots: int) -> None:
+    log, environment = _stub_gcloud(tmp_path)
+    subprocess.run(_up_args("--slots", str(slots)), check=True, env=environment, capture_output=True, text=True)
+    assert f"hal-netplay-slots={slots}," in log.read_text()
+
+
+@pytest.mark.parametrize("slots", ["0", "17", "-1", "1.5", "08"])
+def test_gce_up_rejects_unsupported_capacity_before_creating_resources(tmp_path: Path, slots: str) -> None:
+    log, environment = _stub_gcloud(tmp_path)
+    result = subprocess.run(_up_args("--slots", slots), env=environment, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "--slots must be between 1 and 16" in result.stderr
+    assert not log.exists()
 
 
 def test_gce_down_drains_before_delete(tmp_path: Path) -> None:

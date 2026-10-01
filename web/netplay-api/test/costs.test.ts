@@ -19,7 +19,7 @@ interface World {
   sessions: SessionStore;
 }
 
-async function world(history: number, use: (world: World) => Promise<void>): Promise<void> {
+async function world(history: number, use: (world: World) => Promise<void>, slots = 2): Promise<void> {
   const stub = env.QUEUE.get(env.QUEUE.idFromName(crypto.randomUUID()));
   await runInDurableObject(stub, async (queue, state) => {
     await queue.setTestClock(NOW);
@@ -44,14 +44,14 @@ async function world(history: number, use: (world: World) => Promise<void>): Pro
     }
     const jobs = new JobStore(sql, () => NOW);
     const sessions = new SessionStore(sql, jobs, () => NOW);
-    sessions.putAccounts([0, 1].map(i => ({ connect_code: `BOT${i}#1`, r2_key: `accounts/${i}`, sha256: "a".repeat(64) })));
-    sessions.start(SESSION, { host: "probe", bundle_sha256: policy.bundle_sha256, git_sha: "probe", slots: 2, stream: false }, policy);
+    sessions.putAccounts(Array.from({ length: slots }, (_, i) => ({ connect_code: `BOT${i}#1`, r2_key: `accounts/${i}`, sha256: "a".repeat(64) })));
+    sessions.start(SESSION, { host: "probe", bundle_sha256: policy.bundle_sha256, git_sha: "probe", slots, stream: false }, policy);
     jobs.createJob("live-job", await sha256Hex(TOKEN), "PLAYER#1", CHOICES);
     const worker = workerId(SESSION, 0);
     jobs.claimNext(worker);
     jobs.markConnecting("live-job", worker, "BOT0#1");
     jobs.markPlaying("live-job", worker);
-    await queue.reportStatus(SESSION, runnerStatus(2));
+    await queue.reportStatus(SESSION, runnerStatus(slots));
     await use({ queue, state, jobs, sessions });
   });
 }
@@ -86,6 +86,43 @@ async function measure(state: DurableObjectState, operation: () => Promise<ApiRe
 }
 
 describe("recurring queue costs", () => {
+  it("measures sixteen-slot poll costs independently of historical rows", async () => {
+    const totals: Record<string, Awaited<ReturnType<typeof measure>>>[] = [];
+    for (const history of [0, 10_000]) {
+      await world(history, async ({ queue, state }) => {
+        const idleClaim = await measure(state, () => queue.claim(SESSION, { slot: 15 }));
+        const report = await measure(state, () => queue.reportStatus(SESSION, runnerStatus(16)));
+        const capacity = await measure(state, () => queue.capacity());
+        expect(idleClaim.rowsWritten).toBe(0);
+        expect(idleClaim.alarmWrites).toBe(0);
+        totals.push({ idleClaim, report, capacity });
+      }, 16);
+    }
+    expect(totals[1]).toEqual(totals[0]);
+    expect(totals[0]).toMatchInlineSnapshot(`
+      {
+        "capacity": {
+          "alarmReads": 0,
+          "alarmWrites": 0,
+          "rowsRead": 22,
+          "rowsWritten": 0,
+        },
+        "idleClaim": {
+          "alarmReads": 0,
+          "alarmWrites": 0,
+          "rowsRead": 8,
+          "rowsWritten": 0,
+        },
+        "report": {
+          "alarmReads": 1,
+          "alarmWrites": 0,
+          "rowsRead": 27,
+          "rowsWritten": 1,
+        },
+      }
+    `);
+  });
+
   it("keeps poll, heartbeat, and alarm reads bounded with 10,000 completed jobs and sessions", async () => {
     const totals: Record<string, Awaited<ReturnType<typeof measure>>>[] = [];
     for (const history of [0, 10_000]) {

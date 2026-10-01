@@ -16,7 +16,7 @@ slots=$(metadata hal-netplay-slots)
 drain_timeout=$(metadata hal-netplay-drain-timeout)
 
 [[ $git_sha =~ ^[0-9a-f]{40}$ ]] || { log "invalid Git SHA"; exit 2; }
-[[ $slots =~ ^[1-8]$ ]] || { log "invalid slot count"; exit 2; }
+[[ $slots =~ ^([1-9]|1[0-6])$ ]] || { log "invalid slot count"; exit 2; }
 [[ $drain_timeout =~ ^[1-9][0-9]*$ ]] || { log "invalid drain timeout"; exit 2; }
 
 command -v docker >/dev/null || { log "Docker is missing from the selected GPU image"; exit 1; }

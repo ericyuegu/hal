@@ -2105,8 +2105,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.git_sha is None:
         parser.error("set HAL_GIT_SHA or pass --git-sha")
-    if not 1 <= args.slots <= 8:
-        parser.error("--slots must be in [1, 8]")
+    if not 1 <= args.slots <= 16:
+        parser.error("--slots must be in [1, 16]")
     if not math.isfinite(args.drain_timeout) or args.drain_timeout <= 0:
         parser.error("--drain-timeout must be finite and positive")
     if not 1 <= args.slippi_port <= 65_535 or args.slippi_port + args.slots - 1 > 65_535:
