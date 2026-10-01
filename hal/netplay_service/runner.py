@@ -88,8 +88,8 @@ from hal.netplay_service.queue_client import runner_endpoint
 from hal.netplay_service.queue_client import slot_worker_id
 from hal.netplay_service.queue_contract import InvalidTransitionError
 from hal.netplay_service.queue_contract import SessionEndedError
-from hal.netplay_service.reservation import _RecoverableRuntimeError
-from hal.netplay_service.reservation import _retry_pending_uploads
+from hal.netplay_service.reservation import RecoverableRuntimeError
+from hal.netplay_service.reservation import retry_pending_uploads
 from hal.netplay_service.reservation import run_reservation
 from hal.netplay_service.stream import DisplayGroup
 from hal.netplay_service.stream import IdleStreamState
@@ -608,7 +608,7 @@ class _SlotHealthReporter:
     @staticmethod
     def _raise_if_recovery_required(snapshot: RuntimeSnapshot) -> None:
         if snapshot.recovery_required:
-            raise _RecoverableRuntimeError(snapshot.reason or "runtime_degraded")
+            raise RecoverableRuntimeError(snapshot.reason or "runtime_degraded")
 
     def _raise_if_publisher_failed(self) -> None:
         if self._publisher_error is not None:
@@ -771,7 +771,7 @@ def _slot_worker(
             if draining.is_set():
                 return
             if config.publish_replays:
-                next_upload_attempt = _retry_pending_uploads(
+                next_upload_attempt = retry_pending_uploads(
                     config.replay_dir / f"slot-{config.slot}",
                     config.queue_endpoint,
                     next_upload_attempt,

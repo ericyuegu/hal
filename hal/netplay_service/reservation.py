@@ -103,7 +103,7 @@ class SlotHealth(Protocol):
     def status(self) -> SlotStatus: ...
 
 
-class _RecoverableRuntimeError(RuntimeError):
+class RecoverableRuntimeError(RuntimeError):
     pass
 
 
@@ -379,7 +379,7 @@ def _drain_pending_uploads(root: Path, endpoint: QueueEndpoint) -> None:
             )
 
 
-def _retry_pending_uploads(root: Path, endpoint: QueueEndpoint, next_attempt: float) -> float:
+def retry_pending_uploads(root: Path, endpoint: QueueEndpoint, next_attempt: float) -> float:
     now = time.monotonic()
     if now < next_attempt:
         return next_attempt
@@ -749,7 +749,7 @@ def run_reservation(
         except FrameTimeout:
             health.recovering("frame_stream_stalled")
             link.end(EndReason.SERVICE_FAILURE, retryable=True)
-        except _RecoverableRuntimeError as error:
+        except RecoverableRuntimeError as error:
             health.recovering(str(error))
             link.end(EndReason.SERVICE_FAILURE, retryable=True)
             stop.wait(config.recovery_cooldown_seconds)

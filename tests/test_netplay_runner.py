@@ -894,9 +894,9 @@ def test_pending_replay_retry_is_limited_to_once_per_minute(
     monkeypatch.setattr(reservation.time, "monotonic", lambda: next(times))
     store = Mock()
 
-    next_attempt = reservation._retry_pending_uploads(tmp_path, store, 0.0)
-    next_attempt = reservation._retry_pending_uploads(tmp_path, store, next_attempt)
-    next_attempt = reservation._retry_pending_uploads(tmp_path, store, next_attempt)
+    next_attempt = reservation.retry_pending_uploads(tmp_path, store, 0.0)
+    next_attempt = reservation.retry_pending_uploads(tmp_path, store, next_attempt)
+    next_attempt = reservation.retry_pending_uploads(tmp_path, store, next_attempt)
 
     assert next_attempt == 220.0
     assert drain.call_args_list == [((tmp_path, store),), ((tmp_path, store),)]
