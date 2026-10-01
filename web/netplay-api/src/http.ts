@@ -97,15 +97,44 @@ function logRefusal(scope: string, method: string, path: string): void {
   console.warn(JSON.stringify({ event: "refused", scope, method, path: path.slice(0, 256) }));
 }
 
+const PUBLIC_CACHE_SECONDS: Readonly<Record<string, number>> = { "/v1/options": 10, "/v1/capacity": 3 };
+
+/** Serve a public read from the colo cache so viewers do not each reach the Durable Object. */
+export async function servePublic(
+  cache: Cache,
+  request: Request,
+  seconds: number,
+  produce: () => Promise<Response>,
+): Promise<Response> {
+  const key = new Request(request.url, { method: "GET" });
+  const hit = await cache.match(key);
+  if (hit !== undefined) {
+    const copy = new Response(hit.body, hit);
+    copy.headers.set("Cache-Control", "no-store");
+    return copy;
+  }
+  const response = await produce();
+  if (response.status === 200) {
+    const stored = new Response(response.clone().body, response);
+    stored.headers.set("Cache-Control", `public, max-age=${seconds}`);
+    await cache.put(key, stored);
+  }
+  return response;
+}
+
 export async function handle(request: Request, env: Env): Promise<Response> {
+  if (env.EDGE_CACHE !== "on" && env.EDGE_CACHE !== "off") throw new Error("EDGE_CACHE must be on or off");
   const queue = env.QUEUE.get(env.QUEUE.idFromName(QUEUE_INSTANCE));
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
   try {
     // Player routes
-    if (method === "GET" && path === "/v1/options") return respond(await queue.options());
-    if (method === "GET" && path === "/v1/capacity") return respond(await queue.capacity());
+    const seconds = method === "GET" ? PUBLIC_CACHE_SECONDS[path] : undefined;
+    if (seconds !== undefined) {
+      const produce = async () => respond(path === "/v1/options" ? await queue.options() : await queue.capacity());
+      return env.EDGE_CACHE === "on" ? servePublic(caches.default, request, seconds, produce) : produce();
+    }
     if (method === "POST" && path === "/v1/jobs") {
       const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
       const { success } = await env.JOB_RATE_LIMIT.limit({ key: address });

@@ -2,6 +2,7 @@
   "name": "hal-netplay-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-15",
+  "vars": { "EDGE_CACHE": "on" },
   "routes": [{ "pattern": "20xx.xyz/v1/*", "zone_name": "20xx.xyz" }],
   "durable_objects": {
     "bindings": [{ "name": "QUEUE", "class_name": "Queue" }]
