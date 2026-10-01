@@ -270,6 +270,33 @@ describe("runner routes", () => {
     expect(failed).toContainEqual(expect.objectContaining({ kind: "job_failed", detail: { reason: "session_silent" } }));
   });
 
+  it("frees the slot when the player's page leaves a rematch", async () => {
+    const session = await ready(1);
+    const job = (await call("POST", "/v1/jobs", { body: CREATE })).body;
+    const runner = { session, slot: 0 };
+    await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
+    await call("POST", `/v1/runner/jobs/${job.id}/connecting`, { runner, body: { connect_code: "BOT0#1" } });
+    await call("POST", `/v1/runner/jobs/${job.id}/playing`, { runner });
+    const finished = await call("POST", `/v1/runner/jobs/${job.id}/finish-game`, {
+      runner,
+      body: { game_number: 1, actual_stage: "BATTLEFIELD", result: "win" },
+    });
+    expect(finished.body.status).toBe("rematch_wait");
+    // The runner keeps its session and lease alive; only the page goes quiet.
+    for (let t = 15; t <= 120; t += 15) {
+      await setClock(START + t);
+      await report(session, 1);
+      await call("POST", `/v1/runner/jobs/${job.id}/heartbeat`, { runner });
+      await runAlarm();
+    }
+    expect((await call("GET", `/v1/runner/jobs/${job.id}`, { runner })).status).toBe(409);
+    const released = (await call("GET", `/v1/jobs/${job.id}`, { token: job.token })).body;
+    expect(released).toMatchObject({ status: "canceled", error_code: "player_left", last_result: "win" });
+    const next = (await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "NEXT#2" } })).body;
+    const claimed = await call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot: 0 } });
+    expect(claimed.body.id).toBe(next.id);
+  });
+
   it("drains and ends a session on request", async () => {
     const session = await ready(1);
     expect((await call("POST", `/v1/runner/sessions/${session}/drain`, { runner: true })).status).toBe(200);

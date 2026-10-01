@@ -30,9 +30,9 @@ async function world(history: number, use: (world: World) => Promise<void>, slot
       sql.exec(
         `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?)
          INSERT INTO jobs(id, token_digest, player_code, character, imitation, online_delay,
-                          temperature, status, queue_seq, created_at, updated_at)
+                          temperature, status, queue_seq, player_seen_at, created_at, updated_at)
          SELECT 'old-job-' || x, 'digest', 'OLD' || x || '#1', 'FOX', 'IBDW#0', 2,
-                1, 'complete', x, ?, ? FROM n`, history, NOW - 100, NOW - 100,
+                1, 'complete', x, ?, ?, ? FROM n`, history, NOW - 100, NOW - 100, NOW - 100,
       );
       sql.exec(
         `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?)
@@ -116,7 +116,7 @@ describe("recurring queue costs", () => {
         "report": {
           "alarmReads": 1,
           "alarmWrites": 0,
-          "rowsRead": 27,
+          "rowsRead": 28,
           "rowsWritten": 1,
         },
       }

@@ -142,6 +142,8 @@ describe("queue lifecycle transcripts", () => {
         await report(started.body.session_id, 1);
       }
       const aliases = new Aliases();
+      // The recorded scenarios assume each player's page stays open, as they assume runners keep reporting.
+      const pages: { id: string; token: string }[] = [];
 
       for (const [index, step] of transcript.steps.entries()) {
         const where = `${transcript.name} step ${index}`;
@@ -149,6 +151,7 @@ describe("queue lifecycle transcripts", () => {
           clock += step.seconds!;
           await setClock(clock);
           for (const [alias, id] of sessions) await report(id, needed.get(alias) ?? 1);
+          for (const page of pages) await call("GET", `/v1/jobs/${page.id}`, { token: page.token });
           await runAlarm();
           continue;
         }
@@ -168,6 +171,9 @@ describe("queue lifecycle transcripts", () => {
           actual = await runnerRequest(step.op!, sessions.get(alias!)!, Number(slot ?? 0), job, step.args ?? {});
         }
         aliases.learn(actual.body);
+        if (step.kind === "player" && step.method === "POST" && step.path === "/v1/jobs" && actual.status === 201) {
+          pages.push({ id: actual.body.id, token: actual.body.token });
+        }
         const expected = step.response!;
         expect(actual.status, where).toBe(expected.status);
         const pydanticList = Array.isArray(expected.body?.detail);

@@ -6,7 +6,9 @@ import {
   LEASE_SECONDS,
   MAX_ATTEMPTS,
   MAX_GAMES,
+  PLAYER_PRESENCE_SECONDS,
   PLAYING_LEASE_SECONDS,
+  PRESENCE_WRITE_SECONDS,
   TERMINAL_STATUSES,
   sameDigest,
 } from "./domain";
@@ -47,6 +49,9 @@ export interface JobResponse {
 const ACTIVE = "'queued','leased','connecting','playing','rematch_wait','rematch_ready'";
 const IN_SERVICE = "'leased','connecting','playing','rematch_wait','rematch_ready'";
 const TERMINAL = "'complete','failed','canceled','no_show'";
+// States where only the player's page can move the job forward. Connecting and
+// playing are excluded: the player may close the page and still be in Slippi.
+const PRESENCE = "'queued','leased','rematch_wait'";
 
 // Same columns and meanings as hal/netplay_service/queue.py schema v3, plus
 // last_worker, which lets a retried runner call recognize its own applied change.
@@ -77,6 +82,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   lease_owner TEXT,
   lease_expires_at REAL,
   last_worker TEXT,
+  player_seen_at REAL NOT NULL,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -170,8 +176,8 @@ export class JobStore {
     try {
       this.exec(
         `INSERT INTO jobs(id, token_digest, player_code, character, imitation, online_delay,
-           desired_return, temperature, requested_stage, status, queue_seq, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', ?, ?, ?)`,
+           desired_return, temperature, requested_stage, status, queue_seq, player_seen_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', ?, ?, ?, ?)`,
         id,
         tokenDigest,
         playerCode,
@@ -181,6 +187,7 @@ export class JobStore {
         choices.desired_return,
         choices.temperature,
         seq,
+        now,
         now,
         now,
       );
@@ -200,7 +207,11 @@ export class JobStore {
   }
 
   getJob(id: string, digest: string): JobResponse {
-    return this.response(this.authenticated(id, digest));
+    const row = this.authenticated(id, digest);
+    const now = this.time();
+    if (now - (row.player_seen_at as number) < PRESENCE_WRITE_SECONDS) return this.response(row);
+    this.exec("UPDATE jobs SET player_seen_at = ? WHERE id = ?", now, id);
+    return this.response(this.reload(id));
   }
 
   updatePolicy(id: string, digest: string, desiredReturn: number | null, temperature: number): JobResponse {
@@ -525,8 +536,20 @@ export class JobStore {
   reapExpired(): string[] {
     const now = this.time();
     const changed: string[] = [];
-    const ids = (query: string): string[] =>
-      this.sql.exec<Row>(query, now).toArray().map((row) => row.id as string);
+    const ids = (query: string, at = now): string[] =>
+      this.sql.exec<Row>(query, at).toArray().map((row) => row.id as string);
+    for (const id of ids(
+      `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status IN (${PRESENCE}) AND player_seen_at <= ?`,
+      now - PLAYER_PRESENCE_SECONDS,
+    )) {
+      this.exec(
+        `UPDATE jobs SET status = 'canceled', error_code = 'player_left', lease_owner = NULL, lease_expires_at = NULL,
+           rematch_deadline = NULL, updated_at = ? WHERE id = ?`,
+        now,
+        id,
+      );
+      changed.push(id);
+    }
     for (const id of ids(
       `SELECT id FROM jobs WHERE status IN (${ACTIVE}) AND status = 'connecting' AND connect_deadline <= ?`,
     )) {
@@ -579,7 +602,9 @@ export class JobStore {
          UNION ALL SELECT rematch_deadline FROM jobs
            WHERE status IN (${ACTIVE}) AND status = 'rematch_wait' AND rematch_deadline IS NOT NULL
          UNION ALL SELECT lease_expires_at FROM jobs
-           WHERE lease_owner IS NOT NULL AND status NOT IN (${TERMINAL}))`,
+           WHERE lease_owner IS NOT NULL AND status NOT IN (${TERMINAL})
+         UNION ALL SELECT player_seen_at + ${PLAYER_PRESENCE_SECONDS} FROM jobs
+           WHERE status IN (${ACTIVE}) AND status IN (${PRESENCE}))`,
     );
     return (row?.t as number | null) ?? null;
   }

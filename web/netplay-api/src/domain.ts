@@ -7,6 +7,11 @@ export const LEASE_SECONDS = 20;
 // lease tolerates more silence than the other states.
 export const PLAYING_LEASE_SECONDS = 60;
 export const SESSION_SILENCE_SECONDS = 30;
+// A player's page polls its job every second. Background tabs can throttle
+// timers to once a minute, so a page counts as gone only after two missed minutes.
+export const PLAYER_PRESENCE_SECONDS = 120;
+// Polls refresh presence at most this often, to bound Durable Object writes.
+export const PRESENCE_WRITE_SECONDS = 10;
 export const SESSION_LIVE_SECONDS = 5;
 export const EVENT_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 export const QUEUE_CAP = 20;

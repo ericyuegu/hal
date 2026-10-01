@@ -239,3 +239,73 @@ describe("runner transitions", () => {
       expect(store.nextDeadline()).toBe(clock.now + 20);
     }));
 });
+
+describe("player presence", () => {
+  it("releases a queued job whose page stopped polling for 120 s", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", "CRYO#610", CHOICES);
+      clock.advance(119);
+      expect(store.reapExpired()).toEqual([]);
+      clock.advance(1);
+      expect(store.reapExpired()).toEqual(["j1"]);
+      expect(store.row("j1")).toMatchObject({ status: "canceled", error_code: "player_left" });
+    }));
+
+  it("keeps a job whose page keeps polling", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", "CRYO#610", CHOICES);
+      clock.advance(100);
+      store.getJob("j1", "d1");
+      clock.advance(100);
+      expect(store.reapExpired()).toEqual([]);
+      expect(store.row("j1")?.status).toBe("queued");
+    }));
+
+  it("records a poll at most every 10 s", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", "CRYO#610", CHOICES);
+      const created = clock.now;
+      clock.advance(9);
+      store.getJob("j1", "d1");
+      expect(store.row("j1")?.player_seen_at).toBe(created);
+      clock.advance(1);
+      store.getJob("j1", "d1");
+      expect(store.row("j1")?.player_seen_at).toBe(clock.now);
+    }));
+
+  it("releases leased and rematch_wait jobs but not connecting or playing ones", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", "AAAA#1", CHOICES);
+      store.createJob("j2", "d2", "BBBB#2", CHOICES);
+      store.createJob("j3", "d3", "CCCC#3", CHOICES);
+      store.createJob("j4", "d4", "DDDD#4", CHOICES);
+      store.claimNext("w1");
+      store.claimNext("w2");
+      store.markConnecting("j2", "w2", "HALBOT#1");
+      store.claimNext("w3");
+      store.markConnecting("j3", "w3", "HALBOT#1");
+      store.markPlaying("j3", "w3");
+      store.claimNext("w4");
+      store.markConnecting("j4", "w4", "HALBOT#1");
+      store.markPlaying("j4", "w4");
+      store.finishGame("j4", "w4", 1, "BATTLEFIELD", "win");
+      // Heartbeats keep every lease alive; only presence can release a job.
+      for (let t = 0; t < 120; t += 15) {
+        clock.advance(15);
+        for (const [id, worker] of [["j1", "w1"], ["j2", "w2"], ["j3", "w3"], ["j4", "w4"]] as const) {
+          if (store.row(id)?.lease_owner === worker) store.heartbeat(id, worker);
+        }
+        store.reapExpired();
+      }
+      expect(store.row("j1")).toMatchObject({ status: "canceled", error_code: "player_left", lease_owner: null });
+      expect(store.row("j2")?.status).toBe("no_show");
+      expect(store.row("j3")?.status).toBe("playing");
+      expect(store.row("j4")).toMatchObject({ status: "canceled", error_code: "player_left", rematch_deadline: null });
+    }));
+
+  it("schedules the presence deadline", () =>
+    withStore((store, clock) => {
+      store.createJob("j1", "d1", "CRYO#610", CHOICES);
+      expect(store.nextDeadline()).toBe(clock.now + 120);
+    }));
+});

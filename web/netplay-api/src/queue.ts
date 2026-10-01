@@ -26,7 +26,7 @@ const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 // Every table is created with CREATE TABLE IF NOT EXISTS, which keeps an older
 // table unchanged. Bump this with any table change and use a fresh instance.
 // A mismatched store refuses every request; there are no migrations.
-export const STORE_SCHEMA_VERSION = 3;
+export const STORE_SCHEMA_VERSION = 4;
 export const QUEUE_INSTANCE = `global-v${STORE_SCHEMA_VERSION}`;
 const STORE_TABLES = ["games", "jobs", "pairings", "sessions", "accounts", "stream", "events", "policy", "settings"];
 
