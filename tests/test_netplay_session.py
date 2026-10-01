@@ -674,3 +674,17 @@ def test_menu_detects_dolphin_exit_without_waiting_for_queue_timeout(tmp_path: P
     with pytest.raises(netplay.FrameTimeout, match="Dolphin exited"):
         session._navigate_to_live(NetplaySetup(melee.Character.FOX, "", local_code="BOT#0"))
     controller.flush.assert_not_called()
+
+
+def test_rematch_keeps_the_frozen_stadium_toggle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session(tmp_path)
+    session._console = Mock()
+    session._controller = Mock()
+    helper = melee.MenuHelper()
+    helper.frozen_stadium_selected = True
+    session._menu_helper = helper
+    session._last_frame_id = None
+    monkeypatch.setattr(session, "_navigate_to_live", lambda *_args, **_kwargs: {"id": 0})
+    session.start_rematch(NetplaySetup(melee.Character.FOX, "CRYO#610"))
+    assert session._menu_helper is not helper
+    assert session._menu_helper.frozen_stadium_selected is True

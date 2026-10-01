@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
+from typing import Literal
 from typing import Protocol
 from typing import Self
 
@@ -61,6 +62,18 @@ class ConnectAbandoned(Exception):
     """The caller gave up on the remote player before the match went live."""
 
 
+class PlayerDisconnected(Exception):
+    """The remote player left the direct-mode session."""
+
+
+class PlayerIdle(Exception):
+    """The remote player stayed at character select past the idle timeout."""
+
+
+class PlayerNoShow(Exception):
+    """The remote player did not connect within the connect timeout."""
+
+
 def _never_abandoned() -> bool:
     return False
 
@@ -73,6 +86,195 @@ class MenuDriver(Protocol):
         Slippi scene does not emit menu observations. Never called in a game.
         """
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class DirectSelection:
+    revision: int
+    character: melee.Character
+    costume: int
+    stage: melee.Stage
+    identity: str
+
+
+class DirectMenuDriver:
+    """Drive Slippi 3.6.4 direct mode for one Dolphin session.
+
+    Slippi has no un-ready, and the bot cannot see the remote lock-in, so the bot
+    hovers its character and locks in last. Start while connected and locked is a
+    no-op; once the remote player has gone, Start opens code entry, which is the
+    only observable sign of a disconnect.
+    """
+
+    def __init__(
+        self,
+        *,
+        opponent_code: str,
+        selection: Callable[[], DirectSelection],
+        lock_requests: Callable[[], int],
+        connect_timeout_seconds: float,
+        idle_timeout_seconds: float,
+        hold_seconds: float,
+        hold_cap_seconds: float,
+        probe_interval_seconds: float,
+        on_change: Callable[[], None] = lambda: None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._on_change = on_change
+        self._opponent_code = opponent_code
+        self._selection = selection
+        self._lock_requests = lock_requests
+        self._connect_timeout = connect_timeout_seconds
+        self._idle_timeout = idle_timeout_seconds
+        self._hold = hold_seconds
+        self._hold_cap = hold_cap_seconds
+        self._probe_interval = probe_interval_seconds
+        self._clock = clock
+        # Slippi keeps the Frozen Stadium toggle for the life of the Dolphin process.
+        self._frozen_stadium = False
+        self.connected = False
+        self.phase: Literal["waiting_for_player", "character_select"] = "waiting_for_player"
+        self.deadline: float | None = None
+        self.locked: DirectSelection | None = None
+        self._helper = melee.MenuHelper()
+        self._arrived: float | None = None
+        self._hold_until = 0.0
+        self._hovered: DirectSelection | None = None
+        self._lock_seen = 0
+        self._next_probe = 0.0
+        self._connect_started: float | None = None
+
+    def _update(
+        self,
+        phase: Literal["waiting_for_player", "character_select"],
+        deadline: float | None,
+        locked: DirectSelection | None,
+    ) -> None:
+        before = (self.phase, self.deadline, self.locked)
+        self.phase = phase
+        self.deadline = deadline
+        self.locked = locked
+        if (self.phase, self.deadline, self.locked) != before:
+            self._on_change()
+
+    def begin_game(self) -> None:
+        self._helper = melee.MenuHelper()
+        self._helper.frozen_stadium_selected = self._frozen_stadium
+        self._arrived = None
+        self._hovered = None
+        phase: Literal["waiting_for_player", "character_select"] = (
+            "character_select" if self.connected else "waiting_for_player"
+        )
+        self._update(phase, None, None)
+
+    def __call__(self, state: melee.GameState | None, controller: melee.Controller) -> bool:
+        if state is None:
+            controller.release_all()
+            return True
+        now = self._clock()
+        menu, submenu = state.menu_state, getattr(state, "submenu", None)
+        if menu in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
+            if self.connected:
+                raise PlayerDisconnected("Slippi returned to the main menu")
+            melee.MenuHelper.choose_direct_online(state, controller)
+            return True
+        if menu == melee.Menu.POSTGAME_SCORES:
+            self._helper.skip_postgame(controller)
+            return True
+        if menu == melee.Menu.STAGE_SELECT:
+            selection = self.locked or self._selection()
+            self._helper.choose_stage(
+                stage=selection.stage,
+                gamestate=state,
+                controller=controller,
+                character=selection.character,
+                frozen_stadium=True,
+                autostart=True,
+            )
+            self._frozen_stadium = self._helper.frozen_stadium_selected
+            return True
+        if menu != melee.Menu.SLIPPI_ONLINE_CSS:
+            controller.release_all()
+            return True
+        if submenu == melee.SubMenu.NAME_ENTRY_SUBMENU:
+            if self.connected:
+                raise PlayerDisconnected("Start opened code entry")
+            if self._connect_started is None:
+                self._connect_started = now
+                self._update("waiting_for_player", now + self._connect_timeout, self.locked)
+            self._helper.enter_direct_code(
+                gamestate=state,
+                controller=controller,
+                connect_code=self._opponent_code,
+            )
+            return True
+        if not self.connected:
+            return self._connect(state, controller, now)
+        return self._between_games(state, controller, now)
+
+    def _connect(self, state: melee.GameState, controller: melee.Controller, now: float) -> bool:
+        # Game 1: pick the newest selection, then Start opens code entry; the match
+        # starts when both players have entered each other's codes.
+        if self._connect_started is not None and now >= self._connect_started + self._connect_timeout:
+            raise PlayerNoShow(f"no connection within {self._connect_timeout:.0f}s")
+        selection = self._selection()
+        self._update(self.phase, self.deadline, selection)
+        self._helper.choose_character(
+            character=selection.character,
+            gamestate=state,
+            controller=controller,
+            costume=selection.costume,
+            start=True,
+        )
+        return True
+
+    def _between_games(self, state: melee.GameState, controller: melee.Controller, now: float) -> bool:
+        if self._arrived is None:
+            self._arrived = now
+        if now >= self._arrived + self._idle_timeout:
+            raise PlayerIdle(f"no game started within {self._idle_timeout:.0f}s")
+        if self.locked is not None:
+            self._update("character_select", self._arrived + self._idle_timeout, self.locked)
+            if now >= self._next_probe:
+                self._next_probe = now + self._probe_interval
+                controller.release_all()
+                controller.press_button(melee.Button.BUTTON_START)
+            else:
+                controller.release_button(melee.Button.BUTTON_START)
+            return True
+        selection = self._selection()
+        if self._hovered is None or (
+            selection.character,
+            selection.costume,
+            selection.stage,
+            selection.identity,
+        ) != (
+            self._hovered.character,
+            self._hovered.costume,
+            self._hovered.stage,
+            self._hovered.identity,
+        ):
+            self._hold_until = min(now + self._hold, self._arrived + self._hold_cap)
+        self._hovered = selection
+        requested = self._lock_requests() > self._lock_seen
+        hovering = state.players[1].character == selection.character
+        if hovering and (requested or now >= self._hold_until):
+            if requested:
+                self._lock_seen = self._lock_requests()
+            self._next_probe = now + self._probe_interval
+            controller.release_all()
+            controller.press_button(melee.Button.BUTTON_START)
+            self._update("character_select", self._hold_until, selection)
+            return True
+        self._update("character_select", self._hold_until, None)
+        self._helper.choose_character(
+            character=selection.character,
+            gamestate=state,
+            controller=controller,
+            costume=selection.costume,
+            start=False,
+        )
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,9 +443,11 @@ class NetplaySession:
             raise RuntimeError("start_match must complete before start_rematch")
         if self._last_frame_id is not None:
             raise RuntimeError("the current netplay match has not ended")
-        # MenuHelper latches its character and stage choices. A rematch can
-        # change either one, so it needs a fresh navigation state machine.
+        # MenuHelper latches its choices, so a rematch needs a fresh one, but Slippi
+        # keeps the Frozen Stadium toggle for the whole Dolphin session.
+        frozen = self._menu_helper.frozen_stadium_selected
         self._menu_helper = melee.MenuHelper()
+        self._menu_helper.frozen_stadium_selected = frozen
         self._controller.release_all()
         self._controller.flush()
         first_frame = self._navigate_to_live(
@@ -415,7 +619,8 @@ class NetplaySession:
         ego = ports.get(self.ego_port)
         if ego is None:
             raise RuntimeError(f"local netplay port {self.ego_port} is absent from the live frame")
-        if ego.character != setup.character:
+        # A custom driver owns the selection and its caller checks the locked character.
+        if self.menu_driver is None and ego.character != setup.character:
             raise RuntimeError(f"local player selected {ego.character.name}, expected {setup.character.name}")
         logger.info(f"netplay ports: local={self.ego_port}, opponent={self.opponent_port}")
 
@@ -490,11 +695,11 @@ class NetplaySession:
         apply_inputs(self._controller, inputs)
         self._controller.flush()
 
-    def read_frames(self) -> tuple[list[dict], bool]:
+    def read_frames(self, timeout_seconds: float | None = None) -> tuple[list[dict], bool]:
         """Wait for one observation, then drain available observations without writes."""
         if self._console is None or not self.realtime or self._last_frame_id is None:
             raise RuntimeError("read_frames requires an active real-time match")
-        deadline = time.monotonic() + self.step_timeout_seconds
+        deadline = time.monotonic() + (timeout_seconds if timeout_seconds is not None else self.step_timeout_seconds)
         frames = []
         self.frame_times = []
         while True:
