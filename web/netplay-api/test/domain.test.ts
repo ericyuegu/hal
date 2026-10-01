@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { HttpError, pyRepr, sameDigest, sha256Hex, validatePlayerCode, workerId } from "../src/domain";
 import { checkChoice, optionsBody, parsePolicyConfig } from "../src/policy";
-import { parseCreate, parsePolicyUpdate, parseRematch } from "../src/requests";
+import { parseCreate, parseEnd, parseReport, parseSettingsUpdate } from "../src/requests";
 import policyJson from "./transcripts/policy.json";
 
 const policy = parsePolicyConfig(policyJson);
@@ -64,7 +64,7 @@ describe("policy", () => {
     expect(optionsBody(policy).imitations.some((choice) => choice.value === "MASKED")).toBe(false);
     const masked = { ...policy, masked_identity: true };
     expect(optionsBody(masked).imitations.some((choice) => choice.value === "MASKED")).toBe(true);
-    expect(optionsBody(policy)).toMatchObject({ max_games: 5, no_show_seconds: 60, rematch_seconds: 600 });
+    expect(optionsBody(policy)).not.toHaveProperty("max_games");
   });
 });
 
@@ -72,7 +72,7 @@ describe("requests", () => {
   const base = { player_code: "CRYO#610", character: "FOX", imitation: "IBDW#0", online_delay: 2 };
 
   it("applies create defaults", () => {
-    expect(parseCreate(base, policy)).toEqual({ ...base, desired_return: 20, temperature: 1 });
+    expect(parseCreate(base, policy)).toEqual({ ...base, stage: null, desired_return: 20, temperature: 1 });
     expect(parseCreate({ ...base, desired_return: null }, policy).desired_return).toBeNull();
   });
 
@@ -97,12 +97,55 @@ describe("requests", () => {
     }
   });
 
-  it("requires at least one policy field", () => {
-    expect(error(() => parsePolicyUpdate({}, policy)).detail).toBe("provide desired_return or temperature");
-    expect(parsePolicyUpdate({ temperature: null }, policy)).toEqual({ temperature: null });
+  it("requires at least one settings field", () => {
+    expect(error(() => parseSettingsUpdate({}, policy)).detail).toBe("provide at least one setting");
+    expect(parseSettingsUpdate({ temperature: 1 }, policy)).toEqual({ temperature: 1 });
   });
 
-  it("requires every rematch field", () => {
-    expect(error(() => parseRematch({ character: "FOX", imitation: "IBDW#0" }, policy)).status).toBe(422);
+  it("parses a full report", () => {
+    const report = parseReport({
+      seq: 4,
+      phase: "character_select",
+      phase_seconds_left: 3.5,
+      bot_code: "HAL#9000",
+      seen_revision: 2,
+      locked_revision: 1,
+      finished_games: [{ number: 1, stage: "BATTLEFIELD", result: "no_contest" }],
+    });
+    expect(report.finished_games[0]).toEqual({ number: 1, stage: "BATTLEFIELD", result: "no_contest" });
+  });
+
+  it("refuses an unknown phase, result, or a locked revision ahead of the seen one", () => {
+    const baseReport = {
+      seq: 1,
+      phase: "in_game",
+      phase_seconds_left: null,
+      bot_code: null,
+      seen_revision: 1,
+      locked_revision: 1,
+      finished_games: [],
+    };
+    expect(() => parseReport({ ...baseReport, phase: "rematch_wait" })).toThrow("phase");
+    expect(() =>
+      parseReport({
+        ...baseReport,
+        finished_games: [{ number: 1, stage: "BATTLEFIELD", result: "tie" }],
+      }),
+    ).toThrow("result");
+    expect(() => parseReport({ ...baseReport, locked_revision: 2 })).toThrow("locked_revision");
+  });
+
+  it("accepts only runner end reasons", () => {
+    expect(parseEnd({ reason: "no_show", retryable: false })).toEqual({ reason: "no_show", retryable: false });
+    expect(() => parseEnd({ reason: "player_left", retryable: false })).toThrow("reason");
+  });
+
+  it("parses partial settings and allows null stage and desired_return", () => {
+    expect(parseSettingsUpdate({ stage: null, desired_return: null }, policy)).toEqual({
+      stage: null,
+      desired_return: null,
+    });
+    expect(() => parseSettingsUpdate({}, policy)).toThrow("provide");
+    expect(() => parseSettingsUpdate({ revision: 3 }, policy)).toThrow("unexpected field");
   });
 });

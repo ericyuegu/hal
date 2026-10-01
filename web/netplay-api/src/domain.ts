@@ -1,10 +1,7 @@
-export const CONNECT_TIMEOUT_SECONDS = 60;
-export const IDLE_TIMEOUT_SECONDS = 600;
-export const MAX_GAMES = 5;
 export const MAX_ATTEMPTS = 2;
 export const LEASE_SECONDS = 20;
-// Dolphin keeps running locally through a short network outage, so a playing
-// lease tolerates more silence than the other states.
+// Dolphin keeps running locally through a short network outage, so a game in
+// progress tolerates more silence than the other phases.
 export const PLAYING_LEASE_SECONDS = 60;
 export const SESSION_SILENCE_SECONDS = 30;
 // A player's page polls its job every second. Background tabs can throttle
@@ -12,28 +9,41 @@ export const SESSION_SILENCE_SECONDS = 30;
 export const PLAYER_PRESENCE_SECONDS = 120;
 // Polls refresh presence at most this often, to bound Durable Object writes.
 export const PRESENCE_WRITE_SECONDS = 10;
+// A reservation yields its slot after this long once someone is waiting.
+export const YIELD_AFTER_SECONDS = 15 * 60;
 export const SESSION_LIVE_SECONDS = 5;
 export const EVENT_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 export const QUEUE_CAP = 20;
 export const MAX_BODY_BYTES = 16 * 1024;
-// The runner parses job bodies strictly, so any change to a runner route's
-// request or response shape bumps this with RUNNER_PROTOCOL_VERSION in
-// hal/netplay_service/queue_client.py.
-export const RUNNER_PROTOCOL_VERSION = 2;
+// Any change to a runner route's request or response shape bumps this with
+// RUNNER_PROTOCOL_VERSION in hal/netplay_service/queue_client.py.
+export const RUNNER_PROTOCOL_VERSION = 3;
 
-export type JobStatus =
-  | "queued"
-  | "leased"
-  | "connecting"
-  | "playing"
-  | "rematch_wait"
-  | "rematch_ready"
-  | "complete"
-  | "failed"
-  | "canceled"
-  | "no_show";
-
-export const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["complete", "failed", "canceled", "no_show"]);
+export type JobStatus = "queued" | "assigned" | "ended";
+export const PHASES = ["booting", "waiting_for_player", "character_select", "in_game", "paused"] as const;
+export type Phase = (typeof PHASES)[number];
+export const IN_GAME_PHASES: ReadonlySet<Phase> = new Set<Phase>(["in_game", "paused"]);
+export const END_REASONS = [
+  "player_canceled",
+  "player_left",
+  "player_disconnected",
+  "no_show",
+  "idle_timeout",
+  "yielded",
+  "service_failure",
+] as const;
+export type EndReason = (typeof END_REASONS)[number];
+export const RUNNER_END_REASONS: ReadonlySet<EndReason> = new Set<EndReason>([
+  "player_canceled",
+  "player_disconnected",
+  "no_show",
+  "idle_timeout",
+  "yielded",
+  "service_failure",
+]);
+export const GAME_RESULTS = ["win", "loss", "no_contest"] as const;
+export type GameResult = (typeof GAME_RESULTS)[number];
+export type WindDown = "player" | "yield";
 
 export class HttpError extends Error {
   constructor(
