@@ -1577,7 +1577,10 @@ def test_engine_recovery_releases_pairing_after_generation_cleanup(
     client.finish_pairing.assert_called_once_with(_SESSION_ID, pairing)
 
 
-def test_last_slot_exit_during_drain_is_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("streaming,backend", [(False, "Vulkan"), (True, "OGL")])
+def test_last_slot_exit_during_drain_is_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool, backend: str
+) -> None:
     gpu = Mock()
     slot = Mock()
     # The last worker exits between the top-of-loop check and dead-slot cleanup.
@@ -1602,7 +1605,8 @@ def test_last_slot_exit_during_drain_is_success(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(runner, "_await_engine_ready", lambda *_args, **_kwargs: ready)
     monkeypatch.setattr(runner, "_write_budget_record", Mock())
     monkeypatch.setattr(runner, "_write_status", Mock())
-    monkeypatch.setattr(runner, "_slot_process", Mock(return_value=slot))
+    slot_factory = Mock(return_value=slot)
+    monkeypatch.setattr(runner, "_slot_process", slot_factory)
     replace_slot = Mock(return_value=None)
     monkeypatch.setattr(runner, "_replace_failed_slot", replace_slot)
     terminate = Mock()
@@ -1611,13 +1615,21 @@ def test_last_slot_exit_during_drain_is_success(tmp_path: Path, monkeypatch: pyt
     shutdown(signal.SIGTERM, None)
     client = Mock()
     runner._run_generation(
-        _runner_config(tmp_path),
+        replace(
+            _runner_config(tmp_path),
+            graphics_backend="OGL",
+            wants_stream=streaming,
+            display_base=100,
+            stream_display=":90",
+        ),
         ("BOT#1",),
         "b" * 64,
         shutdown,
         recovery_deadline=None,
         session_client=client,
+        displays=(":90" if streaming else ":100",),
     )
+    assert slot_factory.call_args.args[1].graphics_backend == backend
     client.drain.assert_called_once_with(_SESSION_ID)
     assert replace_slot.call_args.kwargs["restart_allowed"] is False
     terminate.assert_called_once()

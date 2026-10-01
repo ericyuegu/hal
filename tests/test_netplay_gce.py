@@ -139,6 +139,11 @@ def test_gce_shell_scripts_parse_and_startup_has_required_boundaries() -> None:
         "APPIMAGE_EXTRACT_AND_RUN=1",
         "compute,graphics,utility,video",
         "--graphics-backend OGL",
+        "[[ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]]",
+        "/usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json:ro",
+        "VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json",
+        '"$image" vulkaninfo --summary',
+        "grep -q 'deviceName.*NVIDIA' <<< \"$vulkan_devices\"",
         "hal-netplay-runner.service",
         "hal-netplay-health.service",
         "/var/cache/hal-netplay:/root/.cache/hal-netplay",
@@ -182,11 +187,16 @@ def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Pa
     command("dpkg-query", "echo 580.173.02-0ubuntu0.24.04.1\n")
     command("install", "exit 0\n")
     # Stop before display files or credentials are written on the test host.
-    command("systemctl", 'if [[ $* == "restart nvidia-cdi-refresh.service" ]]; then exit 91; fi\n')
+    command(
+        "systemctl",
+        "if [[ $1 == cat && $DOCKER_WAS_INSTALLED == 0 ]]; then exit 1; fi\n"
+        'if [[ $* == "restart nvidia-cdi-refresh.service" ]]; then exit 91; fi\n',
+    )
     environment = os.environ | {
         "PATH": str(commands),
         "STARTUP_LOG": str(log),
         "STARTUP_SHA": _SHA,
+        "DOCKER_WAS_INSTALLED": str(int(docker_installed)),
         "DOCKER_TEMPLATE": str(template),
         "MOCK_BIN": str(commands),
     }
@@ -206,6 +216,14 @@ def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Pa
         assert f"libnvidia-{package}-580-server=580.173.02-0ubuntu0.24.04.1" in packages
     assert calls.index(installs[-1]) < calls.index("systemctl restart nvidia-cdi-refresh.service")
     configure = calls.index("nvidia-ctk runtime configure --runtime=docker")
+    stops = [call for call in calls if call.startswith("systemctl stop ")]
+    assert stops == (
+        ["systemctl stop hal-netplay-runner.service", "systemctl stop hal-netplay-health.service"]
+        if docker_installed
+        else []
+    )
+    if stops:
+        assert calls.index(stops[-1]) < configure
     restart = calls.index("systemctl restart docker")
     assert configure < restart < calls.index("docker info") < calls.index("nvidia-smi ")
 

@@ -1824,7 +1824,10 @@ def _run_generation(
                 policy_sha256=policy_sha256,
                 checkpoint_sha256=ready.checkpoint_sha256,
                 git_sha=config.git_sha,
-                graphics_backend=config.graphics_backend,
+                # Xvfb has no NVIDIA OpenGL context; Vulkan still reaches the GPU.
+                graphics_backend="Vulkan"
+                if displays and not (config.wants_stream and slot == 0)
+                else config.graphics_backend,
                 max_frames=config.max_frames,
                 measurement_dir=config.measurement_dir,
                 publish_replays=config.publish_replays,

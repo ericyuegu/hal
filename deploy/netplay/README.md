@@ -3,7 +3,7 @@
 The queue runs in `web/netplay-api`. A GPU host runs only `hal-netplay-runner`.
 The runner downloads and verifies its static fixtures, starts a remote session,
 keeps that session alive while it downloads policy and account assets, qualifies
-both delay profiles, and then starts its slots.
+the delay-2 profile, and then starts its slots.
 
 ## Current connect code
 
@@ -93,6 +93,10 @@ fetched at runtime.
 
 Fresh-host bring-up was tested. The startup script installs missing Docker
 and matching NVIDIA GLX/video libraries before creating the services.
+It mounts the host's Vulkan driver manifest and checks the NVIDIA device
+inside the image before starting the runner. Reapplying startup metadata
+drains existing services first, then recreates the display authorization
+and restarts the services with the new image and slot count.
 Reboot recovery and managed instance group replacement have not been tested.
 
 ### Assets, secrets, and operator state
@@ -299,7 +303,10 @@ The stream slot uses a dedicated NVIDIA Xorg display. Set
 The GCE startup script installs graphics libraries that match the loaded
 NVIDIA 580 server driver, starts Xorg, and refreshes NVIDIA container metadata.
 A monitor is not required. The runner rejects software OpenGL rendering.
-Other slots retain isolated 640×480 Xvfb displays.
+Other slots retain isolated 640×480 Xvfb displays and use Vulkan on the GPU.
+The runner container mounts the host's matching NVIDIA ICD manifest read-only
+and selects it with `VK_DRIVER_FILES`. No driver manifest is baked into the
+image. The startup preflight rejects a missing NVIDIA Vulkan device.
 
 OBS Studio 30.2.3 (Ubuntu package `30.2.3+dfsg-3~bpo24.04.1`) captures only
 Slippi's `Dolphin` window through Xcomposite. Openbox manages that display.

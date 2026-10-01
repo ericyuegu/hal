@@ -19,6 +19,13 @@ drain_timeout=$(metadata hal-netplay-drain-timeout)
 [[ $slots =~ ^([1-9]|1[0-6])$ ]] || { log "invalid slot count"; exit 2; }
 [[ $drain_timeout =~ ^[1-9][0-9]*$ ]] || { log "invalid drain timeout"; exit 2; }
 
+# Apply new metadata only after existing runner processes have drained.
+for service in hal-netplay-runner.service hal-netplay-health.service; do
+  if systemctl cat "$service" >/dev/null 2>&1; then
+    systemctl stop "$service"
+  fi
+done
+
 command -v nvidia-smi >/dev/null || { log "the NVIDIA driver is missing from the selected GPU image"; exit 1; }
 command -v nvidia-ctk >/dev/null || { log "the NVIDIA container toolkit is missing from the selected GPU image"; exit 1; }
 # The Deep Learning VM image supplies the driver and toolkit, but not Docker.
@@ -47,6 +54,11 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   "libnvidia-encode-580-server=$driver_version" "libnvidia-decode-580-server=$driver_version" \
   xauth mesa-utils
 systemctl restart nvidia-cdi-refresh.service
+# The 580.173.02 host manifest must match the injected driver library.
+# Keep this explicit mount until the container toolkit supplies its Vulkan ICD.
+[[ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]] || {
+  log "the host NVIDIA Vulkan manifest is missing"; exit 1;
+}
 pci=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader)
 bus_id=$(python3 -c 'import sys; domain,bus,tail=sys.argv[1].split(":"); device,function=tail.split("."); print(f"PCI:{int(bus,16)}@{int(domain,16)}:{int(device,16)}:{int(function,16)}")' "$pci")
 cat > /etc/X11/hal-netplay.conf <<EOF
@@ -95,7 +107,9 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now hal-netplay-display.service
+systemctl enable hal-netplay-display.service
+# Xorg must load the regenerated authority cookie and current display config.
+systemctl restart hal-netplay-display.service
 for _ in {1..100}; do
   if DISPLAY=:90 XAUTHORITY=/run/hal-netplay/Xauthority glxinfo -B > /run/hal-netplay/glxinfo 2>/dev/null; then break; fi
   sleep 0.1
@@ -119,6 +133,16 @@ fi
 log "pulling $image"
 docker pull "$image"
 
+log "checking NVIDIA Vulkan in the runner image"
+vulkan_devices=$(docker run --rm --gpus all \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,display \
+  -e VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json \
+  -v /usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json:ro \
+  "$image" vulkaninfo --summary 2>/run/hal-netplay/vulkaninfo.stderr)
+grep -q 'deviceName.*NVIDIA' <<< "$vulkan_devices" || {
+  log "the runner image cannot use the NVIDIA Vulkan device"; exit 1;
+}
+
 stop_seconds=$((drain_timeout + 30))
 unit_timeout=$((drain_timeout + 60))
 cat > /etc/systemd/system/hal-netplay-runner.service <<EOF
@@ -133,7 +157,7 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=${unit_timeout}
 ExecStartPre=-/usr/bin/docker rm -f hal-netplay-runner
-ExecStart=/usr/bin/docker run --rm --name hal-netplay-runner --gpus all --ipc=host --env-file /run/hal-netplay/runner.env -e APPIMAGE_EXTRACT_AND_RUN=1 -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video,display -e HAL_NETPLAY_STREAM_DISPLAY=:90 -e XAUTHORITY=/run/hal-netplay/Xauthority -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v /run/hal-netplay/Xauthority:/run/hal-netplay/Xauthority:ro -v /var/cache/hal-netplay:/root/.cache/hal-netplay -v /var/lib/hal-netplay:/var/lib/hal-netplay ${image} hal-netplay-runner --slots ${slots} --compiled --graphics-backend OGL --drain-timeout ${drain_timeout} --replay-dir /var/lib/hal-netplay/replays --status-path /var/lib/hal-netplay/runner-status.json --git-sha ${git_sha}
+ExecStart=/usr/bin/docker run --rm --name hal-netplay-runner --gpus all --ipc=host --env-file /run/hal-netplay/runner.env -e APPIMAGE_EXTRACT_AND_RUN=1 -e NVIDIA_VISIBLE_DEVICES=all -e VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video,display -e HAL_NETPLAY_STREAM_DISPLAY=:90 -e XAUTHORITY=/run/hal-netplay/Xauthority -v /usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json:ro -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v /run/hal-netplay/Xauthority:/run/hal-netplay/Xauthority:ro -v /var/cache/hal-netplay:/root/.cache/hal-netplay -v /var/lib/hal-netplay:/var/lib/hal-netplay ${image} hal-netplay-runner --slots ${slots} --compiled --graphics-backend OGL --drain-timeout ${drain_timeout} --replay-dir /var/lib/hal-netplay/replays --status-path /var/lib/hal-netplay/runner-status.json --git-sha ${git_sha}
 ExecStop=/usr/bin/docker stop --time=${stop_seconds} hal-netplay-runner
 
 [Install]
@@ -159,6 +183,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now hal-netplay-health.service
-systemctl enable --now hal-netplay-runner.service
+systemctl enable hal-netplay-health.service hal-netplay-runner.service
+systemctl restart hal-netplay-health.service
+systemctl restart hal-netplay-runner.service
 log "runner service started"

@@ -130,3 +130,58 @@ The existing one-GPU G4 is running at 8.229.68.10. The game runner is stopped;
 the health container remains up. Eight-slot source is validated, but its image
 and schema cutover are not deployed yet. Ranked and local player loops remain
 paused. No Git push was made.
+
+## Automatic GPU setup
+
+The G4 driver is NVIDIA 580.173.02. Its host manifest declares Vulkan 1.4.312
+and `libGLX_nvidia.so.0`. The container already had that library, but lacked
+the manifest. NVIDIA documents this
+[driver registration](https://download.nvidia.com/XFree86/Linux-x86_64/570.124.04/README/installedcomponents.html).
+A read-only mount of the host manifest made `vulkaninfo --summary` identify
+the RTX PRO 6000 as a discrete NVIDIA GPU. The unmodified image could not
+create a Vulkan instance.
+
+`gce-startup.sh` now installs matching graphics and video packages, checks
+that the driver manifest exists, mounts it read-only, and sets
+`VK_DRIVER_FILES`. It runs `vulkaninfo` inside the selected runner image and
+requires an NVIDIA device before starting services. The streamed slot retains
+NVIDIA OpenGL on Xorg :90. Managed non-streamed slots use Vulkan on Xvfb.
+
+Reapplying startup metadata now drains existing runner and health services
+before changing Docker. It restarts Xorg after writing its configuration and
+authorization, then restarts both containers from the new unit definitions.
+This also covers a restart of the existing VM; no service-file edit is needed.
+
+Validation:
+
+- Exact remote `docker run --rm --gpus all ... vulkaninfo --summary` preflight
+  passed, with and without a test Xvfb display. Results are
+  `vulkan-after.log` and `vulkan-preflight.log`.
+- `bash -n deploy/netplay/gce-startup.sh` passed.
+- Focused `uv run pytest -q tests/test_netplay_runner.py tests/test_netplay_gce.py`
+  passed **92** tests. The tests cover fresh and existing host setup, draining
+  before Docker changes, the matching driver mount, renderer selection, and
+  clean drain when the last worker exits during the supervisor loop.
+- Ruff format, Ruff check, and ty passed. One test formatting check failed
+  first; `uv run ruff format tests/test_netplay_gce.py` corrected it.
+- The full non-integration suite passed **1,627** tests with the same eight
+  skips, 21 deselections, and 26 warnings in 148.79 seconds. The final shell
+  restart changes also passed the focused suite.
+- The mandatory combined integration command passed **ten** tests with six
+  deselections and six warnings in 97.18 seconds.
+- A source search first named absent `tests/test_netplay_host.py`; the
+  maintained host tests are in `tests/test_netplay_gce.py`.
+- Reading `/etc/vulkan/icd.d/nvidia_icd.json` on the host failed; the installed
+  host manifest is `/usr/share/vulkan/icd.d/nvidia_icd.json`.
+- API deployment `npx wrangler deploy` succeeded, version
+  `11b4ac42-3ca3-4f83-abfa-00efb53c1b02`, on the existing route.
+  The new queue was paused, the same policy was published with only
+  `online_delays` changed to `[2]`, and HAL#9000 was registered.
+  A temporary session received eight grants for that one account and ended
+  cleanly. Public options report delay 2, no-show 60 seconds, rematch 600.
+  This check did not report fabricated healthy capacity.
+- `docker build --file deploy/netplay/Dockerfile --build-arg HAL_GIT_SHA=9817205a --tag hal-netplay-runner:direct8-prebuild .`
+  prepares the build cache. That temporary tag is not a release or deployment.
+
+Separate frontend wording and spec edits appeared during this work. They are
+outside this GPU setup commit.
