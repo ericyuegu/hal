@@ -162,6 +162,8 @@ class DirectMenuDriver:
         self._helper.frozen_stadium_selected = self._frozen_stadium
         self._arrived = None
         self._hovered = None
+        # Only a request made during this character select may skip the hold.
+        self._lock_seen = self._lock_requests()
         phase: Literal["waiting_for_player", "character_select"] = (
             "character_select" if self.connected else "waiting_for_player"
         )
@@ -259,8 +261,7 @@ class DirectMenuDriver:
         requested = self._lock_requests() > self._lock_seen
         hovering = state.players[1].character == selection.character
         if hovering and (requested or now >= self._hold_until):
-            if requested:
-                self._lock_seen = self._lock_requests()
+            self._lock_seen = self._lock_requests()
             self._next_probe = now + self._probe_interval
             controller.release_all()
             controller.press_button(melee.Button.BUTTON_START)

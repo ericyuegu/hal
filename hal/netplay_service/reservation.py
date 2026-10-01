@@ -53,6 +53,7 @@ from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import QueueUnavailableError
 from hal.netplay_service.queue_client import RemoteQueue
 from hal.netplay_service.queue_contract import InvalidTransitionError
+from hal.netplay_service.queue_contract import QueueError
 from hal.netplay_service.queue_contract import RunnerQueue
 from hal.netplay_service.queue_contract import SessionEndedError
 from hal.netplay_service.replays import ReplayMetadata
@@ -137,7 +138,8 @@ class ReservationLink:
         self._deadline: float | None = None
         self._bot_code: str | None = None
         self._locked: int | None = None
-        self._games: list[FinishedGame] = []
+        # The Worker keeps a requeued job's games and requires the full list in every report.
+        self._games: list[FinishedGame] = list(job.games)
         self._released = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"reservation-{job.id}", daemon=True)
@@ -176,6 +178,13 @@ class ReservationLink:
             logger.bind(job=self._job_id, event="report").warning("reservation report failed: {}", error)
             return
         except InvalidTransitionError:
+            with self._lock:
+                self._released = True
+            return
+        except QueueError as error:
+            # A refused or unreadable report will not succeed on retry; stop so the
+            # loop aborts and the Worker's lease rule takes the job back.
+            logger.bind(job=self._job_id, event="report").error("reservation report refused: {}", error)
             with self._lock:
                 self._released = True
             return

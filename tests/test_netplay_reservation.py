@@ -24,6 +24,7 @@ from hal.netplay_service.domain import Phase
 from hal.netplay_service.domain import Settings
 from hal.netplay_service.domain import WindDown
 from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.queue_client import QueueRejectedError
 from hal.netplay_service.queue_contract import InvalidTransitionError
 from hal.netplay_service.reservation import ReservationLink
 from hal.netplay_service.runner import SlotConfig
@@ -307,3 +308,24 @@ def test_service_failure_is_retryable_and_records_no_result(
 
     assert queue.ends == [(EndReason.SERVICE_FAILURE, True)]
     assert queue.reports[-1].finished_games == ()
+
+
+def test_a_requeued_reservation_reports_its_earlier_games() -> None:
+    first = FinishedGame(1, "BATTLEFIELD", GameResult.WIN)
+    queue = _Queue([_job(games=(first,))])
+    job = _job(attempt=2, games=(first,))
+    with ReservationLink(queue, job, "s/slot-0", interval_seconds=0.01) as link:  # type: ignore[arg-type]
+        link.add_game(FinishedGame(2, "POKEMON_STADIUM", GameResult.LOSS))
+        link.end(EndReason.PLAYER_DISCONNECTED)
+    assert queue.reports[-1].finished_games == (first, FinishedGame(2, "POKEMON_STADIUM", GameResult.LOSS))
+
+
+def test_a_rejected_report_stops_the_link_instead_of_killing_its_thread() -> None:
+    queue = _Queue([_job(), QueueRejectedError(422, "finished_games must be numbered 1, 2, 3")])
+    with ReservationLink(queue, _job(), "s/slot-0", interval_seconds=0.01) as link:  # type: ignore[arg-type]
+        assert queue.second_report.wait(1)
+        for _ in range(100):
+            if link.released():
+                break
+            threading.Event().wait(0.01)
+        assert link.released()

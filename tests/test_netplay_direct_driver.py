@@ -145,9 +145,10 @@ def test_lock_request_locks_now() -> None:
 
 
 def test_probe_presses_start_every_interval_after_lock() -> None:
-    clock = _Clock()
-    driver = _driver([FOX], [1], clock)
+    clock, locks = _Clock(), [0]
+    driver = _driver([FOX], locks, clock)
     _between_games(driver)
+    locks.append(1)
     css = _State(melee.Menu.SLIPPI_ONLINE_CSS, frame=1)
     controller = _Controller()
     driver(css, controller)  # type: ignore[arg-type]
@@ -235,3 +236,21 @@ def test_on_change_reports_deadline_move_and_lock() -> None:
     clock.now = 105.1
     driver(css, controller)  # type: ignore[arg-type]
     assert len(changes) == 2
+
+
+def test_a_lock_request_from_an_earlier_game_does_not_skip_the_hold() -> None:
+    clock, locks = _Clock(), [0]
+    driver = _driver([FOX], locks, clock)
+    _between_games(driver)
+    css = _State(melee.Menu.SLIPPI_ONLINE_CSS, frame=1)
+    controller = _Controller()
+    locks.append(1)
+    driver(css, controller)  # type: ignore[arg-type]
+    assert driver.locked == FOX
+    locks.append(2)  # pressed after HAL already locked in
+    _between_games(driver)
+    driver(css, controller)  # type: ignore[arg-type]
+    assert driver.locked is None
+    clock.now += 5.1
+    driver(css, controller)  # type: ignore[arg-type]
+    assert driver.locked == FOX
