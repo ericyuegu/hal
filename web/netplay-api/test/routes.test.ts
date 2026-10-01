@@ -89,7 +89,7 @@ describe("security and shape", () => {
     const result = await call("POST", "/v1/runner/sessions", {
       runner: true,
       runnerToken: OTHER_RUNNER_TOKEN,
-      body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "b", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 1, stream: false },
+      body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "b", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 1, stream: false },
     });
     expect(result.status).toBe(201);
   });
@@ -151,15 +151,15 @@ describe("player routes", () => {
 });
 
 describe("runner routes", () => {
-  it("leases and serves sixteen isolated slots and releases all accounts on shutdown", async () => {
+  it("serves sixteen slots on one account and releases it on shutdown", async () => {
     await publish();
-    await seedAccounts(16);
+    await seedAccounts(1);
     const session = crypto.randomUUID();
-    const body = { protocol_version: 1, session_id: session, host: "sixteen-slots", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots: 16, stream: false };
+    const body = { protocol_version: 2, session_id: session, host: "sixteen-slots", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots: 16, stream: false };
     const started = await call("POST", "/v1/runner/sessions", { runner: true, body });
     expect(started.status).toBe(201);
     expect(started.body.accounts.map((account: { slot: number }) => account.slot)).toEqual(Array.from({ length: 16 }, (_, i) => i));
-    expect(new Set(started.body.accounts.map((account: { connect_code: string }) => account.connect_code)).size).toBe(16);
+    expect(new Set(started.body.accounts.map((account: { connect_code: string }) => account.connect_code)).size).toBe(1);
     expect((await call("POST", "/v1/runner/sessions", { runner: true, body })).body).toEqual(started.body);
     await report(session, 16);
     const claimed = new Set<string>();
@@ -187,9 +187,9 @@ describe("runner routes", () => {
 
   it.each([0, 17])("rejects %i slots before leasing accounts", async slots => {
     await publish();
-    await seedAccounts(16);
+    await seedAccounts(1);
     const result = await call("POST", "/v1/runner/sessions", { runner: true,
-      body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "bad", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots, stream: false },
+      body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "bad", bundle_sha256: POLICY.bundle_sha256, git_sha: "source", slots, stream: false },
     });
     expect(result).toMatchObject({ status: 422, body: { detail: "slots must be in [1, 16]" } });
     const status = (await call("GET", "/v1/admin/status", { admin: true })).body;
@@ -230,7 +230,7 @@ describe("runner routes", () => {
     await seedAccounts(2);
     const result = await call("POST", "/v1/runner/sessions", {
       runner: true,
-      body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "b", bundle_sha256: "f".repeat(64), git_sha: "g", slots: 1, stream: false },
+      body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "b", bundle_sha256: "f".repeat(64), git_sha: "g", slots: 1, stream: false },
     });
     expect(result.status).toBe(409);
   });

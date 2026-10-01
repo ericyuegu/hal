@@ -125,6 +125,20 @@
       "token": "$token1"
     },
     {
+      "args": {
+        "attempt": 1
+      },
+      "compare": "full",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "pairing-finished",
+      "response": {
+        "body": {},
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
       "args": {},
       "compare": "full",
       "job": null,

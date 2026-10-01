@@ -5,6 +5,12 @@ The runner downloads and verifies its static fixtures, starts a remote session,
 keeps that session alive while it downloads policy and account assets, qualifies
 both delay profiles, and then starts its slots.
 
+## Current connect code
+
+Use `HAL#9000` for new games. The owner changed the code from `HAL#647`
+on October 1. The page reads the code returned by the runner. Historical
+replays and reports retain the code used when those games were played.
+
 ## Current status — 2026-10-01 UTC
 
 The owner stopped the G4 at 07:04 UTC. Compute Engine confirms

@@ -34,7 +34,7 @@ from hal.netplay_service.queue_contract import SessionEndedError
 # Must equal RUNNER_PROTOCOL_VERSION in web/netplay-api/src/domain.ts; the two change
 # together with any change to a runner route's request or response shape, because
 # parse_job refuses a job body with any field added or removed.
-RUNNER_PROTOCOL_VERSION: Final = 1
+RUNNER_PROTOCOL_VERSION: Final = 2
 RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0, 2.0, 4.0)
 _TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(10.0, connect=5.0)
 # The bearer token travels in the clear over http, so http is only for a Worker on this machine.
@@ -329,6 +329,14 @@ class RemoteQueue:
     def heartbeat(self, job_id: str, worker_id: str) -> None:
         self._transition(job_id, worker_id, "heartbeat")
 
+    def finish_pairing(self, job_id: str, worker_id: str, attempt: int) -> None:
+        slot = self._slot(worker_id)
+        self._api.request(
+            "POST",
+            f"/v1/runner/sessions/{self.session_id}/pairing-finished",
+            body={"slot": slot, "job_id": job_id, "attempt": attempt},
+        )
+
     def mark_connecting(self, job_id: str, worker_id: str, connect_code: str) -> None:
         self._transition(job_id, worker_id, "connecting", {"connect_code": validate_player_code(connect_code)})
 
@@ -375,6 +383,13 @@ class Account:
     connect_code: str
     r2_key: str
     sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class Pairing:
+    slot: int
+    job_id: str
+    attempt: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,7 +486,7 @@ class RunnerClient:
             raise QueueProtocolError("session start accounts must be a list")
         grants = tuple(_grant(item) for item in accounts)
         if tuple(grant.slot for grant in grants) != tuple(range(slots)):
-            raise QueueProtocolError(f"session start must lease one account per slot: {grants}")
+            raise QueueProtocolError(f"session start must assign every slot: {grants}")
         if payload["session_id"] != session_id:
             raise QueueProtocolError(f"session start returned {payload['session_id']!r}, not {session_id!r}")
         try:
@@ -519,6 +534,30 @@ class RunnerClient:
         if depth < 0:
             raise QueueProtocolError("capacity queued must be non-negative")
         return depth
+
+    def pairing(self, session_id: str) -> Pairing | None:
+        payload = _object(
+            _json(self._api.request("GET", f"/v1/runner/sessions/{session_id}/pairing")),
+            frozenset(("pairing",)),
+            "pairing",
+        )
+        if payload["pairing"] is None:
+            return None
+        value = _object(payload["pairing"], frozenset(("slot", "job_id", "attempt")), "pairing")
+        try:
+            pairing = Pairing(_integer(value["slot"]), _text(value["job_id"]), _integer(value["attempt"]))
+            if pairing.slot < 0 or not pairing.job_id or pairing.attempt < 1:
+                raise ValueError("invalid pairing identity")
+            return pairing
+        except (TypeError, ValueError) as error:
+            raise QueueProtocolError(f"pairing response is invalid: {error}") from error
+
+    def finish_pairing(self, session_id: str, pairing: Pairing) -> None:
+        self._api.request(
+            "POST",
+            f"/v1/runner/sessions/{session_id}/pairing-finished",
+            body={"slot": pairing.slot, "job_id": pairing.job_id, "attempt": pairing.attempt},
+        )
 
     def drain(self, session_id: str) -> None:
         self._api.request("POST", f"/v1/runner/sessions/{session_id}/drain")

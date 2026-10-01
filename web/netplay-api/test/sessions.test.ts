@@ -72,17 +72,18 @@ function refused(fn: () => unknown): { status: number; detail: string } {
 const START = { host: "box", bundle_sha256: policy.bundle_sha256, git_sha: "abc", slots: 2, stream: true };
 
 describe("sessions", () => {
-  it("leases one account per slot and refuses mismatched bundles", () =>
+  it("leases one account per session and refuses mismatched bundles", () =>
     world(({ sessions }) => {
       const started = sessions.start("s1", START, policy);
       expect(started.accounts.map((grant) => [grant.slot, grant.connect_code])).toEqual([
         [0, "BOT0#1"],
-        [1, "BOT1#1"],
+        [1, "BOT0#1"],
       ]);
       expect(refused(() => sessions.start("s2", { ...START, bundle_sha256: "f".repeat(64) }, policy)).status).toBe(409);
-      expect(refused(() => sessions.start("s3", START, policy))).toEqual({
-        status: 409,
-        detail: "1 bot accounts are free; 2 are required",
+      sessions.start("s2", START, policy);
+      sessions.start("s3", START, policy);
+      expect(refused(() => sessions.start("s5", START, policy))).toEqual({
+        status: 409, detail: "no bot accounts are free",
       });
       expect(refused(() => sessions.start("s4", START, null)).status).toBe(503);
     }));

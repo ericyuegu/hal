@@ -1,3 +1,4 @@
+import { QUEUE_INSTANCE } from "./queue";
 import { HttpError, MAX_BODY_BYTES, sameDigest, sha256Hex } from "./domain";
 import type { Env } from "./env";
 import type { ApiResult, RunnerAction } from "./queue";
@@ -97,7 +98,7 @@ function logRefusal(scope: string, method: string, path: string): void {
 }
 
 export async function handle(request: Request, env: Env): Promise<Response> {
-  const queue = env.QUEUE.get(env.QUEUE.idFromName("global"));
+  const queue = env.QUEUE.get(env.QUEUE.idFromName(QUEUE_INSTANCE));
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
@@ -142,11 +143,13 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         return respond(await queue.startSession(await readBody(request)));
       }
       if (method === "GET" && path === "/v1/runner/policy") return respond(await queue.activePolicy());
-      const session = path.match(/^\/v1\/runner\/sessions\/([^/]+)(\/status|\/claim|\/drain)?$/);
+      const session = path.match(/^\/v1\/runner\/sessions\/([^/]+)(\/status|\/claim|\/drain|\/pairing|\/pairing-finished)?$/);
       if (session) {
         const [, id, suffix] = session as [string, string, string | undefined];
         if (method === "POST" && suffix === "/status") return respond(await queue.reportStatus(id, await readBody(request)));
         if (method === "POST" && suffix === "/claim") return respond(await queue.claim(id, await readBody(request)));
+        if (method === "GET" && suffix === "/pairing") return respond(await queue.pairing(id));
+        if (method === "POST" && suffix === "/pairing-finished") return respond(await queue.finishPairing(id, await readBody(request)));
         if (method === "POST" && suffix === "/drain") return respond(await queue.drain(id));
         if (method === "DELETE" && suffix === undefined) return respond(await queue.endSession(id));
       }

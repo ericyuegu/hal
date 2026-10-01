@@ -64,7 +64,7 @@ describe("policy", () => {
     expect(optionsBody(policy).imitations.some((choice) => choice.value === "MASKED")).toBe(false);
     const masked = { ...policy, masked_identity: true };
     expect(optionsBody(masked).imitations.some((choice) => choice.value === "MASKED")).toBe(true);
-    expect(optionsBody(policy)).toMatchObject({ max_games: 5, no_show_seconds: 600, rematch_seconds: 600 });
+    expect(optionsBody(policy)).toMatchObject({ max_games: 5, no_show_seconds: 60, rematch_seconds: 600 });
   });
 });
 

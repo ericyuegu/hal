@@ -230,6 +230,20 @@
       "worker": "a:0"
     },
     {
+      "args": {
+        "attempt": 1
+      },
+      "compare": "full",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "pairing-finished",
+      "response": {
+        "body": {},
+        "status": 200
+      },
+      "worker": "a:0"
+    },
+    {
       "body": null,
       "kind": "player",
       "method": "GET",
@@ -339,6 +353,20 @@
         "body": {
           "status": "failed"
         },
+        "status": 200
+      },
+      "worker": "a:1"
+    },
+    {
+      "args": {
+        "attempt": 2
+      },
+      "compare": "full",
+      "job": "$job1",
+      "kind": "worker",
+      "op": "pairing-finished",
+      "response": {
+        "body": {},
         "status": 200
       },
       "worker": "a:1"

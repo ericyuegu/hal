@@ -1,5 +1,6 @@
 import {
   HttpError,
+  CONNECT_TIMEOUT_SECONDS,
   IDLE_TIMEOUT_SECONDS,
   type JobStatus,
   LEASE_SECONDS,
@@ -340,7 +341,7 @@ export class JobStore {
     this.exec(
       "UPDATE jobs SET status = 'connecting', connect_code = ?, connect_deadline = ?, updated_at = ? WHERE id = ?",
       connectCode,
-      now + IDLE_TIMEOUT_SECONDS,
+      now + CONNECT_TIMEOUT_SECONDS,
       now,
       id,
     );

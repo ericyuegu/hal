@@ -22,6 +22,7 @@ from hal.netplay_service.queue_client import RETRY_DELAYS_SECONDS
 from hal.netplay_service.queue_client import RUNNER_PROTOCOL_VERSION
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
+from hal.netplay_service.queue_client import Pairing
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import QueueProtocolError
 from hal.netplay_service.queue_client import QueueRejectedError
@@ -304,7 +305,7 @@ def test_runner_protocol_matches_the_worker() -> None:
 
 def test_start_session_rejects_a_missing_or_misnumbered_account() -> None:
     body = {"session_id": "session-00000001", "accounts": [], "policy": POLICY.to_payload()}
-    with pytest.raises(QueueProtocolError, match="one account per slot"):
+    with pytest.raises(QueueProtocolError, match="assign every slot"):
         _runner(_Script(httpx.Response(201, json=body))).start_session(
             session_id="session-00000001",
             host="box",
@@ -515,3 +516,35 @@ def test_live_socket_sends_auth_and_slot_headers() -> None:
             assert json.loads(socket.recv(timeout=2)) == {"type": "released"}
         server.shutdown()
     assert seen == {"path": "/v1/runner/jobs/job-1/live", "auth": "Bearer runner-token", "slot": "1"}
+
+
+def test_pairing_cleanup_retries_with_the_same_attempt() -> None:
+    script = _Script(httpx.Response(503), httpx.Response(200, json={}))
+    sleeps: list[float] = []
+    _queue(script, sleeps).finish_pairing("job-1", WORKER, 2)
+    assert sleeps == [0.25]
+    assert len(script.requests) == 2
+    for request in script.requests:
+        assert request.url.path == "/v1/runner/sessions/sess/pairing-finished"
+        assert json.loads(request.content) == {"slot": 1, "job_id": "job-1", "attempt": 2}
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [(None, None), ({"slot": 0, "job_id": "job", "attempt": 1}, Pairing(0, "job", 1))],
+)
+def test_runner_reads_pairing(body: object, expected: Pairing | None) -> None:
+    script = _Script(httpx.Response(200, json={"pairing": body}))
+    with httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)) as http:
+        client = RunnerClient(ENDPOINT, client=http)
+        assert client.pairing("sess") == expected
+
+
+@pytest.mark.parametrize("field,value", [("slot", -1), ("job_id", ""), ("attempt", 0)])
+def test_runner_rejects_invalid_pairing(field: str, value: object) -> None:
+    body = {"slot": 0, "job_id": "job", "attempt": 1, field: value}
+    script = _Script(httpx.Response(200, json={"pairing": body}))
+    with httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script)) as http:
+        client = RunnerClient(ENDPOINT, client=http)
+        with pytest.raises(QueueProtocolError, match="invalid pairing identity"):
+            client.pairing("sess")

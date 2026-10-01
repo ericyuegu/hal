@@ -1,3 +1,4 @@
+export const CONNECT_TIMEOUT_SECONDS = 60;
 export const IDLE_TIMEOUT_SECONDS = 600;
 export const MAX_GAMES = 5;
 export const MAX_ATTEMPTS = 2;
@@ -13,7 +14,7 @@ export const MAX_BODY_BYTES = 16 * 1024;
 // The runner parses job bodies strictly, so any change to a runner route's
 // request or response shape bumps this with RUNNER_PROTOCOL_VERSION in
 // hal/netplay_service/queue_client.py.
-export const RUNNER_PROTOCOL_VERSION = 1;
+export const RUNNER_PROTOCOL_VERSION = 2;
 
 export type JobStatus =
   | "queued"

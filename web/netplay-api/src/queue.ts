@@ -24,10 +24,11 @@ export interface ApiResult {
 const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 
 // Every table is created with CREATE TABLE IF NOT EXISTS, which keeps an older
-// table unchanged. Bump this with any change to a table, and migrate or wipe the
-// store before deploying: a mismatched store refuses every request.
-export const STORE_SCHEMA_VERSION = 2;
-const STORE_TABLES = ["games", "jobs", "sessions", "accounts", "stream", "events", "policy", "settings"];
+// table unchanged. Bump this with any table change and use a fresh instance.
+// A mismatched store refuses every request; there are no migrations.
+export const STORE_SCHEMA_VERSION = 3;
+export const QUEUE_INSTANCE = `global-v${STORE_SCHEMA_VERSION}`;
+const STORE_TABLES = ["games", "jobs", "pairings", "sessions", "accounts", "stream", "events", "policy", "settings"];
 
 const QUEUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS policy (
@@ -310,7 +311,7 @@ export class Queue extends DurableObject<Env> {
         const started = this.sessions.start(id, input, this.policy());
         if (!repeated) {
           this.events.log("session_started", { session: id, host: input.host, slots: input.slots, git_sha: input.git_sha });
-          for (const grant of started.accounts) {
+          for (const grant of started.accounts.slice(0, 1)) {
             this.events.log("account_leased", { session: id, slot: grant.slot, connect_code: grant.connect_code });
           }
         }
@@ -344,12 +345,35 @@ export class Queue extends DurableObject<Env> {
         const held = this.jobs.heldLease(this.sessions.jobWorker(sessionId, slot));
         if (held !== null) return held;
         const worker = this.sessions.claimWorker(sessionId, slot, this.policy());
+        if (this.sessions.pairing(sessionId) !== null) return null;
         if (this.sessions.deferToStreamSlot(sessionId, slot)) return null;
         const job = this.jobs.claimNext(worker);
-        if (job !== null) this.events.log("job_claimed", { job: job.id, session: sessionId, slot });
+        if (job !== null) {
+          this.sessions.startPairing(sessionId, slot, job.id, job.attempt);
+          this.events.log("job_claimed", { job: job.id, session: sessionId, slot });
+        }
         return job;
       });
     });
+  }
+
+  async pairing(sessionId: string): Promise<ApiResult> {
+    return this.run(() => {
+      this.sessions.live(sessionId);
+      return { pairing: this.sessions.pairing(sessionId) };
+    }, { alarm: false });
+  }
+
+  async finishPairing(sessionId: string, raw: unknown): Promise<ApiResult> {
+    return this.run(() => this.tx(() => {
+      const value = fields(raw, ["slot", "job_id", "attempt"], ["slot", "job_id", "attempt"]);
+      const slot = int(value.slot, "slot");
+      this.sessions.recordingWorker(sessionId, slot);
+      const attempt = int(value.attempt, "attempt");
+      if (attempt < 1) throw new HttpError(422, "attempt must be positive");
+      this.sessions.finishPairing(sessionId, slot, str(value.job_id, "job_id"), attempt);
+      return {};
+    }), { alarm: false });
   }
 
   async drain(sessionId: string): Promise<ApiResult> {
@@ -403,6 +427,7 @@ export class Queue extends DurableObject<Env> {
           }
           case "playing": {
             const result = this.jobs.markPlaying(jobId, worker);
+            this.sessions.finishPairing(sessionId, slot, jobId, result.attempt);
             log("job_playing");
             return result;
           }

@@ -73,7 +73,7 @@ from hal.netplay_service.assets import AssetCache
 from hal.netplay_service.assets import LocalSource
 from hal.netplay_service.assets import PinnedAsset
 from hal.netplay_service.assets import R2Source
-from hal.netplay_service.domain import IDLE_TIMEOUT_SECONDS
+from hal.netplay_service.domain import CONNECT_TIMEOUT_SECONDS
 from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
@@ -260,10 +260,7 @@ class RunnerConfig:
             raise ValueError("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
 
 
-_NETPLAY_TIMINGS = (
-    FrameTiming(2, 1, 3, 4, 8),
-    FrameTiming(3, 1, 4, 4, 8),
-)
+_NETPLAY_TIMINGS = (FrameTiming(2, 2, 4, 4, 8),)
 _ENGINE_RECOVERY_TIMEOUT_SECONDS = 120.0
 _ENGINE_PROGRESS_TIMEOUT_SECONDS = 1.0
 _SLOT_RESET_TIMEOUT_SECONDS = 1.0
@@ -343,8 +340,8 @@ def _prepare_netplay_engine(
     connections: dict[int, Connection],
 ) -> _PreparedNetplayEngine:
     artifact = read_action_sequence_artifact(config.policy)
-    if artifact.capability_version < 2 or not {2, 3}.issubset(artifact.spec.supported_transport_delays):
-        raise ValueError("netplay delay-2 and delay-3 profiles require a qualified 059 capability-v2 bundle")
+    if artifact.capability_version < 2 or 2 not in artifact.spec.supported_transport_delays:
+        raise ValueError("the netplay delay-2 profile requires a qualified 059 capability-v2 bundle")
     inference_dtype = torch.bfloat16 if torch.device(config.device).type == "cuda" else torch.float32
     registry = ModelRegistry()
     model = registry.register_artifact(artifact, device=config.device, inference_dtype=inference_dtype)
@@ -737,8 +734,8 @@ def _bot_connect_code(path: Path) -> str:
 
 def _bot_connect_codes(paths: Sequence[Path]) -> tuple[str, ...]:
     codes = tuple(_bot_connect_code(path) for path in paths)
-    if len(set(codes)) != len(codes):
-        raise ValueError("runner Slippi accounts must have distinct connect codes")
+    if len(set(codes)) != 1:
+        raise ValueError("runner slots must share one Slippi account")
     return codes
 
 
@@ -1208,10 +1205,10 @@ def _run_reservation(
         job.game_count + 1,
     )
 
-    store.mark_connecting(job.id, config.worker_id, config.bot_connect_code)
-    health.configure_schedule(timing)
-    health.connecting(job.choices.online_delay)
     try:
+        store.mark_connecting(job.id, config.worker_id, config.bot_connect_code)
+        health.configure_schedule(timing)
+        health.connecting(job.choices.online_delay)
         with (
             _LivePolicySettings(store, job, config.worker_id) as settings,
             NetplaySession(
@@ -1222,7 +1219,7 @@ def _run_reservation(
                 replay_dir=replay_dir,
                 slippi_port=config.slippi_port,
                 step_timeout_seconds=FRAME_STALL_SECONDS,
-                connect_timeout_seconds=IDLE_TIMEOUT_SECONDS,
+                connect_timeout_seconds=CONNECT_TIMEOUT_SECONDS,
                 connect_abandoned=settings.released.is_set,
                 realtime=True,
                 graphics_backend=config.graphics_backend,
@@ -1477,6 +1474,9 @@ def _handle_reservation(
         logger.exception("reservation {} failed: {}", job.id, type(error).__name__)
         with suppress(InvalidTransitionError):
             store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
+    finally:
+        # Cancellation and failed pairing retain the gate until Dolphin has closed.
+        store.finish_pairing(job.id, config.worker_id, job.attempt)
 
 
 def _slot_process(
@@ -1583,6 +1583,11 @@ def _replace_failed_slot(
         failed.exitcode,
         config.worker_id,
     )
+    with closing(RunnerClient(config.queue_endpoint)) as client:
+        pairing = client.pairing(config.session_id)
+        if pairing is not None and pairing.slot == config.slot:
+            # The worker is dead and PR_SET_PDEATHSIG closes its Dolphin.
+            client.finish_pairing(config.session_id, pairing)
     config.status_path.unlink(missing_ok=True)
     if config.stream_output:
         assert config.stream_state_path is not None
@@ -1788,9 +1793,9 @@ def _run_generation(
             len(ready.budgets) != len(_NETPLAY_TIMINGS)
             or tuple(check.timings[0] for check in ready.budgets) != _NETPLAY_TIMINGS
         ):
-            raise RuntimeError("inference process did not qualify both declared netplay profiles")
+            raise RuntimeError("inference process did not qualify the declared netplay profile")
         _write_budget_record(config, ready, policy_sha256)
-        runtime = RuntimeConfig(1, (2, 3), replan_interval_frames=4)
+        runtime = RuntimeConfig(1, (2,), replan_interval_frames=4)
         status_started_at = time.time()
         _write_status(
             config.status_path,
@@ -1936,6 +1941,8 @@ def _run_generation(
                     restart_started_at,
                 )
             if slot_processes and all(process is None for process in slot_processes.values()):
+                if draining.is_set():
+                    return
                 raise RuntimeError("all netplay slots are unavailable")
             if time.monotonic() >= next_status:
                 status = _write_status(
@@ -2047,6 +2054,11 @@ def run(
                 except _EngineLost as error:
                     if attempt == 1 or shutdown.requested:
                         raise RuntimeError("netplay inference recovery failed; service remains unavailable") from error
+                    if session_client is not None:
+                        pairing = session_client.pairing(config.session_id)
+                        if pairing is not None:
+                            # Generation cleanup has closed every Dolphin before a new search.
+                            session_client.finish_pairing(config.session_id, pairing)
                     recovery_deadline = time.monotonic() + _ENGINE_RECOVERY_TIMEOUT_SECONDS
                     logger.error("netplay inference lost: {}; preparing one replacement process", error)
     finally:
@@ -2056,6 +2068,8 @@ def run(
 
 
 def _download_session_assets(started: StartedSession, *, local_assets: Path | None) -> tuple[Path, tuple[Path, ...]]:
+    if started.policy.online_delays != (2,):
+        raise ValueError("netplay runner requires a delay-2-only policy")
     remote = None
     if local_assets is None:
         remote = r2.client()

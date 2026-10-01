@@ -1,4 +1,4 @@
-import { HttpError, IDLE_TIMEOUT_SECONDS, MAX_GAMES, pyRepr } from "./domain";
+import { HttpError, CONNECT_TIMEOUT_SECONDS, IDLE_TIMEOUT_SECONDS, MAX_GAMES, pyRepr } from "./domain";
 
 export interface Choice {
   value: string;
@@ -118,7 +118,7 @@ export function optionsBody(policy: PolicyConfig) {
     temperature_range: policy.temperature_range,
     default_temperature: policy.default_temperature,
     max_games: MAX_GAMES,
-    no_show_seconds: IDLE_TIMEOUT_SECONDS,
+    no_show_seconds: CONNECT_TIMEOUT_SECONDS,
     rematch_seconds: IDLE_TIMEOUT_SECONDS,
   };
 }

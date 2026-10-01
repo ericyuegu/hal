@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { CREATE, POLICY, START as T0, call, publish, report, resetQueue, runAlarm, seedAccounts, setClock } from "./helpers";
 
 const SESSION = "retry-session-0001";
-const START = { protocol_version: 1, session_id: SESSION, host: "box", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 2, stream: false };
+const START = { protocol_version: 2, session_id: SESSION, host: "box", bundle_sha256: POLICY.bundle_sha256, git_sha: "g", slots: 2, stream: false };
 
 beforeEach(async () => {
   await resetQueue();
@@ -22,7 +22,7 @@ describe("retried runner calls", () => {
     expect(second).toMatchObject({ status: 201, body: first.body });
     const status = await call("GET", "/v1/admin/status", { admin: true });
     expect(status.body.sessions).toHaveLength(1);
-    expect(status.body.accounts.filter((row: { session_id: string | null }) => row.session_id !== null)).toHaveLength(2);
+    expect(status.body.accounts.filter((row: { session_id: string | null }) => row.session_id !== null)).toHaveLength(1);
   });
 
   it("refuses a reused session id with other settings, after an end, or in a bad format", async () => {
@@ -37,11 +37,11 @@ describe("retried runner calls", () => {
   });
 
   it("refuses another runner protocol before creating or repeating a session", async () => {
-    const refused = { status: 409, body: { detail: "runner protocol 2 is not the Worker's 1" } };
-    expect(await start({ ...START, protocol_version: 2 })).toMatchObject(refused);
+    const refused = { status: 409, body: { detail: "runner protocol 1 is not the Worker's 2" } };
+    expect(await start({ ...START, protocol_version: 1 })).toMatchObject(refused);
     expect((await call("GET", "/v1/admin/status", { admin: true })).body.sessions).toHaveLength(0);
     await start();
-    expect(await start({ ...START, protocol_version: 2 })).toMatchObject(refused);
+    expect(await start({ ...START, protocol_version: 1 })).toMatchObject(refused);
     const { protocol_version: _, ...unversioned } = START;
     expect((await start(unversioned)).status).toBe(422);
   });
@@ -59,7 +59,7 @@ describe("retried runner calls", () => {
     const events = await call("GET", `/v1/admin/events?job=${first.body.id}`, { admin: true });
     expect(events.body.events.filter((event: { kind: string }) => event.kind === "job_claimed")).toHaveLength(1);
     const other = await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } });
-    expect(other.body.player_code).toBe("OTHER#1");
+    expect(other.status).toBe(204);
   });
 
   it("returns the slot's leased job when a claim is repeated after a drain", async () => {
@@ -168,6 +168,12 @@ describe("retried runner calls", () => {
     });
 
     await call("POST", "/v1/jobs", { body: { ...CREATE, player_code: "OTHER#1" } });
+    expect((await call("POST", `/v1/runner/sessions/${SESSION}/claim`, {
+      runner: true, body: { slot: 1 },
+    })).status).toBe(204);
+    await call("POST", `/v1/runner/jobs/${first.body.id}/playing`, {
+      runner: { session: SESSION, slot: 0 },
+    });
     expect(
       await call("POST", `/v1/runner/sessions/${SESSION}/claim`, { runner: true, body: { slot: 1 } }),
     ).toMatchObject({ status: 200, body: { player_code: "OTHER#1" } });

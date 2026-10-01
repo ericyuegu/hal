@@ -245,8 +245,8 @@ match IDs, game numbers, and placements with peppi.
 Completed games upload to bucket `hal` under:
 
 ```text
-netplay/v1/replays/YYYY/MM/DD/HAL#647/ranked-<set-and-tiebreaker-hash>/game-NN.slp
-netplay/v1/replays/YYYY/MM/DD/HAL#647/ranked-<set-and-tiebreaker-hash>/game-NN.json
+netplay/v1/replays/YYYY/MM/DD/HAL#9000/ranked-<set-and-tiebreaker-hash>/game-NN.slp
+netplay/v1/replays/YYYY/MM/DD/HAL#9000/ranked-<set-and-tiebreaker-hash>/game-NN.json
 ```
 
 List this run's objects with:

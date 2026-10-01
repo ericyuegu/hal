@@ -40,6 +40,7 @@ from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
 from hal.netplay_service.health import write_slot_status
+from hal.netplay_service.queue_client import Pairing
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import SessionState
 from hal.netplay_service.queue_client import StreamGrant
@@ -231,19 +232,19 @@ def test_bot_account_code_is_read_without_fallback(tmp_path: Path) -> None:
         runner._bot_connect_code(account)
 
 
-def test_runner_rejects_duplicate_slippi_accounts(tmp_path: Path) -> None:
+def test_runner_shares_one_slippi_account(tmp_path: Path) -> None:
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"
     first.write_text('{"connectCode":"HAL#1"}')
     second.write_text('{"connectCode":"HAL#1"}')
 
-    with pytest.raises(ValueError, match="distinct connect codes"):
+    assert runner._bot_connect_codes((first, second)) == ("HAL#1", "HAL#1")
+    second.write_text('{"connectCode":"HAL#2"}')
+    with pytest.raises(ValueError, match="share one Slippi account"):
         runner._bot_connect_codes((first, second))
 
 
-def test_gpu_preparation_shares_one_model_across_distinct_netplay_profiles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_preparation_qualifies_the_delay_two_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from multiprocessing import Pipe
 
     model = torch.nn.Linear(1, 1)
@@ -282,7 +283,9 @@ def test_gpu_preparation_shares_one_model_across_distinct_netplay_profiles(
     qualified: list[FrameTiming] = []
 
     def qualify(_policy: object, runtime: RuntimeConfig, _wait: float, *, shape: tuple[int, int]):
-        timing = FrameTiming(runtime.require_single_delay(), 1, shape[1], 4, shape[0])
+        timing = FrameTiming(
+            runtime.require_single_delay(), shape[1] - runtime.require_single_delay(), shape[1], 4, shape[0]
+        )
         qualified.append(timing)
         return RealtimeBudgetCheck((timing,), (LatencyMeasurement(shape[0], shape[1], (0.001,)),))
 
@@ -303,14 +306,14 @@ def test_gpu_preparation_shares_one_model_across_distinct_netplay_profiles(
         parent.close()
         child.close()
     assert len(built) == 1
-    assert len(policies) == 2
-    assert len(engine_profiles) == 2
+    assert len(policies) == 1
+    assert len(engine_profiles) == 1
     assert tuple(qualified) == runner._NETPLAY_TIMINGS
-    assert {profile.fixed_prefix_frames for profile in prepared.engine.profiles} == {3, 4}
+    assert {profile.fixed_prefix_frames for profile in prepared.engine.profiles} == {4}
     assert prepared.ready.profiles == tuple(prepared.engine.profiles)
     assert prepared.ready.checkpoint_sha256 == "a" * 64
     assert prepared.ready.context_frames == 256
-    assert len(prepared.capture_counters) == 2
+    assert len(prepared.capture_counters) == 1
 
 
 @pytest.mark.parametrize("serving_fails", [False, True])
@@ -460,6 +463,9 @@ def test_standby_reset_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
 def test_failed_slot_restarts_once_with_the_same_worker_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from multiprocessing import Pipe
 
+    client = Mock()
+    client.pairing.return_value = None
+    monkeypatch.setattr(runner, "RunnerClient", Mock(return_value=client))
     old = Mock(pid=123, exitcode=1)
     old.is_alive.return_value = False
     replacement = Mock(pid=124, exitcode=None)
@@ -671,7 +677,7 @@ def _run_cli(
     slots: int = 1,
 ) -> tuple[runner.RunnerConfig, Mock]:
     policy = tmp_path / "policy.halpolicy"
-    accounts = tuple(tmp_path / f"account-{slot}.json" for slot in range(slots))
+    accounts = (tmp_path / "account.json",) * slots
     started = SimpleNamespace(policy=SimpleNamespace(bundle_sha256="a" * 64))
     client = Mock()
     client.active_policy.return_value = started.policy
@@ -701,10 +707,11 @@ def _run_cli(
     return captured[0], client
 
 
-def test_runner_cli_allocates_sixteen_distinct_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runner_cli_allocates_sixteen_slots_on_one_account(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, client = _run_cli(tmp_path, monkeypatch, slots=16)
     assert client.start_session.call_args.kwargs["slots"] == 16
-    assert len(set(config.user_jsons)) == 16
+    assert len(config.user_jsons) == 16
+    assert len(set(config.user_jsons)) == 1
     assert config.slippi_ports == tuple(range(51441, 51457))
 
 
@@ -1435,7 +1442,7 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
 def test_runner_cli_accepts_bounded_coalescing_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = _run_cli(tmp_path, monkeypatch, "--batch-wait-ms", "0.25")
     assert config.batch_wait_seconds == 0.00025
-    assert (FrameTiming(2, 1, 3, 4, 8), FrameTiming(3, 1, 4, 4, 8)) == runner._NETPLAY_TIMINGS
+    assert (FrameTiming(2, 2, 4, 4, 8),) == runner._NETPLAY_TIMINGS
 
 
 @pytest.mark.parametrize("after_wait", ["stop", "drain", "job"])
@@ -1482,3 +1489,142 @@ def test_idle_slot_limits_claims_and_observes_shutdown(
     assert handle.call_count == (1 if after_wait == "job" else 0)
     store.close.assert_called_once()
     connection.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("error", [None, ValueError("invalid match")])
+def test_pairing_release_follows_dolphin_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception | None
+) -> None:
+    events: list[str] = []
+
+    def reservation(*_args: object) -> None:
+        try:
+            if error is not None:
+                raise error
+        finally:
+            events.append("Dolphin closed")
+
+    store = Mock()
+    store.finish_pairing.side_effect = lambda *_args: events.append("pairing released")
+    monkeypatch.setattr(runner, "_run_reservation", reservation)
+    job = _job()
+    runner._handle_reservation(
+        _slot_config(tmp_path),
+        store,
+        Mock(),
+        RuntimeConfig(1, (2,)),
+        job,
+        threading.Event(),
+        Mock(),
+        runner._NETPLAY_TIMINGS[0],
+    )
+    assert events == ["Dolphin closed", "pairing released"]
+    store.finish_pairing.assert_called_once_with(job.id, f"{_SESSION_ID}/slot-0", job.attempt)
+
+
+@pytest.mark.parametrize("owner", [0, 1, None])
+def test_dead_slot_releases_only_its_pairing_after_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: int | None
+) -> None:
+    failed = Mock(exitcode=1)
+    client = Mock()
+    pairing = None if owner is None else Pairing(owner, "job", 2)
+    client.pairing.return_value = pairing
+    client.pairing.side_effect = lambda _session: (failed.join.assert_called_once_with(timeout=0), pairing)[1]
+    monkeypatch.setattr(runner, "RunnerClient", lambda _endpoint: client)
+    assert (
+        runner._replace_failed_slot(
+            Mock(),
+            failed,
+            _slot_config(tmp_path),
+            Mock(),
+            RuntimeConfig(1, (2,)),
+            Mock(),
+            threading.Event(),
+            threading.Event(),
+            restart_allowed=False,
+            capacity=8,
+            processes=[failed],
+        )
+        is None
+    )
+    if owner == 0:
+        client.finish_pairing.assert_called_once_with(_SESSION_ID, pairing)
+    else:
+        client.finish_pairing.assert_not_called()
+
+
+def test_engine_recovery_releases_pairing_after_generation_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    pairing = Pairing(0, "job", 1)
+
+    def generation(*_args: object, **_kwargs: object) -> None:
+        if not events:
+            events.append("generation closed")
+            raise runner._EngineLost("lost GPU")
+        events.append("replacement started")
+
+    client = Mock()
+    client.pairing.return_value = pairing
+    client.finish_pairing.side_effect = lambda *_args: events.append("pairing released")
+    monkeypatch.setattr(runner, "_run_generation", generation)
+    monkeypatch.setattr(runner, "_bot_connect_codes", lambda _paths: ("BOT#1",))
+    monkeypatch.setattr(runner, "_sha256", lambda _path: "b" * 64)
+    runner.run(_runner_config(tmp_path), session_client=client)
+    assert events == ["generation closed", "pairing released", "replacement started"]
+    client.finish_pairing.assert_called_once_with(_SESSION_ID, pairing)
+
+
+def test_last_slot_exit_during_drain_is_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gpu = Mock()
+    slot = Mock()
+    # The last worker exits between the top-of-loop check and dead-slot cleanup.
+    slot.is_alive.side_effect = [True, False]
+    context = SimpleNamespace(Event=threading.Event, Process=Mock(return_value=gpu))
+    receive, send = Mock(), Mock()
+    receive.poll.return_value = False
+    parents, children = {0: Mock(), 1: Mock()}, {0: Mock(), 1: Mock()}
+    timing = runner._NETPLAY_TIMINGS[0]
+    ready = runner._EngineReady(
+        PolicySpec("059", "o59-history-decoder", (), (0, 2, 3)),
+        256,
+        "a" * 64,
+        2,
+        (RealtimeBudgetCheck((timing,), (LatencyMeasurement(8, 4, (0.02,)),)),),
+        (7,),
+        "test GPU",
+        (),
+    )
+    monkeypatch.setattr(runner.mp, "get_context", lambda _method: context)
+    monkeypatch.setattr(runner, "_open_generation_pipes", lambda *_args: (receive, send, parents, children))
+    monkeypatch.setattr(runner, "_await_engine_ready", lambda *_args, **_kwargs: ready)
+    monkeypatch.setattr(runner, "_write_budget_record", Mock())
+    monkeypatch.setattr(runner, "_write_status", Mock())
+    monkeypatch.setattr(runner, "_slot_process", Mock(return_value=slot))
+    replace_slot = Mock(return_value=None)
+    monkeypatch.setattr(runner, "_replace_failed_slot", replace_slot)
+    terminate = Mock()
+    monkeypatch.setattr(runner, "_terminate_processes", terminate)
+    shutdown = runner._ShutdownFlag()
+    shutdown(signal.SIGTERM, None)
+    client = Mock()
+    runner._run_generation(
+        _runner_config(tmp_path),
+        ("BOT#1",),
+        "b" * 64,
+        shutdown,
+        recovery_deadline=None,
+        session_client=client,
+    )
+    client.drain.assert_called_once_with(_SESSION_ID)
+    assert replace_slot.call_args.kwargs["restart_allowed"] is False
+    terminate.assert_called_once()
+
+
+def test_runner_rejects_unqualified_published_delay_before_downloading() -> None:
+    started = Mock()
+    started.policy.online_delays = (2, 3)
+    with pytest.raises(ValueError, match="delay-2-only"):
+        runner._download_session_assets(started, local_assets=None)

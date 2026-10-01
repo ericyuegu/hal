@@ -39,10 +39,13 @@ def _account(path: Path, code: str) -> Path:
     return path
 
 
-def test_policy_config_requires_both_netplay_delays() -> None:
+def test_policy_config_publishes_only_the_qualified_netplay_delay() -> None:
     config = policy_config("a" * 64, "b" * 64, 2, (0, 2, 3))
     assert config.bundle_r2_key == f"netplay/policies/{'a' * 64}.halpolicy"
-    assert config.online_delays == (2, 3)
+    assert config.online_delays == (2,)
+    assert policy_config("a" * 64, "b" * 64, 2, (2,)).online_delays == (2,)
+    with pytest.raises(ValueError, match="supports delay 2"):
+        policy_config("a" * 64, "b" * 64, 2, (3,))
     assert config.desired_return_range == (-20.0, 140.0)
     assert not config.masked_identity
     assert config.imitations[0].value == "MASKED"

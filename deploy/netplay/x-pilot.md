@@ -8,7 +8,8 @@ return 120. Their verified Slippi replays record HAL Fox against `gm-v2-falco`
 and `gm-v2-marth`. HAL lost both. The run continues through the supported schedule.
 See the local result files for current progress; this document is a checkpoint.
 
-The G4 runner is ready at `HAL#647`. Its stream is
+HAL's current connect code is `HAL#9000` (changed October 1).
+Earlier games in this report used `HAL#647`. Its stream is
 [hal_20xx](https://www.twitch.tv/hal_20xx). The opponent channel is
 [x_pilot](https://www.twitch.tv/x_pilot).
 
@@ -100,8 +101,8 @@ fixed. The G4 uses the same source bind mount as the prior OBS deployment.
 6. Create one HAL reservation through `POST /v1/jobs`. Set `player_code` to the
    confirmed x_pilot code and `character` to this row's HAL character. Use the
    fixed settings above. Save the reservation token in a mode-600 local file.
-   Confirm that the reservation reaches `connecting` and reports `HAL#647`.
-7. Send `!play HAL#647` if the bot has no active session for this Twitch user.
+   Confirm that the reservation reaches `connecting` and reports `HAL#9000`.
+7. Send `!play HAL#9000` if the bot has no active session for this Twitch user.
    Confirm its reply and the HAL transition to `playing`. A full remote server,
    failed connection, or rejected agent is a failed attempt, not a played row.
 8. Wait for the game to finish and for its replay upload. Record the job ID,

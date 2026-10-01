@@ -92,11 +92,12 @@ uses direct peer traffic; runner control traffic is outbound HTTPS and WSS.
 
 ### Storage
 
-All queue state lives in one Durable Object instance, addressed by a fixed name.
+All queue state lives in one Durable Object instance, addressed by the schema-specific name `global-v3`.
+Schema changes use a fresh instance; old state is retained without migration.
 Requests to it run one at a time, and each request runs in one storage
 transaction.
 
-Tables (storage schema version 2; no migrations):
+Tables (storage schema version 3; no migrations):
 
 - `jobs`, `games`: ported from the removed Python `queue.py` v3 schema, with
   session ownership and the fields required for idempotent runner requests.
@@ -106,7 +107,9 @@ Tables (storage schema version 2; no migrations):
 - `stream`: exactly one row: `session_id` (null when free), `slot` (always 0),
   `granted_at`. See "Streaming".
 - `accounts`: `connect_code`, `r2_key`, `sha256`, `session_id` (null when free),
-  `slot`, `leased_at`.
+  `leased_at`. One account is leased to each session and shared by all its slots.
+- `pairings`: `session_id` (primary key), `slot`, `job_id`, `attempt`.
+  At most one slot per session can search for a new opponent.
 - `policy`: exactly one row. It holds the published policy config (see
   "Publishing a policy").
 - `events`: `at`, `kind`, `job_id`, `session_id`, `detail` (JSON). Rows older
@@ -160,9 +163,11 @@ has its own token.
 
 | Route | Purpose | Replaces |
 | --- | --- | --- |
-| `POST /v1/runner/sessions` | Start a session: `{session_id, protocol_version, host, bundle_sha256, git_sha, slots, stream}`, with a runner-chosen ID. Returns the session ID, the policy config, and one leased account per slot. A repeat with identical fields returns the same session. `409` if the runner protocol version differs from the Worker's, if the bundle is not the active policy, if too few accounts are free, or if the ID exists with other fields. | runner startup and per-box account config |
+| `POST /v1/runner/sessions` | Start a session: `{session_id, protocol_version, host, bundle_sha256, git_sha, slots, stream}`, with a runner-chosen ID. Returns the session ID, the policy config, and one shared leased account assigned to every slot. A repeat with identical fields returns the same session. `409` if the runner protocol version differs from the Worker's, if the bundle is not the active policy, if no account is free, or if the ID exists with other fields. | runner startup and per-box account config |
 | `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. The response is `{draining, stream}`: `stream` is `null` unless this session holds the stream lease, and then it carries the stream key. | status files read by the API |
-| `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Returns the slot's `leased` job if it holds one, so a repeat cannot take a second job. Refused while the session is draining, or while the slot holds a job past `leased`. Applies the stream-slot preference (see "Streaming"). | `claim_next` |
+| `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Returns the slot's `leased` job if it holds one, so a repeat cannot take a second job. Refused while the session is draining, or while the slot holds a job past `leased`. Applies the session pairing gate and stream-slot preference (see "Streaming"). | `claim_next` |
+| `GET /v1/runner/sessions/{sid}/pairing` | Return the pending `{slot, job_id, attempt}`, or null. | supervisor crash recovery |
+| `POST /v1/runner/sessions/{sid}/pairing-finished` | Release only the matching `{slot, job_id, attempt}` after Dolphin cleanup. A repeat is safe, including after session end. | slot cleanup |
 | `POST /v1/runner/sessions/{sid}/drain` | Stop claiming; keep current sets. | local stop flag |
 | `DELETE /v1/runner/sessions/{sid}` | End the session: fail its remaining leases with the current generation-abort codes and free its accounts. A repeat returns the first result. | `fail_worker_generation` |
 | `POST /v1/runner/jobs/{id}/heartbeat` | Extend the job lease. | `heartbeat` |
@@ -202,7 +207,8 @@ The TypeScript store is a port of `queue.py`, not a redesign. It keeps:
 - FIFO order with a retried job placed at the front; at most two attempts
 - rematch: character, imitation, and stage may change; delay may not
 - `cancel_after_game`
-- `IDLE_TIMEOUT_SECONDS` (600) for both connect and rematch deadlines
+- `CONNECT_TIMEOUT_SECONDS` (60) for initial connection, and
+  `IDLE_TIMEOUT_SECONDS` (600) for rematches
 - `service_failure_bot_forfeit`, `service_generation_aborted`, `lease_expired`
   and every other error code
 - idempotent replay recording
@@ -222,8 +228,16 @@ Deliberate changes, each with its own test:
    also safe to repeat (see "Runner routes"), because the client retries every
    request.
 4. **Policy and account checks.** Sessions must match the active bundle, and
-   each slot holds exactly one leased account.
+   each session leases one account shared by its slots.
 5. **Rate limit, queue cap, and pause** (`429`, `503`).
+6. **Shared account pairing.** Claims acquire a persistent per-session gate.
+   Entering `playing` releases it. Cancellation, no-show, failure, and lease
+   expiry keep it until the runner has closed Dolphin and acknowledged cleanup.
+   The acknowledgement includes the attempt, so a delayed retry cannot release
+   a newer pairing. A dead slot is cleaned up after the existing lease grace;
+   full engine recovery releases the gate after all Dolphins have closed.
+   Session end or 30-second silence also releases it. Connected games and
+   their rematches run concurrently. Runner protocol version is 2.
 
 ## Runner changes
 
@@ -246,9 +260,19 @@ terminal state after a reconnect.
 
 ### Startup
 
-A runner accepts 1–16 slots. Each slot needs a distinct Slippi account.
-Startup qualifies both delay profiles at the requested capacity before any
-slot accepts a match.
+A runner accepts 1–16 slots and shares one Slippi account across them.
+The approved G4 deployment uses eight slots and `HAL#9000`. New connections
+are serialized: simultaneous searches self-paired in the October 1 test.
+See `deploy/netplay/parallel-pairing.md` for evidence.
+
+Startup qualifies delay 2 at the requested capacity before any slot accepts
+a match. The schedule uses a two-frame inference allowance, prefix 4, replan
+4, and horizon 8. Qualification must pass a 33.333 ms p99 deadline. Policy
+publication advertises only delay 2; the runner rejects other published delays.
+There is one shared model. Predictions use request-driven batching with a
+0.5 ms collection window and CUDA graph buckets through the configured
+capacity. Dolphin starts on a reservation, remains for rematches, and closes
+after the reservation.
 
 `hal-netplay-runner --slots N` needs only:
 
@@ -265,7 +289,7 @@ Startup order:
    accounts.
 3. Start the status reporter immediately. It keeps the session alive during
    downloads and qualification.
-4. Download the policy bundle and each leased account's `user.json` from R2,
+4. Download the policy bundle and the shared account's `user.json` from R2,
    and verify their SHA-256.
 5. Load the bundle and run the existing `check_realtime_budget` qualification.
    If it fails, end the session and exit non-zero with the measured timings.

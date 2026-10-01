@@ -81,6 +81,10 @@ function runnerRequest(op: string, session: string, slot: number, job: string, a
   switch (op) {
     case "claim":
       return call("POST", `/v1/runner/sessions/${session}/claim`, { runner: true, body: { slot } });
+    case "pairing-finished":
+      return call("POST", `/v1/runner/sessions/${session}/pairing-finished`, {
+        runner: true, body: { slot, job_id: job, attempt: args.attempt },
+      });
     case "end-session":
       return call("DELETE", `/v1/runner/sessions/${session}`, { runner: true });
     case "get":
@@ -108,7 +112,8 @@ beforeEach(async () => {
   await resetQueue();
 });
 
-describe("golden transcripts from the Python service", () => {
+// Adapted from the Python traces for the 60-second deadline and explicit pairing cleanup.
+describe("queue lifecycle transcripts", () => {
   it("covers every recorded scenario", () => {
     expect(transcripts.length).toBe(18);
   });
@@ -123,7 +128,7 @@ describe("golden transcripts from the Python service", () => {
       for (const [alias, slots] of needed) {
         const started = await call("POST", "/v1/runner/sessions", {
           runner: true,
-          body: { protocol_version: 1, session_id: crypto.randomUUID(), host: alias, bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots, stream: false },
+          body: { protocol_version: 2, session_id: crypto.randomUUID(), host: alias, bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots, stream: false },
         });
         sessions.set(alias, started.body.session_id);
         await report(started.body.session_id, slots);
@@ -131,7 +136,7 @@ describe("golden transcripts from the Python service", () => {
       if (needed.size === 0) {
         const started = await call("POST", "/v1/runner/sessions", {
           runner: true,
-          body: { protocol_version: 1, session_id: crypto.randomUUID(), host: "capacity", bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots: 1, stream: false },
+          body: { protocol_version: 2, session_id: crypto.randomUUID(), host: "capacity", bundle_sha256: POLICY.bundle_sha256, git_sha: "transcript", slots: 1, stream: false },
         });
         sessions.set("capacity", started.body.session_id);
         await report(started.body.session_id, 1);

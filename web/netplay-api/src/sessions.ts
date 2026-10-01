@@ -23,8 +23,13 @@ CREATE TABLE IF NOT EXISTS accounts (
   r2_key TEXT NOT NULL,
   sha256 TEXT NOT NULL,
   session_id TEXT,
-  slot INTEGER,
   leased_at REAL
+);
+CREATE TABLE IF NOT EXISTS pairings (
+  session_id TEXT PRIMARY KEY,
+  slot INTEGER NOT NULL,
+  job_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stream (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -166,15 +171,7 @@ export class SessionStore {
         existing.slots === input.slots &&
         existing.wants_stream === (input.stream ? 1 : 0);
       if (!same) throw new HttpError(409, `session ${id} exists with different settings`);
-      const accounts = this.rows(
-        "SELECT slot, connect_code, r2_key, sha256 FROM accounts WHERE session_id = ? ORDER BY slot",
-        id,
-      ).map((row) => ({
-        slot: row.slot as number,
-        connect_code: row.connect_code as string,
-        r2_key: row.r2_key as string,
-        sha256: row.sha256 as string,
-      }));
+      const accounts = this.accountGrants(id, input.slots);
       return { session_id: id, accounts };
     }
     if (policy === null) throw new HttpError(503, "no policy has been published");
@@ -182,8 +179,8 @@ export class SessionStore {
       throw new HttpError(409, `bundle ${input.bundle_sha256} is not the active policy ${policy.bundle_sha256}`);
     }
     const free = this.rows("SELECT * FROM accounts WHERE session_id IS NULL ORDER BY connect_code");
-    if (free.length < input.slots) {
-      throw new HttpError(409, `${free.length} bot accounts are free; ${input.slots} are required`);
+    if (free.length === 0) {
+      throw new HttpError(409, "no bot accounts are free");
     }
     const now = this.now();
     this.sql.exec(
@@ -198,22 +195,41 @@ export class SessionStore {
       now,
       now,
     );
-    const accounts = free.slice(0, input.slots).map((row, slot) => {
-      this.sql.exec(
-        "UPDATE accounts SET session_id = ?, slot = ?, leased_at = ? WHERE connect_code = ?",
-        id,
-        slot,
-        now,
-        row.connect_code,
-      );
-      return {
-        slot,
-        connect_code: row.connect_code as string,
-        r2_key: row.r2_key as string,
-        sha256: row.sha256 as string,
-      };
-    });
-    return { session_id: id, accounts };
+    this.sql.exec(
+      "UPDATE accounts SET session_id = ?, leased_at = ? WHERE connect_code = ?",
+      id, now, free[0]!.connect_code,
+    );
+    return { session_id: id, accounts: this.accountGrants(id, input.slots) };
+  }
+
+  private accountGrants(id: string, slots: number): AccountGrant[] {
+    const account = this.rows("SELECT connect_code, r2_key, sha256 FROM accounts WHERE session_id = ?", id)[0];
+    if (account === undefined) throw new HttpError(409, "session has no leased account");
+    return Array.from({ length: slots }, (_, slot) => ({
+      slot,
+      connect_code: account.connect_code as string,
+      r2_key: account.r2_key as string,
+      sha256: account.sha256 as string,
+    }));
+  }
+
+  pairing(id: string): { slot: number; job_id: string; attempt: number } | null {
+    const row = this.rows("SELECT slot, job_id, attempt FROM pairings WHERE session_id = ?", id)[0];
+    return row === undefined ? null : {
+      slot: row.slot as number, job_id: row.job_id as string, attempt: row.attempt as number,
+    };
+  }
+
+  startPairing(id: string, slot: number, jobId: string, attempt: number): void {
+    this.sql.exec("INSERT INTO pairings(session_id, slot, job_id, attempt) VALUES (?, ?, ?, ?)", id, slot, jobId, attempt);
+  }
+
+  finishPairing(id: string, slot: number, jobId: string, attempt: number): void {
+    // Compare the attempt too: a delayed retry must not unlock a later pairing of this job.
+    this.sql.exec(
+      "DELETE FROM pairings WHERE session_id = ? AND slot = ? AND job_id = ? AND attempt = ?",
+      id, slot, jobId, attempt,
+    );
   }
 
   live(id: string): Row {
@@ -305,7 +321,8 @@ export class SessionStore {
       failed.length,
       id,
     );
-    this.sql.exec("UPDATE accounts SET session_id = NULL, slot = NULL, leased_at = NULL WHERE session_id = ?", id);
+    this.sql.exec("UPDATE accounts SET session_id = NULL, leased_at = NULL WHERE session_id = ?", id);
+    this.sql.exec("DELETE FROM pairings WHERE session_id = ?", id);
     this.releaseStream(id);
     return failed;
   }
@@ -435,7 +452,7 @@ export class SessionStore {
            ended_at, end_reason FROM sessions WHERE ended_at IS NULL OR ended_at >= ? ORDER BY started_at`,
         this.now() - 24 * 60 * 60,
       ),
-      accounts: this.rows("SELECT connect_code, session_id, slot, leased_at FROM accounts ORDER BY connect_code"),
+      accounts: this.rows("SELECT connect_code, session_id, leased_at FROM accounts ORDER BY connect_code"),
       stream:
         stream?.session_id == null
           ? null
