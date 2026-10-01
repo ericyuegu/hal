@@ -590,7 +590,7 @@ function JoinForm({
   return (
     <>
       <Sentence
-        lead="I want to play"
+        lead="I want HAL to play like"
         options={options}
         imitation={{ value: imitationValue, set: setImitation }}
         character={{ value: characterValue, set: setCharacter }}
@@ -616,6 +616,13 @@ function JoinForm({
             aria-invalid={showCodeError || undefined}
             aria-describedby={showCodeError ? 'code-hint' : undefined}
             onBlur={() => setTouched(playerCode !== '')}
+            onKeyDown={(event) => {
+              // Mod+Enter already reaches the page hotkey.
+              if (event.key !== 'Enter' || event.metaKey || event.ctrlKey)
+                return;
+              event.preventDefault();
+              submit();
+            }}
             onChange={(event) =>
               setPlayerCode(
                 event.target.value
@@ -803,7 +810,7 @@ function Reservation({
       <p className="eyebrow">{statusTitle(job)}</p>
       <Sentence
         small
-        lead={ended ? 'You played' : 'You’re playing'}
+        lead={ended ? 'HAL played like' : 'HAL is playing like'}
         options={options}
         imitation={{ value: job.imitation }}
         character={{ value: job.character }}
@@ -1024,6 +1031,8 @@ function resultText(result: string | null): string {
 function terminalDetail(job: Job): string {
   if (job.status === 'no_show')
     return 'HAL waited but no connection arrived. Queue again when you are ready.';
+  if (job.error_code === 'player_left')
+    return 'This page was closed for two minutes, so your spot went to the next player.';
   if (job.error_code) return `Reason: ${pretty(job.error_code)}.`;
   if (job.status === 'complete') return 'Thanks for playing.';
   return 'Queue again whenever you like.';
@@ -1117,7 +1126,7 @@ function RematchForm({
     <div className="rematch">
       <Sentence
         small
-        lead="Next, I want to play"
+        lead="Next, I want HAL to play like"
         options={options}
         imitation={{ value: imitation, set: setImitation }}
         character={{ value: character, set: setCharacter }}

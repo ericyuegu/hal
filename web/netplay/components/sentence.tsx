@@ -116,7 +116,7 @@ export function Sentence({
         {difficulty && (
           <>
             {' '}
-            at difficulty{' '}
+            on difficulty{' '}
             <span className="nw">
               {blank('diff', <span className="num">{difficulty.value}</span>)}.
             </span>

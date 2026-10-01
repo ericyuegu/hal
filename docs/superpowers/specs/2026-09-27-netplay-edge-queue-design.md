@@ -563,7 +563,7 @@ still hash-checked.
 These were agreed in the same conversation and are implemented in the page
 redesign spec against the API above.
 
-- **Page:** the one-sentence design ("I want to play Mang0's Falco at difficulty
+- **Page:** the one-sentence design ("I want HAL to play like Mang0’s Falco on difficulty
   25."), Loud Notebook style (paper, ink, 2px outlines, orange accent, Schibsted
   Grotesk and IBM Plex Mono). Mockup: `.superpowers/brainstorm/*/content/sentence-v6.html`.
 - **Grammar:** ranks read as adjectives ("Master-rank Falco"); players and
