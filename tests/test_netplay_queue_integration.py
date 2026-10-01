@@ -1,6 +1,5 @@
 """RemoteQueue, RunnerClient, and SessionReporter against the real queue Worker under `wrangler dev`."""
 
-import json
 import os
 import time
 from collections.abc import Callable
@@ -12,8 +11,14 @@ import pytest
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
+from hal.netplay_service.domain import EndReason
+from hal.netplay_service.domain import FinishedGame
+from hal.netplay_service.domain import GameResult
 from hal.netplay_service.domain import JobStatus
+from hal.netplay_service.domain import Observed
+from hal.netplay_service.domain import Phase
 from hal.netplay_service.domain import PolicyConfig
+from hal.netplay_service.domain import WindDown
 from hal.netplay_service.health import RunnerStatus
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
@@ -134,6 +139,10 @@ def _create(url: str, player_code: str) -> tuple[str, str]:
     return created.json()["id"], created.json()["token"]
 
 
+def _observed(seq: int, games: tuple[FinishedGame, ...] = ()) -> Observed:
+    return Observed(seq, Phase.CHARACTER_SELECT, 5.0, "BOT0#1", 1, None, games)
+
+
 def _player_job(url: str, job_id: str, token: str) -> dict[str, object]:
     response = httpx.get(f"{url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
     return response.json()
@@ -169,33 +178,33 @@ def test_lost_responses_never_duplicate_sessions_jobs_or_games(worker_url: str, 
     claimed = RemoteQueue(endpoint, started.session_id, client=claim_client, sleep=sleeps.append).claim_next(worker)
     assert claim_loss.lost == 1
     assert claimed is not None and (claimed.id, claimed.attempt) == (first_id, 1)
-    assert claimed.choices.imitation == "MASTER"
-    assert claimed.choices.desired_return == 120.0
+    assert claimed.settings.imitation == "MASTER"
+    assert claimed.settings.desired_return == 120.0
     assert _player_job(worker_url, second_id, second_token)["status"] == "queued"
 
     queue = RemoteQueue(endpoint, started.session_id)
-    queue.mark_connecting(first_id, worker, started.accounts[0].connect_code)
-    playing_client, playing_loss = _lossy(worker_url, "POST", "/playing")
-    RemoteQueue(endpoint, started.session_id, client=playing_client, sleep=sleeps.append).mark_playing(
-        first_id, worker
+    game = FinishedGame(1, "BATTLEFIELD", GameResult.WIN)
+    report_client, report_loss = _lossy(worker_url, "POST", "/report")
+    reported = RemoteQueue(endpoint, started.session_id, client=report_client, sleep=sleeps.append).report(
+        first_id, worker, _observed(1, (game,))
     )
-    assert playing_loss.lost == 1
-    assert queue.get_worker_job(first_id, worker).status is JobStatus.PLAYING
-    finish = {"game_number": 1, "actual_stage": "BATTLEFIELD", "result": "win"}
-    assert queue.finish_game(first_id, worker, **finish) is JobStatus.REMATCH_WAIT
-    assert queue.finish_game(first_id, worker, **finish) is JobStatus.REMATCH_WAIT
-    assert queue.get_worker_job(first_id, worker).game_count == 1
+    assert report_loss.lost == 1
+    assert reported.games == (game,)
+    assert queue.get_worker_job(first_id, worker).status is JobStatus.ASSIGNED
+    assert queue.get_worker_job(first_id, worker).games == (game,)
 
     end_client, end_loss = _lossy(worker_url, "DELETE", f"/v1/runner/sessions/{started.session_id}")
     assert RunnerClient(endpoint, client=end_client, sleep=sleeps.append).end_session(started.session_id) == 1
     assert end_loss.lost == 1
     assert sleeps == [0.25, 0.25, 0.25, 0.25]
     first = _player_job(worker_url, first_id, first_token)
-    assert (first["status"], first["error_code"]) == ("failed", "service_generation_aborted")
+    assert (first["status"], first["end_reason"]) == ("queued", None)
+    assert first["games"] == [{"number": 1, "stage": "BATTLEFIELD", "result": "win"}]
+    httpx.delete(f"{worker_url}/v1/jobs/{first_id}", headers={"Authorization": f"Bearer {first_token}"}, timeout=10)
     httpx.delete(f"{worker_url}/v1/jobs/{second_id}", headers={"Authorization": f"Bearer {second_token}"}, timeout=10)
 
 
-def test_live_socket_pushes_settings_and_release(worker_url: str, admin: AdminClient) -> None:
+def test_reports_receive_settings_and_release(worker_url: str, admin: AdminClient) -> None:
     endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
     sessions = RunnerClient(endpoint)
     started = _start(sessions)
@@ -203,36 +212,29 @@ def test_live_socket_pushes_settings_and_release(worker_url: str, admin: AdminCl
     job_id, token = _create(worker_url, "LIVE#1")
     worker = slot_worker_id(started.session_id, 0)
     queue = RemoteQueue(endpoint, started.session_id)
-    assert queue.claim_next(worker) is not None
-    with queue.connect_live(job_id, worker) as socket:
-        assert json.loads(socket.recv(timeout=5)) == {
-            "type": "settings",
-            "revision": 0,
-            "desired_return": 120,
-            "temperature": 1,
-        }
-        httpx.patch(
-            f"{worker_url}/v1/jobs/{job_id}/policy",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"desired_return": 140},
-            timeout=10,
-        ).raise_for_status()
-        assert json.loads(socket.recv(timeout=5)) == {
-            "type": "settings",
-            "revision": 1,
-            "desired_return": 140,
-            "temperature": 1,
-        }
-        assert queue.get_worker_job(job_id, worker).choices.desired_return == 140.0
-        rejected = httpx.patch(
-            f"{worker_url}/v1/jobs/{job_id}/policy",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"desired_return": 141},
-            timeout=10,
-        )
-        assert rejected.status_code == 422
-        httpx.delete(f"{worker_url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        assert json.loads(socket.recv(timeout=5)) == {"type": "released"}
+    claimed = queue.claim_next(worker)
+    assert claimed is not None
+    assert queue.report(job_id, worker, _observed(1)).settings.desired_return == 120.0
+    httpx.patch(
+        f"{worker_url}/v1/jobs/{job_id}/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"desired_return": 140},
+        timeout=10,
+    ).raise_for_status()
+    changed = queue.report(job_id, worker, _observed(2))
+    assert (changed.settings.revision, changed.settings.desired_return) == (2, 140.0)
+    rejected = httpx.patch(
+        f"{worker_url}/v1/jobs/{job_id}/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"desired_return": 141},
+        timeout=10,
+    )
+    assert rejected.status_code == 422
+    httpx.delete(f"{worker_url}/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    assert queue.report(job_id, worker, _observed(3)).wind_down is WindDown.PLAYER
+    ended = queue.end(job_id, worker, EndReason.PLAYER_CANCELED, retryable=False)
+    assert (ended.status, ended.end_reason) == (JobStatus.ENDED, EndReason.PLAYER_CANCELED)
+    queue.finish_pairing(job_id, worker, claimed.attempt)
     sessions.end_session(started.session_id)
 
 
