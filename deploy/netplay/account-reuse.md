@@ -1,5 +1,9 @@
 # Concurrent Slippi account test — October 1, 2026 UTC
 
+A later [parallel-pairing test](parallel-pairing.md) made the two G4
+emulators connect to each other. Sequential pairing remains the tested way
+to reuse this account for independent concurrent games.
+
 ## Result
 
 Two independent games used the same `HAL#647` and `CRYO#610` accounts at
