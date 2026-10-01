@@ -56,7 +56,7 @@ class _NetplayLifecycle:
         client: InferenceClient,
         schedule: ActionScheduler,
         *,
-        player_identity: str | None,
+        player_identity: Callable[[], str | None] | str | None,
         policy_settings: Callable[[], tuple[float | None, float]] | None,
         observer: results.PlayObserver | None,
         schedule_observer: ScheduleObserver | None,
@@ -68,7 +68,9 @@ class _NetplayLifecycle:
         self.session = session
         self.client = client
         self.schedule = schedule
-        self.player_identity = player_identity
+        self._player_identity = player_identity
+        self._resolved_player_identity: str | None = None
+        self._identity_resolved = False
         self.policy_settings = policy_settings
         self.observer = observer
         self.schedule_observer = schedule_observer
@@ -100,12 +102,18 @@ class _NetplayLifecycle:
             raise RuntimeError(
                 f"netplay skipped observation frame {self.schedule.history[-1].frame_id + 1} before {frame_id}"
             )
+        if not self._identity_resolved:
+            if self._player_identity is None or isinstance(self._player_identity, str):
+                self._resolved_player_identity = self._player_identity
+            else:
+                self._resolved_player_identity = self._player_identity()
+            self._identity_resolved = True
         item = policy_input_from_frame(
             frame,
             spec=self.client.spec,
             stream_id=self.stream_id,
             controlled_port=self.session.ego_port,
-            player_identity=self.player_identity,
+            player_identity=self._resolved_player_identity,
             desired_return=desired_return,
             temperature=temperature,
             reset=not self.schedule.history,
@@ -317,7 +325,7 @@ def run_netplay_match(
     runtime: RuntimeConfig,
     timing: FrameTiming,
     *,
-    player_identity: str | None = None,
+    player_identity: Callable[[], str | None] | str | None = None,
     policy_settings: Callable[[], tuple[float | None, float]] | None = None,
     max_frames: int = 28_800,
     rematch: bool = False,

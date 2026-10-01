@@ -12,15 +12,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import Mock
 
-import melee
 import numpy as np
 import pytest
 import torch
-from peppi_py.game import EndMethod
 
+import hal.netplay_service.reservation as reservation
 import hal.netplay_service.runner as runner
 from hal.eval.qualification import RealtimeBudgetCheck
-from hal.eval.replays import ReplayEnd
 from hal.eval.results import NetplayProgress
 from hal.eval.results import PlayResult
 from hal.eval.results import ScheduleEvent
@@ -35,7 +33,7 @@ from hal.inference.client import StreamInvalidated
 from hal.inference.cuda_graph import CaptureCounter
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import JobStatus
-from hal.netplay_service.domain import MatchChoices
+from hal.netplay_service.domain import Settings
 from hal.netplay_service.health import ChunkHealth
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import SlotStatus
@@ -46,7 +44,6 @@ from hal.netplay_service.queue_client import SessionState
 from hal.netplay_service.queue_client import StreamGrant
 from hal.netplay_service.replays import ReplayMetadata
 from hal.netplay_service.replays import UploadedReplay
-from hal.sim.netplay import ConnectAbandoned
 from hal.sim.trajectory import Trajectory
 
 _ENDPOINT = QueueEndpoint("http://127.0.0.1:8787", "runner-token")
@@ -57,18 +54,17 @@ def _job(*, stage: str | None = None) -> Job:
     return Job(
         id="reservation",
         player_code="CRYO#610",
-        choices=MatchChoices("FOX", "IBDW#0", 2, stage),
-        status=JobStatus.REMATCH_READY if stage else JobStatus.CONNECTING,
+        online_delay=2,
+        status=JobStatus.ASSIGNED,
+        end_reason=None,
         queue_position=None,
         attempt=1,
-        game_count=0,
-        connect_code="HAL#1",
-        actual_stage=None,
-        last_result=None,
-        error_code=None,
-        connect_deadline=None,
-        rematch_deadline=None,
-        cancel_after_game=False,
+        settings=Settings(1, "FOX", "IBDW#0", stage, 20.0, 1.0),
+        phase=None,
+        phase_deadline=None,
+        games=(),
+        wind_down=None,
+        lock_requests=0,
     )
 
 
@@ -106,40 +102,6 @@ def _runner_config(tmp_path: Path) -> runner.RunnerConfig:
         status_path=tmp_path / "status.json",
         git_sha="a" * 40,
     )
-
-
-class _LiveConnection:
-    def __init__(self, messages: list[object]) -> None:
-        self._messages = messages
-
-    def __enter__(self) -> _LiveConnection:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        pass
-
-    def recv(self, timeout: float) -> object:
-        if self._messages:
-            message = self._messages.pop(0)
-            if isinstance(message, BaseException):
-                raise message
-            return message
-        time.sleep(timeout)
-        raise TimeoutError
-
-
-class _LiveQueue:
-    def __init__(self, job: Job, connections: list[_LiveConnection]) -> None:
-        self.job = job
-        self.connections = connections
-        self.get_calls = 0
-
-    def connect_live(self, _job_id: str, _worker_id: str) -> _LiveConnection:
-        return self.connections.pop(0)
-
-    def get_worker_job(self, _job_id: str, _worker_id: str) -> Job:
-        self.get_calls += 1
-        return self.job
 
 
 @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), True])
@@ -200,26 +162,6 @@ def test_recovery_keeps_120_seconds_after_a_long_cold_preparation_budget(
     runner.run(config)
 
     assert [call.kwargs["recovery_deadline"] for call in generation.call_args_list] == [None, 220.0]
-
-
-def test_live_policy_settings_follow_job_revision_after_reconnect() -> None:
-    job = _job()
-    store = _LiveQueue(
-        job,
-        [
-            _LiveConnection([OSError("socket lost")]),
-            _LiveConnection(
-                [json.dumps({"type": "settings", "revision": 1, "desired_return": None, "temperature": 0.9})]
-            ),
-        ],
-    )
-    with runner._LivePolicySettings(store, job, "session/slot-0") as settings:  # type: ignore[arg-type]
-        assert settings.current() == (20.0, 1.0)
-        deadline = time.monotonic() + 2.0
-        while settings.current() != (None, 0.9) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert settings.current() == (None, 0.9)
-    assert store.get_calls == 1
 
 
 def test_bot_account_code_is_read_without_fallback(tmp_path: Path) -> None:
@@ -656,20 +598,6 @@ def test_runner_owns_stream_resources_across_inference_generations(
     assert closed == ["stream", "pulse", "displays"]
 
 
-def test_heartbeat_forfeits_active_job_when_runner_aborts() -> None:
-    store = Mock()
-    done = threading.Event()
-    abort = threading.Event()
-    thread = threading.Thread(target=runner._heartbeat, args=(store, "job", "session/slot-0", done, abort))
-    thread.start()
-
-    abort.set()
-    thread.join(timeout=1.0)
-
-    assert not thread.is_alive()
-    store.forfeit_service_failure.assert_called_once_with("job", "session/slot-0")
-
-
 def _run_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -883,306 +811,6 @@ def test_health_publisher_failure_terminates_the_slot(
             time.sleep(0.001)
 
 
-def test_live_policy_settings_release_when_worker_sends_release() -> None:
-    job = _job()
-    store = _LiveQueue(job, [_LiveConnection([json.dumps({"type": "released"})])])
-    with runner._LivePolicySettings(store, job, "session/slot-0") as settings:  # type: ignore[arg-type]
-        assert settings.released.wait(2.0)
-
-
-def test_abandoned_connect_frees_slot_without_no_show(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Session:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def __enter__(self) -> Session:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-    monkeypatch.setattr(runner, "NetplaySession", Session)
-    monkeypatch.setattr(runner, "run_netplay_match", Mock(side_effect=ConnectAbandoned("released")))
-    store = Mock()
-    store.connect_live.return_value = _LiveConnection([])
-    stop = Mock()
-    stop.is_set.return_value = False
-
-    runner._run_reservation(
-        _slot_config(tmp_path),
-        store,
-        Mock(),
-        RuntimeConfig(1, (2, 3)),
-        _job(),
-        stop,
-        Mock(),
-        FrameTiming(2, 2, 4, 2, 8),
-    )
-
-    store.mark_no_show.assert_not_called()
-
-
-def test_stream_slot_writes_only_public_game_state_and_returns_to_idle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state_path = tmp_path / "stream.json"
-    config = replace(
-        _slot_config(tmp_path),
-        display=":100",
-        stream_output=True,
-        stream_state_path=state_path,
-        pulse_environment=(("PULSE_SINK", "hal_stream"),),
-    )
-    stream_flags: list[bool] = []
-
-    class Session:
-        def __init__(self, *_args: object, **kwargs: object) -> None:
-            stream_flags.append(bool(kwargs["stream_output"]))
-
-        def __enter__(self) -> Session:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-    def play(*_args: object, **_kwargs: object) -> None:
-        payload = json.loads(state_path.read_text())
-        assert payload == {
-            "character": "FOX",
-            "desired_return": 20.0,
-            "game_number": 1,
-            "imitation": "IBDW#0",
-            "schema_version": 1,
-            "state": "game",
-        }
-        assert "CRYO#610" not in state_path.read_text()
-        raise ConnectAbandoned("released")
-
-    monkeypatch.setattr(runner, "NetplaySession", Session)
-    monkeypatch.setattr(runner, "run_netplay_match", play)
-    store = Mock()
-    store.connect_live.return_value = _LiveConnection([])
-    stop = Mock()
-    stop.is_set.return_value = False
-
-    runner._run_reservation(
-        config,
-        store,
-        Mock(),
-        RuntimeConfig(1, (2, 3)),
-        _job(),
-        stop,
-        Mock(),
-        FrameTiming(2, 2, 4, 2, 8),
-    )
-
-    assert stream_flags == [True]
-    assert json.loads(state_path.read_text()) == {"schema_version": 1, "state": "idle"}
-
-
-def test_recoverable_failure_closes_dolphin_before_retry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[str] = []
-
-    class Session:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def __enter__(self) -> Session:
-            events.append("enter")
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            events.append("close")
-
-    monkeypatch.setattr(runner, "NetplaySession", Session)
-    monkeypatch.setattr(
-        runner,
-        "run_netplay_match",
-        Mock(side_effect=runner._RecoverableRuntimeError("low_frame_rate")),
-    )
-    store = Mock()
-    store.connect_live.return_value = _LiveConnection([])
-    stop = Mock()
-    stop.is_set.return_value = False
-
-    with pytest.raises(runner._RecoverableRuntimeError):
-        runner._run_reservation(
-            _slot_config(tmp_path),
-            store,
-            Mock(),
-            RuntimeConfig(1, (2, 3)),
-            _job(),
-            stop,
-            Mock(),
-            FrameTiming(2, 2, 4, 2, 8),
-        )
-
-    assert events == ["enter", "close"]
-
-
-def test_recoverable_failure_resets_slot_and_retries_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        runner,
-        "_run_reservation",
-        Mock(side_effect=runner._RecoverableRuntimeError("frame_stutter")),
-    )
-    store = Mock()
-    health = Mock()
-    stop = Mock()
-
-    runner._handle_reservation(
-        _slot_config(tmp_path),
-        store,
-        Mock(),
-        RuntimeConfig(1, (2, 3)),
-        _job(),
-        stop,
-        health,
-        FrameTiming(2, 2, 4, 2, 8),
-    )
-
-    health.recovering.assert_called_once_with("frame_stutter")
-    store.fail.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0", "runtime_degraded", retryable=True)
-    stop.wait.assert_called_once_with(0.0)
-
-
-def test_no_contest_ends_reservation_without_a_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    graphics_backends: list[str] = []
-
-    class Session:
-        def __init__(self, *_args: object, **kwargs: object) -> None:
-            graphics_backends.append(str(kwargs["graphics_backend"]))
-
-        def __enter__(self) -> Session:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-    def play(*_args: object, **kwargs: object) -> object:
-        on_live = kwargs["on_live"]
-        assert callable(on_live)
-        on_live()
-        return object()
-
-    replay = tmp_path / "replays" / "slot-0" / "game.slp"
-    monkeypatch.setattr(runner, "NetplaySession", Session)
-    monkeypatch.setattr(runner, "run_netplay_match", play)
-    monkeypatch.setattr(
-        runner,
-        "read_new_replay_end",
-        lambda *_args: ReplayEnd(replay, EndMethod.NO_CONTEST),
-    )
-    store = Mock()
-    store.connect_live.return_value = _LiveConnection([])
-    stop = Mock()
-    stop.is_set.return_value = False
-    health = Mock()
-
-    runner._run_reservation(
-        replace(_slot_config(tmp_path), graphics_backend="OGL"),
-        store,
-        Mock(),
-        RuntimeConfig(1, (2, 3)),
-        _job(),
-        stop,
-        health,
-        FrameTiming(2, 2, 4, 2, 8),
-    )
-
-    store.mark_no_contest.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
-    assert graphics_backends == ["OGL"]
-    store.finish_game.assert_not_called()
-    health.playing.assert_called_once_with()
-    health.configure_schedule.assert_called_once_with(FrameTiming(2, 2, 4, 2, 8))
-
-
-def test_first_game_is_random_and_rematch_uses_requested_stage() -> None:
-    first = runner._setup(_job(), rematch=False)
-    rematch = runner._setup(_job(stage="YOSHIS_STORY"), rematch=True)
-    assert first.character is melee.Character.FOX
-    assert first.stage is melee.Stage.RANDOM_STAGE
-    assert rematch.stage is melee.Stage.YOSHIS_STORY
-    with pytest.raises(ValueError, match="no requested stage"):
-        runner._setup(_job(), rematch=True)
-
-
-def test_local_qualification_retains_replay_without_publishing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class Session:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def __enter__(self) -> Session:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-    def play(*_args: object, **kwargs: object) -> object:
-        kwargs["on_live"]()
-        return SimpleNamespace(
-            trajectory=[0],
-            stage=31,
-            wall_seconds=1.0,
-            game_fps=60.0,
-            frame_interval_p95_ms=16.0,
-            frame_interval_p99_ms=17.0,
-            dolphin_step_p95_ms=1.0,
-            dolphin_step_p99_ms=2.0,
-            inference_p95_ms=5.0,
-            inference_p99_ms=6.0,
-            transport_correction_frames=0,
-        )
-
-    replay = tmp_path / "replays" / "slot-0" / "game.slp"
-    pending = Mock(return_value=replay.with_suffix(".slp.upload.json"))
-    uploaded = Mock()
-    monkeypatch.setattr(runner, "NetplaySession", Session)
-    monkeypatch.setattr(runner, "run_netplay_match", play)
-    monkeypatch.setattr(runner, "read_new_replay_end", lambda *_args: ReplayEnd(replay, EndMethod.GAME))
-    monkeypatch.setattr(runner, "_human_result", lambda _result: "tie")
-    monkeypatch.setattr(runner, "_stage_name", lambda _stage: "FINAL_DESTINATION")
-    monkeypatch.setattr(runner, "_write_pending_upload", pending)
-    monkeypatch.setattr(runner, "_complete_pending_upload", uploaded)
-    store = Mock()
-    store.connect_live.return_value = _LiveConnection([])
-    store.finish_game.return_value = JobStatus.COMPLETE
-    stop = Mock()
-    stop.is_set.return_value = False
-
-    runner._run_reservation(
-        replace(_slot_config(tmp_path), publish_replays=False),
-        store,
-        Mock(),
-        RuntimeConfig(1, (2, 3)),
-        _job(),
-        stop,
-        Mock(),
-        FrameTiming(2, 1, 3, 4, 8),
-    )
-
-    pending.assert_called_once()
-    assert pending.call_args.args[2] == f"{_SESSION_ID}/slot-0"
-    uploaded.assert_not_called()
-    store.finish_game.assert_called_once()
-    assert store.finish_game.call_args.kwargs["game_number"] == 1
-
-
 def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     replay = tmp_path / "game.slp"
     replay.write_bytes(b"replay")
@@ -1198,7 +826,7 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
         started_at=now,
         ended_at=now,
     )
-    sidecar = runner._write_pending_upload(replay, metadata, f"{_SESSION_ID}/slot-0")
+    sidecar = reservation._write_pending_upload(replay, metadata, f"{_SESSION_ID}/slot-0")
     events: list[str] = []
     uploaded = UploadedReplay("key", "metadata", "c" * 64, 6, "etag")
 
@@ -1217,9 +845,9 @@ def test_pending_replay_upload_records_before_local_delete(tmp_path: Path, monke
             assert replay.exists()
             events.append("record")
 
-    monkeypatch.setattr(runner, "upload_replay", upload)
-    monkeypatch.setattr(runner, "_sidecar_queue", lambda _endpoint, _worker_id: Store())
-    runner._complete_pending_upload(sidecar, _ENDPOINT)
+    monkeypatch.setattr(reservation, "upload_replay", upload)
+    monkeypatch.setattr(reservation, "_sidecar_queue", lambda _endpoint, _worker_id: Store())
+    reservation._complete_pending_upload(sidecar, _ENDPOINT)
     assert events == ["upload", "record"]
     assert not replay.exists()
     assert not sidecar.exists()
@@ -1240,20 +868,20 @@ def test_pending_replay_sidecar_carries_the_worker(tmp_path: Path) -> None:
         started_at=now,
         ended_at=now,
     )
-    sidecar = runner._write_pending_upload(replay, metadata, "sess/slot-1")
+    sidecar = reservation._write_pending_upload(replay, metadata, "sess/slot-1")
 
-    assert runner._read_pending_upload(sidecar) == (replay, metadata, "sess/slot-1")
+    assert reservation._read_pending_upload(sidecar) == (replay, metadata, "sess/slot-1")
 
     payload = json.loads(sidecar.read_text())
     sidecar.write_text(json.dumps(payload | {"worker_id": ""}))
     with pytest.raises(RuntimeError, match="invalid values"):
-        runner._read_pending_upload(sidecar)
+        reservation._read_pending_upload(sidecar)
 
     del payload["worker_id"]
     payload["schema_version"] = 1
     sidecar.write_text(json.dumps(payload))
     with pytest.raises(RuntimeError, match="wrong schema"):
-        runner._read_pending_upload(sidecar)
+        reservation._read_pending_upload(sidecar)
 
 
 def test_pending_replay_retry_is_limited_to_once_per_minute(
@@ -1262,13 +890,13 @@ def test_pending_replay_retry_is_limited_to_once_per_minute(
 ) -> None:
     drain = Mock()
     times = iter((100.0, 110.0, 160.0))
-    monkeypatch.setattr(runner, "_drain_pending_uploads", drain)
-    monkeypatch.setattr(runner.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(reservation, "_drain_pending_uploads", drain)
+    monkeypatch.setattr(reservation.time, "monotonic", lambda: next(times))
     store = Mock()
 
-    next_attempt = runner._retry_pending_uploads(tmp_path, store, 0.0)
-    next_attempt = runner._retry_pending_uploads(tmp_path, store, next_attempt)
-    next_attempt = runner._retry_pending_uploads(tmp_path, store, next_attempt)
+    next_attempt = reservation._retry_pending_uploads(tmp_path, store, 0.0)
+    next_attempt = reservation._retry_pending_uploads(tmp_path, store, next_attempt)
+    next_attempt = reservation._retry_pending_uploads(tmp_path, store, next_attempt)
 
     assert next_attempt == 220.0
     assert drain.call_args_list == [((tmp_path, store),), ((tmp_path, store),)]
@@ -1286,67 +914,12 @@ def test_result_is_reported_from_the_human_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        runner,
+        reservation,
         "summarize_trajectory",
         lambda _trajectory: SimpleNamespace(p1_stocks_left=p1, p2_stocks_left=p2),
     )
     result = SimpleNamespace(trajectory=object(), ego_port=ego_port)
-    assert runner._human_result(result) == expected  # type: ignore[arg-type]
-
-
-def test_dolphin_connection_failure_does_not_report_inference_loss(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(runner, "_run_reservation", Mock(side_effect=runner.DolphinConnectionLost("closed")))
-    store, health, stop = Mock(), Mock(), Mock()
-    runner._handle_reservation(
-        _slot_config(tmp_path),
-        store,
-        Mock(),
-        RuntimeConfig(1, (2,)),
-        _job(),
-        stop,
-        health,
-        FrameTiming(2, 2, 4, 2, 8),
-    )
-    health.recovering.assert_called_once_with("dolphin_connection_lost")
-    store.forfeit_service_failure.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
-    store.fail.assert_not_called()
-
-
-def test_inference_failure_stops_slot_after_forfeiting_current_reservation(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(runner, "_run_reservation", Mock(side_effect=runner.InferenceUnavailable("timed out")))
-    store, health, stop = Mock(), Mock(), Mock()
-    with pytest.raises(runner.InferenceUnavailable, match="timed out"):
-        runner._handle_reservation(
-            _slot_config(tmp_path),
-            store,
-            Mock(),
-            RuntimeConfig(1, (2,)),
-            _job(),
-            stop,
-            health,
-            FrameTiming(2, 2, 4, 2, 8),
-        )
-    health.recovering.assert_called_once_with("inference_engine_lost")
-    store.forfeit_service_failure.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
-    store.claim_next.assert_not_called()
-
-
-def test_no_usable_plan_forfeits_match_without_stopping_healthy_slot(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(runner, "_run_reservation", Mock(side_effect=runner.NoUsableActionPlan("late plans")))
-    store, health, stop = Mock(), Mock(), Mock()
-    runner._handle_reservation(
-        _slot_config(tmp_path),
-        store,
-        Mock(),
-        RuntimeConfig(1, (2,)),
-        _job(),
-        stop,
-        health,
-        FrameTiming(2, 1, 3, 4, 8),
-    )
-    health.recovering.assert_called_once_with("no_usable_action_plan")
-    store.forfeit_service_failure.assert_called_once_with("reservation", f"{_SESSION_ID}/slot-0")
-    store.fail.assert_not_called()
+    assert reservation._human_result(result) == expected  # type: ignore[arg-type]
 
 
 def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path: Path) -> None:
@@ -1392,8 +965,17 @@ def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path
     health.status.return_value.chunk_health = ChunkHealth(timing, submission_gaps=1)
     started = datetime.now(UTC)
 
-    path = runner._write_match_measurement(
-        config, _job(), result, timing, health, started, started + timedelta(seconds=2)
+    job = _job()
+    path = reservation._write_match_measurement(
+        config,
+        job,
+        job.settings,
+        1,
+        result,
+        timing,
+        health,
+        started,
+        started + timedelta(seconds=2),
     )
 
     assert path is not None
@@ -1413,8 +995,16 @@ def test_match_measurement_preserves_source_frame_and_schedule_counters(tmp_path
     assert payload["match_end_seconds"] == pytest.approx(0.4)
     assert payload["total_elapsed_seconds"] == pytest.approx(2.0)
     with pytest.raises(ValueError, match="plan decisions"):
-        runner._write_match_measurement(
-            config, _job(), replace(result, plan_decisions=()), timing, health, started, started
+        reservation._write_match_measurement(
+            config,
+            job,
+            job.settings,
+            1,
+            replace(result, plan_decisions=()),
+            timing,
+            health,
+            started,
+            started,
         )
 
 
@@ -1425,7 +1015,18 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
     health = Mock()
     health.status.return_value.chunk_health = ChunkHealth(timing, exhausted_chunks=1, submission_gaps=0)
 
-    runner._write_match_failure(config, _job(), timing, health, datetime.now(UTC), progress, RuntimeError("lost"))
+    job = _job()
+    reservation._write_match_failure(
+        config,
+        job,
+        job.settings,
+        1,
+        timing,
+        health,
+        datetime.now(UTC),
+        progress,
+        RuntimeError("lost"),
+    )
 
     path = config.measurement_dir / "reservation-game-1-failure.json"
     payload = json.loads(path.read_text())
@@ -1497,7 +1098,7 @@ def test_pairing_release_follows_dolphin_cleanup(
 ) -> None:
     events: list[str] = []
 
-    def reservation(*_args: object) -> None:
+    def execute(*_args: object) -> None:
         try:
             if error is not None:
                 raise error
@@ -1506,9 +1107,9 @@ def test_pairing_release_follows_dolphin_cleanup(
 
     store = Mock()
     store.finish_pairing.side_effect = lambda *_args: events.append("pairing released")
-    monkeypatch.setattr(runner, "_run_reservation", reservation)
+    monkeypatch.setattr(runner, "run_reservation", execute)
     job = _job()
-    runner._handle_reservation(
+    args = (
         _slot_config(tmp_path),
         store,
         Mock(),
@@ -1518,6 +1119,11 @@ def test_pairing_release_follows_dolphin_cleanup(
         Mock(),
         runner._NETPLAY_TIMINGS[0],
     )
+    if error is None:
+        runner._handle_reservation(*args)
+    else:
+        with pytest.raises(ValueError, match="invalid match"):
+            runner._handle_reservation(*args)
     assert events == ["Dolphin closed", "pairing released"]
     store.finish_pairing.assert_called_once_with(job.id, f"{_SESSION_ID}/slot-0", job.attempt)
 

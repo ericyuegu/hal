@@ -21,9 +21,6 @@ from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import replace
-from datetime import UTC
-from datetime import datetime
-from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnContext
 from multiprocessing.process import BaseProcess
@@ -33,21 +30,12 @@ from typing import Protocol
 import melee
 import torch
 from loguru import logger
-from peppi_py.game import EndMethod
 from prometheus_client import Gauge
 from prometheus_client import start_http_server
-from websockets.exceptions import ConnectionClosed
 
 from hal import r2
-from hal.eval.match_summary import summarize_trajectory
-from hal.eval.netplay import DolphinConnectionLost
-from hal.eval.netplay import NoUsableActionPlan
-from hal.eval.netplay import run_netplay_match
 from hal.eval.qualification import RealtimeBudgetCheck
 from hal.eval.qualification import check_realtime_budget
-from hal.eval.replays import read_new_replay_end
-from hal.eval.results import NetplayProgress
-from hal.eval.results import PlayResult
 from hal.eval.scheduling import ActionScheduler
 from hal.eval.scheduling import FrameTiming
 from hal.fixtures import ISO
@@ -59,7 +47,6 @@ from hal.inference.api import PolicySpec
 from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import RuntimeConfig
 from hal.inference.client import InferenceClient
-from hal.inference.client import InferenceUnavailable
 from hal.inference.client import StreamInvalidate
 from hal.inference.client import StreamInvalidated
 from hal.inference.cuda_graph import CaptureCounter
@@ -73,12 +60,8 @@ from hal.netplay_service.assets import AssetCache
 from hal.netplay_service.assets import LocalSource
 from hal.netplay_service.assets import PinnedAsset
 from hal.netplay_service.assets import R2Source
-from hal.netplay_service.domain import CONNECT_TIMEOUT_SECONDS
-from hal.netplay_service.domain import TERMINAL_STATUSES
 from hal.netplay_service.domain import Job
-from hal.netplay_service.domain import JobStatus
 from hal.netplay_service.domain import validate_player_code
-from hal.netplay_service.health import FRAME_STALL_SECONDS
 from hal.netplay_service.health import SLOT_HEARTBEAT_MAX_AGE_SECONDS
 from hal.netplay_service.health import SLOT_STARTUP_GRACE_SECONDS
 from hal.netplay_service.health import ChunkHealth
@@ -104,23 +87,17 @@ from hal.netplay_service.queue_client import new_session_id
 from hal.netplay_service.queue_client import runner_endpoint
 from hal.netplay_service.queue_client import slot_worker_id
 from hal.netplay_service.queue_contract import InvalidTransitionError
-from hal.netplay_service.queue_contract import RunnerQueue
 from hal.netplay_service.queue_contract import SessionEndedError
-from hal.netplay_service.replays import ReplayMetadata
-from hal.netplay_service.replays import upload_replay
+from hal.netplay_service.reservation import _RecoverableRuntimeError
+from hal.netplay_service.reservation import _retry_pending_uploads
+from hal.netplay_service.reservation import run_reservation
 from hal.netplay_service.stream import DisplayGroup
-from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import PulseAudio
 from hal.netplay_service.stream import StreamSupervisor
 from hal.netplay_service.stream import write_stream_state
-from hal.sim.netplay import ConnectAbandoned
-from hal.sim.netplay import NetplaySession
-from hal.sim.netplay import NetplaySetup
 from hal.sim.session import DolphinGraphicsBackend
-from hal.sim.session import FrameTimeout
 
-_PENDING_UPLOAD_RETRY_SECONDS = 60.0
 _SLOT_STATUS_INTERVAL_SECONDS = 1.0
 _SLOT_RESTART_LEASE_GRACE_SECONDS = 60.0
 _SESSION_HEARTBEAT = Gauge(
@@ -506,10 +483,6 @@ def _gpu_inference_process(
             connection.close()
 
 
-class _RecoverableRuntimeError(RuntimeError):
-    pass
-
-
 class _SlotHealthReporter:
     """Publish one slot heartbeat without file I/O in the frame loop."""
 
@@ -739,182 +712,6 @@ def _bot_connect_codes(paths: Sequence[Path]) -> tuple[str, ...]:
     return codes
 
 
-def _human_result(result: PlayResult) -> str:
-    summary = summarize_trajectory(result.trajectory)
-    bot_stocks = summary.p1_stocks_left if result.ego_port == 1 else summary.p2_stocks_left
-    human_stocks = summary.p2_stocks_left if result.ego_port == 1 else summary.p1_stocks_left
-    if human_stocks > bot_stocks:
-        return "win"
-    if human_stocks < bot_stocks:
-        return "loss"
-    return "tie"
-
-
-def _stage_name(stage_id: int) -> str:
-    try:
-        stage = melee.Stage(stage_id)
-    except ValueError as error:
-        raise RuntimeError(f"netplay returned unknown stage {stage_id}") from error
-    if stage in (melee.Stage.NO_STAGE, melee.Stage.RANDOM_STAGE):
-        raise RuntimeError(f"netplay returned non-playable stage {stage.name}")
-    return stage.name
-
-
-def _setup(job: Job, *, rematch: bool) -> NetplaySetup:
-    try:
-        character = melee.Character[job.choices.character]
-        if rematch:
-            if job.choices.requested_stage is None:
-                raise ValueError(f"rematch job {job.id} has no requested stage")
-            stage = melee.Stage[job.choices.requested_stage]
-        else:
-            stage = melee.Stage.RANDOM_STAGE
-    except KeyError as error:
-        raise ValueError(f"job {job.id} contains an unknown Melee selection") from error
-    return NetplaySetup(character, job.player_code, stage=stage)
-
-
-def _upload_sidecar(path: Path) -> Path:
-    return path.with_suffix(path.suffix + ".upload.json")
-
-
-def _write_pending_upload(path: Path, metadata: ReplayMetadata, worker_id: str) -> Path:
-    payload = asdict(metadata)
-    payload["started_at"] = metadata.started_at.astimezone(UTC).isoformat()
-    payload["ended_at"] = metadata.ended_at.astimezone(UTC).isoformat()
-    # The queue accepts a replay only from the worker that played the game.
-    payload["worker_id"] = worker_id
-    payload["schema_version"] = 2
-    sidecar = _upload_sidecar(path)
-    temporary = sidecar.with_suffix(sidecar.suffix + ".partial")
-    temporary.write_text(json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True))
-    temporary.replace(sidecar)
-    return sidecar
-
-
-def _read_pending_upload(sidecar: Path) -> tuple[Path, ReplayMetadata, str]:
-    try:
-        payload = json.loads(sidecar.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"cannot read pending replay metadata {sidecar}") from error
-    expected = {
-        "ended_at",
-        "game_number",
-        "git_sha",
-        "player_code",
-        "policy_sha256",
-        "reservation_id",
-        "result",
-        "schema_version",
-        "started_at",
-        "actual_stage",
-        "worker_id",
-    }
-    if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema_version") != 2:
-        raise RuntimeError(f"pending replay metadata has the wrong schema: {sidecar}")
-    replay = Path(str(sidecar).removesuffix(".upload.json"))
-    try:
-        metadata = ReplayMetadata(
-            reservation_id=payload["reservation_id"],
-            player_code=payload["player_code"],
-            game_number=payload["game_number"],
-            actual_stage=payload["actual_stage"],
-            result=payload["result"],
-            policy_sha256=payload["policy_sha256"],
-            git_sha=payload["git_sha"],
-            started_at=datetime.fromisoformat(payload["started_at"]),
-            ended_at=datetime.fromisoformat(payload["ended_at"]),
-        )
-    except (TypeError, ValueError) as error:
-        raise RuntimeError(f"pending replay metadata contains invalid values: {sidecar}") from error
-    worker_id = payload["worker_id"]
-    if not isinstance(worker_id, str) or not worker_id:
-        raise RuntimeError(f"pending replay metadata contains invalid values: {sidecar}")
-    return replay, metadata, worker_id
-
-
-def _sidecar_queue(endpoint: QueueEndpoint, worker_id: str) -> RemoteQueue:
-    session_id, separator, slot = worker_id.rpartition("/slot-")
-    if not separator or not session_id or not slot.isdigit():
-        raise RuntimeError(f"pending replay metadata has invalid worker_id {worker_id!r}")
-    return RemoteQueue(endpoint, session_id)
-
-
-def _complete_pending_upload(sidecar: Path, endpoint: QueueEndpoint) -> None:
-    replay, metadata, worker_id = _read_pending_upload(sidecar)
-    uploaded = upload_replay(replay, metadata)
-    with closing(_sidecar_queue(endpoint, worker_id)) as queue:
-        queue.record_replay(
-            metadata.reservation_id,
-            worker_id,
-            metadata.game_number,
-            key=uploaded.key,
-            sha256=uploaded.sha256,
-            size=uploaded.size,
-            etag=uploaded.etag,
-        )
-    logger.info(
-        "replay uploaded reservation={} game={} key={} size={} etag={}",
-        metadata.reservation_id,
-        metadata.game_number,
-        uploaded.key,
-        uploaded.size,
-        uploaded.etag,
-    )
-    replay.unlink()
-    sidecar.unlink()
-
-
-def _drain_pending_uploads(root: Path, endpoint: QueueEndpoint) -> None:
-    for sidecar in sorted(root.rglob("*.slp.upload.json")):
-        try:
-            _complete_pending_upload(sidecar, endpoint)
-        except Exception as error:  # Replay failures are isolated from active games.
-            logger.warning(
-                "pending replay upload failed: {}: {}: {}",
-                type(error).__name__,
-                error,
-                sidecar,
-            )
-
-
-def _retry_pending_uploads(root: Path, endpoint: QueueEndpoint, next_attempt: float) -> float:
-    now = time.monotonic()
-    if now < next_attempt:
-        return next_attempt
-    _drain_pending_uploads(root, endpoint)
-    return now + _PENDING_UPLOAD_RETRY_SECONDS
-
-
-def _heartbeat(
-    store: RunnerQueue,
-    job_id: str,
-    worker_id: str,
-    done: threading.Event,
-    abort: _StopEvent,
-) -> None:
-    next_heartbeat = time.monotonic() + 5.0
-    while not done.wait(0.1):
-        if abort.is_set():
-            try:
-                store.forfeit_service_failure(job_id, worker_id)
-            except InvalidTransitionError, SessionEndedError:
-                pass
-            except QueueUnavailableError as error:
-                logger.bind(job=job_id, event="forfeit").warning("job forfeit failed: {}", error)
-            return
-        if time.monotonic() < next_heartbeat:
-            continue
-        try:
-            store.heartbeat(job_id, worker_id)
-        except QueueUnavailableError as error:
-            logger.bind(job=job_id, event="heartbeat").warning("job heartbeat failed: {}", error)
-            continue
-        except InvalidTransitionError:
-            return
-        next_heartbeat = time.monotonic() + 5.0
-
-
 @dataclass(frozen=True, slots=True)
 class SessionStatus:
     path: Path
@@ -937,432 +734,6 @@ class SessionStatus:
         _SESSION_HEARTBEAT.set(time.time())
         _HEALTHY_SLOTS.set(status.healthy_slots)
         return status
-
-
-class _LivePolicySettings:
-    """Receive pushed policy settings off the frame thread."""
-
-    def __init__(self, store: RemoteQueue, job: Job, worker_id: str) -> None:
-        self._store = store
-        self._job_id = job.id
-        self._worker_id = worker_id
-        self._revision = job.policy_revision
-        self._values = (job.choices.desired_return, job.choices.temperature)
-        # Set once the queue cancels, expires, or reassigns the job, so a
-        # connect wait frees the slot without waiting for its own timeout.
-        self.released = threading.Event()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._receive, daemon=True)
-
-    def _apply(self, raw: object) -> bool:
-        if not isinstance(raw, str):
-            raise QueueProtocolError("live settings message must be text")
-        try:
-            message = json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise QueueProtocolError("live settings message is not JSON") from error
-        if not isinstance(message, dict) or not isinstance(message.get("type"), str):
-            raise QueueProtocolError("live settings message has the wrong shape")
-        if message["type"] == "released":
-            if set(message) != {"type"}:
-                raise QueueProtocolError("released message fields changed")
-            self.released.set()
-            return False
-        if message["type"] != "settings" or set(message) != {
-            "type",
-            "revision",
-            "desired_return",
-            "temperature",
-        }:
-            raise QueueProtocolError("settings message fields changed")
-        revision = message["revision"]
-        desired_return = message["desired_return"]
-        temperature = message["temperature"]
-        if type(revision) is not int or revision < 0:
-            raise QueueProtocolError("settings revision must be a non-negative integer")
-        if desired_return is not None and (
-            isinstance(desired_return, bool) or not isinstance(desired_return, (int, float))
-        ):
-            raise QueueProtocolError("desired_return must be a number or null")
-        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
-            raise QueueProtocolError("temperature must be a number")
-        if revision >= self._revision:
-            self._values = (
-                None if desired_return is None else float(desired_return),
-                float(temperature),
-            )
-            self._revision = revision
-        return True
-
-    def _receive(self) -> None:
-        backoff = 0.25
-        reconnecting = False
-        while not self._stop.is_set():
-            try:
-                if reconnecting:
-                    job = self._store.get_worker_job(self._job_id, self._worker_id)
-                    if job.status in TERMINAL_STATUSES:
-                        self.released.set()
-                        return
-                with self._store.connect_live(self._job_id, self._worker_id) as connection:
-                    reconnecting = True
-                    backoff = 0.25
-                    while not self._stop.is_set():
-                        try:
-                            message = connection.recv(timeout=0.25)
-                        except TimeoutError:
-                            continue
-                        if not self._apply(message):
-                            return
-            except InvalidTransitionError, SessionEndedError:
-                self.released.set()
-                return
-            except QueueUnavailableError as error:
-                logger.bind(job=self._job_id, event="live_settings").warning("live settings unavailable: {}", error)
-            except (ConnectionClosed, OSError) as error:
-                logger.bind(job=self._job_id, event="live_settings").warning("live settings disconnected: {}", error)
-            if self._stop.wait(backoff):
-                return
-            backoff = min(backoff * 2, 4.0)
-
-    def current(self) -> tuple[float | None, float]:
-        return self._values
-
-    def __enter__(self) -> _LivePolicySettings:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self._stop.set()
-        self._thread.join()
-
-
-class _ReservationLive:
-    """Mark a reservation live when the netplay countdown completes."""
-
-    def __init__(self, config: SlotConfig, store: RunnerQueue, job: Job, health: _SlotHealthReporter) -> None:
-        self.config = config
-        self.store = store
-        self.job = job
-        self.health = health
-        self.live = False
-
-    def __call__(self) -> None:
-        self.store.mark_playing(self.job.id, self.config.worker_id)
-        self.health.playing()
-        self.live = True
-        logger.info(
-            "reservation {} live on slot {} game={} delay={}",
-            self.job.id,
-            self.config.slot,
-            self.job.game_count + 1,
-            self.job.choices.online_delay,
-        )
-
-    def reset(self, job: Job) -> None:
-        self.job = job
-        self.live = False
-
-
-def _write_match_measurement(
-    config: SlotConfig,
-    job: Job,
-    result: PlayResult,
-    timing: FrameTiming,
-    health: _SlotHealthReporter,
-    started_at: datetime,
-    ended_at: datetime,
-) -> Path | None:
-    directory = config.measurement_dir
-    if directory is None:
-        return None
-    if len(result.inference_source_frames) != len(result.inference_seconds) or len(result.plan_decisions) != len(
-        result.inference_source_frames
-    ):
-        raise ValueError("match inference samples lack source frame IDs or plan decisions")
-    directory.mkdir(parents=True, exist_ok=True)
-    elapsed = (ended_at - started_at).total_seconds()
-    counters = health.status().chunk_health
-    payload = {
-        "schema_version": 3,
-        "reservation_id": job.id,
-        "game_number": job.game_count + 1,
-        "slot": config.slot,
-        "worker_id": config.worker_id,
-        "stream_id": config.stream_id,
-        "generation": result.generation,
-        "source_git_sha": config.git_sha,
-        "graphics_backend": config.graphics_backend,
-        "policy_bundle_sha256": config.policy_sha256,
-        "checkpoint_sha256": config.checkpoint_sha256,
-        "character": job.choices.character,
-        "player_identity": job.choices.imitation,
-        "desired_return": job.choices.desired_return,
-        "temperature": job.choices.temperature,
-        "requested_stage": job.choices.requested_stage,
-        "timing": asdict(timing),
-        "observation_mode": "first_seen_speculative",
-        "started_at": started_at.isoformat(),
-        "ended_at": ended_at.isoformat(),
-        "total_elapsed_seconds": elapsed,
-        "connection_countdown_seconds": result.connection_countdown_seconds,
-        "gameplay_seconds": result.wall_seconds,
-        "match_end_seconds": result.match_end_seconds,
-        "frame_ids": result.trajectory.frame_id.tolist(),
-        "frames": len(result.trajectory),
-        "game_fps": result.game_fps,
-        "inference_source_frames": result.inference_source_frames,
-        "inference_seconds": result.inference_seconds,
-        "frame_interval_seconds": result.frame_interval_seconds,
-        "dolphin_step_seconds": result.dolphin_step_seconds,
-        "schedule": None if counters is None else asdict(counters),
-        "schedule_events": [asdict(event) for event in result.schedule_events],
-        "plan_decisions": [asdict(decision) for decision in result.plan_decisions],
-        "controller_submission_gaps": None if counters is None else counters.submission_gaps,
-        "transport_correction_frames": result.transport_correction_frames,
-    }
-    path = directory / f"{job.id}-game-{job.game_count + 1}.json"
-    pending = path.with_suffix(".json.tmp")
-    pending.write_text(json.dumps(payload, allow_nan=False, sort_keys=True))
-    pending.replace(path)
-    return path
-
-
-def _write_match_failure(
-    config: SlotConfig,
-    job: Job,
-    timing: FrameTiming,
-    health: _SlotHealthReporter,
-    started_at: datetime,
-    progress: NetplayProgress,
-    error: BaseException,
-) -> None:
-    directory = config.measurement_dir
-    if directory is None:
-        return
-    directory.mkdir(parents=True, exist_ok=True)
-    counters = health.status().chunk_health
-    payload = {
-        "schema_version": 2,
-        "reservation_id": job.id,
-        "game_number": job.game_count + 1,
-        "slot": config.slot,
-        "worker_id": config.worker_id,
-        "source_git_sha": config.git_sha,
-        "graphics_backend": config.graphics_backend,
-        "policy_bundle_sha256": config.policy_sha256,
-        "checkpoint_sha256": config.checkpoint_sha256,
-        "character": job.choices.character,
-        "player_identity": job.choices.imitation,
-        "desired_return": job.choices.desired_return,
-        "temperature": job.choices.temperature,
-        "requested_stage": job.choices.requested_stage,
-        "timing": asdict(timing),
-        "observation_mode": "first_seen_speculative",
-        "started_at": started_at.isoformat(),
-        "failed_at": datetime.now(UTC).isoformat(),
-        "failure": f"{type(error).__name__}: {error}",
-        "progress": asdict(progress),
-        "schedule": None if counters is None else asdict(counters),
-        "controller_submission_gaps": None if counters is None else counters.submission_gaps,
-    }
-    path = directory / f"{job.id}-game-{job.game_count + 1}-failure.json"
-    pending = path.with_suffix(".json.tmp")
-    pending.write_text(json.dumps(payload, allow_nan=False, sort_keys=True))
-    pending.replace(path)
-
-
-def _run_reservation(
-    config: SlotConfig,
-    store: RemoteQueue,
-    policy: InferenceClient,
-    runtime: RuntimeConfig,
-    job: Job,
-    stop: _StopEvent,
-    health: _SlotHealthReporter,
-    timing: FrameTiming,
-) -> None:
-    replay_dir = config.replay_dir / f"slot-{config.slot}"
-    replay_dir.mkdir(parents=True, exist_ok=True)
-    heartbeat_stop = threading.Event()
-    heartbeat = threading.Thread(
-        target=_heartbeat,
-        args=(store, job.id, config.worker_id, heartbeat_stop, stop),
-        daemon=True,
-    )
-    heartbeat.start()
-    live = _ReservationLive(config, store, job, health)
-    logger.info(
-        "reservation {} starting on slot {} player={} character={} delay={} first_stage=random "
-        "requested_stage={} imitate={} game={}",
-        job.id,
-        config.slot,
-        job.player_code,
-        job.choices.character,
-        job.choices.online_delay,
-        job.choices.requested_stage,
-        job.choices.imitation,
-        job.game_count + 1,
-    )
-
-    try:
-        store.mark_connecting(job.id, config.worker_id, config.bot_connect_code)
-        health.configure_schedule(timing)
-        health.connecting(job.choices.online_delay)
-        with (
-            _LivePolicySettings(store, job, config.worker_id) as settings,
-            NetplaySession(
-                config.iso_path,
-                dolphin_path=config.dolphin_path,
-                user_json_path=config.user_json,
-                online_delay=job.choices.online_delay,
-                replay_dir=replay_dir,
-                slippi_port=config.slippi_port,
-                step_timeout_seconds=FRAME_STALL_SECONDS,
-                connect_timeout_seconds=CONNECT_TIMEOUT_SECONDS,
-                connect_abandoned=settings.released.is_set,
-                realtime=True,
-                graphics_backend=config.graphics_backend,
-                stream_output=config.stream_output,
-            ) as session,
-        ):
-            rematch = False
-            while not stop.is_set():
-                if config.stream_output:
-                    assert config.stream_state_path is not None
-                    write_stream_state(
-                        config.stream_state_path,
-                        GameStreamState(
-                            job.choices.character,
-                            job.choices.imitation,
-                            job.choices.desired_return,
-                            job.game_count + 1,
-                        ),
-                    )
-                previous = frozenset(replay_dir.rglob("*.slp"))
-                started_at = datetime.now(UTC)
-                result = run_netplay_match(
-                    session,
-                    _setup(job, rematch=rematch),
-                    policy,
-                    runtime,
-                    timing,
-                    player_identity=None if job.choices.imitation == "MASKED" else job.choices.imitation,
-                    policy_settings=settings.current,
-                    max_frames=config.max_frames,
-                    rematch=rematch,
-                    on_live=live,
-                    on_failure=partial(_write_match_failure, config, job, timing, health, started_at),
-                    observer=health,
-                    schedule_observer=health,
-                    stream_id=config.stream_id,
-                )
-                ended_at = datetime.now(UTC)
-                _write_match_measurement(config, job, result, timing, health, started_at, ended_at)
-                replay_end = read_new_replay_end(replay_dir, previous)
-                if replay_end.method is EndMethod.NO_CONTEST:
-                    store.mark_no_contest(job.id, config.worker_id)
-                    logger.info(
-                        "reservation {} ended by no contest on slot {} replay={}",
-                        job.id,
-                        config.slot,
-                        replay_end.path,
-                    )
-                    return
-                if not replay_end.completed:
-                    raise RuntimeError(f"netplay replay ended via {replay_end.method.name}: {replay_end.path}")
-                replay = replay_end.path
-                actual_stage = _stage_name(result.stage)
-                human_result = _human_result(result)
-                limit_ms = timing.inference_allowance_frames * 1000 / 60
-                if result.inference_p95_ms >= limit_ms:
-                    logger.warning(
-                        "reservation {} missed the delay-{} policy deadline: p95={:.1f}ms limit={:.1f}ms",
-                        job.id,
-                        job.choices.online_delay,
-                        result.inference_p95_ms,
-                        limit_ms,
-                    )
-                next_status = store.finish_game(
-                    job.id,
-                    config.worker_id,
-                    game_number=job.game_count + 1,
-                    actual_stage=actual_stage,
-                    result=human_result,
-                )
-                logger.info(
-                    "reservation {} game={} complete frames={} wall={:.1f}s fps={:.1f} "
-                    "frame_p95={:.1f}ms frame_p99={:.1f}ms dolphin_p95={:.1f}ms dolphin_p99={:.1f}ms "
-                    "policy_p95={:.1f}ms policy_p99={:.1f}ms stage={} human_result={} corrections={}",
-                    job.id,
-                    job.game_count + 1,
-                    len(result.trajectory),
-                    result.wall_seconds,
-                    result.game_fps,
-                    result.frame_interval_p95_ms,
-                    result.frame_interval_p99_ms,
-                    result.dolphin_step_p95_ms,
-                    result.dolphin_step_p99_ms,
-                    result.inference_p95_ms,
-                    result.inference_p99_ms,
-                    actual_stage,
-                    human_result,
-                    result.transport_correction_frames,
-                )
-                metadata = ReplayMetadata(
-                    reservation_id=job.id,
-                    player_code=job.player_code,
-                    game_number=job.game_count + 1,
-                    actual_stage=actual_stage,
-                    result=human_result,
-                    policy_sha256=config.policy_sha256,
-                    git_sha=config.git_sha,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                )
-                sidecar = _write_pending_upload(replay, metadata, config.worker_id)
-                if config.publish_replays:
-                    try:
-                        _complete_pending_upload(sidecar, config.queue_endpoint)
-                    except Exception as error:  # R2 availability must not end a session.
-                        logger.warning("replay upload deferred: {}: {}", type(error).__name__, error)
-                if next_status is JobStatus.COMPLETE:
-                    return
-                health.idle()
-                while not stop.is_set():
-                    session.park_menu()
-                    try:
-                        job = store.get_worker_job(job.id, config.worker_id)
-                    except InvalidTransitionError:
-                        return
-                    if job.status is JobStatus.REMATCH_READY:
-                        rematch = True
-                        live.reset(job)
-                        health.configure_schedule(timing)
-                        health.connecting(job.choices.online_delay)
-                        break
-                    if job.status in TERMINAL_STATUSES:
-                        return
-                    if job.status is not JobStatus.REMATCH_WAIT:
-                        raise RuntimeError(f"unexpected reservation status {job.status.value}")
-    except ConnectAbandoned:
-        logger.info("reservation {} released before its match went live", job.id)
-    except FrameTimeout:
-        raise _RecoverableRuntimeError("frame_stream_stalled") from None
-    except TimeoutError:
-        if not live.live:
-            with suppress(InvalidTransitionError):
-                store.mark_no_show(job.id, config.worker_id)
-            return
-        raise
-    finally:
-        if config.stream_output:
-            assert config.stream_state_path is not None
-            write_stream_state(config.stream_state_path, IdleStreamState())
-        with suppress(InferenceUnavailable):
-            policy.close_match()
-        heartbeat_stop.set()
-        heartbeat.join(timeout=1.0)
 
 
 def _slot_worker(
@@ -1417,7 +788,7 @@ def _slot_worker(
                 stop.wait(5.0)
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
-            timing = next(s for s in schedules if s.physical_delay_frames == job.choices.online_delay)
+            timing = next(s for s in schedules if s.physical_delay_frames == job.online_delay)
             _handle_reservation(config, store, policy, runtime, job, stop, health, timing)
 
 
@@ -1432,48 +803,7 @@ def _handle_reservation(
     timing: FrameTiming,
 ) -> None:
     try:
-        _run_reservation(config, store, policy, runtime, job, stop, health, timing)
-    except DolphinConnectionLost as error:
-        health.recovering("dolphin_connection_lost")
-        logger.error("reservation {}: {}", job.id, error)
-        with suppress(InvalidTransitionError):
-            store.forfeit_service_failure(job.id, config.worker_id)
-    except NoUsableActionPlan as error:
-        health.recovering("no_usable_action_plan")
-        logger.error("reservation {}: {}", job.id, error)
-        with suppress(InvalidTransitionError):
-            store.forfeit_service_failure(job.id, config.worker_id)
-    except InferenceUnavailable as error:
-        health.recovering("inference_engine_lost")
-        logger.error("reservation {}: {}", job.id, error)
-        with suppress(InvalidTransitionError):
-            store.forfeit_service_failure(job.id, config.worker_id)
-        raise
-    except SessionEndedError:
-        raise
-    except QueueUnavailableError as error:
-        health.recovering("queue_unavailable")
-        logger.error("reservation {} lost queue access: {}", job.id, error)
-        raise
-    except _RecoverableRuntimeError as error:
-        logger.error(
-            "reservation {} degraded on slot {}: {}; retrying with a fresh Dolphin",
-            job.id,
-            config.slot,
-            error,
-        )
-        health.recovering(str(error))
-        with suppress(InvalidTransitionError):
-            store.fail(job.id, config.worker_id, "runtime_degraded", retryable=True)
-        stop.wait(config.recovery_cooldown_seconds)
-    except (KeyError, ValueError) as error:
-        logger.error("reservation {} rejected: {}: {}", job.id, type(error).__name__, error)
-        with suppress(InvalidTransitionError):
-            store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=False)
-    except Exception as error:  # A reservation cannot kill a long-running slot.
-        logger.exception("reservation {} failed: {}", job.id, type(error).__name__)
-        with suppress(InvalidTransitionError):
-            store.fail(job.id, config.worker_id, type(error).__name__.lower(), retryable=True)
+        run_reservation(config, store, policy, runtime, job, stop, health, timing)
     finally:
         # Cancellation and failed pairing retain the gate until Dolphin has closed.
         store.finish_pairing(job.id, config.worker_id, job.attempt)

@@ -12,6 +12,7 @@ from peppi_py.game import EndMethod
 class ReplayEnd:
     path: Path
     method: EndMethod
+    is_frozen_ps: bool | None = None
 
     @property
     def completed(self) -> bool:
@@ -34,7 +35,10 @@ def read_new_replay_end(replay_dir: Path, previous: Collection[Path]) -> ReplayE
         method = EndMethod(int(game.end.method))
     except (TypeError, ValueError) as error:
         raise RuntimeError(f"netplay replay has unknown game-end method: {replay}") from error
-    return ReplayEnd(replay, method)
+    frozen = getattr(getattr(game, "start", None), "is_frozen_ps", None)
+    if frozen is not None and type(frozen) is not bool:
+        raise RuntimeError(f"netplay replay has invalid Frozen Stadium state: {replay}")
+    return ReplayEnd(replay, method, frozen)
 
 
 def require_completed_replay(replay_dir: Path, previous: Collection[Path]) -> Path:

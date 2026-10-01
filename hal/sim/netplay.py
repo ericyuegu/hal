@@ -332,6 +332,7 @@ class NetplaySession:
         self.stream_output = stream_output
         self.ego_port: int | None = None
         self.opponent_port: int | None = None
+        self.ego_character: melee.Character | None = None
         self._console: melee.Console | None = None
         self._controller: melee.Controller | None = None
         self._menu_helper: melee.MenuHelper | None = None
@@ -619,6 +620,7 @@ class NetplaySession:
         ego = ports.get(self.ego_port)
         if ego is None:
             raise RuntimeError(f"local netplay port {self.ego_port} is absent from the live frame")
+        self.ego_character = ego.character
         # A custom driver owns the selection and its caller checks the locked character.
         if self.menu_driver is None and ego.character != setup.character:
             raise RuntimeError(f"local player selected {ego.character.name}, expected {setup.character.name}")
