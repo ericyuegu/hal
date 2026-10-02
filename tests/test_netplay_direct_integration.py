@@ -21,6 +21,8 @@ from hal.sim.netplay import NetplaySetup
 from hal.sim.netplay import PlayerDisconnected
 
 pytestmark = pytest.mark.integration
+# Replays use Melee's external stage IDs, not libmelee's internal ones.
+_STADIUM_REPLAY_ID = 3
 
 _WALK_LEFT = ControllerAction(
     main_x=-1.0,
@@ -134,5 +136,5 @@ def test_direct_mode_session(tmp_path: Path) -> None:
     assert not errors, errors
     replays = sorted((tmp_path / "bot").rglob("*.slp"))
     starts = [peppi_py.read_slippi(str(path), skip_frames=True).start for path in replays]
-    stadium = [start for start in starts if start.stage == melee.Stage.POKEMON_STADIUM.value]
+    stadium = [start for start in starts if start.stage == _STADIUM_REPLAY_ID]
     assert len(stadium) >= 2 and all(start.is_frozen_ps for start in stadium)

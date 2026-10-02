@@ -97,6 +97,11 @@ class DirectSelection:
     identity: str
 
 
+# A match start also reports the code-entry submenu, for about a second; a
+# disconnect leaves Slippi on code entry, so only a held code-entry screen counts.
+_DISCONNECT_CONFIRM_SECONDS = 2.0
+
+
 class DirectMenuDriver:
     """Drive Slippi 3.6.4 direct mode for one Dolphin session.
 
@@ -143,6 +148,7 @@ class DirectMenuDriver:
         self._lock_seen = 0
         self._next_probe = 0.0
         self._connect_started: float | None = None
+        self._code_entry_since: float | None = None
 
     def _update(
         self,
@@ -162,6 +168,7 @@ class DirectMenuDriver:
         self._helper.frozen_stadium_selected = self._frozen_stadium
         self._arrived = None
         self._hovered = None
+        self._code_entry_since = None
         # Only a request made during this character select may skip the hold.
         self._lock_seen = self._lock_requests()
         phase: Literal["waiting_for_player", "character_select"] = (
@@ -171,8 +178,9 @@ class DirectMenuDriver:
 
     def __call__(self, state: melee.GameState | None, controller: melee.Controller) -> bool:
         if state is None:
-            controller.release_all()
-            return True
+            # Polls between frames must not flush: a release here would cancel the
+            # last press before the game samples input.
+            return False
         now = self._clock()
         menu, submenu = state.menu_state, getattr(state, "submenu", None)
         if menu in (melee.Menu.MAIN_MENU, melee.Menu.PRESS_START):
@@ -199,8 +207,18 @@ class DirectMenuDriver:
             controller.release_all()
             return True
         if submenu == melee.SubMenu.NAME_ENTRY_SUBMENU:
+            if state.ready_to_start:
+                # The ready-to-fight banner: both players locked in and the match is starting.
+                self._code_entry_since = None
+                controller.release_all()
+                return True
             if self.connected:
-                raise PlayerDisconnected("Start opened code entry")
+                if self._code_entry_since is None:
+                    self._code_entry_since = now
+                if now - self._code_entry_since >= _DISCONNECT_CONFIRM_SECONDS:
+                    raise PlayerDisconnected("Slippi stayed on code entry")
+                controller.release_all()
+                return True
             if self._connect_started is None:
                 self._connect_started = now
                 self._update("waiting_for_player", now + self._connect_timeout, self.locked)
@@ -210,6 +228,7 @@ class DirectMenuDriver:
                 connect_code=self._opponent_code,
             )
             return True
+        self._code_entry_since = None
         if not self.connected:
             return self._connect(state, controller, now)
         return self._between_games(state, controller, now)

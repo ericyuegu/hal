@@ -161,14 +161,31 @@ def test_probe_presses_start_every_interval_after_lock() -> None:
     assert _starts(controller) == 2
 
 
-def test_code_entry_after_connection_means_disconnected() -> None:
-    driver = _driver([FOX], [0], _Clock())
+def test_code_entry_held_after_connection_means_disconnected() -> None:
+    clock = _Clock()
+    driver = _driver([FOX], [0], clock)
     _between_games(driver)
+    entry = _State(melee.Menu.SLIPPI_ONLINE_CSS, submenu=melee.SubMenu.NAME_ENTRY_SUBMENU)
+    driver(entry, _Controller())  # type: ignore[arg-type]
+    clock.now += 1.9
+    driver(entry, _Controller())  # type: ignore[arg-type]
+    clock.now += 0.2
     with pytest.raises(PlayerDisconnected):
-        driver(  # type: ignore[arg-type]
-            _State(melee.Menu.SLIPPI_ONLINE_CSS, submenu=melee.SubMenu.NAME_ENTRY_SUBMENU),
-            _Controller(),
-        )
+        driver(entry, _Controller())  # type: ignore[arg-type]
+
+
+def test_a_starting_match_is_not_a_disconnect() -> None:
+    # Slippi reports the code-entry submenu for about a second while a match starts;
+    # the ready-to-fight banner tells it apart from the real code-entry screen.
+    clock = _Clock()
+    driver = _driver([FOX], [0], clock)
+    _between_games(driver)
+    starting = _State(melee.Menu.SLIPPI_ONLINE_CSS, submenu=melee.SubMenu.NAME_ENTRY_SUBMENU, ready_to_start=255)
+    for _ in range(10):
+        clock.now += 1.0
+        controller = _Controller()
+        driver(starting, controller)  # type: ignore[arg-type]
+        assert controller.pressed == []
 
 
 def test_idle_timeout_at_character_select() -> None:
@@ -254,3 +271,13 @@ def test_a_lock_request_from_an_earlier_game_does_not_skip_the_hold() -> None:
     clock.now += 5.1
     driver(css, controller)  # type: ignore[arg-type]
     assert driver.locked == FOX
+
+
+def test_polls_without_a_new_state_leave_presses_alone() -> None:
+    # The session polls far faster than frames arrive; flushing a release between
+    # frames would cancel every press before the game samples input.
+    driver = _driver([FOX], [0], _Clock())
+    controller = _Controller()
+    controller.press_button(melee.Button.BUTTON_A)
+    assert driver(None, controller) is False  # type: ignore[arg-type]
+    assert controller.prev.button[melee.Button.BUTTON_A] is True
