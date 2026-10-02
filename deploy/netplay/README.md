@@ -11,11 +11,19 @@ Use `HAL#9000` for new games. The owner changed the code from `HAL#647`
 on October 1. The page reads the code returned by the runner. Historical
 replays and reports retain the code used when those games were played.
 
-## Current status — 2026-10-01 UTC
+## Current status — 2026-10-02 UTC
 
-Direct play is live with **eight healthy slots**, one shared **HAL#9000**
-account, and one RTX PRO 6000 Blackwell GPU. Admissions are open. Ranked,
-the Phillip campaign, and the local test player remain stopped.
+The owner requested a stop. The runner, health service, and stream display
+are stopped. The VM accepted `systemctl poweroff`; SSH then timed out.
+The instance and disk were not deleted. Compute Engine's final state could
+not be read because local authentication expired and the VM service account
+lacks permission to read instance state.
+
+The Cloudflare pause request failed with HTTP 500 / error 1101. Queue pause
+state is therefore unconfirmed. No pending production replay sidecars
+remained. See the [shutdown record](g4-stop-2026-10-02.md).
+
+The configuration below describes the last deployed eight-slot service.
 
 - Site: [20xx.xyz](https://20xx.xyz). Worker `hal-netplay-web` serves the page;
   `hal-netplay-api` handles `/v1/*`. The queue cost fix remains deployed.
