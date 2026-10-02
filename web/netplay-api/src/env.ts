@@ -1,6 +1,7 @@
 import type { Queue } from "./queue";
 
 export interface Env {
+  MAINTENANCE?: "on" | "off";
   QUEUE: DurableObjectNamespace<Queue>;
   JOB_RATE_LIMIT: RateLimit;
   // "on" in deployment, "off" in tests whose assertions read fresh capacity.

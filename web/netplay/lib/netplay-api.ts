@@ -211,9 +211,118 @@ export const fallbackOptions: Options = {
     ['YOSHIS_STORY', "Yoshi's Story"],
     ['FOUNTAIN_OF_DREAMS', 'Fountain of Dreams'],
   ].map(([value, label]) => ({ value, label })),
-  online_delays: [2, 3],
+  online_delays: [2],
   desired_return_range: [-20, 140],
   default_desired_return: 20,
   temperature_range: [0.8, 1.1],
   default_temperature: 1,
 };
+
+/** One connection carries capacity and the authenticated reservation view. */
+export function watchQueue(
+  saved: { id: string; token: string } | null,
+  handlers: {
+    capacity: (value: Capacity) => void;
+    job: (value: Job | null) => void;
+    error: (error: ApiError) => void;
+  },
+): () => void {
+  let stopped = false;
+  let socket: WebSocket | null = null;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let attempts = 0;
+  function connect() {
+    const url = new URL('/v1/live', location.href);
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(url);
+    socket = ws;
+    const openedAt = Date.now();
+    let lastReceived = Date.now();
+    let pages: string[] = [];
+    ws.onmessage = (event: MessageEvent<string>) => {
+      lastReceived = Date.now();
+      if (event.data === 'pong') return;
+      let data = event.data;
+      const fragment = JSON.parse(data) as {
+        type: string;
+        page: number;
+        count: number;
+        text: string;
+      };
+      if (fragment.type === 'page') {
+        if (
+          fragment.page !== pages.length ||
+          fragment.count > 128 ||
+          fragment.text.length > 2048
+        ) {
+          ws.close(1009, 'Invalid snapshot page');
+          return;
+        }
+        pages.push(fragment.text);
+        if (pages.length < fragment.count) return;
+        data = pages.join('');
+        pages = [];
+      }
+      const message = JSON.parse(data) as {
+        type: string;
+        sequence: number;
+        protocol_version?: number;
+        capacity?: Capacity;
+        job?: Job | null;
+        status?: number;
+        detail?: string;
+      };
+      if (message.type === 'hello') {
+        if (message.protocol_version !== 4) {
+          stopped = true;
+          handlers.error(
+            new ApiError('The service has updated. Reload this page.', 409),
+          );
+          ws.close();
+          return;
+        }
+        ws.send(
+          JSON.stringify({
+            type: 'subscribe',
+            job_id: saved?.id ?? null,
+            token: saved?.token,
+            ack: message.sequence,
+          }),
+        );
+      } else if (message.type === 'capacity' && message.capacity)
+        handlers.capacity(message.capacity);
+      else if (message.type === 'job') handlers.job(message.job ?? null);
+      else if (message.type === 'error')
+        handlers.error(
+          new ApiError(
+            message.detail ?? 'Live status failed.',
+            message.status ?? 500,
+          ),
+        );
+      if (message.sequence % 32 === 0)
+        ws.send(JSON.stringify({ type: 'ack', ack: message.sequence }));
+    };
+    ws.onopen = () => {
+      heartbeat = setInterval(() => {
+        if (Date.now() - lastReceived > 90_000) ws.close();
+        else if (ws.readyState === WebSocket.OPEN) ws.send('ping');
+      }, 30_000);
+    };
+    ws.onclose = () => {
+      clearInterval(heartbeat);
+      if (stopped) return;
+      if (Date.now() - openedAt >= 60_000) attempts = 0;
+      handlers.error(new ApiError('Connection lost. Reconnecting…', 503));
+      const delay = Math.min(300_000, 2000 * 2 ** Math.min(attempts++, 8));
+      retry = setTimeout(connect, delay * (0.75 + Math.random() * 0.5));
+    };
+  }
+  connect();
+  return () => {
+    stopped = true;
+    clearTimeout(retry);
+    clearInterval(heartbeat);
+    socket?.close();
+  };
+}

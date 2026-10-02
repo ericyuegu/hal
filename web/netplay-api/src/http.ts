@@ -28,8 +28,27 @@ async function readBody(request: Request): Promise<unknown> {
     if (!Number.isInteger(parsed) || parsed < 0) throw new HttpError(400, "invalid Content-Length");
     if (parsed > MAX_BODY_BYTES) throw new HttpError(413, "request body is too large");
   }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) throw new HttpError(413, "request body is too large");
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (reader !== undefined) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_BODY_BYTES) {
+          await reader.cancel();
+          throw new HttpError(413, "request body is too large");
+        }
+        chunks.push(value);
+      }
+    } finally { reader.releaseLock(); }
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const text = new TextDecoder().decode(bytes);
   if (text === "") return undefined;
   try {
     return JSON.parse(text) as unknown;
@@ -113,11 +132,22 @@ export async function servePublic(
 
 export async function handle(request: Request, env: Env): Promise<Response> {
   if (env.EDGE_CACHE !== "on" && env.EDGE_CACHE !== "off") throw new Error("EDGE_CACHE must be on or off");
+  if (env.MAINTENANCE === "on") return failure(503, "Game servers are offline. Please try again later.", { "Retry-After": "300" });
   const queue = env.QUEUE.get(env.QUEUE.idFromName(QUEUE_INSTANCE));
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
   try {
+    // WebSocket messages stay inside the object after this authenticated upgrade.
+    if (method === "GET" && path === "/v1/live") {
+      const origin = request.headers.get("Origin");
+      if (origin !== null && origin !== url.origin) return failure(403, "cross-origin subscription refused");
+      return queue.fetch(request);
+    }
+    if (method === "GET" && path === "/v1/runner/live") {
+      if (!(await tokenMatches(bearer(request), env.RUNNER_TOKEN_SHA256))) return failure(401, "runner token is invalid");
+      return queue.fetch(request);
+    }
     // Player routes
     const seconds = method === "GET" ? PUBLIC_CACHE_SECONDS[path] : undefined;
     if (seconds !== undefined) {
@@ -170,11 +200,15 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         const [, id, action] = runnerJob as [string, string, string | undefined];
         const { session: sessionId, slot } = runnerSlot(request);
         if (method === "GET" && action === undefined) return respond(await queue.workerJob(sessionId, slot, id));
+        const attempt = Number(request.headers.get("X-HAL-Attempt"));
+        if (method === "POST" && (action === "report" || action === "end") && (!Number.isInteger(attempt) || attempt < 1)) {
+          return failure(400, "X-HAL-Attempt is required");
+        }
         if (method === "POST" && action === "report") {
-          return respond(await queue.report(sessionId, slot, id, await readBody(request)));
+          return respond(await queue.report(sessionId, slot, id, await readBody(request), attempt));
         }
         if (method === "POST" && action === "end") {
-          return respond(await queue.endJob(sessionId, slot, id, await readBody(request)));
+          return respond(await queue.endJob(sessionId, slot, id, await readBody(request), attempt));
         }
         if (method === "POST" && action === "replay") {
           return respond(await queue.recordReplay(sessionId, slot, id, await readBody(request)));

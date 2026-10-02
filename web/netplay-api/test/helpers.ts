@@ -51,7 +51,7 @@ export interface CallOptions {
   body?: unknown;
   rawBody?: string;
   token?: string;
-  runner?: { session: string; slot: number } | true;
+  runner?: { session: string; slot: number; attempt?: number } | true;
   runnerToken?: string;
   admin?: boolean;
   ip?: string;
@@ -65,6 +65,7 @@ export async function call(method: string, path: string, options: CallOptions = 
     if (options.runner !== true) {
       headers.set("X-HAL-Session", options.runner.session);
       headers.set("X-HAL-Slot", String(options.runner.slot));
+      headers.set("X-HAL-Attempt", String(options.runner.attempt ?? 1));
     }
   }
   if (options.admin) headers.set("Authorization", `Bearer ${ADMIN_TOKEN}`);
@@ -134,7 +135,7 @@ export async function report(session: string, slots: number, healthy = slots): P
 export async function startSession(slots = 2): Promise<string> {
   const result = await call("POST", "/v1/runner/sessions", {
     runner: true,
-    body: { protocol_version: 3, session_id: crypto.randomUUID(), host: "test-box", bundle_sha256: POLICY.bundle_sha256, git_sha: "abc123", slots, stream: false },
+    body: { protocol_version: 4, session_id: crypto.randomUUID(), host: "test-box", bundle_sha256: POLICY.bundle_sha256, git_sha: "abc123", slots, stream: false },
   });
   if (result.status !== 201) throw new Error(`session failed: ${JSON.stringify(result.body)}`);
   await report(result.body.session_id, slots);

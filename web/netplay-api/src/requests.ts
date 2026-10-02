@@ -169,7 +169,9 @@ export function parseReport(raw: unknown): ObservedReport {
   const games = value.finished_games.map((item, index) => {
     const game = fields(item, ["number", "stage", "result"], ["number", "stage", "result"]);
     const number = int(game.number, "game number");
-    if (number !== index + 1) throw new HttpError(422, "finished_games must be numbered 1, 2, 3, …");
+    if (number < 1 || (index > 0 && number !== (value.finished_games as { number: number }[])[index - 1]!.number + 1)) {
+      throw new HttpError(422, "finished_games must have consecutive positive numbers");
+    }
     return {
       number,
       stage: str(game.stage, "game stage"),

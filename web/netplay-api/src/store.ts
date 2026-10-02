@@ -50,6 +50,9 @@ export interface JobView {
 }
 
 export const JOB_SCHEMA = `
+CREATE TABLE IF NOT EXISTS counts (id INTEGER PRIMARY KEY CHECK (id = 1), queued INTEGER NOT NULL, active INTEGER NOT NULL);
+INSERT OR IGNORE INTO counts(id, queued, active) VALUES (1, 0, 0);
+
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   token_digest TEXT NOT NULL,
@@ -82,6 +85,16 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS jobs_count_insert AFTER INSERT ON jobs WHEN NEW.status IN ('queued', 'assigned') BEGIN
+  UPDATE counts SET queued = queued + (NEW.status = 'queued'), active = active + (NEW.status = 'assigned') WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS jobs_count_update AFTER UPDATE OF status ON jobs WHEN OLD.status != NEW.status BEGIN
+  UPDATE counts SET queued = queued + (NEW.status = 'queued') - (OLD.status = 'queued'),
+    active = active + (NEW.status = 'assigned') - (OLD.status = 'assigned') WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS jobs_count_delete AFTER DELETE ON jobs WHEN OLD.status IN ('queued', 'assigned') BEGIN
+  UPDATE counts SET queued = queued - (OLD.status = 'queued'), active = active - (OLD.status = 'assigned') WHERE id = 1;
+END;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_player ON jobs(player_code) WHERE status IN ('queued', 'assigned');
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(retry_front DESC, queue_seq) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_jobs_assigned ON jobs(lease_expires_at, assigned_at) WHERE status = 'assigned';
@@ -109,6 +122,8 @@ export class JobStore {
   constructor(
     private readonly sql: SqlStorage,
     private readonly now: () => number,
+    private readonly presence?: (id: string, persisted: number) => number,
+    private readonly lease?: (row: Row) => number,
   ) {}
 
   protected first(query: string, ...params: SqlStorageValue[]): Row | null {
@@ -133,10 +148,10 @@ export class JobStore {
     return row;
   }
 
-  view(row: Row): JobView {
+  view(row: Row, queuePosition?: number): JobView {
     const status = row.status as JobStatus;
-    let position: number | null = null;
-    if (status === "queued") {
+    let position: number | null = queuePosition ?? null;
+    if (status === "queued" && queuePosition === undefined) {
       const ahead = this.first(
         `SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'
            AND (retry_front > ? OR (retry_front = ? AND queue_seq < ?))`,
@@ -189,7 +204,7 @@ export class JobStore {
 
   createJob(id: string, tokenDigest: string, request: CreateRequest): JobView {
     const now = this.time();
-    const seq = Number(this.first("SELECT COALESCE(MAX(queue_seq), 0) + 1 AS seq FROM jobs")?.seq);
+    const seq = Number(this.first("SELECT COALESCE(MAX(rowid), 0) + 1 AS seq FROM jobs")?.seq);
     try {
       this.exec(
         `INSERT INTO jobs(id, token_digest, player_code, online_delay, status, queue_seq, settings_revision,
@@ -227,6 +242,7 @@ export class JobStore {
   getJob(id: string, digest: string): JobView {
     const row = this.authenticated(id, digest);
     const now = this.time();
+    if (this.presence !== undefined) return this.view(row);
     if (now - (row.player_seen_at as number) < PRESENCE_WRITE_SECONDS) return this.view(row);
     this.exec("UPDATE jobs SET player_seen_at = ? WHERE id = ?", now, id);
     return this.view(this.reload(id));
@@ -265,12 +281,17 @@ export class JobStore {
     return this.view(this.reload(id));
   }
 
+  queuePositions(): Map<string, number> {
+    return new Map(this.sql.exec<{ id: string }>("SELECT id FROM jobs WHERE status = 'queued' ORDER BY retry_front DESC, queue_seq")
+      .toArray().map((row, index) => [row.id, index + 1]));
+  }
+
   queueDepth(): number {
-    return Number(this.first("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'")?.n);
+    return Number(this.first("SELECT queued AS n FROM counts WHERE id = 1")?.n);
   }
 
   activeCount(): number {
-    return Number(this.first("SELECT COUNT(*) AS n FROM jobs WHERE status = 'assigned'")?.n);
+    return Number(this.first("SELECT active AS n FROM counts WHERE id = 1")?.n);
   }
 
   private owned(id: string, worker: string): Row {
@@ -344,7 +365,7 @@ export class JobStore {
     }
     const newGames = report.finished_games.filter((game) => this.recordGame(id, worker, game, now));
     const lease = phase !== null && IN_GAME_PHASES.has(phase) ? PLAYING_LEASE_SECONDS : LEASE_SECONDS;
-    this.exec("UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?", now + lease, now, id);
+    if (fresh) this.exec("UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?", now + lease, now, id);
     return { view: this.view(this.reload(id)), phaseChanged: fresh && report.phase !== row.phase, newGames };
   }
 
@@ -355,6 +376,8 @@ export class JobStore {
       if (stored.stage === game.stage && stored.result === game.result) return false;
       throw new HttpError(409, `game ${game.number} is already recorded with a different result`);
     }
+    const last = this.first("SELECT MAX(game_number) AS n FROM games WHERE job_id = ?", id)?.n ?? 0;
+    if (game.number !== Number(last) + 1) throw new HttpError(422, "finished_games must be numbered 1, 2, 3, …");
     this.exec(
       "INSERT INTO games(job_id, game_number, stage, result, worker, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       id,
@@ -401,6 +424,14 @@ export class JobStore {
       this.time(),
       id,
     );
+  }
+
+  windDownForBudget(): boolean {
+    return this.sql.exec("UPDATE jobs SET wind_down = 'yield' WHERE status = 'assigned' AND wind_down IS NULL").rowsWritten > 0;
+  }
+
+  hasReplay(id: string, number: number): boolean {
+    return this.first("SELECT 1 FROM games WHERE job_id = ? AND game_number = ? AND replay_key IS NOT NULL", id, number) !== null;
   }
 
   recordReplay(
@@ -459,13 +490,15 @@ export class JobStore {
   reapExpired(): string[] {
     const now = this.time();
     const gone = this.sql
-      .exec<Row>("SELECT id FROM jobs WHERE status = 'queued' AND player_seen_at <= ?", now - PLAYER_PRESENCE_SECONDS)
+      .exec<Row>("SELECT id, player_seen_at FROM jobs WHERE status = 'queued' AND player_seen_at <= ?", now - PLAYER_PRESENCE_SECONDS)
       .toArray()
+      .filter((row) => this.playerSeen(row) <= now - PLAYER_PRESENCE_SECONDS)
       .map((row) => row.id as string);
     for (const id of gone) this.finish(id, "player_left");
     const expired = this.sql
-      .exec<Row>("SELECT id FROM jobs WHERE status = 'assigned' AND lease_expires_at <= ?", now)
+      .exec<Row>("SELECT * FROM jobs WHERE status = 'assigned' AND lease_expires_at <= ?", now)
       .toArray()
+      .filter((row) => this.leaseExpiry(row) <= now)
       .map((row) => row.id as string);
     for (const id of expired) this.requeueOrEnd(id);
     return [...gone, ...expired];
@@ -487,14 +520,30 @@ export class JobStore {
     return ids;
   }
 
+  private playerSeen(row: Row): number {
+    return this.presence?.(row.id as string, row.player_seen_at as number) ?? row.player_seen_at as number;
+  }
+
+  private leaseExpiry(row: Row): number {
+    return Math.max(row.lease_expires_at as number, this.lease?.(row) ?? 0);
+  }
+
+  savePresence(id: string, seen: number): void {
+    this.exec("UPDATE jobs SET player_seen_at = MAX(player_seen_at, ?) WHERE id = ? AND status = 'queued'", seen, id);
+  }
+
+  assigned(): Row[] {
+    return this.sql.exec<Row>("SELECT * FROM jobs WHERE status = 'assigned'").toArray();
+  }
+
   nextDeadline(): number | null {
-    const row = this.first(
-      `SELECT MIN(t) AS t FROM (
-         SELECT lease_expires_at AS t FROM jobs WHERE status = 'assigned' AND lease_expires_at IS NOT NULL
-         UNION ALL SELECT player_seen_at + ${PLAYER_PRESENCE_SECONDS} FROM jobs WHERE status = 'queued'
-         UNION ALL SELECT assigned_at + ${YIELD_AFTER_SECONDS} FROM jobs
-           WHERE status = 'assigned' AND wind_down IS NULL AND assigned_at IS NOT NULL)`,
-    );
-    return (row?.t as number | null) ?? null;
+    const queued = this.sql.exec<Row>("SELECT id, player_seen_at FROM jobs WHERE status = 'queued'").toArray();
+    const deadlines = queued.map((row) => this.playerSeen(row) + PLAYER_PRESENCE_SECONDS);
+    for (const row of this.assigned()) {
+      deadlines.push(this.leaseExpiry(row));
+      // Yield is due only when there is someone to take the slot.
+      if (queued.length > 0 && row.wind_down === null) deadlines.push((row.assigned_at as number) + YIELD_AFTER_SECONDS);
+    }
+    return deadlines.length === 0 ? null : Math.min(...deadlines);
   }
 }

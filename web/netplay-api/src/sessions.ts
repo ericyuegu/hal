@@ -1,4 +1,4 @@
-import { HttpError, SESSION_LIVE_SECONDS, SESSION_SILENCE_SECONDS, validatePlayerCode, workerId } from "./domain";
+import { IN_GAME_PHASES, LEASE_SECONDS, PLAYING_LEASE_SECONDS, HttpError, SESSION_LIVE_SECONDS, SESSION_SILENCE_SECONDS, validatePlayerCode, workerId } from "./domain";
 import type { PolicyConfig } from "./policy";
 import type { JobStore, Row } from "./store";
 
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at REAL NOT NULL,
   draining INTEGER NOT NULL DEFAULT 0,
   status TEXT,
+  runtime TEXT NOT NULL DEFAULT '[]',
   ended_at REAL,
   end_reason TEXT,
   failed_jobs INTEGER
@@ -144,6 +145,33 @@ function parseAccounts(raw: unknown): Account[] {
   });
 }
 
+export interface SlotProgress {
+  slot: number;
+  job_id: string;
+  attempt: number;
+  seq: number;
+  at: number;
+}
+
+function progress(raw: unknown, previous: SlotProgress[], slots: number, now: number): SlotProgress[] {
+  if (!Array.isArray(raw) || raw.length > slots) throw new HttpError(422, "invalid slot progress");
+  const seen = new Set<number>();
+  const updated = raw.map((entry: unknown) => {
+    if (entry === null || typeof entry !== "object") throw new HttpError(422, "invalid slot progress");
+    const v = entry as Record<string, unknown>;
+    const slot = v.slot as number;
+    if (!Number.isInteger(slot) || slot < 0 || slot >= slots || seen.has(slot)
+      || typeof v.job_id !== "string" || v.job_id.length > 64
+      || !Number.isSafeInteger(v.attempt) || (v.attempt as number) < 1
+      || !Number.isSafeInteger(v.seq) || (v.seq as number) < 1) throw new HttpError(422, "invalid slot progress");
+    seen.add(slot);
+    const old = previous.find((p) => p.slot === slot && p.job_id === v.job_id && p.attempt === v.attempt);
+    if (old !== undefined && (v.seq as number) <= old.seq) return old;
+    return { slot, job_id: v.job_id, attempt: v.attempt, seq: v.seq, at: now } as SlotProgress;
+  });
+  return [...updated, ...previous.filter((p) => !seen.has(p.slot))];
+}
+
 export class SessionStore {
   constructor(
     private readonly sql: SqlStorage,
@@ -244,11 +272,12 @@ export class SessionStore {
   }
 
   // Liveness uses the time this report arrived, never the runner's clock.
-  report(id: string, raw: unknown): { draining: boolean; streamHolder: boolean; streamGranted: boolean } {
+  report(id: string, raw: unknown, observations: unknown = []): { draining: boolean; streamHolder: boolean; streamGranted: boolean } {
     const row = this.live(id);
     const status = parseRunnerStatus(raw, row.slots as number);
     const now = this.now();
-    this.sql.exec("UPDATE sessions SET status = ?, last_seen_at = ? WHERE id = ?", JSON.stringify(status), now, id);
+    const runtime = progress(observations, JSON.parse(row.runtime as string) as SlotProgress[], row.slots as number, now);
+    this.sql.exec("UPDATE sessions SET status = ?, last_seen_at = ?, runtime = ? WHERE id = ?", JSON.stringify(status), now, JSON.stringify(runtime), id);
     let holder = this.rows("SELECT session_id FROM stream WHERE id = 1")[0]?.session_id;
     let streamGranted = false;
     if (holder === null && row.wants_stream === 1 && row.draining === 0) {
@@ -281,7 +310,7 @@ export class SessionStore {
       `SELECT sessions.id, sessions.last_seen_at FROM stream
        JOIN sessions ON sessions.id = stream.session_id
        WHERE stream.id = 1 AND sessions.ended_at IS NULL AND sessions.draining = 0
-         AND sessions.last_seen_at >= ?`,
+         AND sessions.last_seen_at > ?`,
       this.now() - SESSION_LIVE_SECONDS,
     )[0];
     if (holder === undefined || (holder.id === id && slot === 0)) return false;
@@ -305,7 +334,7 @@ export class SessionStore {
   }
 
   drain(id: string): void {
-    this.live(id);
+    if (this.live(id).draining === 1) return;
     this.sql.exec("UPDATE sessions SET draining = 1 WHERE id = ?", id);
     this.releaseStream(id);
   }
@@ -355,18 +384,32 @@ export class SessionStore {
     return { sessions, jobs: sessions.flatMap((id) => this.end(id, "silent")) };
   }
 
+  runtimeLeases(): Map<string, SlotProgress[]> {
+    return new Map(this.rows(`SELECT id, runtime FROM sessions WHERE id IN (${LEASED_SESSION_IDS}) AND ended_at IS NULL`)
+      .map((row) => [row.id as string, JSON.parse(row.runtime as string) as SlotProgress[]]));
+  }
+
+  leaseExpiry(job: Row, runtime: Map<string, SlotProgress[]>): number {
+    const [session, slotName] = (job.lease_owner as string).split("/slot-");
+    const slot = Number(slotName);
+    const sample = runtime.get(session!)?.find((p) => p.slot === slot && p.job_id === job.id && p.attempt === job.attempt);
+    return sample === undefined ? 0 : sample.at + (IN_GAME_PHASES.has(job.phase as never) ? PLAYING_LEASE_SECONDS : LEASE_SECONDS);
+  }
+
   nextDeadline(): number | null {
     const row = this.rows(
       `SELECT MIN(last_seen_at) AS t FROM sessions WHERE id IN (${LEASED_SESSION_IDS}) AND ended_at IS NULL`,
     )[0];
-    return row?.t == null ? null : (row.t as number) + SESSION_SILENCE_SECONDS;
+    if (row?.t == null) return null;
+    const freshness = (row.t as number) + SESSION_LIVE_SECONDS;
+    return freshness > this.now() ? freshness : (row.t as number) + SESSION_SILENCE_SECONDS;
   }
 
   capacity(): CapacityBody {
     const cutoff = this.now() - SESSION_LIVE_SECONDS;
     const statuses = this.rows(
       `SELECT status FROM sessions WHERE id IN (${LEASED_SESSION_IDS}) AND ended_at IS NULL
-         AND draining = 0 AND status IS NOT NULL AND last_seen_at >= ? ORDER BY started_at`,
+         AND draining = 0 AND status IS NOT NULL AND last_seen_at > ? ORDER BY started_at`,
       cutoff,
     ).map((row) => JSON.parse(row.status as string) as RunnerStatus);
     const base = { active: this.jobs.activeCount(), queued: this.jobs.queueDepth(), target_fps: 60 };

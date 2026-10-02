@@ -138,7 +138,7 @@ class ReservationLink:
         self._deadline: float | None = None
         self._bot_code: str | None = None
         self._locked: int | None = None
-        # The Worker keeps a requeued job's games and requires the full list in every report.
+        # Keep the complete local history; RemoteQueue sends only unacknowledged results.
         self._games: list[FinishedGame] = list(job.games)
         self._released = False
         self._stop = threading.Event()

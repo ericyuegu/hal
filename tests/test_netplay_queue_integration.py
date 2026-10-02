@@ -4,10 +4,12 @@ import os
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 
+from hal.netplay_service.control import QueueControl
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
@@ -254,3 +256,71 @@ def test_reporter_keeps_a_starting_session_alive_while_a_silent_one_ends(worker_
     with pytest.raises(SessionEndedError):
         sessions.report_status(silent.session_id, _status())
     assert sessions.end_session(starting.session_id) == 0
+
+
+def test_shared_control_pushes_settings_and_coalesces_local_reports(
+    worker_url: str, admin: AdminClient, tmp_path: Path
+) -> None:
+    endpoint = QueueEndpoint(worker_url, DEV_RUNNER_TOKEN)
+    sessions = RunnerClient(endpoint)
+    started = _start(sessions)
+    session_id = started.session_id
+    remote_requests: list[str] = []
+
+    def record(request: httpx.Request) -> None:
+        remote_requests.append(request.url.path)
+
+    try:
+        with (
+            httpx.Client(base_url=worker_url, headers=endpoint.headers(), event_hooks={"request": [record]}) as http,
+            QueueControl(endpoint, session_id, _status, tmp_path / "status.json", client=http) as control,
+        ):
+            queue = RemoteQueue(control.endpoint, session_id)
+            worker = slot_worker_id(session_id, 0)
+            try:
+                # Empty claims stay on this host, including repeated idle checks.
+                for _ in range(20):
+                    assert queue.claim_next(worker) is None
+                assert not remote_requests
+                job_id, token = _create(worker_url, "RELAY#1")
+                deadline = time.monotonic() + 5
+                job = queue.claim_next(worker)
+                while job is None:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+                    job = queue.claim_next(worker)
+                assert job.id == job_id
+                for seq in range(1, 21):
+                    assert queue.report(job_id, worker, _observed(seq)).id == job_id
+                assert sum(path.endswith("/report") for path in remote_requests) == 1
+                changed = httpx.patch(
+                    f"{worker_url}/v1/jobs/{job_id}/settings",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"desired_return": 80},
+                )
+                assert changed.status_code == 200
+                deadline = time.monotonic() + 5
+                while queue.report(job_id, worker, _observed(21)).settings.desired_return != 80:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+                assert sum(path.endswith("/report") for path in remote_requests) == 1
+                old_socket = control._socket
+                assert old_socket is not None
+                old_socket.close()
+                deadline = time.monotonic() + 10
+                while control._socket is old_socket or not control._connected:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+                assert queue.report(job_id, worker, _observed(22)).settings.desired_return == 80
+                queue.end(job_id, worker, EndReason.PLAYER_CANCELED, retryable=False)
+                queue.finish_pairing(job_id, worker, job.attempt)
+                sessions.drain(session_id)
+                deadline = time.monotonic() + 3
+                while not control.state().draining:
+                    assert time.monotonic() < deadline, "draining waited for the next heartbeat"
+                    time.sleep(0.05)
+            finally:
+                queue.close()
+    finally:
+        sessions.end_session(session_id)
+        sessions.close()

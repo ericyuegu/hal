@@ -4,20 +4,20 @@ export const LEASE_SECONDS = 20;
 // progress tolerates more silence than the other phases.
 export const PLAYING_LEASE_SECONDS = 60;
 export const SESSION_SILENCE_SECONDS = 30;
-// A player's page polls its job every second. Background tabs can throttle
-// timers to once a minute, so a page counts as gone only after two missed minutes.
+// Socket auto-response receipt times track presence without SQL heartbeat writes.
+// Background tabs can throttle timers, so presence lasts two minutes.
 export const PLAYER_PRESENCE_SECONDS = 120;
-// Polls refresh presence at most this often, to bound Durable Object writes.
+// Store-only callers without a socket presence provider use this write interval.
 export const PRESENCE_WRITE_SECONDS = 10;
 // A reservation yields its slot after this long once someone is waiting.
 export const YIELD_AFTER_SECONDS = 15 * 60;
-export const SESSION_LIVE_SECONDS = 5;
+export const SESSION_LIVE_SECONDS = 20;
 export const EVENT_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 export const QUEUE_CAP = 20;
 export const MAX_BODY_BYTES = 16 * 1024;
 // Any change to a runner route's request or response shape bumps this with
 // RUNNER_PROTOCOL_VERSION in hal/netplay_service/queue_client.py.
-export const RUNNER_PROTOCOL_VERSION = 3;
+export const RUNNER_PROTOCOL_VERSION = 4;
 
 export type JobStatus = "queued" | "assigned" | "ended";
 export const PHASES = ["booting", "waiting_for_player", "character_select", "in_game", "paused"] as const;

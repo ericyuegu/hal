@@ -1,7 +1,8 @@
-# Proposed free-tier queue architecture — October 2, 2026
+# Free-tier queue architecture — October 2, 2026
 
-Status: design proposal, not implemented or deployed. This does not amend the
-canonical spec. The G4 remains shut down. Audit source: commit 64ed8dec.
+Status: approved for implementation and redeployment. The implementation uses
+runner protocol 4 and storage schema 7. See `free-tier-rollout.md` for test and
+release status. The original audit used commit 64ed8dec.
 
 ## Finding
 
@@ -121,7 +122,7 @@ the G4 needs no public HAL endpoint.
   600-second rematch deadline. Tests must cover each boundary.
 - A ten-second host report requires changing the current five-second
   capacity-freshness rule. Propose a twenty-second freshness window.
-  This is a spec change requiring approval, not an unannounced constant edit.
+  The owner approved this change with the shared control design.
 - Browser application keepalives use the hibernation auto-response API.
   Inspect platform receipt timestamps for presence. Do not write one SQL row
   per browser heartbeat. Persist disconnect deadlines when needed and test

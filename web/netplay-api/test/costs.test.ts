@@ -123,7 +123,7 @@ describe("recurring queue costs", () => {
         "report": {
           "alarmReads": 1,
           "alarmWrites": 0,
-          "rowsRead": 26,
+          "rowsRead": 44,
           "rowsWritten": 1,
         },
       }
@@ -149,7 +149,7 @@ describe("recurring queue costs", () => {
               seen_revision: 1,
               locked_revision: 1,
               finished_games: [],
-            }),
+            }, 1),
           alarm: () => queue.alarm(),
         };
         const costs: Record<string, Awaited<ReturnType<typeof measure>>> = {};
@@ -207,7 +207,7 @@ describe("alarm writes", () => {
         sessions.start(SESSION, { host: "probe", bundle_sha256: policy.bundle_sha256, git_sha: "probe", slots: 1, stream: false }, policy);
         await queue.reportStatus(SESSION, runnerStatus(1));
         const firstAlarm = await state.storage.getAlarm();
-        expect(firstAlarm).toBe((now + 30) * 1000);
+        expect(firstAlarm).toBe((now + 20) * 1000);
         clock.mockReturnValue((now + 2) * 1000);
         const reopened = new Queue(state, { ...env, HAL_TEST_CLOCK: "0" });
         const cost = await measure(state, () => reopened.reportStatus(SESSION, runnerStatus(1)));
@@ -215,7 +215,7 @@ describe("alarm writes", () => {
         expect(await state.storage.getAlarm()).toBe(firstAlarm);
         jobs.createJob("early-job", "digest", { ...NEW_JOB, player_code: "PLAYER#2" });
         expect(await reopened.claim(SESSION, { slot: 0 })).toMatchObject({ status: 200 });
-        expect(await state.storage.getAlarm()).toBe((now + 22) * 1000);
+        expect(await state.storage.getAlarm()).toBe(firstAlarm);
         clock.mockReturnValue((now + 22) * 1000);
         await state.storage.deleteAlarm();
         await reopened.alarm();

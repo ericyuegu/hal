@@ -60,6 +60,7 @@ from hal.netplay_service.assets import AssetCache
 from hal.netplay_service.assets import LocalSource
 from hal.netplay_service.assets import PinnedAsset
 from hal.netplay_service.assets import R2Source
+from hal.netplay_service.control import QueueControl
 from hal.netplay_service.domain import Job
 from hal.netplay_service.domain import validate_player_code
 from hal.netplay_service.health import SLOT_HEARTBEAT_MAX_AGE_SECONDS
@@ -1055,7 +1056,7 @@ def _run_generation(
     *,
     recovery_deadline: float | None,
     session_client: RunnerClient | None = None,
-    reporter: SessionReporter | None = None,
+    reporter: SessionReporter | QueueControl | None = None,
     drain_timeout_seconds: float = 900.0,
     displays: tuple[str, ...] = (),
     pulse_environment: tuple[tuple[str, str], ...] = (),
@@ -1320,7 +1321,7 @@ def run(
     config: RunnerConfig,
     *,
     session_client: RunnerClient | None = None,
-    reporter: SessionReporter | None = None,
+    reporter: SessionReporter | QueueControl | None = None,
     drain_timeout_seconds: float = 900.0,
 ) -> None:
     """Admit matches only after a separate GPU process qualifies each profile."""
@@ -1500,10 +1501,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         status_path = args.status_path.resolve()
         status = SessionStatus(status_path, started.policy.bundle_sha256, args.slots)
         try:
-            with SessionReporter(client, session_id, status) as reporter:
+            with (
+                QueueControl(endpoint, session_id, status, status_path) as control,
+                closing(RunnerClient(control.endpoint)) as local_client,
+            ):
                 policy, user_jsons = _download_session_assets(started, local_assets=args.local_assets)
                 config = RunnerConfig(
-                    queue_endpoint=endpoint,
+                    queue_endpoint=control.endpoint,
                     session_id=session_id,
                     policy=policy,
                     user_jsons=user_jsons,
@@ -1527,8 +1531,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
                 run(
                     config,
-                    session_client=client,
-                    reporter=reporter,
+                    session_client=local_client,
+                    reporter=control,
                     drain_timeout_seconds=args.drain_timeout,
                 )
         finally:

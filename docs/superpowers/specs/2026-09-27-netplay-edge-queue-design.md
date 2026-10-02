@@ -92,12 +92,12 @@ uses direct peer traffic; runner control traffic is outbound HTTPS and WSS.
 
 ### Storage
 
-All queue state lives in one Durable Object instance, addressed by the schema-specific name `global-v3`.
+All queue state lives in one Durable Object instance, addressed by the schema-specific name `global-v7`.
 Schema changes use a fresh instance; old state is retained without migration.
 Requests to it run one at a time, and each request runs in one storage
 transaction.
 
-Tables (storage schema version 3; no migrations):
+Tables (storage schema version 7; no migrations):
 
 - `jobs`, `games`: ported from the removed Python `queue.py` v3 schema, with
   session ownership and the fields required for idempotent runner requests.
@@ -130,8 +130,9 @@ When it fires, it processes everything due and sets the next alarm. A mutation
 keeps an existing earlier alarm instead of rewriting it after each heartbeat.
 Reads and empty claims do not schedule alarms. Recurring queries use the active
 job index and leased account IDs, so completed job and session history does not
-increase their read cost. An idle slot waits five seconds between claims. This
-replaces the API process's `reap_expired` loop.
+increase their read cost. The host makes claims after pushed work notifications.
+Slots can check the host's loopback relay while idle; these checks never reach
+Cloudflare. Queue and active counts use transactional SQLite triggers.
 
 ## Routes
 
@@ -143,9 +144,14 @@ Unchanged paths and JSON shapes:
 - `GET /v1/capacity`: aggregated from live sessions' `RunnerStatus` payloads,
   using the same rules as `aggregate_runner_status` today. Status `unavailable`
   when no session is live.
-- `POST /v1/jobs`, `GET /v1/jobs/{id}`, `PATCH /v1/jobs/{id}/policy`,
-  `DELETE /v1/jobs/{id}`, `POST /v1/jobs/{id}/rematch`: bearer job token as today.
+- `POST /v1/jobs`, `GET /v1/jobs/{id}`, `PATCH /v1/jobs/{id}/settings`,
+  `DELETE /v1/jobs/{id}`, `POST /v1/jobs/{id}/lock`: bearer job token as today.
   The server stores only a SHA-256 digest of each token.
+- `WS /v1/live`: one socket supplies capacity and the player's job. The first
+  subscription authenticates the job token. Public snapshots have no connect
+  codes or stream keys. Browser keepalives use the hibernation auto-response API;
+  their receipt timestamps provide the existing 120-second presence window.
+  Browser GETs no longer renew presence. No periodic browser GETs remain.
 
 New errors:
 
@@ -164,26 +170,22 @@ has its own token.
 | Route | Purpose | Replaces |
 | --- | --- | --- |
 | `POST /v1/runner/sessions` | Start a session: `{session_id, protocol_version, host, bundle_sha256, git_sha, slots, stream}`, with a runner-chosen ID. Returns the session ID, the policy config, and one shared leased account assigned to every slot. A repeat with identical fields returns the same session. `409` if the runner protocol version differs from the Worker's, if the bundle is not the active policy, if no account is free, or if the ID exists with other fields. | runner startup and per-box account config |
-| `POST /v1/runner/sessions/{sid}/status` | Report the `RunnerStatus` payload, about every 2 s. Doubles as the session heartbeat. The response is `{draining, stream}`: `stream` is `null` unless this session holds the stream lease, and then it carries the stream key. | status files read by the API |
+| `POST /v1/runner/sessions/{sid}/status` | Explicit status update for diagnostics. The production host sends status through its shared socket every 10 s. The response is `{draining, stream}`: `stream` is `null` unless this session holds the stream lease, and then it carries the stream key. | status files read by the API |
 | `POST /v1/runner/sessions/{sid}/claim` | `{slot}` → a job or `204`. Returns the slot's `leased` job if it holds one, so a repeat cannot take a second job. Refused while the session is draining, or while the slot holds a job past `leased`. Applies the session pairing gate and stream-slot preference (see "Streaming"). | `claim_next` |
 | `GET /v1/runner/sessions/{sid}/pairing` | Return the pending `{slot, job_id, attempt}`, or null. | supervisor crash recovery |
 | `POST /v1/runner/sessions/{sid}/pairing-finished` | Release only the matching `{slot, job_id, attempt}` after Dolphin cleanup. A repeat is safe, including after session end. | slot cleanup |
 | `POST /v1/runner/sessions/{sid}/drain` | Stop claiming; keep current sets. | local stop flag |
 | `DELETE /v1/runner/sessions/{sid}` | End the session: fail its remaining leases with the current generation-abort codes and free its accounts. A repeat returns the first result. | `fail_worker_generation` |
-| `POST /v1/runner/jobs/{id}/heartbeat` | Extend the job lease. | `heartbeat` |
-| `POST /v1/runner/jobs/{id}/connecting` | `{connect_code}` | `mark_connecting` |
-| `POST /v1/runner/jobs/{id}/playing` | | `mark_playing` |
-| `POST /v1/runner/jobs/{id}/no-show` | | `mark_no_show` |
-| `POST /v1/runner/jobs/{id}/no-contest` | | `mark_no_contest` |
-| `POST /v1/runner/jobs/{id}/finish-game` | `{game_number, actual_stage, result}` | `finish_game` |
-| `POST /v1/runner/jobs/{id}/fail` | `{error_code, retryable}` | `fail` |
-| `POST /v1/runner/jobs/{id}/forfeit` | | `forfeit_service_failure` |
+| `POST /v1/runner/jobs/{id}/report` | Persist phase, acknowledged settings and new game results. Repeated sequence numbers do not renew leases. | reservation transitions |
+| `POST /v1/runner/jobs/{id}/end` | `{reason, retryable}` ends or requeues the matching attempt. | reservation completion |
 | `POST /v1/runner/jobs/{id}/replay` | `{game_number, key, sha256, size, etag}`. Accepted only from the worker that finished that game, even after its session ended. | `record_replay` |
 | `GET /v1/runner/jobs/{id}` | Current job for the owning worker. | `get_worker_job` |
-| `WS /v1/runner/jobs/{id}/live` | Server pushes `settings {revision, desired_return, temperature}` on connect and on every change, and `released` when the job is canceled, expires, or is reassigned. | `_LivePolicySettings` polling SQLite |
+| `WS /v1/runner/live` | One authenticated host socket multiplexes health, slot progress, work hints, settings and stream ownership. | host and per-slot polling |
 
 Each job route names the session and slot (`X-HAL-Session`, `X-HAL-Slot`
-headers), and the Durable Object derives the worker ID from them.
+headers), and the Durable Object derives the worker ID from them. Reports and
+end commands also carry `X-HAL-Attempt`; a delayed retry cannot alter a newer
+attempt. Reconnect snapshots are authoritative; work notifications are hints.
 
 ### Admin routes (`/v1/admin/*`)
 
@@ -237,7 +239,7 @@ Deliberate changes, each with its own test:
    a newer pairing. A dead slot is cleaned up after the existing lease grace;
    full engine recovery releases the gate after all Dolphins have closed.
    Session end or 30-second silence also releases it. Connected games and
-   their rematches run concurrently. Runner protocol version is 2.
+   their rematches run concurrently. Runner protocol version is 4.
 
 ## Runner changes
 
@@ -253,10 +255,32 @@ raises the same `InvalidTransitionError` the runner already handles. That class
 and the `RunnerQueue` protocol live in `hal/netplay_service/queue_contract.py`.
 `RemoteQueue` is its production implementation.
 
-`_LivePolicySettings` keeps its interface. It reads settings from the job's
-WebSocket instead of polling SQLite, reconnects with backoff, and sets
-`released` on a `released` message or when `GET /v1/runner/jobs/{id}` reports a
-terminal state after a reconnect.
+`hal/netplay_service/control.py` owns one outbound WebSocket and an authenticated
+loopback relay. Slot processes receive only the local endpoint and a local token.
+Their two-second reports stay on the box. The relay forwards changed observations
+and new game results as idempotent HTTP commands. It serves pushed settings,
+capacity and pairing state from local memory. The emulator frame loop does not
+wait on Cloudflare.
+
+One ten-second host message persists all slot progress in one session row. A
+slot must have a fresh local report and fresh, non-recovering health. Repeated
+progress sequences do not renew its lease. The object retains the 20-second
+nonplaying lease, 60-second playing lease and 30-second session-silence rule.
+Capacity becomes stale after 20 seconds. On control loss, the local session also
+expires after 30 seconds.
+
+Sockets use hibernation, bounded output, acknowledgement windows and reconnect
+backoff. Messages are at most 16 KiB. Larger snapshots use numbered pages, with a
+256 KiB reassembly limit. Slow consumers close and reconnect for current state.
+Queue positions are computed once per broadcast. Settings go only to the affected
+reservation. Identical capacity snapshots are not resent.
+
+The approved free-tier workload and limits are in
+`deploy/netplay/free-tier-design.md`. A persistent daily write budget gates new
+reservations and settings changes. It reserves health, cleanup and game completion
+work. Existing matches wind down when the command reserve is consumed. A Worker
+maintenance binding can reject traffic without invoking the object. This does not
+make rejected requests free or protect against unlimited traffic.
 
 ### Startup
 
@@ -339,7 +363,7 @@ the GPU and model.
 ### Claim preference
 
 - A claim from any slot other than the stream slot returns `204` while the
-  stream slot is live (its session reported status within 5 s and is not
+  stream slot is live (its session reported status within 20 s and is not
   draining) and has no job. The stream slot's next claim, at most one claim
   interval later, takes the job.
 - When no session holds the stream, or the stream slot has a job, claims work as

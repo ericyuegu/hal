@@ -14,15 +14,13 @@ import { Check, Copy, Gamepad2, LoaderCircle, X } from 'lucide-react';
 import { Sentence, ShortcutSheet, useHotkeys } from '@/components/sentence';
 import type { Panel } from '@/components/sentence';
 import {
-  ApiError,
   Capacity,
   Choice,
   createJob,
   CreateJob,
   EndReason,
   fallbackOptions,
-  getCapacity,
-  getJob,
+  watchQueue,
   getOptions,
   Job,
   leaveJob,
@@ -198,48 +196,27 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    let canceled = false;
-    async function refresh() {
-      try {
-        const next = await getCapacity();
-        if (!canceled) setCapacity(next);
-      } catch {
-        if (!canceled) setCapacity(unavailableCapacity);
-      }
-    }
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 5000);
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!saved) return;
-    let canceled = false;
-    async function refresh() {
-      try {
-        const next = await getJob(saved!.id, saved!.token);
-        if (!canceled) {
-          setJob(next);
-          setError('');
+    if (!loaded) return;
+    return watchQueue(saved, {
+      capacity: (next) => {
+        setCapacity(next);
+        setError((current) =>
+          current === 'Connection lost. Reconnecting…' ? '' : current,
+        );
+      },
+      job: (next) => {
+        setJob(next);
+        setError('');
+      },
+      error: (cause) => {
+        if ([401, 403, 404].includes(cause.status)) forget();
+        else {
+          setCapacity(unavailableCapacity);
+          setError(cause.message);
         }
-      } catch (cause) {
-        if (canceled) return;
-        // The service no longer knows this reservation; drop the stale credential.
-        if (cause instanceof ApiError && [401, 403, 404].includes(cause.status))
-          forget();
-        else setError(errorText(cause, 'Could not read reservation status.'));
-      }
-    }
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 1000);
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [saved, forget]);
+      },
+    });
+  }, [saved, loaded, forget]);
 
   useStatusAlerts(job);
 

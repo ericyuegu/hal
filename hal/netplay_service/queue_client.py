@@ -37,7 +37,7 @@ from hal.netplay_service.queue_contract import SessionEndedError
 # Must equal RUNNER_PROTOCOL_VERSION in web/netplay-api/src/domain.ts; the two change
 # together with any change to a runner route's request or response shape, because
 # parse_job refuses a job body with any field added or removed.
-RUNNER_PROTOCOL_VERSION: Final = 3
+RUNNER_PROTOCOL_VERSION: Final = 4
 RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0, 2.0, 4.0)
 _TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(10.0, connect=5.0)
 # The bearer token travels in the clear over http, so http is only for a Worker on this machine.
@@ -313,6 +313,8 @@ class RemoteQueue:
     ) -> None:
         self.endpoint = endpoint
         self.session_id = session_id
+        self._attempts: dict[str, int] = {}
+        self._game_numbers: dict[str, int] = {}
         self._api = _Api(endpoint, client, sleep)
 
     def close(self) -> None:
@@ -331,7 +333,12 @@ class RemoteQueue:
         response = self._api.request(
             "POST", f"/v1/runner/sessions/{self.session_id}/claim", body={"slot": self._slot(worker_id)}
         )
-        return None if response.status_code == 204 else parse_job(_json(response))
+        if response.status_code == 204:
+            return None
+        job = parse_job(_json(response))
+        self._attempts[job.id] = job.attempt
+        self._game_numbers[job.id] = max((game.number for game in job.games), default=0)
+        return job
 
     def finish_pairing(self, job_id: str, worker_id: str, attempt: int) -> None:
         slot = self._slot(worker_id)
@@ -341,21 +348,37 @@ class RemoteQueue:
             body={"slot": slot, "job_id": job_id, "attempt": attempt},
         )
 
+    def _attempt_headers(self, job_id: str, worker_id: str) -> dict[str, str]:
+        headers = self._slot_headers(worker_id)
+        if job_id not in self._attempts:
+            self._attempts[job_id] = self.get_worker_job(job_id, worker_id).attempt
+        return {**headers, "X-HAL-Attempt": str(self._attempts[job_id])}
+
     def report(self, job_id: str, worker_id: str, observed: Observed) -> Job:
+        headers = self._attempt_headers(job_id, worker_id)
+        payload = observed.to_payload()
+        known = self._game_numbers.get(job_id, 0)
+        payload["finished_games"] = [
+            {"number": game.number, "stage": game.stage, "result": game.result.value}
+            for game in observed.finished_games
+            if game.number > known
+        ]
         response = self._api.request(
             "POST",
             f"/v1/runner/jobs/{job_id}/report",
-            body=observed.to_payload(),
-            headers=self._slot_headers(worker_id),
+            body=payload,
+            headers=headers,
         )
-        return parse_job(_json(response))
+        job = parse_job(_json(response))
+        self._game_numbers[job_id] = max((game.number for game in job.games), default=0)
+        return job
 
     def end(self, job_id: str, worker_id: str, reason: EndReason, *, retryable: bool) -> Job:
         response = self._api.request(
             "POST",
             f"/v1/runner/jobs/{job_id}/end",
             body={"reason": reason.value, "retryable": retryable},
-            headers=self._slot_headers(worker_id),
+            headers=self._attempt_headers(job_id, worker_id),
         )
         return parse_job(_json(response))
 
@@ -367,7 +390,9 @@ class RemoteQueue:
 
     def get_worker_job(self, job_id: str, worker_id: str) -> Job:
         response = self._api.request("GET", f"/v1/runner/jobs/{job_id}", headers=self._slot_headers(worker_id))
-        return parse_job(_json(response))
+        job = parse_job(_json(response))
+        self._game_numbers[job_id] = max((game.number for game in job.games), default=0)
+        return job
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +434,25 @@ class StreamGrant:
 class SessionState:
     draining: bool
     stream: StreamGrant | None = None
+
+
+def parse_session_state(raw: object) -> SessionState:
+    payload = _object(raw, frozenset(("draining", "stream")), "status")
+    try:
+        raw_stream = payload["stream"]
+        stream = None
+        if raw_stream is not None:
+            grant = _object(raw_stream, frozenset(("slot", "key")), "stream grant")
+            slot = _integer(grant["slot"])
+            key = _text(grant["key"])
+            if slot != 0:
+                raise ValueError("stream grant slot must be 0")
+            if not key:
+                raise ValueError("stream grant key must be non-empty")
+            stream = StreamGrant(slot, key)
+        return SessionState(draining=_boolean(payload["draining"]), stream=stream)
+    except (TypeError, ValueError) as error:
+        raise QueueProtocolError(f"status response is invalid: {error}") from error
 
 
 def new_session_id() -> str:
@@ -492,21 +536,7 @@ class RunnerClient:
             frozenset(("draining", "stream")),
             "status",
         )
-        try:
-            raw_stream = payload["stream"]
-            stream = None
-            if raw_stream is not None:
-                grant = _object(raw_stream, frozenset(("slot", "key")), "stream grant")
-                slot = _integer(grant["slot"])
-                key = _text(grant["key"])
-                if slot != 0:
-                    raise ValueError("stream grant slot must be 0")
-                if not key:
-                    raise ValueError("stream grant key must be non-empty")
-                stream = StreamGrant(slot, key)
-            return SessionState(draining=_boolean(payload["draining"]), stream=stream)
-        except (TypeError, ValueError) as error:
-            raise QueueProtocolError(f"status response is invalid: {error}") from error
+        return parse_session_state(payload)
 
     def queue_depth(self) -> int:
         payload = _json(self._api.request("GET", "/v1/capacity"))

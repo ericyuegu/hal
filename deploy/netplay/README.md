@@ -846,3 +846,15 @@ The first live game with the meter averaged **58.914 emulator FPS**, with
 with no encoder/network drops. An overlay restart during the game preserved
 the Ranked, Dolphin, and OBS process IDs and added no dropped stream frames.
 The completed replay uploaded, and the helper started the next game.
+
+
+## Shared control and free-tier limits — October 2, 2026
+
+See [the rollout record](free-tier-rollout.md) for the current release state,
+architecture, measured daily load, commands, failures and remaining checks.
+The approved design is [free-tier-design.md](free-tier-design.md).
+
+The updated runner uses one control socket for all slots. The browser receives status by
+push. Slot polling and stream queue-depth reads stay on G4. New admissions and
+settings changes stop before the daily write reserve is spent. The object also
+stops admissions at 100 MiB; history and R2 replays are retained.

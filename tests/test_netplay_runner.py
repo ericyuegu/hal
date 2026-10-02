@@ -3,6 +3,7 @@ import signal
 import threading
 import time
 from contextlib import contextmanager
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
@@ -627,6 +628,7 @@ def _run_cli(
     monkeypatch.setattr(runner, "runner_endpoint", lambda _environment: _ENDPOINT)
     monkeypatch.setattr(runner, "RunnerClient", lambda _endpoint: client)
     monkeypatch.setattr(runner, "SessionReporter", reporting)
+    monkeypatch.setattr(runner, "QueueControl", lambda *_args: nullcontext(SimpleNamespace(endpoint=_ENDPOINT)))
     monkeypatch.setattr(runner, "_download_session_assets", lambda *_args, **_kwargs: (policy, accounts))
     monkeypatch.setattr(runner, "run", run)
     monkeypatch.setattr(runner, "new_session_id", lambda: _SESSION_ID)

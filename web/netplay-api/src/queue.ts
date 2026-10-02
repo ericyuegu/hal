@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   HttpError,
+  MAX_BODY_BYTES,
   IN_GAME_PHASES,
   QUEUE_CAP,
   RUNNER_PROTOCOL_VERSION,
@@ -8,12 +9,15 @@ import {
   sha256Hex,
   validatePlayerCode,
 } from "./domain";
+import { WriteBudget } from "./budget";
+import { LiveConnections } from "./live";
+import type { SlotProgress } from "./sessions";
 import type { Env } from "./env";
 import { EVENT_SCHEMA, EventLog } from "./events";
 import { type PolicyConfig, checkChoice, optionsBody, parsePolicyConfig } from "./policy";
 import { bool, fields, int, parseCreate, parseEnd, parseReport, parseSettingsUpdate, str } from "./requests";
 import { SESSION_SCHEMA, SessionStore, type StartRequest } from "./sessions";
-import { JOB_SCHEMA, JobStore } from "./store";
+import { JOB_SCHEMA, JobStore, type JobView } from "./store";
 
 export interface ApiResult {
   status: number;
@@ -26,9 +30,9 @@ const SESSION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 // Every table is created with CREATE TABLE IF NOT EXISTS, which keeps an older
 // table unchanged. Bump this with any table change and use a fresh instance.
 // A mismatched store refuses every request; there are no migrations.
-export const STORE_SCHEMA_VERSION = 5;
+export const STORE_SCHEMA_VERSION = 7;
 export const QUEUE_INSTANCE = `global-v${STORE_SCHEMA_VERSION}`;
-const STORE_TABLES = ["games", "jobs", "pairings", "sessions", "accounts", "stream", "events", "policy", "settings"];
+const STORE_TABLES = ["games", "jobs", "pairings", "sessions", "accounts", "stream", "events", "policy", "settings", "counts"];
 
 const QUEUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS policy (
@@ -44,6 +48,10 @@ export class Queue extends DurableObject<Env> {
   private readonly sessions: SessionStore;
   private readonly events: EventLog;
   private readonly schemaError: string | null;
+
+  private readonly budget: WriteBudget;
+  private readonly connections: LiveConnections;
+  private runtime: Map<string, SlotProgress[]> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -68,7 +76,12 @@ export class Queue extends DurableObject<Env> {
       return null;
     });
     const now = () => this.now();
-    this.jobs = new JobStore(sql, now);
+    this.budget = new WriteBudget(sql, now);
+    this.connections = new LiveConnections(ctx, now);
+    this.jobs = new JobStore(sql, now, (id, seen) => this.connections.presence(id, seen), (row) => {
+      this.runtime ??= this.sessions.runtimeLeases();
+      return this.sessions.leaseExpiry(row, this.runtime);
+    });
     this.sessions = new SessionStore(sql, this.jobs, now);
     this.events = new EventLog(sql, now);
   }
@@ -115,13 +128,27 @@ export class Queue extends DurableObject<Env> {
 
   private async run(
     fn: () => unknown,
-    { status = 200, alarm = true }: { status?: number; alarm?: boolean } = {},
+    { status = 200, alarm = true, push = alarm, cost = 0, admission = false }:
+      { status?: number; alarm?: boolean; push?: boolean | "job"; cost?: number | (() => number); admission?: boolean } = {},
   ): Promise<ApiResult> {
     try {
       this.requireSchema();
-      const body = await fn();
+      this.runtime = null;
+      if (admission) this.budget.requireCapacity();
+      let body = await fn();
+      let windDown = false;
+      const credits = typeof cost === "function" ? cost() : cost;
+      if (body !== null && body !== undefined && credits > 0 && this.budget.charge(credits)) {
+        windDown = this.jobs.windDownForBudget();
+        if (windDown && push === "job") body = this.jobs.view(this.jobs.row((body as JobView).id)!);
+      }
       // Empty claims do not change deadlines. Read routes also opt out.
       if (alarm && body !== null && body !== undefined) await this.scheduleAlarm();
+      if (windDown) this.broadcast();
+      else if (push && body !== null && body !== undefined) {
+        if (push === "job") this.broadcastJob(body as JobView);
+        else this.broadcast();
+      }
       return body === null || body === undefined ? { status: 204 } : { status, body };
     } catch (error) {
       if (error instanceof HttpError) {
@@ -152,9 +179,12 @@ export class Queue extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     if (this.schemaError !== null) throw new Error(this.schemaError);
+    this.runtime = null;
+    let changed = false;
     this.tx(() => {
       const streamHolder = this.sessions.streamHolder();
       const ended = this.sessions.endSilent();
+      changed = ended.sessions.length > 0;
       for (const id of ended.sessions) this.events.log("session_ended", { session: id, reason: "silent" });
       for (const id of ended.jobs) {
         this.events.log("job_released", {
@@ -167,6 +197,7 @@ export class Queue extends DurableObject<Env> {
         this.events.log("stream_lease_released", { session: streamHolder, reason: "session_silent" });
       }
       for (const id of this.jobs.reapExpired()) {
+        changed = true;
         const row = this.jobs.row(id);
         this.events.log("job_released", {
           job: id,
@@ -174,11 +205,135 @@ export class Queue extends DurableObject<Env> {
           reason: row?.end_reason ?? "lease_expired",
         });
       }
-      for (const id of this.jobs.applyYield()) this.events.log("wind_down", { job: id, reason: "yield" });
+      for (const id of this.jobs.applyYield()) {
+        changed = true;
+        this.events.log("wind_down", { job: id, reason: "yield" });
+      }
       this.events.prune();
     });
     await this.scheduleAlarm();
+    this.broadcast(changed);
   }
+
+  async fetch(request: Request): Promise<Response> {
+    try {
+      this.requireSchema();
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") throw new HttpError(426, "WebSocket upgrade required");
+      const url = new URL(request.url);
+      const session = url.pathname === "/v1/runner/live" ? request.headers.get("X-HAL-Session") : null;
+      if (url.pathname === "/v1/runner/live" && session === null) throw new HttpError(401, "session required");
+      if (session !== null) this.sessions.live(session);
+      return this.connections.open(session);
+    } catch (error) {
+      if (error instanceof HttpError) return Response.json({ detail: error.detail }, { status: error.status });
+      throw error;
+    }
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    try {
+      this.requireSchema();
+      if (typeof message !== "string" || new TextEncoder().encode(message).byteLength > MAX_BODY_BYTES) {
+        ws.close(1009, "message too large");
+        return;
+      }
+      let value: Record<string, unknown>;
+      try { value = JSON.parse(message) as Record<string, unknown>; }
+      catch { throw new HttpError(422, "invalid JSON"); }
+      if (value === null || typeof value !== "object") throw new HttpError(422, "message must be an object");
+      const peer = this.connections.peer(ws);
+      if (value.ack !== undefined) this.connections.acknowledge(ws, int(value.ack, "ack"));
+      if (value.type === "ack") return;
+      if (peer.role === "browser" && value.type === "subscribe") {
+        const id = value.job_id === null ? null : str(value.job_id, "job_id");
+        if (id !== null) this.jobs.authenticated(id, await sha256Hex(str(value.token, "token")));
+        if (peer.job !== null) this.jobs.savePresence(peer.job, this.connections.presence(peer.job, this.connections.lastSeen(ws)));
+        const updated = this.connections.peer(ws);
+        ws.serializeAttachment({ ...updated, job: id, seen: this.now() });
+        this.snapshot(ws);
+        return;
+      }
+      if (peer.role === "host" && value.type === "health") {
+        if (!this.env.TWITCH_STREAM_KEY && this.sessions.wantsStream(peer.session)) throw new HttpError(503, "TWITCH_STREAM_KEY is not configured");
+        this.runtime = null;
+        const state = this.tx(() => this.sessions.report(peer.session, value.status, value.progress));
+        if (state.streamGranted) this.events.log("stream_lease_granted", { session: peer.session, slot: 0 });
+        this.connections.send(ws, { type: "health", draining: state.draining,
+          stream: state.streamHolder ? { slot: 0, key: this.env.TWITCH_STREAM_KEY } : null });
+        this.broadcast(false);
+        return;
+      }
+      if (peer.role === "host" && value.type === "subscribe") { this.snapshot(ws); return; }
+      throw new HttpError(422, "unknown live message");
+    } catch (error) {
+      if (!(error instanceof HttpError)) throw error;
+      this.connections.send(ws, { type: "error", status: error.status, detail: error.detail });
+    }
+  }
+
+  private snapshot(ws: WebSocket, capacity = this.sessions.capacity(), jobs = new Map<string, unknown>(), positions = this.jobs.queuePositions()): void {
+    const peer = this.connections.peer(ws);
+    this.connections.send(ws, { type: "capacity", capacity });
+    if (peer.role === "browser" && peer.job !== null) {
+      if (!jobs.has(peer.job)) {
+        const row = this.jobs.row(peer.job);
+        jobs.set(peer.job, row === null ? null : this.jobs.view(row, positions.get(peer.job)));
+      }
+      this.connections.send(ws, { type: "job", job: jobs.get(peer.job) });
+    }
+    if (peer.role === "host") {
+      try {
+        const session = this.sessions.live(peer.session);
+        this.connections.send(ws, { type: "state", draining: session.draining === 1,
+          stream: this.sessions.streamHolder() === peer.session ? { slot: 0, key: this.env.TWITCH_STREAM_KEY } : null });
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error;
+        this.connections.send(ws, { type: "error", status: error.status, detail: error.detail });
+        ws.close(1008, "session ended");
+        return;
+      }
+      this.connections.send(ws, { type: "work", pairing: this.sessions.pairing(peer.session),
+        assignments: this.jobs.assigned().filter((row) => (row.lease_owner as string).startsWith(`${peer.session}/slot-`))
+          .map((row) => ({ id: row.id, slot: Number((row.lease_owner as string).split("/slot-")[1]), attempt: row.attempt })) });
+      for (const row of this.jobs.assigned()) {
+        if (!(row.lease_owner as string).startsWith(`${peer.session}/slot-`)) continue;
+        this.connections.send(ws, { type: "job", job: this.jobs.view(row) });
+      }
+    }
+  }
+
+  private broadcastJob(job: JobView): void {
+    const owner = job.status === "assigned" ? this.jobs.row(job.id)?.lease_owner : null;
+    for (const ws of this.connections.sockets()) {
+      const peer = this.connections.peer(ws);
+      if ((peer.role === "browser" && peer.job === job.id)
+        || (peer.role === "host" && typeof owner === "string" && owner.startsWith(`${peer.session}/slot-`))) {
+        this.connections.send(ws, { type: "job", job });
+      }
+    }
+  }
+
+  private broadcast(jobs = true): void {
+    const sockets = this.connections.sockets();
+    if (sockets.length === 0) return;
+    const capacity = this.sessions.capacity();
+    const views = new Map<string, unknown>();
+    const positions = jobs ? this.jobs.queuePositions() : new Map<string, number>();
+    for (const ws of sockets) {
+      if (jobs) this.snapshot(ws, capacity, views, positions);
+      else this.connections.send(ws, { type: "capacity", capacity });
+    }
+  }
+
+  async webSocketClose(ws: WebSocket, code: number): Promise<void> {
+    const peer = this.connections.peer(ws);
+    if (peer.role === "browser" && peer.job !== null) {
+      this.jobs.savePresence(peer.job, this.connections.presence(peer.job, this.connections.lastSeen(ws)));
+    }
+    ws.close(code === 1005 || code === 1006 ? 1000 : code, "closed");
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> { await this.webSocketClose(ws, 1011); }
 
   // Player routes
 
@@ -221,7 +376,7 @@ export class Queue extends DurableObject<Env> {
         return created;
       });
       return { ...job, token };
-    }, { status: 201 });
+    }, { status: 201, cost: 24, admission: true });
   }
 
   async getJob(id: string, token: string): Promise<ApiResult> {
@@ -238,7 +393,7 @@ export class Queue extends DurableObject<Env> {
         this.events.log("settings_updated", { job: id, revision: job.settings.revision });
         return job;
       });
-    }, { alarm: false });
+    }, { alarm: false, push: "job", cost: 8, admission: true });
   }
 
   async requestLock(id: string, token: string): Promise<ApiResult> {
@@ -247,7 +402,7 @@ export class Queue extends DurableObject<Env> {
       const job = this.jobs.requestLock(id, digest);
       this.events.log("lock_requested", { job: id, count: job.lock_requests });
       return job;
-    }), { alarm: false });
+    }), { alarm: false, push: "job", cost: 8, admission: true });
   }
 
   async leaveJob(id: string, token: string): Promise<ApiResult> {
@@ -298,7 +453,7 @@ export class Queue extends DurableObject<Env> {
         }
         return { ...started, policy: this.policy() };
       });
-    }, { status: 201 });
+    }, { status: 201, cost: 16 });
   }
 
   async reportStatus(sessionId: string, raw: unknown): Promise<ApiResult> {
@@ -335,7 +490,7 @@ export class Queue extends DurableObject<Env> {
         }
         return job;
       });
-    });
+    }, { cost: 24 });
   }
 
   async pairing(sessionId: string): Promise<ApiResult> {
@@ -354,15 +509,16 @@ export class Queue extends DurableObject<Env> {
       if (attempt < 1) throw new HttpError(422, "attempt must be positive");
       this.sessions.finishPairing(sessionId, slot, str(value.job_id, "job_id"), attempt);
       return {};
-    }), { alarm: false });
+    }), { alarm: false, push: true, cost: 8 });
   }
 
   async drain(sessionId: string): Promise<ApiResult> {
     return this.run(() =>
       this.tx(() => {
         const released = this.sessions.streamHolder() === sessionId;
+        const alreadyDraining = this.sessions.live(sessionId).draining === 1;
         this.sessions.drain(sessionId);
-        this.events.log("session_draining", { session: sessionId });
+        if (!alreadyDraining) this.events.log("session_draining", { session: sessionId });
         if (released) this.events.log("stream_lease_released", { session: sessionId, reason: "draining" });
         return { draining: true };
       }),
@@ -387,16 +543,17 @@ export class Queue extends DurableObject<Env> {
     });
   }
 
-  async report(sessionId: string, slot: number, jobId: string, raw: unknown): Promise<ApiResult> {
+  async report(sessionId: string, slot: number, jobId: string, raw: unknown, attempt: number): Promise<ApiResult> {
     return this.run(() => {
       const observed = parseReport(raw);
       const policy = this.requirePolicy();
       for (const game of observed.finished_games) checkChoice(policy.stages, game.stage, "stage");
       return this.tx(() => {
         const worker = this.sessions.jobWorker(sessionId, slot);
+        if (this.jobs.row(jobId)?.attempt !== attempt) throw new HttpError(409, "job attempt has changed");
         const { view, phaseChanged, newGames } = this.jobs.report(jobId, worker, observed);
         // A live game no longer needs the session's one pairing, so other slots may claim.
-        if (IN_GAME_PHASES.has(observed.phase)) this.sessions.finishPairing(sessionId, slot, jobId, view.attempt);
+        if (view.observed !== null && IN_GAME_PHASES.has(view.observed.phase)) this.sessions.finishPairing(sessionId, slot, jobId, view.attempt);
         if (phaseChanged) {
           this.events.log("phase_changed", { job: jobId, session: sessionId, slot, phase: observed.phase });
         }
@@ -408,19 +565,21 @@ export class Queue extends DurableObject<Env> {
         // applyYield may have just set this job's wind_down; answer with the current row.
         return yielded.includes(jobId) ? this.jobs.view(this.jobs.row(jobId)!) : view;
       });
-    });
+    }, { cost: () => 24 + 8 * parseReport(raw).finished_games.length });
   }
 
-  async endJob(sessionId: string, slot: number, jobId: string, raw: unknown): Promise<ApiResult> {
+  async endJob(sessionId: string, slot: number, jobId: string, raw: unknown, attempt: number): Promise<ApiResult> {
     return this.run(() => {
       const { reason, retryable } = parseEnd(raw);
       return this.tx(() => {
         const worker = this.sessions.jobWorker(sessionId, slot);
+        const before = this.jobs.row(jobId);
+        if (before?.attempt !== attempt) throw new HttpError(409, "job attempt has changed");
         const job = this.jobs.end(jobId, worker, reason, retryable);
-        this.events.log("job_ended", { job: jobId, session: sessionId, slot, reason, status: job.status });
+        if (before?.status !== job.status) this.events.log("job_ended", { job: jobId, session: sessionId, slot, reason, status: job.status });
         return job;
       });
-    });
+    }, { cost: 24 });
   }
 
   async recordReplay(sessionId: string, slot: number, jobId: string, raw: unknown): Promise<ApiResult> {
@@ -432,6 +591,7 @@ export class Queue extends DurableObject<Env> {
       );
       const worker = this.sessions.recordingWorker(sessionId, slot);
       const number = int(value.game_number, "game_number");
+      const recorded = this.jobs.hasReplay(jobId, number);
       const job = this.jobs.recordReplay(
         jobId,
         worker,
@@ -441,9 +601,9 @@ export class Queue extends DurableObject<Env> {
         int(value.size, "size"),
         str(value.etag, "etag"),
       );
-      this.events.log("replay_recorded", { job: jobId, session: sessionId, slot, game_number: number, key: value.key });
+      if (!recorded) this.events.log("replay_recorded", { job: jobId, session: sessionId, slot, game_number: number, key: value.key });
       return job;
-    }), { alarm: false });
+    }), { alarm: false, cost: 8 });
   }
 
   async workerJob(sessionId: string, slot: number, jobId: string): Promise<ApiResult> {
@@ -491,6 +651,8 @@ export class Queue extends DurableObject<Env> {
   async adminStatus(): Promise<ApiResult> {
     return this.run(
       () => ({
+        write_budget: this.budget.summary(),
+        database_bytes: this.ctx.storage.sql.databaseSize,
         paused: this.setting("paused") === "1",
         policy: this.policy(),
         capacity: this.sessions.capacity(),
@@ -517,6 +679,7 @@ export class Queue extends DurableObject<Env> {
       for (const table of STORE_TABLES) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
       this.setSetting("schema_version", String(STORE_SCHEMA_VERSION));
       this.sessions.resetStream();
+      this.ctx.storage.sql.exec("INSERT INTO counts(id, queued, active) VALUES (1, 0, 0)");
     });
     await this.ctx.storage.deleteAlarm();
   }

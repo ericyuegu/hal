@@ -96,7 +96,9 @@ class _Script:
 
 def _queue(script: _Script, sleeps: list[float]) -> RemoteQueue:
     client = httpx.Client(base_url=ENDPOINT.url, transport=httpx.MockTransport(script))
-    return RemoteQueue(ENDPOINT, "sess", client=client, sleep=sleeps.append)
+    queue = RemoteQueue(ENDPOINT, "sess", client=client, sleep=sleeps.append)
+    queue._attempts["job-1"] = 1
+    return queue
 
 
 def test_claim_sends_auth_access_and_slot_and_maps_204_to_none() -> None:

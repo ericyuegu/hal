@@ -197,7 +197,7 @@ describe("sessions", () => {
       sessions.start("s2", START, policy);
       sessions.report("s2", readyStatus(2));
       expect(sessions.capacity()).toMatchObject({ capacity: 4, healthy_slots: 3, service_status: "degraded" });
-      clock.advance(6);
+      clock.advance(21);
       expect(sessions.capacity().capacity).toBe(0);
     }));
 
