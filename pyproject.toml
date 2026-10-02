@@ -86,6 +86,7 @@ ignore = ["E501"]
 "notebooks/039_scaling_viz.py" = ["B007", "B905"]
 # Ruff parses jaxtyping dimension strings as forward-reference type expressions.
 "experiments/059_muon_action_sequence.py" = ["F722"]
+"experiments/060_compute_optimal_action_sequence.py" = ["F722"]
 "hal/models/attention.py" = ["F722"]
 
 [tool.pytest.ini_options]

@@ -19,6 +19,11 @@ Launch examples::
         uv run experiments/059_muon_action_sequence.py
     uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@MY_PROJECT.iam.gserviceaccount.com -- \
         uv run experiments/059_muon_action_sequence.py --cfg.max-steps 100000
+    uv run scripts/launch_gce.py --project centering-star-502613-k3 \
+        --zone us-central1-b --machine-type g4-standard-96 --gpu-count 2 \
+        --disk 3000 --disk-type hyperdisk-balanced --no-spot -- \
+        torchrun --standalone --nproc-per-node=2 \
+        experiments/060_compute_optimal_action_sequence.py train --smoke --stop-after-update 512
 
 The startup log is available with ``gcloud compute instances get-serial-port-output``.
 On completion the VM shuts down, stopping compute charges but retaining its boot
@@ -54,6 +59,12 @@ DEFAULT_SECRETS = (
 )
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESOURCE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_G4_GPU_COUNTS = {
+    "g4-standard-48": 1,
+    "g4-standard-96": 2,
+    "g4-standard-192": 4,
+    "g4-standard-384": 8,
+}
 
 
 def _run_gcloud(*args: str, capture: bool = True) -> str:
@@ -99,6 +110,16 @@ def startup_script(
 
 
 def create_command(args: Args, *, project: str, name: str, startup_file: str) -> list[str]:
+    if args.machine_type.startswith("g4-"):
+        expected_gpus = _G4_GPU_COUNTS.get(args.machine_type)
+        if expected_gpus is None:
+            raise ValueError(f"unsupported G4 machine type {args.machine_type!r}")
+        if args.gpu_count != expected_gpus:
+            raise ValueError(
+                f"{args.machine_type} has {expected_gpus} integrated GPUs; got --gpu-count={args.gpu_count}"
+            )
+    elif args.gpu_count < 1:
+        raise ValueError("attached-GPU machine types require a positive --gpu-count")
     command = [
         "gcloud",
         "compute",
@@ -108,7 +129,6 @@ def create_command(args: Args, *, project: str, name: str, startup_file: str) ->
         f"--project={project}",
         f"--zone={args.zone}",
         f"--machine-type={args.machine_type}",
-        f"--accelerator=type={args.accelerator},count={args.gpu_count}",
         "--maintenance-policy=TERMINATE",
         "--no-restart-on-failure",
         f"--image-family={args.image_family}",
@@ -120,6 +140,8 @@ def create_command(args: Args, *, project: str, name: str, startup_file: str) ->
         "--labels=app=hal,workload=training",
         "--quiet",
     ]
+    if args.machine_type not in _G4_GPU_COUNTS:
+        command.insert(7, f"--accelerator=type={args.accelerator},count={args.gpu_count}")
     if args.service_account:
         command.append(f"--service-account={args.service_account}")
     if args.spot:
@@ -215,7 +237,10 @@ def main(args: Args) -> None:
     with tempfile.NamedTemporaryFile("w", prefix="hal-gce-startup-", suffix=".sh") as startup:
         startup.write(rendered)
         startup.flush()
-        command = create_command(args, project=project, name=name, startup_file=startup.name)
+        try:
+            command = create_command(args, project=project, name=name, startup_file=startup.name)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         if args.dry_run:
             printable = ["<startup-script>" if item.startswith("--metadata-from-file=") else item for item in command]
             logger.info(
