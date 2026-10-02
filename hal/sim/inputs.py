@@ -26,6 +26,7 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import POLICY_BUTTON_MASK
 from hal.controller import ControllerAction
 from hal.controller import ControllerInputs
+from hal.controller import controller_action_wire_values
 from hal.wire import ACTION_CHANNELS
 from hal.wire import BUTTON_BITS
 
@@ -115,6 +116,25 @@ def canonical_pre_to_action(pre: Mapping[str, object]) -> ControllerAction:
         raise ValueError("canonical pre.buttons_physical must be an integer")
     buttons = int(buttons_value)
     return ControllerAction(main_x, main_y, c_x, c_y, trigger_l, trigger_r, buttons)
+
+
+def controller_action_readback(action: ControllerInputs) -> ControllerAction:
+    """Predict Slippi's processed sticks for the pinned libmelee input path.
+
+    Melee clamps each stick to radius 80, truncates to signed bytes, then
+    zeros axes below byte 23. Commands and forced prefixes must retain their
+    original values; this conversion is only for checking observed inputs.
+    """
+    main_x, main_y, c_x, c_y, _left, _right, _buttons = controller_action_wire_values(action)
+    sticks: list[float] = []
+    for x, y in ((main_x, main_y), (c_x, c_y)):
+        radius = math.hypot(x, y)
+        if radius > 80:
+            x, y = int(x * 80 / radius), int(y * 80 / radius)
+        sticks.extend((0.0 if abs(x) < 23 else x / 80, 0.0 if abs(y) < 23 else y / 80))
+    return ControllerAction(
+        sticks[0], sticks[1], sticks[2], sticks[3], action.trigger_l, action.trigger_r, action.buttons
+    )
 
 
 def controller_actions_match(

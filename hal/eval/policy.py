@@ -25,6 +25,7 @@ from hal.inference.api import RuntimeConfig
 from hal.representation.observations import flatten_canonical_frame
 from hal.sim.inputs import ActionTransport
 from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import controller_action_readback
 from hal.sim.inputs import controller_actions_match
 from hal.sim.rollout import ObservationRow
 from hal.sim.rollout import PolicyRuntimeSpec
@@ -186,7 +187,8 @@ class PolicyBatchAdapter:
             self._states[slot] = state
         applied = action_vec_to_controller(frame.action)
         expected = state.expected_applied.pop(frame_id, None)
-        if expected is not None and not reset and not controller_actions_match(expected, applied):
+        readback = controller_action_readback(expected) if expected is not None and self.observed_actions else expected
+        if readback is not None and not reset and not controller_actions_match(readback, applied):
             raise RuntimeError(
                 f"local controller alignment failed for {slot} at frame {frame_id}: "
                 f"expected {expected!r}, observed {applied!r}"
