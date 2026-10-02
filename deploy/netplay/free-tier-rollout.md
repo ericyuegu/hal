@@ -2,7 +2,9 @@
 
 ## Release state
 
-Implementation and local validation are complete. Deployment is in progress.
+Implementation and local validation are complete. The frontend and API are deployed.
+The API remains in maintenance mode. The runner image is built and passed an
+import check with networking disabled.
 The G4 has not been restarted. Google Cloud needs a fresh `gcloud auth login`.
 The production capacity endpoint still returned HTTP 500 / Cloudflare 1101
 before deployment. The reported request quota resets October 3 at 00:00 UTC.
@@ -183,13 +185,49 @@ Focused commands also passed:
 
 ## Remaining release steps
 
-1. Commit the tested source and build the runner image from that exact commit.
-2. Deploy the API in maintenance and publish the static frontend.
-3. After Google login and the quota reset, publish the unchanged production policy
+1. After Google login and the quota reset, publish the unchanged production policy
    and HAL#9000 account references into `global-v7`. Keep admissions paused.
-4. Push the image, update startup metadata, then start the existing one-GPU G4
+2. Push the image, update startup metadata, then start the existing one-GPU G4
    with eight slots. Run its startup qualification and verify shared control.
-5. Check live Worker CPU, socket recovery and gameplay. Resume admissions only
+3. Check live Worker CPU, socket recovery and gameplay. Resume admissions only
    after those checks pass.
 
-Deployment IDs and image results will be appended after those steps run.
+## Deployed release
+
+Source commit: `7b33980d9b239ce158b72e252c96743393c673c1`.
+
+- `git add ...` and `git commit -m 'Push queue control updates'` succeeded.
+  Ruff format, Ruff check and ty commit hooks all passed.
+- `npx wrangler deploy --var MAINTENANCE:on --var EDGE_CACHE:on` succeeded.
+  API version: `8358d716-7b37-4e4d-a36b-9af5759337a7`.
+  The maintenance override is deployed configuration; source defaults to off.
+- `bash deploy/netplay/deploy-web.sh` succeeded: npm ci, production build and
+  Wrangler deploy. npm ci reported 14 dependency vulnerabilities (one low,
+  four moderate, nine high) and blocked three dependency install scripts.
+  The build and deploy still passed. Dependencies were not changed in this release.
+  Frontend version: `f18e9cf3-1e35-4c85-adaa-3f0e48028044`.
+- `curl https://20xx.xyz/v1/capacity` returned HTTP 503 and the expected
+  “Game servers are offline” JSON. This path makes no object request.
+- A Python urllib request to the public page returned HTTP 403. A subsequent
+  curl check returned HTTP 200 for both the page and its new JavaScript chunk.
+  A byte comparison matched each response to the local static export.
+- `docker build --file deploy/netplay/Dockerfile --build-arg HAL_GIT_SHA=7b33980d9b239ce158b72e252c96743393c673c1 --tag us-west1-docker.pkg.dev/centering-star-502613-k3/hal-netplay/hal-netplay-runner:7b33980d9b239ce158b72e252c96743393c673c1 .`
+  passed. Log: `/tmp/hal-queue-image-build.log`.
+  Image ID: `sha256:7a49140137e0321ccfac218425183d9b1a98311154bb226a5950005c63a3856f`.
+  Image size: 9,016,819,955 bytes. The revision label matches the source commit.
+- `docker run --rm --network none --entrypoint python <image> -c 'from hal.netplay_service.control import QueueControl; from hal.netplay_service.runner import main; print("Runner and shared control imports passed")'`
+  passed. `docker image inspect <image>` confirmed the ID, size and revision.
+  An inspection of the previous image also passed (9,016,770,001 bytes).
+- `df -h /tmp` and `df -h /var/lib/docker` checked build space. The build
+  completed with 63 GB available on the Docker filesystem at the last check.
+- `git diff --check` passed before the release record commit.
+- One combined inspection used the repository-relative Dockerfile path from
+  the API directory and failed. Rerunning the read from the repository root
+  succeeded. No files were changed by that inspection.
+- Final duplicate test sessions had already closed when their output was
+  retrieved after context compaction. The results recorded above are from
+  completed, observed runs; no unobserved result is claimed.
+
+No registry push, G4 start, policy publication, queue activation or live gameplay
+verification has run in this release. Google login and the Cloudflare quota reset
+remain required. The public page is at https://20xx.xyz/.
