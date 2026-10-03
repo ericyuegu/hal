@@ -52,11 +52,11 @@ def test_pruned81_production_parameter_and_compute_contracts() -> None:
     counts = _O61.subsystem_parameter_counts(model)
 
     assert model.codec.group_vocabs == (256, 81, 9, 25)
-    assert counts["total"] == 121_941_261
-    assert _O61.compute_equivalent_parameter_count(cfg, counts) == 2_424_485_409
-    assert cfg.max_steps == 497_664
+    assert counts["total"] == 197_620_669
+    assert _O61.compute_equivalent_parameter_count(cfg, counts) == 3_958_066_689
+    assert cfg.max_steps == 714_752
     assert cfg.supervised_positions_per_update == 16_384
-    assert cfg.target_positions == 8_153_726_976
+    assert cfg.target_positions == 11_710_496_768
 
 
 def test_pruned81_proxy_matches_the_depth_treatment() -> None:

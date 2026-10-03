@@ -21,17 +21,22 @@ _SPEC.loader.exec_module(_MODULE)
 
 def test_production_architecture_and_parameter_contract() -> None:
     cfg = _MODULE.TrainConfig()
-    assert cfg.arch.d_model == 800
+    assert cfg.arch.d_model == 1_024
+    assert cfg.arch.n_heads == 16
+    assert cfg.arch.d_model // cfg.arch.n_heads == 64
+    assert cfg.arch.d_model.bit_count() == 1
     assert cfg.arch.n_layers == 6
+    assert cfg.arch.temporal_d_model == 1_024
     assert cfg.arch.temporal_layers == 8
+    assert cfg.arch.temporal_heads == 16
     assert cfg.arch.head_offsets == tuple(range(1, 31))
     assert cfg.arch.sample_chunk_length == 30
     assert cfg.arch.main_stick_layout == "legacy65"
     with torch.device("meta"):
         model = _MODULE.make_model(cfg)
     counts = _MODULE.subsystem_parameter_counts(model)
-    assert counts["total"] == 121_915_117
-    assert _MODULE.compute_equivalent_parameter_count(cfg, counts) == 2_424_072_753
+    assert counts["total"] == 197_587_357
+    assert _MODULE.compute_equivalent_parameter_count(cfg, counts) == 3_957_542_929
 
 
 def test_parameter_matched_proxy_arms_change_the_depth_allocation() -> None:
@@ -58,16 +63,16 @@ def test_compute_curve_weights_schedule_and_batch_arithmetic() -> None:
     cfg = _MODULE.TrainConfig()
     _MODULE.validate_config(cfg)
     assert _MODULE.OFFSET_LOSS_WEIGHTS == (1 / 30,) * 30
-    assert _MODULE.compute_flops_per_supervised_position(2_424_072_753) == 14_544_436_518
+    assert _MODULE.compute_flops_per_supervised_position(3_957_542_929) == 23_745_257_574
     assert cfg.batch_size == cfg.world_size * cfg.local_batch_size == 512
     assert cfg.microbatch_size == cfg.local_batch_size == 256
     assert cfg.supervised_positions_per_update == cfg.policy_prefixes_per_update == 16_384
     assert cfg.value_prefixes_per_update == 65_536
-    assert cfg.max_steps == 497_664
-    assert cfg.max_steps * cfg.supervised_positions_per_update == 8_153_726_976
+    assert cfg.max_steps == 714_752
+    assert cfg.max_steps * cfg.supervised_positions_per_update == 11_710_496_768
     assert cfg.warmup_steps == 4_096
-    assert cfg.decay_start_update == 372_736
-    assert cfg.decay_duration == 124_928
+    assert cfg.decay_start_update == 536_576
+    assert cfg.decay_duration == 178_176
     assert cfg.decay_start_update + cfg.decay_duration == cfg.max_steps
     assert (
         _MODULE.checkpoint_rounded_updates(
@@ -88,7 +93,7 @@ def test_microbatch_fallback_preserves_the_global_optimizer_batch() -> None:
     _MODULE.validate_config(cfg)
     assert cfg.local_batch_size // cfg.microbatch_size == 2
     assert cfg.batch_size == 512
-    assert cfg.max_steps == 497_664
+    assert cfg.max_steps == 714_752
 
 
 def test_rank_partitions_are_disjoint_and_cover_every_source() -> None:

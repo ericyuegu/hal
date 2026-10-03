@@ -11,5 +11,5 @@ is comparable to or better than its parameter-matched 16-trunk/4-decoder control
 in gameplay evaluation. Compare the O61 treatment proxy against the matching O60
 treatment proxy to isolate the codec. Offline validation is diagnostic only.
 
-Production uses width 800, six trunk layers, eight decoder layers, and 121,941,261
+Production uses width 1,024, six trunk layers, eight decoder layers, and 197,620,669
 stored parameters. It is not launched as part of qualification.

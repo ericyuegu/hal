@@ -20,4 +20,4 @@ the 512-update production-shape smoke run, and the interrupted-resume comparison
 uploads the final immutable record under `qualifications/060-g4-<git-sha>/record.json`.
 The startup script shuts down the VM after the command exits and retains the boot disk.
 
-Do not use this command to start the 497,664-update training run.
+Do not use this command to start the 714,752-update training run.

@@ -17,7 +17,7 @@ encoder makes that churn invisible: one shared per-slot encoder, gated by the
 slot's presence flag, summed over the slots. An empty slot adds the exact zero
 vector and the live-item count stays implicit in the sum.
 
-The treatment uses a wider 800-dimensional model with six trunk layers and eight
+The treatment uses a 1024-dimensional model with six trunk layers and eight
 temporal-decoder layers. It predicts every offset from 1 through 30 with equal
 loss coefficients. The policy samples 32 suffix prefixes per replay window, so
 scaling-law data D counts those 32 positions. The critic and AWR normalizer still
@@ -190,17 +190,17 @@ _DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 1
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (1 / 30,) * 30
-COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 2_424_072_753
-FLOPS_PER_SUPERVISED_POSITION: Final[int] = 14_544_436_518
+COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_957_542_929
+FLOPS_PER_SUPERVISED_POSITION: Final[int] = 23_745_257_574
 SCALING_FIT_A: Final[float] = 89.11185023618282
 SCALING_FIT_B: Final[float] = 2009.4388275435915
 SCALING_FIT_ALPHA: Final[float] = 0.3680109101792296
 SCALING_FIT_BETA: Final[float] = 0.49828476033099955
-TARGET_UPDATES: Final[int] = 497_664
-TARGET_POSITIONS: Final[int] = 8_153_726_976
+TARGET_UPDATES: Final[int] = 714_752
+TARGET_POSITIONS: Final[int] = 11_710_496_768
 WARMUP_UPDATES: Final[int] = 4_096
-DECAY_START_UPDATE: Final[int] = 372_736
-COOLDOWN_UPDATES: Final[int] = 124_928
+DECAY_START_UPDATE: Final[int] = 536_576
+COOLDOWN_UPDATES: Final[int] = 178_176
 
 
 RETURN_HORIZON: Final[int] = 60
@@ -495,19 +495,19 @@ class Architecture:
     trunk_reference_attention_scale: ClassVar[float] = 0.25
     temporal_reference_attention_scale: ClassVar[float] = 0.5
 
-    d_model: int = 800
+    d_model: int = 1024
     n_layers: int = 6
-    n_heads: int = 10
+    n_heads: int = 16
     attn_window: int = 0
     L_ctx: int = 256
 
     sample_chunk_length: int = 30
     head_offsets: tuple[int, ...] = tuple(range(1, 31))
-    temporal_d_model: int = 800
+    temporal_d_model: int = 1024
     temporal_layers: int = 8
-    temporal_heads: int = 10
-    temporal_ff_dim: int = 3200
-    group_head_dim: int = 800
+    temporal_heads: int = 16
+    temporal_ff_dim: int = 4096
+    group_head_dim: int = 1024
     return_embed_dim: int = 128
     action_embed_dim: int = 32
     offset_embed_dim: int = 16
@@ -521,7 +521,7 @@ class Architecture:
     item_state_dim: int = 4
     item_hidden_dim: int = 64
     item_dim: int = 32
-    value_hidden_dim: int = 400
+    value_hidden_dim: int = 512
     main_stick_layout: MainStickLayout = "legacy65"
 
     @property
@@ -534,14 +534,14 @@ class Architecture:
     def parameter_count_contract(self) -> dict[str, int]:
         if self == Architecture():
             return {
-                "trunk": 46_080_000,
-                "temporal_decoder": 65_080_304,
-                "group_heads": 2_844_355,
-                "trunk_skip_heads": 2_844_355,
-                "value_head": 640_401,
-                "return_conditioner": 3_302_656,
-                "other": 1_123_046,
-                "total": 121_915_117,
+                "trunk": 75_497_472,
+                "temporal_decoder": 106_466_320,
+                "group_heads": 4_558_179,
+                "trunk_skip_heads": 4_558_179,
+                "value_head": 1_049_089,
+                "return_conditioner": 4_227_328,
+                "other": 1_230_790,
+                "total": 197_587_357,
             }
         proxy_treatment = Architecture(
             d_model=256,
@@ -2781,7 +2781,7 @@ def compute_equivalent_parameter_count(cfg: TrainConfig, parameter_counts: Mappi
 
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
     """Return six times every parameter use in one optimizer update."""
-    if cfg.arch == Architecture() and parameter_counts["total"] != 121_915_117:
+    if cfg.arch == Architecture() and parameter_counts["total"] != 197_587_357:
         raise ValueError("production parameter count changed")
     return (
         compute_flops_per_supervised_position(compute_equivalent_parameter_count(cfg, parameter_counts))
