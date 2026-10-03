@@ -108,7 +108,7 @@ def startup_script(
     keep_alive: bool,
 ) -> str:
     """Render the metadata startup script. It contains secret names, never values."""
-    secret_specs = "\n".join(f"{env_name}={secret_id}" for env_name, secret_id in secrets)
+    secret_specs = "".join(f"{env_name}={secret_id}\n" for env_name, secret_id in secrets)
     values = {
         "HAL_GIT_SHA": sha,
         "HAL_TRAIN_CMD_B64": base64.b64encode(train_cmd.encode()).decode(),

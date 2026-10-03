@@ -37,7 +37,7 @@ def test_startup_script_contains_no_secret_values() -> None:
         machine_type="g4-standard-96",
         keep_alive=False,
     )
-    assert base64.b64encode(b"WANDB_API_KEY=wandb-key").decode() in script
+    assert base64.b64encode(b"WANDB_API_KEY=wandb-key\n").decode() in script
     assert "secret-value" not in script
     assert base64.b64encode(b"python train.py --name 'two words'").decode() in script
     assert "export HAL_KEEP_ALIVE=0" in script
