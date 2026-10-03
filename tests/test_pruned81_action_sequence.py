@@ -97,3 +97,17 @@ def test_pruned81_training_batches_use_the_live_policy_feature_keys() -> None:
     assert tuple(actual.context.features) == tuple(expected.context.features)
     for name, value in actual.context.features.items():
         torch.testing.assert_close(value, expected.context.features[name])
+
+
+def test_pruned81_compile_warmup_uses_the_real_prefix_sampler_layout() -> None:
+    cfg = _O61.proxy_config()
+    synthetic = _O61._synthetic_prefix_positions(cfg, torch.device("cpu"))
+    sampled = _O61.PrefixSampler(7, "cpu").sample(
+        torch.zeros(cfg.local_batch_size, dtype=torch.long),
+        length=cfg.arch.L_ctx,
+        suffix_start=cfg.arch.direct_loss_start,
+        validated_on_cpu=True,
+    )
+
+    assert synthetic.is_contiguous()
+    assert synthetic.stride() == sampled.stride() == (_O61.POLICY_PREFIXES_PER_WINDOW, 1)

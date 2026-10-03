@@ -119,6 +119,20 @@ def test_training_batches_use_the_live_policy_feature_keys() -> None:
     assert actual.replay_ids == sparse_batch.replay_ids
 
 
+def test_compile_warmup_uses_the_real_prefix_sampler_layout() -> None:
+    cfg = _MODULE.proxy_config()
+    synthetic = _MODULE._synthetic_prefix_positions(cfg, torch.device("cpu"))
+    sampled = _MODULE.PrefixSampler(7, "cpu").sample(
+        torch.zeros(cfg.local_batch_size, dtype=torch.long),
+        length=cfg.arch.L_ctx,
+        suffix_start=cfg.arch.direct_loss_start,
+        validated_on_cpu=True,
+    )
+
+    assert synthetic.is_contiguous()
+    assert synthetic.stride() == sampled.stride() == (_MODULE.POLICY_PREFIXES_PER_WINDOW, 1)
+
+
 def test_rank_partitions_are_disjoint_and_cover_every_source() -> None:
     cfg = _MODULE.TrainConfig()
     full = _MODULE.data_selection(cfg)

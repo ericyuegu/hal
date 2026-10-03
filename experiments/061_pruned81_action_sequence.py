@@ -4056,11 +4056,7 @@ def _compile_synthetic_forward_backward(
                 torch.compiler.cudagraph_mark_step_begin()
             batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
             valid_prefixes = cfg.local_batch_size * POLICY_PREFIXES_PER_WINDOW
-            prefix_positions = torch.arange(
-                cfg.arch.direct_loss_start,
-                cfg.arch.direct_loss_start + POLICY_PREFIXES_PER_WINDOW,
-                device=DEVICE,
-            ).expand(cfg.local_batch_size, -1)
+            prefix_positions = _synthetic_prefix_positions(cfg, torch.device(DEVICE))
             loss, _nll, _metrics = microbatch_loss(
                 model,
                 batch,
@@ -4081,6 +4077,16 @@ def _compile_synthetic_forward_backward(
             torch.cuda.set_rng_state(cuda_rng_state)
     if compile_started is not None:
         print(f"[compile] lazy compilation complete in {time.monotonic() - compile_started:.1f}s", flush=True)
+
+
+def _synthetic_prefix_positions(cfg: TrainConfig, device: torch.device) -> Tensor:
+    """Match the contiguous layout returned by the real prefix sampler."""
+    positions = torch.arange(
+        cfg.arch.direct_loss_start,
+        cfg.arch.direct_loss_start + POLICY_PREFIXES_PER_WINDOW,
+        device=device,
+    )
+    return positions.expand(cfg.local_batch_size, -1).contiguous()
 
 
 def _loader_state_boundaries(cfg: TrainConfig, run_stop: int) -> tuple[int, ...]:
