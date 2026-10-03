@@ -1,11 +1,14 @@
 # x_pilot matchup run
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 ## Status
 
 Started on 2026-09-29 with effective runner source `1dd743b2`.
 The first two completed games used `MASTER` player conditioning and raw desired
 return 120. Their verified Slippi replays record HAL Fox against `gm-v2-falco`
-and `gm-v2-marth`. HAL lost both. The run continues through the supported schedule.
+and `gm-v2-marth`. HAL lost both. The campaign is paused. Its old controls are archived and must be ported before reuse.
 See the local result files for current progress; this document is a checkpoint.
 
 HAL's current connect code is `HAL#9000` (changed October 1).
@@ -159,7 +162,7 @@ row 49. The first attempt at row 50 received no x_pilot acknowledgment for
 The failed attempt remains in the event log and private reservation records.
 The same row was resumed and reached `playing`, with `MASTER`/120 unchanged.
 
-## Local operation and credentials
+## Historical local operation and credentials
 
 Two local user services manage the run. They use no new cloud resources:
 

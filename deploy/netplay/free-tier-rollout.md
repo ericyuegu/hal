@@ -1,5 +1,8 @@
 # Shared queue control rollout — October 2, 2026
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 ## Release state
 
 Implementation and local validation are complete. The frontend and API are deployed.

@@ -1,5 +1,10 @@
 # Netplay Reservation Sync Implementation Plan
 
+Transport update: the approved [protocol-4 design](../../../deploy/netplay/free-tier-design.md)
+replaces the external two-second reports with a shared host WebSocket and local
+relay. Continuous-session ownership and menu semantics below still apply.
+See [the current runbook](../../../deploy/netplay/README.md) for operation.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the reservation's edge-triggered transition protocol with player-owned settings, runner-owned snapshots, and one end command; keep the player connected in Slippi between games; cache the public read routes.

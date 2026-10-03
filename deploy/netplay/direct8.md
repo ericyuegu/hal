@@ -1,5 +1,8 @@
 # Eight-slot direct play — October 1, 2026 UTC
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 ## Configuration
 
 The owner approved eight slots sharing one Slippi account, a 60-second initial

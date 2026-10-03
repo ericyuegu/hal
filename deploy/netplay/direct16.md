@@ -1,5 +1,8 @@
 # Direct-play capacity — October 1, 2026 UTC
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 A subsequent [account-reuse experiment](account-reuse.md) established two
 simultaneous Slippi games with the same account after sequential pairing.
 The account requirements below describe HAL's current implementation.

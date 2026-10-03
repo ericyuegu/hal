@@ -1,5 +1,8 @@
 # Concurrent Slippi account test — October 1, 2026 UTC
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 A later [parallel-pairing test](parallel-pairing.md) made the two G4
 emulators connect to each other. Sequential pairing remains the tested way
 to reuse this account for independent concurrent games.

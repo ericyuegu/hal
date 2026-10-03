@@ -1,5 +1,10 @@
 # Netplay reservation sync
 
+Transport update: the approved [protocol-4 design](../../../deploy/netplay/free-tier-design.md)
+replaces the external two-second reports with a shared host WebSocket and local
+relay. Continuous-session ownership and menu semantics below still apply.
+See [the current runbook](../../../deploy/netplay/README.md) for operation.
+
 Date: 2026-10-01. Status: design approved in conversation; awaiting written-spec review.
 
 ## Goal

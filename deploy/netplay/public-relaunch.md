@@ -1,5 +1,8 @@
 # Frontend deployment and Ranked restart — September 30, 2026
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 The new frontend is live. The owner then canceled the direct-play restart
 and asked to resume Ranked. The existing Ranked container started at
 23:56:25 UTC. Its separate FPS and memory monitor is attached. The G4 VM
@@ -94,7 +97,7 @@ active and no chat commands were sent.
 
 The analog test correction is committed as `b5edd221`. The separate stream
 monitor is committed as `298b3506`; its incident report and all monitoring
-commands are in [ranked.md](ranked.md#stream-and-memory-monitor--september-30-2026).
+commands are in [ranked.md](ranked-history.md#stream-and-memory-monitor--september-30-2026).
 Deployment evidence is local under `runs/netplay/public-relaunch/`.
 
 
@@ -143,7 +146,7 @@ The owner requested Ranked and canceled direct-play setup. The existing
 `hal-ranked-player-v5` container and its Twitch stream are running again.
 The first game began at 23:57:08 UTC. The independent monitor reports about
 59.9 game FPS and 60 OBS FPS with no drops or alerts in the first live check.
-See [the restart report](ranked.md#ranked-restart-with-live-monitoring) for
+See [the restart report](ranked-history.md#ranked-restart-with-live-monitoring) for
 commands, evidence, and the exact run directory. The public runner remains
 inactive, its exclusion marker remains present, and no policy publication or
 admin resume request was made. The frontend deployment remains live.

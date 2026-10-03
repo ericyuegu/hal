@@ -1,5 +1,8 @@
 # Parallel Slippi pairing test — October 1, 2026 UTC
 
+Historical record. Status and commands below apply to the recorded release.
+See [current deployment status](status.md) and [the runbook](README.md).
+
 ## Result
 
 Parallel searches did not connect the requested opponents.
