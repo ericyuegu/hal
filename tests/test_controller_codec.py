@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 
@@ -66,6 +67,57 @@ def test_stick_centers_live_in_target_space():
             assert (centers == torch.tensor(pt)).all(dim=1).any()
 
 
+def test_pruned81_matches_the_notebook_center_order_and_coordinates() -> None:
+    original = controller_codec.STICK_CLUSTER_CENTERS_MAIN.numpy()
+    core = np.delete(original[:25], np.array((18, 20, 22, 24)), axis=0)
+    middle = []
+    for turn in range(4):
+        for angle in (30, 45, 60):
+            theta = np.deg2rad(turn * 90 + angle)
+            middle.append((0.75 * np.cos(theta), 0.75 * np.sin(theta)))
+    quadrant = np.linspace(np.deg2rad(17), np.deg2rad(73), 11)
+    rim_angles = np.concatenate((np.deg2rad(np.arange(4) * 90), *(quadrant + turn * np.pi / 2 for turn in range(4))))
+    rim = np.stack((np.cos(rim_angles), np.sin(rim_angles)), axis=-1).astype(np.float32)
+    expected = np.concatenate((core, np.asarray(middle, dtype=np.float32), rim))
+
+    actual = controller_codec.STICK_CLUSTER_CENTERS_MAIN_PRUNED81
+
+    assert actual.shape == (81, 2)
+    assert torch.equal(actual, torch.from_numpy(expected))
+    assert torch.equal(actual[:21], torch.from_numpy(core))
+
+
+def test_pruned81_keeps_partial_axes_and_full_rim_cardinals() -> None:
+    centers = controller_codec.STICK_CLUSTER_CENTERS_MAIN_PRUNED81
+    for radius in (0.35, 0.5, 0.675, 0.85):
+        for point in ((radius, 0.0), (-radius, 0.0), (0.0, radius), (0.0, -radius)):
+            assert (centers == torch.tensor(point)).all(dim=1).any()
+    cardinals = torch.tensor(((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)))
+    assert torch.allclose(centers[33:37], cardinals, atol=1e-7, rtol=0)
+    assert torch.equal(centers[33:37].abs().amax(dim=1), torch.ones(4))
+    assert not (centers.abs() == 79 / 80).any()
+    for point in ((0.6, 0.6), (-0.6, 0.6), (-0.6, -0.6), (0.6, -0.6)):
+        assert not (centers == torch.tensor(point)).all(dim=1).any()
+
+
+def test_pruned81_codec_uses_an_81_class_main_stick_vocabulary() -> None:
+    codec = DiscreteControllerCodec(embed_dim=8, main_stick_layout="pruned81")
+
+    assert codec.main_stick_layout == "pruned81"
+    assert codec.group_vocabs == (256, 81, 9, 25)
+    assert codec.class_embeddings["main_stick"].num_embeddings == 81
+    assert torch.equal(codec.main_centers, controller_codec.STICK_CLUSTER_CENTERS_MAIN_PRUNED81)
+
+    indices = torch.zeros(81, 4, dtype=torch.long)
+    indices[:, controller_codec.MAIN_STICK_GROUP] = torch.arange(81)
+    assert torch.equal(codec.quantize(codec.dequantize(indices)), indices)
+
+
+def test_codec_rejects_an_unknown_main_stick_layout() -> None:
+    with pytest.raises(ValueError, match="unknown main-stick layout"):
+        DiscreteControllerCodec(embed_dim=8, main_stick_layout="unknown")  # type: ignore[arg-type]
+
+
 def test_c_stick_set_is_the_compact_nine_point_set():
     # c-stick is 95% neutral, the rest on the rim cardinals/diagonals: neutral + 4 cardinals
     # + 4 full diagonals, distinct from the larger main pose set.
@@ -77,7 +129,11 @@ def test_c_stick_set_is_the_compact_nine_point_set():
 
 
 def test_stick_centers_are_unique():
-    for centers in (controller_codec.STICK_CLUSTER_CENTERS_MAIN, controller_codec.STICK_CLUSTER_CENTERS_C):
+    for centers in (
+        controller_codec.STICK_CLUSTER_CENTERS_MAIN,
+        controller_codec.STICK_CLUSTER_CENTERS_MAIN_PRUNED81,
+        controller_codec.STICK_CLUSTER_CENTERS_C,
+    ):
         assert torch.unique(centers, dim=0).shape[0] == centers.shape[0]
 
 

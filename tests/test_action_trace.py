@@ -73,3 +73,24 @@ def test_action_trace_refuses_to_overwrite_an_existing_directory(tmp_path: Path)
 
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         ActionTraceWriter(root, model="cody")
+
+
+def test_action_trace_records_a_nonlegacy_controller_vocabulary(tmp_path: Path) -> None:
+    root = tmp_path / "trace"
+    group_vocabs = (256, 81, 9, 25)
+    with ActionTraceWriter(root, model="pruned81", group_vocabs=group_vocabs) as writer:
+        writer.record_plan(
+            decode_seed=1,
+            slot_ids=torch.tensor([0]),
+            resets=None,
+            indices=torch.zeros(1, 1, 4, dtype=torch.long),
+            logits=tuple(torch.zeros(1, 1, vocab) for vocab in group_vocabs),
+            uniforms=torch.zeros(1, 4, 1),
+            head_offsets=(1,),
+            temperature=1.0,
+            delay_frames=0,
+            replan_interval_frames=1,
+        )
+
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["controller_group_vocabs"]["main_stick"] == 81

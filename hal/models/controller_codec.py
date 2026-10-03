@@ -1,6 +1,8 @@
 """Discrete controller vocabulary shared by training and inference."""
 
+import math
 from typing import Final
+from typing import Literal
 from typing import cast
 
 import torch
@@ -100,6 +102,43 @@ _STICK_CLUSTER_XY: tuple[tuple[float, float], ...] = (
 
 STICK_CLUSTER_CENTERS_MAIN: Tensor = torch.tensor(_STICK_CLUSTER_XY, dtype=torch.float32)
 
+type MainStickLayout = Literal["legacy65", "pruned81"]
+
+
+def _pruned81_main_stick_xy() -> tuple[tuple[float, float], ...]:
+    """Reproduce the selected notebook codebook, including its center order."""
+    outer_diagonal_indices = frozenset((18, 20, 22, 24))
+    core = tuple(point for index, point in enumerate(_STICK_CLUSTER_XY[:25]) if index not in outer_diagonal_indices)
+    middle = tuple(
+        (
+            0.75 * math.cos(math.radians(turn * 90 + angle)),
+            0.75 * math.sin(math.radians(turn * 90 + angle)),
+        )
+        for turn in range(4)
+        for angle in (30.0, 45.0, 60.0)
+    )
+    cardinal_angles = tuple(math.radians(turn * 90) for turn in range(4))
+    quadrant_start = math.radians(17)
+    quadrant_stop = math.radians(73)
+    quadrant_angles = tuple(quadrant_start + index * (quadrant_stop - quadrant_start) / 10 for index in range(11))
+    rim_angles = cardinal_angles + tuple(angle + turn * math.pi / 2 for turn in range(4) for angle in quadrant_angles)
+    rim = tuple((math.cos(angle), math.sin(angle)) for angle in rim_angles)
+    return core + middle + rim
+
+
+_STICK_CLUSTER_XY_PRUNED81: Final[tuple[tuple[float, float], ...]] = _pruned81_main_stick_xy()
+STICK_CLUSTER_CENTERS_MAIN_PRUNED81: Tensor = torch.tensor(_STICK_CLUSTER_XY_PRUNED81, dtype=torch.float32)
+
+
+def main_stick_centers(layout: MainStickLayout) -> Tensor:
+    """Return the main-stick centers for one persisted layout identity."""
+    if layout == "legacy65":
+        return STICK_CLUSTER_CENTERS_MAIN
+    if layout == "pruned81":
+        return STICK_CLUSTER_CENTERS_MAIN_PRUNED81
+    raise ValueError(f"unknown main-stick layout {layout!r}")
+
+
 # C-stick is 95% exact-neutral and its non-neutral mass sits overwhelmingly on the rim at the
 # cardinals/diagonals (smash attacks); a dense pose set would leave most clusters empty. Its
 # own 9-point set: neutral + four full cardinals + four full diagonals.
@@ -189,6 +228,17 @@ CONTROLLER_DECODE_ORDER: Final[tuple[str, ...]] = (
     "buttons",
 )
 
+
+def controller_group_vocabs(layout: MainStickLayout) -> tuple[int, ...]:
+    """Return controller vocabulary sizes for a main-stick layout."""
+    return (
+        N_BUTTON_COMBOS,
+        main_stick_centers(layout).shape[0],
+        STICK_CLUSTER_CENTERS_C.shape[0],
+        TRIGGER_CENTERS.shape[0] ** 2,
+    )
+
+
 CONTINUOUS_CHANNEL_COUNT: Final[int] = 6
 TRIGGER_LEFT_CHANNEL: Final[int] = ACTION_CHANNELS.index("trigger_l")
 TRIGGER_RIGHT_CHANNEL: Final[int] = ACTION_CHANNELS.index("trigger_r")
@@ -208,12 +258,14 @@ class DiscreteControllerCodec(nn.Module):
     trigger_centers: Tensor
     button_valid_for_trigger: Tensor
 
-    def __init__(self, embed_dim: int) -> None:
+    def __init__(self, embed_dim: int, *, main_stick_layout: MainStickLayout = "legacy65") -> None:
         super().__init__()
         self.embed_dim = embed_dim
+        self.main_stick_layout = main_stick_layout
+        self.group_vocabs = controller_group_vocabs(main_stick_layout)
         self.class_embeddings = nn.ModuleDict(
             {
-                name: nn.Embedding(CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]], embed_dim)
+                name: nn.Embedding(self.group_vocabs[CONTROLLER_GROUP_INDEX[name]], embed_dim)
                 for name in CONTROLLER_GROUP_NAMES
             }
         )
@@ -221,11 +273,11 @@ class DiscreteControllerCodec(nn.Module):
         self.semantic_projections = nn.ModuleDict(
             {name: nn.Linear(width, embed_dim, bias=False) for name, width in semantic_dims.items()}
         )
-        self.register_buffer("main_centers", STICK_CLUSTER_CENTERS_MAIN.clone())
+        self.register_buffer("main_centers", main_stick_centers(main_stick_layout).clone())
         self.register_buffer("c_centers", STICK_CLUSTER_CENTERS_C.clone())
         self.register_buffer("trigger_centers", TRIGGER_CENTERS.clone())
-        button_bits = combo_to_buttons(torch.arange(CONTROLLER_GROUP_VOCABS[BUTTONS_GROUP]))
-        trigger_pairs = torch.arange(CONTROLLER_GROUP_VOCABS[TRIGGERS_GROUP])
+        button_bits = combo_to_buttons(torch.arange(self.group_vocabs[BUTTONS_GROUP]))
+        trigger_pairs = torch.arange(self.group_vocabs[TRIGGERS_GROUP])
         trigger_count = len(self.trigger_centers)
         left_full = trigger_pairs.div(trigger_count, rounding_mode="floor") == trigger_count - 1
         right_full = trigger_pairs.remainder(trigger_count) == trigger_count - 1

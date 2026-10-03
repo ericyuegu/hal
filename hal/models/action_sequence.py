@@ -27,9 +27,9 @@ from hal.models.controller_codec import CONTROLLER_DECODE_ORDER
 from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
 from hal.models.controller_codec import CONTROLLER_GROUP_INDEX
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
-from hal.models.controller_codec import CONTROLLER_GROUP_VOCABS
 from hal.models.controller_codec import TRIGGERS_GROUP
 from hal.models.controller_codec import DiscreteControllerCodec
+from hal.models.controller_codec import MainStickLayout
 from hal.models.sampling import sample_categorical
 from hal.models.sampling import sample_with_temperature
 from hal.models.sampling import validate_sampling_temperature
@@ -93,6 +93,7 @@ class ActionSequenceConfig:
     depth_alpha: float = 0.5
     hidden_std_multiplier: float = 0.5
     return_conditioning: bool = True
+    main_stick_layout: MainStickLayout = "legacy65"
 
 
 def decoder_rmsnorm(x: Tensor) -> Tensor:
@@ -507,7 +508,7 @@ class CausalTemporalDecoder(nn.Module):
                 name: NonlinearActionHead(
                     self.d_model,
                     cfg.group_head_dim,
-                    CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]],
+                    codec.group_vocabs[CONTROLLER_GROUP_INDEX[name]],
                     # Keep the near-zero button Jacobian bounded in every path.
                     norm_eps=1e-5 if name == "buttons" else 1e-6,
                 )
@@ -519,7 +520,7 @@ class CausalTemporalDecoder(nn.Module):
                 name: NonlinearActionHead(
                     cfg.d_model,
                     cfg.group_head_dim,
-                    CONTROLLER_GROUP_VOCABS[CONTROLLER_GROUP_INDEX[name]],
+                    codec.group_vocabs[CONTROLLER_GROUP_INDEX[name]],
                 )
                 for name in CONTROLLER_GROUP_NAMES
             }
@@ -749,7 +750,7 @@ class CausalTemporalDecoder(nn.Module):
     def nll_from_logits(logits: dict[str, Tensor], targets: Tensor) -> Tensor:
         losses = [
             F.cross_entropy(
-                logits[name].float().reshape(-1, CONTROLLER_GROUP_VOCABS[group]),
+                logits[name].float().reshape(-1, logits[name].shape[-1]),
                 targets[..., group].reshape(-1),
                 reduction="none",
             ).view(*targets.shape[:-1])
@@ -1127,7 +1128,7 @@ class ActionSequenceTransformer(nn.Module):
         self.cfg = cfg
         self.L_chunk = cfg.sample_chunk_length
         self.head_offsets = tuple(cfg.head_offsets)
-        self.codec = DiscreteControllerCodec(cfg.action_embed_dim)
+        self.codec = DiscreteControllerCodec(cfg.action_embed_dim, main_stick_layout=cfg.main_stick_layout)
         self.cat_specs = {**CAT_FEATURES, "action": (cfg.action_vocab, cfg.action_state_embed_dim)}
         self.cat_embeds = nn.ModuleDict(
             {name: nn.Embedding(vocab, dim) for name, (vocab, dim) in self.cat_specs.items()}

@@ -18,6 +18,27 @@ def test_default_059_parameter_count() -> None:
     assert sum(parameter.numel() for parameter in model.parameters()) == 246_862_205
 
 
+def test_pruned81_model_uses_81_way_main_stick_heads() -> None:
+    config = ActionSequenceConfig(
+        d_model=32,
+        n_layers=1,
+        n_heads=4,
+        temporal_d_model=32,
+        temporal_layers=1,
+        temporal_heads=4,
+        temporal_ff_dim=64,
+        group_head_dim=16,
+        value_hidden_dim=16,
+        main_stick_layout="pruned81",
+    )
+    with torch.device("meta"):
+        model = ActionSequenceTransformer(config)
+
+    assert model.codec.group_vocabs == (256, 81, 9, 25)
+    assert model.temporal.outputs["main_stick"].down.out_features == 81
+    assert model.temporal.trunk_outputs["main_stick"].down.out_features == 81
+
+
 def test_proxy_parameter_order_initialization_and_rng_match_control() -> None:
     control = json.loads(_FIXTURE.read_text())
     config = ActionSequenceConfig(

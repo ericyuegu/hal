@@ -51,3 +51,27 @@ def test_create_command_spot_keyless_service_account() -> None:
     assert "--scopes=cloud-platform" in command
     assert "--service-account=jobs@example.iam.gserviceaccount.com" in command
     assert all("secret-value" not in argument for argument in command)
+
+
+def test_create_command_g4_uses_integrated_gpus_and_hyperdisk() -> None:
+    args = Args(
+        cmd=["torchrun", "train.py"],
+        zone="us-central1-b",
+        machine_type="g4-standard-96",
+        gpu_count=2,
+        disk=3000,
+        disk_type="hyperdisk-balanced",
+        spot=False,
+    )
+    command = create_command(args, project="project", name="hal-o60", startup_file="/tmp/start.sh")
+    assert "--machine-type=g4-standard-96" in command
+    assert "--boot-disk-size=3000GB" in command
+    assert "--boot-disk-type=hyperdisk-balanced" in command
+    assert not any(argument.startswith("--accelerator=") for argument in command)
+    assert "--provisioning-model=SPOT" not in command
+
+
+def test_create_command_rejects_g4_gpu_count_mismatch() -> None:
+    args = Args(cmd=["python", "train.py"], machine_type="g4-standard-96", gpu_count=1)
+    with pytest.raises(ValueError, match="has 2 integrated GPUs"):
+        create_command(args, project="project", name="hal-o60", startup_file="/tmp/start.sh")

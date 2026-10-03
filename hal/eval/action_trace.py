@@ -67,14 +67,24 @@ class ActionTraceWriter:
     action probability because the decoder samples groups autoregressively.
     """
 
-    def __init__(self, root: str | Path, *, model: str, flush_rows: int = 8192) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        model: str,
+        group_vocabs: tuple[int, ...] = CONTROLLER_GROUP_VOCABS,
+        flush_rows: int = 8192,
+    ) -> None:
         if flush_rows < 1:
             raise ValueError(f"flush_rows must be positive, got {flush_rows}")
+        if len(group_vocabs) != len(CONTROLLER_GROUP_NAMES) or any(vocab < 1 for vocab in group_vocabs):
+            raise ValueError(f"invalid controller group vocabularies {group_vocabs!r}")
         self.root = Path(root)
         if self.root.exists():
             raise FileExistsError(f"refusing to overwrite action trace directory {self.root}")
         self.root.mkdir(parents=True)
         self.model = model
+        self.group_vocabs = group_vocabs
         self.flush_rows = flush_rows
         self._columns: dict[str, list[object]] = {field.name: [] for field in _TRACE_SCHEMA}
         self._clocks: dict[tuple[int, int], _SlotClock] = {}
@@ -85,7 +95,7 @@ class ActionTraceWriter:
             "model": model,
             "controller_decode_order": list(CONTROLLER_DECODE_ORDER),
             "controller_group_names": list(CONTROLLER_GROUP_NAMES),
-            "controller_group_vocabs": dict(zip(CONTROLLER_GROUP_NAMES, CONTROLLER_GROUP_VOCABS, strict=True)),
+            "controller_group_vocabs": dict(zip(CONTROLLER_GROUP_NAMES, group_vocabs, strict=True)),
             "logits": "centered legality-masked logits before temperature scaling",
             "probabilities": "softmax(logits / temperature)",
             "action_probability": "product of the four sampled conditional group probabilities",
@@ -110,7 +120,7 @@ class ActionTraceWriter:
         if self._closed:
             raise RuntimeError("cannot record to a closed action trace")
         batch, horizon, groups = indices.shape
-        expected_logits = tuple((batch, horizon, vocab) for vocab in CONTROLLER_GROUP_VOCABS)
+        expected_logits = tuple((batch, horizon, vocab) for vocab in self.group_vocabs)
         actual_logits = tuple(tuple(values.shape) for values in logits)
         if groups != len(CONTROLLER_GROUP_NAMES) or actual_logits != expected_logits:
             raise ValueError(f"trace logits have shapes {actual_logits}, expected {expected_logits}")
