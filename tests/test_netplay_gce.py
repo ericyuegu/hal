@@ -321,3 +321,56 @@ def test_gce_managed_up_and_down(tmp_path: Path) -> None:
     assert "--size=0" in down
     assert "managed delete hal-netplay-test" in down
     assert "instance-templates delete hal-netplay-test-template" in down
+
+
+def test_compose_renders_private_sockets_and_nvidia_driver(tmp_path: Path) -> None:
+    import json
+    import shutil
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is required to render its configuration")
+    version = subprocess.run(["docker", "compose", "version"], capture_output=True)
+    if version.returncode:
+        pytest.skip("Docker Compose plugin is unavailable")
+    environment = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "HAL_GIT_SHA": _SHA,
+        "HAL_NETPLAY_SLOTS": "8",
+        "HAL_NETPLAY_API_URL": "https://example.invalid",
+        "HAL_NETPLAY_RUNNER_TOKEN": "test",
+        "CF_ACCESS_CLIENT_ID": "test",
+        "CF_ACCESS_CLIENT_SECRET": "test",
+        "AWS_ENDPOINT_URL": "https://example.invalid",
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "HAL_NETPLAY_STREAM_DISPLAY": ":90",
+        "HAL_NETPLAY_X11_SOCKET": "/tmp/.X11-unix/X90",
+        "HAL_NETPLAY_XAUTHORITY": "/run/test/Xauthority",
+    }
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            "/dev/null",
+            "-f",
+            str(_DEPLOY / "compose.yaml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    runner = json.loads(result.stdout)["services"]["runner"]
+    mounts = {mount["target"]: mount for mount in runner["volumes"]}
+    assert "/tmp/.X11-unix" not in mounts
+    assert mounts["/tmp/.X11-unix/X90"]["read_only"]
+    assert not mounts["/tmp/.X11-unix/X90"]["bind"].get("create_host_path", False)
+    driver = runner["environment"]["VK_DRIVER_FILES"]
+    assert mounts[driver]["read_only"]
+    assert mounts[driver]["source"] == "/usr/share/vulkan/icd.d/nvidia_icd.json"
+    assert runner["command"][runner["command"].index("--slots") + 1] == "8"

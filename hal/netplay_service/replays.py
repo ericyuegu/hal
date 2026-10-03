@@ -14,13 +14,10 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-from botocore.exceptions import ClientError
-
 from hal import r2
 from hal.netplay_service.domain import validate_player_code
 
 REPLAY_PREFIX: Final[str] = "netplay/v1/replays/"
-REPLAY_LIFECYCLE_ID: Final[str] = "hal-netplay-v1-replays-30d"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,8 +36,8 @@ class ReplayMetadata:
         validate_player_code(self.player_code)
         if not self.reservation_id or "/" in self.reservation_id:
             raise ValueError("reservation_id must be a non-empty R2 path segment")
-        if not 1 <= self.game_number <= 5:
-            raise ValueError("game_number must be in [1, 5]")
+        if type(self.game_number) is not int or self.game_number < 1:
+            raise ValueError("game_number must be a positive integer")
         if self.started_at.tzinfo is None or self.ended_at.tzinfo is None:
             raise ValueError("replay timestamps must include a timezone")
         if self.ended_at < self.started_at:
@@ -164,28 +161,6 @@ def upload_and_delete(path: str | Path, metadata: ReplayMetadata, *, client: Any
     uploaded = upload_replay(source, metadata, client=client)
     source.unlink()
     return uploaded
-
-
-def ensure_replay_lifecycle(*, client: Any | None = None) -> None:
-    """Install the 30-day rule without replacing unrelated bucket rules."""
-    bucket = r2.bucket()
-    with _r2_client(client) as remote:
-        try:
-            current = remote.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
-        except ClientError as error:
-            code = error.response.get("Error", {}).get("Code")
-            if code not in ("NoSuchLifecycleConfiguration", "NoSuchLifecycle"):
-                raise
-            current = []
-        rule = {
-            "ID": REPLAY_LIFECYCLE_ID,
-            "Status": "Enabled",
-            "Filter": {"Prefix": REPLAY_PREFIX},
-            "Expiration": {"Days": 30},
-        }
-        rules = [existing for existing in current if existing.get("ID") != REPLAY_LIFECYCLE_ID]
-        rules.append(rule)
-        remote.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={"Rules": rules})
 
 
 @contextmanager

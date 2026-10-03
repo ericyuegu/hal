@@ -100,13 +100,13 @@ def test_pulseaudio_owns_one_private_null_sink(tmp_path: Path) -> None:
 
 def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
     player_code = "CRYO#610"
-    state = GameStreamState("FALCO", "MASTER", 25.0, 2)
+    state = GameStreamState("FALCO", "MASTER", 25.0, 12)
     path = tmp_path / "state.json"
     write_stream_state(path, state)
     game = overlay_text(state, 3)
     idle = overlay_text(IdleStreamState(), 3)
 
-    assert game == "HAL · Master rank Falco · difficulty 25 · Game 2 of 5 · play at 20xx.xyz"
+    assert game == "HAL · Master rank Falco · difficulty 25 · Game 12 · play at 20xx.xyz"
     assert idle == "Play HAL at 20xx.xyz · 3 players waiting"
     assert player_code not in path.read_text()
     assert player_code not in game

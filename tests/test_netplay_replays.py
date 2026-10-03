@@ -1,17 +1,14 @@
 import hashlib
+import json
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from botocore.exceptions import ClientError
 
 from hal import r2
-from hal.netplay_service.replays import REPLAY_LIFECYCLE_ID
-from hal.netplay_service.replays import REPLAY_PREFIX
 from hal.netplay_service.replays import ReplayMetadata
-from hal.netplay_service.replays import ensure_replay_lifecycle
 from hal.netplay_service.replays import replay_object_key
 from hal.netplay_service.replays import soak_replay_directory
 from hal.netplay_service.replays import upload_and_delete
@@ -34,8 +31,6 @@ def _metadata() -> ReplayMetadata:
 class FakeR2:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, dict[str, str], str]] = {}
-        self.lifecycle: list[dict] | None = None
-        self.exceptions = SimpleNamespace(ClientError=ClientError)
         self.closed = False
 
     def close(self) -> None:
@@ -50,14 +45,6 @@ class FakeR2:
     def head_object(self, *, Key: str, **_kwargs):
         value, metadata, etag = self.objects[Key]
         return {"ContentLength": len(value), "Metadata": metadata, "ETag": f'"{etag}"'}
-
-    def get_bucket_lifecycle_configuration(self, **_kwargs):
-        if self.lifecycle is None:
-            raise ClientError({"Error": {"Code": "NoSuchLifecycleConfiguration"}}, "GetBucketLifecycle")
-        return {"Rules": self.lifecycle}
-
-    def put_bucket_lifecycle_configuration(self, *, LifecycleConfiguration, **_kwargs):
-        self.lifecycle = LifecycleConfiguration["Rules"]
 
 
 def test_replay_key_indexes_exact_player_under_utc_date() -> None:
@@ -108,17 +95,22 @@ def test_failed_validation_keeps_local_copy(tmp_path: Path, monkeypatch: pytest.
     assert remote.closed
 
 
-def test_lifecycle_preserves_unrelated_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("number", [6, 100])
+def test_continuous_session_uploads_later_games(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, number: int) -> None:
     monkeypatch.setenv("AWS_BUCKET", "hal")
+    source = tmp_path / "game.slp"
+    source.write_bytes(b"replay")
     remote = FakeR2()
-    remote.lifecycle = [{"ID": "keep", "Status": "Enabled", "Filter": {"Prefix": "runs/"}}]
-    ensure_replay_lifecycle(client=remote)
+    uploaded = upload_and_delete(source, replace(_metadata(), game_number=number), client=remote)
+    assert uploaded.key.endswith(f"/game-{number:02d}.slp")
+    assert json.loads(remote.objects[uploaded.metadata_key][0])["game_number"] == number
+    assert not source.exists()
 
-    assert remote.lifecycle is not None
-    assert remote.lifecycle[0]["ID"] == "keep"
-    replay_rule = next(rule for rule in remote.lifecycle if rule["ID"] == REPLAY_LIFECYCLE_ID)
-    assert replay_rule["Filter"]["Prefix"] == REPLAY_PREFIX
-    assert replay_rule["Expiration"]["Days"] == 30
+
+@pytest.mark.parametrize("number", [0, -1, True, 1.5])
+def test_replay_rejects_invalid_game_number(number: int) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        replace(_metadata(), game_number=number)
 
 
 def test_soak_replays_are_always_removed() -> None:

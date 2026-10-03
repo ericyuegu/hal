@@ -1,4 +1,4 @@
-"""Pinned runner assets: a manifest, a hash-checked cache, and content-addressed uploads."""
+"""Verified policy and account downloads with content-addressed uploads."""
 
 import hashlib
 import re

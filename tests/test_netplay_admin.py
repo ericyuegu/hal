@@ -8,6 +8,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from hal.netplay_service.admin import check_imitations
+from hal.netplay_service.admin import main
 from hal.netplay_service.admin import parse_since
 from hal.netplay_service.admin import policy_config
 from hal.netplay_service.admin import publish_policy
@@ -107,3 +108,9 @@ def test_parse_since(value: str, expected: float) -> None:
 def test_parse_since_rejects_other_forms() -> None:
     with pytest.raises(ValueError, match="like 30m"):
         parse_since("yesterday", 0.0)
+
+
+def test_removed_lifecycle_command_cannot_change_retention() -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["install-replay-lifecycle"])
+    assert error.value.code == 2

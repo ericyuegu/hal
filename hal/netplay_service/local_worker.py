@@ -85,6 +85,8 @@ def local_worker(state_dir: Path, *, port: int, startup_timeout_seconds: float =
         str(state_dir / "storage"),
         "--show-interactive-dev-session=false",
         "--var",
+        "MAINTENANCE:off",
+        "--var",
         f"RUNNER_TOKEN_SHA256:{_digest(DEV_RUNNER_TOKEN)}",
         "--var",
         f"ADMIN_TOKEN_SHA256:{_digest(DEV_ADMIN_TOKEN)}",

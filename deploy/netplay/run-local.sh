@@ -76,6 +76,7 @@ set -m
 cd "$repo_dir/web/netplay-api"
 npm exec wrangler dev -- --local --ip 127.0.0.1 --port 8787 \
   --persist-to "$state_dir/worker" \
+  --var "MAINTENANCE:off" \
   --var "RUNNER_TOKEN_SHA256:$runner_digest" \
   --var "ADMIN_TOKEN_SHA256:$admin_digest" \
   --var "TWITCH_STREAM_KEY:$stream_key" </dev/null &

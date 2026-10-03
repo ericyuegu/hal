@@ -23,11 +23,23 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility,video,display
       HAL_NETPLAY_STREAM_DISPLAY: ${HAL_NETPLAY_STREAM_DISPLAY:?set a dedicated NVIDIA Xorg display}
+      VK_DRIVER_FILES: /etc/vulkan/icd.d/nvidia_icd.json
       XAUTHORITY: /run/hal-netplay/Xauthority
     volumes:
       - cache:/root/.cache/hal-netplay
       - state:/opt/hal/runs/netplay
-      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - type: bind
+        source: ${HAL_NETPLAY_X11_SOCKET:?set the dedicated Xorg socket, e.g. /tmp/.X11-unix/X90}
+        target: ${HAL_NETPLAY_X11_SOCKET:?set the dedicated Xorg socket}
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HAL_NETPLAY_VULKAN_ICD:-/usr/share/vulkan/icd.d/nvidia_icd.json}
+        target: /etc/vulkan/icd.d/nvidia_icd.json
+        read_only: true
+        bind:
+          create_host_path: false
       - ${HAL_NETPLAY_XAUTHORITY:?set the Xorg cookie file}:/run/hal-netplay/Xauthority:ro
     shm_size: 1gb
     deploy:

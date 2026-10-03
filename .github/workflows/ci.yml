@@ -14,7 +14,7 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.14"
-      - run: uv sync --frozen --all-groups --extra netplay-server
+      - run: uv sync --frozen --all-groups
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - name: Type check maintained code
@@ -24,3 +24,29 @@ jobs:
             experiments/059_muon_action_sequence.py \
             scripts
       - run: uv run pytest -q -m "not integration"
+
+  netplay-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: |
+            web/netplay-api/package-lock.json
+            web/netplay/package-lock.json
+      - run: npm ci
+        working-directory: web/netplay-api
+      - run: npm test
+        working-directory: web/netplay-api
+      - run: npm run typecheck
+        working-directory: web/netplay-api
+      - run: npm ci
+        working-directory: web/netplay
+      - run: npm run lint
+        working-directory: web/netplay
+      - run: npx tsc --noEmit --incremental false
+        working-directory: web/netplay
+      - run: npm run build
+        working-directory: web/netplay

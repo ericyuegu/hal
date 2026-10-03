@@ -27,7 +27,6 @@ from hal.netplay_service.domain import account_connect_code
 from hal.netplay_service.queue_client import Account
 from hal.netplay_service.queue_client import AdminClient
 from hal.netplay_service.queue_client import admin_endpoint
-from hal.netplay_service.replays import ensure_replay_lifecycle
 from hal.representation.player_identity import RANK_PLAYER_IDS
 
 _SINCE: Final[re.Pattern[str]] = re.compile(r"([0-9]+)([smhd])")
@@ -122,7 +121,6 @@ def _admin_client() -> AdminClient:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="hal-netplay-admin")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("install-replay-lifecycle", help="install the private replay 30-day lifecycle rule")
     publish = commands.add_parser("publish-policy", help="upload a bundle and make it the active policy")
     publish.add_argument("bundle", type=Path)
     accounts = commands.add_parser("accounts", help="manage bot Slippi accounts")
@@ -139,9 +137,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     commands.add_parser("resume", help="accept new reservations again")
     args = parser.parse_args(argv)
 
-    if args.command == "install-replay-lifecycle":
-        ensure_replay_lifecycle()
-        return
     admin = _admin_client()
     try:
         if args.command == "publish-policy":

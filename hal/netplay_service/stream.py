@@ -104,9 +104,7 @@ def overlay_text(state: StreamState, queue_depth: int) -> str:
     character = _CHARACTER_LABELS[state.character]
     imitation = _IMITATION_LABELS[state.imitation]
     difficulty = "auto" if state.desired_return is None else f"{state.desired_return:g}"
-    return (
-        f"HAL · {imitation} {character} · difficulty {difficulty} · Game {state.game_number} of 5 · play at 20xx.xyz"
-    )
+    return f"HAL · {imitation} {character} · difficulty {difficulty} · Game {state.game_number} · play at 20xx.xyz"
 
 
 def write_overlay(path: Path, text: str) -> None:

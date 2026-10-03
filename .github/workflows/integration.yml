@@ -14,7 +14,12 @@ jobs:
           enable-cache: true
           python-version: "3.14"
       - run: uv sync --frozen --all-groups
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.0"
+      - run: npm ci
+        working-directory: web/netplay-api
       - name: Verify offline/live parity and process cleanup
         env:
           HAL_REQUIRE_INTEGRATION: "1"
-        run: uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration
+        run: uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py tests/test_netplay_queue_integration.py -m integration
