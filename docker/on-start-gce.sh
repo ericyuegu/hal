@@ -34,7 +34,16 @@ while IFS='=' read -r env_name secret_id; do
   printf '\n' >> /run/hal/job.env
 done < <(printf '%s' "$HAL_SECRET_SPECS_B64" | base64 -d)
 
-command -v docker >/dev/null || { log "Docker is missing from the selected DLVM image"; false; }
+if ! command -v docker >/dev/null; then
+  log "installing Docker because the selected DLVM image does not include it"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install --yes --no-install-recommends docker.io
+  command -v nvidia-ctk >/dev/null || { log "nvidia-ctk is missing from the selected DLVM image"; false; }
+  nvidia-ctk runtime configure --runtime=docker
+  systemctl enable docker
+  systemctl restart docker
+fi
 nvidia-smi
 log "pulling ${HAL_IMAGE}"
 docker pull "$HAL_IMAGE"

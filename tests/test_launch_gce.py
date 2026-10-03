@@ -40,6 +40,8 @@ def test_startup_script_contains_no_secret_values() -> None:
     assert "secret-value" not in script
     assert base64.b64encode(b"python train.py --name 'two words'").decode() in script
     assert "export HAL_KEEP_ALIVE=0" in script
+    assert "apt-get install --yes --no-install-recommends docker.io" in script
+    assert "nvidia-ctk runtime configure --runtime=docker" in script
 
 
 def test_create_command_spot_keyless_service_account() -> None:
