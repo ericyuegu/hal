@@ -38,9 +38,10 @@ def test_pruned81_is_the_only_production_treatment_change() -> None:
     }
 
     assert changed == {"main_stick_layout": ("legacy65", "pruned81")}
-    assert asdict(control.awr) == asdict(treatment.awr)
-    assert control.source_names == treatment.source_names
-    assert control.target_positions == treatment.target_positions
+    control_values = asdict(control)
+    treatment_values = asdict(treatment)
+    treatment_values["arch"]["main_stick_layout"] = "legacy65"
+    assert control_values == treatment_values
 
 
 def test_pruned81_production_parameter_and_compute_contracts() -> None:
