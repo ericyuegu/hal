@@ -1,10 +1,11 @@
 """Compatibility fixes for MosaicML Streaming 0.13.0.
 
 Mosaic 0.13.0 mishandles Python 3.14 shared-memory registration, retains file
-descriptors for non-owning prefix probes, and leaves failed shard downloads in
-``PREPARING``. The focused tests in ``tests/test_streaming_compat.py`` reproduce all
-three failures. Remove a patch only after those tests pass against an upgraded
-Mosaic release.
+descriptors for non-owning prefix probes, leaves failed shard downloads in
+``PREPARING``, and joins the default process group when constructing a rank-local
+dataset. The focused tests in ``tests/test_streaming_compat.py`` reproduce these
+failures. Remove a patch only after those tests pass against an upgraded Mosaic
+release.
 
 This module replaces private APIs. ``patch_streaming`` therefore rejects every
 version except the one validated here and applies the replacements once.
@@ -12,12 +13,16 @@ version except the one validated here and applies the replacements once.
 
 import os
 import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.metadata import version
 from multiprocessing import resource_tracker
 from typing import Any
 
 import streaming.base.constant as streaming_constants
 import streaming.base.dataset as streaming_dataset
+import streaming.base.distributed as streaming_distributed
 import streaming.base.shared.memory as streaming_memory
 import streaming.base.shared.prefix as streaming_prefix
 
@@ -30,6 +35,21 @@ if not hasattr(streaming_dataset.StreamingDataset, _ORIGINAL_PREPARE_SHARD_ATTR)
     )
 _SUPPORTED_STREAMING_VERSION = "0.13.0"
 _PATCHED = False
+_LOCAL_WORLD_LOCK = threading.RLock()
+_WORLD_ENVIRONMENT = ("RANK", "WORLD_SIZE", "LOCAL_RANK", "LOCAL_WORLD_SIZE")
+
+
+class _SingleProcessDistributed:
+    @staticmethod
+    def is_available() -> bool:
+        return False
+
+    @staticmethod
+    def is_initialized() -> bool:
+        return False
+
+
+_SINGLE_PROCESS_DISTRIBUTED = _SingleProcessDistributed()
 
 
 def require_supported_streaming() -> None:
@@ -123,6 +143,37 @@ def _prepare_shard_without_poisoned_state(
         if self._shard_states[shard_id] == streaming_dataset._ShardState.PREPARING:
             self._shard_states[shard_id] = streaming_dataset._ShardState.REMOTE
         raise
+
+
+@contextmanager
+def single_process_streaming() -> Iterator[None]:
+    """Construct one Mosaic dataset without joining the training process group."""
+    require_supported_streaming()
+    with _LOCAL_WORLD_LOCK:
+        previous_environment = {name: os.environ.get(name) for name in _WORLD_ENVIRONMENT}
+        previous_dataset_dist = streaming_dataset.dist
+        previous_distributed_dist = streaming_distributed.dist
+        previous_prefix_dist = streaming_prefix.dist
+        try:
+            os.environ.update(
+                RANK="0",
+                WORLD_SIZE="1",
+                LOCAL_RANK="0",
+                LOCAL_WORLD_SIZE="1",
+            )
+            streaming_dataset.dist = _SINGLE_PROCESS_DISTRIBUTED  # ty: ignore[invalid-assignment]
+            streaming_distributed.dist = _SINGLE_PROCESS_DISTRIBUTED  # ty: ignore[invalid-assignment]
+            streaming_prefix.dist = _SINGLE_PROCESS_DISTRIBUTED  # ty: ignore[invalid-assignment]
+            yield
+        finally:
+            streaming_dataset.dist = previous_dataset_dist
+            streaming_distributed.dist = previous_distributed_dist
+            streaming_prefix.dist = previous_prefix_dist
+            for name, value in previous_environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 def patch_streaming() -> None:

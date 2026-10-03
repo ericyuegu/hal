@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from streaming import MDSWriter
+from streaming import StreamingDataset
 from streaming.base.shared.memory import SharedMemory
 
 import hal.data.streaming_compat as streaming_compat
@@ -54,6 +56,37 @@ def test_patches_survive_module_reload() -> None:
     assert getattr(dataset_type, reloaded._ORIGINAL_PREPARE_SHARD_ATTR) is original
     assert dataset_type.prepare_shard is reloaded._prepare_shard_without_poisoned_state
     assert original is not dataset_type.prepare_shard
+
+
+def test_single_process_streaming_does_not_join_training_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_scalar_mds(tmp_path / "train")
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "2")
+    original_dataset_dist = streaming_compat.streaming_dataset.dist
+    original_distributed_dist = streaming_compat.streaming_distributed.dist
+    original_prefix_dist = streaming_compat.streaming_prefix.dist
+
+    def unexpected_barrier() -> None:
+        raise AssertionError("rank-local dataset joined the training process group")
+
+    monkeypatch.setattr(original_dataset_dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(original_dataset_dist, "barrier", unexpected_barrier)
+    with streaming_compat.single_process_streaming():
+        dataset = StreamingDataset(local=str(tmp_path / "train"), batch_size=1, shuffle=False)
+        assert len(dataset) == 1
+
+    assert os.environ["RANK"] == "1"
+    assert os.environ["WORLD_SIZE"] == "2"
+    assert os.environ["LOCAL_RANK"] == "1"
+    assert os.environ["LOCAL_WORLD_SIZE"] == "2"
+    assert streaming_compat.streaming_dataset.dist is original_dataset_dist
+    assert streaming_compat.streaming_distributed.dist is original_distributed_dist
+    assert streaming_compat.streaming_prefix.dist is original_prefix_dist
 
 
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="requires Linux procfs")

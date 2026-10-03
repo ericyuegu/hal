@@ -21,6 +21,7 @@ from hal.data.feature_stats import FeatureStats
 from hal.data.policy_world_schema import decode_policy_world_replay
 from hal.data.schema import check_schema_version
 from hal.data.streaming_compat import patch_streaming
+from hal.data.streaming_compat import single_process_streaming
 from hal.representation.features import ExtraColumns
 from hal.representation.features import FeatureProjection
 from hal.streams import StreamSource
@@ -179,16 +180,17 @@ def make_validation_replay_loader(
         )
         for source in sources
     ]
-    mds = StreamingDataset(
-        streams=streams,
-        cache_limit=cache_limit,
-        predownload=8 * batch_size,
-        batch_size=batch_size,
-        shuffle=True,
-        shuffle_algo="py1e",
-        shuffle_block_size=8192,
-        shuffle_seed=seed,
-    )
+    with single_process_streaming():
+        mds = StreamingDataset(
+            streams=streams,
+            cache_limit=cache_limit,
+            predownload=8 * batch_size,
+            batch_size=batch_size,
+            shuffle=True,
+            shuffle_algo="py1e",
+            shuffle_block_size=8192,
+            shuffle_seed=seed,
+        )
     windows = _ValidationWindows(
         mds,
         context_length=context_length,
