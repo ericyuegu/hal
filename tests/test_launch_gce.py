@@ -34,6 +34,7 @@ def test_startup_script_contains_no_secret_values() -> None:
         project="my-project",
         secrets=[("WANDB_API_KEY", "wandb-key")],
         image="example/image:tag",
+        machine_type="g4-standard-96",
         keep_alive=False,
     )
     assert base64.b64encode(b"WANDB_API_KEY=wandb-key").decode() in script
@@ -42,6 +43,21 @@ def test_startup_script_contains_no_secret_values() -> None:
     assert "export HAL_KEEP_ALIVE=0" in script
     assert "apt-get install --yes --no-install-recommends docker.io" in script
     assert "nvidia-ctk runtime configure --runtime=docker" in script
+    assert "export HAL_NCCL_P2P_LEVEL=PHB" in script
+    assert '-e "NCCL_P2P_LEVEL=${HAL_NCCL_P2P_LEVEL}"' in script
+
+
+def test_startup_script_preserves_legacy_nccl_defaults() -> None:
+    script = startup_script(
+        sha="abc123",
+        train_cmd="python train.py",
+        project="my-project",
+        secrets=[],
+        image="example/image:tag",
+        machine_type="a2-highgpu-1g",
+        keep_alive=False,
+    )
+    assert "export HAL_NCCL_P2P_LEVEL=''" in script
 
 
 def test_create_command_spot_keyless_service_account() -> None:

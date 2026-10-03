@@ -48,6 +48,12 @@ nvidia-smi
 log "pulling ${HAL_IMAGE}"
 docker pull "$HAL_IMAGE"
 
+nccl_env=()
+if [ -n "${HAL_NCCL_P2P_LEVEL:-}" ]; then
+  log "configuring NCCL_P2P_LEVEL=${HAL_NCCL_P2P_LEVEL} for the G4 topology"
+  nccl_env=(-e "NCCL_P2P_LEVEL=${HAL_NCCL_P2P_LEVEL}")
+fi
+
 # The runtime script lives outside the repository because the exact SHA has not
 # been cloned yet. It executes inside the prebuilt HAL image and uses its /opt/venv.
 cat > /run/hal/run.sh <<'HAL_RUNTIME'
@@ -81,6 +87,7 @@ set +e
 docker run --rm --gpus all --ipc=host \
   --env-file /run/hal/job.env \
   -e HAL_GIT_SHA -e HAL_TRAIN_CMD_B64 \
+  "${nccl_env[@]}" \
   -v /run/hal/run.sh:/run/hal/run.sh:ro \
   "$HAL_IMAGE" bash /run/hal/run.sh 2>&1 | tee /var/log/hal-training.log
 code=${PIPESTATUS[0]}

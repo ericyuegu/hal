@@ -65,6 +65,11 @@ _G4_GPU_COUNTS = {
     "g4-standard-192": 4,
     "g4-standard-384": 8,
 }
+_G4_NCCL_P2P_LEVELS = {
+    "g4-standard-96": "PHB",
+    "g4-standard-192": "PHB",
+    "g4-standard-384": "SYS",
+}
 
 
 def _run_gcloud(*args: str, capture: bool = True) -> str:
@@ -93,7 +98,14 @@ def parse_secrets(specs: list[str] | tuple[str, ...]) -> list[tuple[str, str]]:
 
 
 def startup_script(
-    *, sha: str, train_cmd: str, project: str, secrets: list[tuple[str, str]], image: str, keep_alive: bool
+    *,
+    sha: str,
+    train_cmd: str,
+    project: str,
+    secrets: list[tuple[str, str]],
+    image: str,
+    machine_type: str,
+    keep_alive: bool,
 ) -> str:
     """Render the metadata startup script. It contains secret names, never values."""
     secret_specs = "\n".join(f"{env_name}={secret_id}" for env_name, secret_id in secrets)
@@ -103,6 +115,7 @@ def startup_script(
         "HAL_GCP_PROJECT": project,
         "HAL_SECRET_SPECS_B64": base64.b64encode(secret_specs.encode()).decode(),
         "HAL_IMAGE": image,
+        "HAL_NCCL_P2P_LEVEL": _G4_NCCL_P2P_LEVELS.get(machine_type, ""),
         "HAL_KEEP_ALIVE": "1" if keep_alive else "0",
     }
     exports = "\n".join(f"export {name}={shlex.quote(value)}" for name, value in values.items())
@@ -229,7 +242,13 @@ def main(args: Args) -> None:
     train_cmd = shlex.join(args.cmd)
     name = args.name or f"hal-{datetime.now(UTC):%Y%m%d-%H%M%S}-{sha[:7]}"
     rendered = startup_script(
-        sha=sha, train_cmd=train_cmd, project=project, secrets=secrets, image=args.image, keep_alive=args.keep_alive
+        sha=sha,
+        train_cmd=train_cmd,
+        project=project,
+        secrets=secrets,
+        image=args.image,
+        machine_type=args.machine_type,
+        keep_alive=args.keep_alive,
     )
 
     # gcloud requires a file for a multiline startup script. The file only contains
