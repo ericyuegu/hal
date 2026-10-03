@@ -12,9 +12,10 @@ The common base was `3219c86c`. Main added two native-simulator commits through
 commits through `f0d79b40`. The old worktree was absent; the branch was intact.
 
 The restored `~/src/hal-edge-queue` worktree merges main with commit `da7a123f`.
-There were no conflicts. Cleanup remains on that branch through validation before the final
-fast-forward of main. Main's unrelated dirty files are recorded before integration
-and must compare byte-for-byte after it. No stash or reset of those files is used.
+There were no conflicts. Cleanup was validated on that branch, then main was fast-forwarded to `62f54764`.
+The working diff, staged diff and untracked-file list were identical immediately
+before and after the fast-forward. Unrelated work changed concurrently since the
+initial snapshot; its latest state was preserved. No stash or reset of main was used.
 
 Milestones:
 
@@ -123,3 +124,22 @@ up outside the repository before edits. No unrelated memories or private credent
 are changed. Main receives a fast-forward only after the validated source is committed.
 
 The final handoff does not claim any new deployment.
+
+### Completed integration
+
+`git merge --ff-only netplay-edge-queue` advanced main from `700165f3` to
+`62f54764`. A Python check compared working/staged diffs and the untracked-file list
+across that operation; all matched. Working diff SHA-256 at that boundary:
+`8a92a38e2616d9c7eab9c1331b6b7008c46643678851d79b4853aa5f84382630`.
+
+Seven local memory files were updated: MEMORY, netplay edge queue, old harness,
+old version gate, Dolphin setup, direct-mode behavior and local build history.
+The two obsolete harness/version-gate entries were removed from the active index;
+their files now explain their historical status. The original notes are retained
+in `/tmp/hal-netplay-memory-before-20261003-92z0joai/`. All other memory content is
+untouched. The canonical state is the tracked runbook and deployment ledger.
+
+The fixture link was converted to an ignored `data/` directory with links only to
+existing emulator/raw/processed fixtures. The integration worktree is clean.
+The documentation commit hooks skip source checks because no source changed.
+No dependency version or production service changed during the final handoff.
