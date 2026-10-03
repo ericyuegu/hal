@@ -1,0 +1,6 @@
+{
+  "x-pilot-master120/control/hal_credentials.py": "f96e793a6a662b57f88a1609306d3d50f5565d6f4d2f58f87fb22e3d7777388e",
+  "x-pilot-master120/control/hal_xpilot_chat.py": "96ee478bc2609b66a5470f0ab3f14cb5f6f96825548e0ca873d9636b51be94b7",
+  "x-pilot-master120/control/hal_xpilot_run.py": "497f6017a392c3e783af97df11d6244869a51914dfd9786faf018ad111f95743",
+  "public-relaunch/operations.py": "6dfdb7f8aeb38df013463e9a14280406f1186e8771fc7abb6555d7dce23af584"
+}
