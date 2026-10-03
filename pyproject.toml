@@ -64,6 +64,9 @@ python-preference = "only-managed"
 melee = { path = "vendor/melee-0.47.0+hal.realtime.1.tar.gz" }
 peppi-py = { git = "https://github.com/ericyuegu/peppi-py", rev = "6fca8045d891961c8c9a40ff21ea40bcf5367e0e" }
 
+[tool.setuptools.package-data]
+"hal.sim" = ["native_adapter.c"]
+
 [tool.setuptools.packages.find]
 include = ["hal*"]
 

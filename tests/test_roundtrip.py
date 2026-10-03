@@ -37,6 +37,7 @@ import peppi_py
 import pytest
 from streaming import StreamingDataset
 
+from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.data.extract import extract_replay
 from hal.data.index import ReplayIndexEntry
@@ -50,6 +51,8 @@ from hal.paths import EMULATOR_PATH
 from hal.paths import ISO_PATH as _ISO_PATH
 from hal.sim.diff import diff
 from hal.sim.inputs import ControllerInputs
+from hal.sim.inputs import canonical_pre_to_action
+from hal.sim.inputs import controller_action_readback
 from hal.sim.loop import drive
 from hal.sim.process_vec import drive_process_vec
 from hal.sim.rollout import ObservationRow
@@ -500,3 +503,45 @@ def test_analog_sweep_reads_back_grid_exact(tmp_path: Path) -> None:
             if not ok:
                 failures.append(f"{channel} fed {fed:.5f} (byte {byte}) read {rec:.5f}")
     assert not failures, f"{len(failures)} analog wire mismatches:\n" + "\n".join(failures[:20])
+
+
+@pytest.mark.integration
+def test_stick_vocabulary_readback_matches_game_processing(tmp_path: Path) -> None:
+    """Joint rim commands must survive the alignment guard after game processing."""
+    from hal.models.controller_codec import STICK_CLUSTER_CENTERS_C
+    from hal.models.controller_codec import STICK_CLUSTER_CENTERS_MAIN
+
+    _check_prereqs()
+    commands = [ControllerAction(x, y, 0, 0, 0, 0, 1024) for x, y in STICK_CLUSTER_CENTERS_MAIN.tolist()]
+    commands.extend(ControllerAction(0, 0, x, y, 0, 0, 1024) for x, y in STICK_CLUSTER_CENTERS_C.tolist())
+    commands.extend(
+        ControllerAction(x / 80, y / 80, x / 80, y / 80, 0, 0, 1024)
+        for x in (-24, -23, -22, 0, 22, 23, 24)
+        for y in (0, 40, 79)
+    )
+    matchup = ReplayMatchup(
+        stage=melee.Stage.FINAL_DESTINATION,
+        players=(PlayerSetup(1, melee.Character.FOX), PlayerSetup(2, melee.Character.FOX, costume=1)),
+        port_to_mds_prefix={1: "p1", 2: "p2"},
+    )
+    with Session(
+        iso_path=ISO_PATH,
+        dolphin_path=DOLPHIN_PATH,
+        slippi_port=51449,
+        tmp_home_directory=False,
+        replay_dir=str(tmp_path),
+    ) as session:
+        frame = session.start_match(matchup)
+        for _ in range(200):
+            frame, active = session.step({1: NEUTRAL_CONTROLLER_ACTION, 2: NEUTRAL_CONTROLLER_ACTION})
+            assert active
+        for command in commands:
+            previous_frame = frame["id"]
+            frame, active = session.step({1: command, 2: NEUTRAL_CONTROLLER_ACTION})
+            assert active and frame["id"] == previous_frame + 1
+            observed = canonical_pre_to_action(frame["ports"][1]["leader"]["pre"])
+            expected = controller_action_readback(command)
+            assert (observed.main_x, observed.main_y, observed.c_x, observed.c_y) == pytest.approx(
+                (expected.main_x, expected.main_y, expected.c_x, expected.c_y), abs=1e-6
+            ), f"command {command} produced {observed}"
+            assert observed.buttons == command.buttons

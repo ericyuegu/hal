@@ -18,6 +18,8 @@ from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import ControllerAction
 from hal.controller import validate_controller_action
 from hal.sim.inputs import apply_inputs
+from hal.sim.inputs import controller_action_readback
+from hal.sim.inputs import controller_actions_match
 from hal.sim.sources import MDSControllerSource
 from hal.wire import ACTION_CHANNELS
 from hal.wire import BUTTON_BITS
@@ -63,6 +65,27 @@ def test_stick_wire_recovers_every_byte_on_the_80_grid() -> None:
     for byte in range(-80, 81):
         wire = melee.controller.fix_analog_stick_signed(byte / 80.0)
         assert _dolphin_stick_byte(wire) == byte, f"stick byte {byte} mangled"
+
+
+@pytest.mark.parametrize(
+    ("command", "readback"),
+    [
+        ((13, -79), (0, -78)),
+        ((23, 79), (0, 76)),
+        ((24, 79), (23, 76)),
+        ((22, 0), (0, 0)),
+        ((23, 0), (23, 0)),
+        ((-23, 0), (-23, 0)),
+        ((40, -40), (40, -40)),
+        ((80, 80), (56, 56)),
+    ],
+)
+def test_controller_readback_accounts_for_game_processing(command: tuple[int, int], readback: tuple[int, int]) -> None:
+    action = ControllerAction(command[0] / 80, command[1] / 80, command[0] / 80, command[1] / 80, 0.6, 1, 1024)
+    expected = ControllerAction(readback[0] / 80, readback[1] / 80, readback[0] / 80, readback[1] / 80, 0.6, 1, 1024)
+    assert controller_action_readback(action) == expected
+    assert not controller_actions_match(expected, replace(expected, buttons=0))
+    assert not controller_actions_match(expected, replace(expected, main_y=expected.main_y + 0.05))
 
 
 def _minimal_columns(prefix: str) -> dict[str, np.ndarray]:

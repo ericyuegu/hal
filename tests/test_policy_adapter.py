@@ -213,7 +213,9 @@ class _TaggedPolicy:
         self.requests.extend(requests)
         self.inputs.extend(request.observations[-1] for request in requests)
         return tuple(
-            action_plan(request, (ControllerAction((len(self.inputs) % 10) / 10, 0, 0, 0, 0, 0, 0),), state_value=0.0)
+            action_plan(
+                request, (ControllerAction(0.3 + (len(self.inputs) % 10) / 20, 0, 0, 0, 0, 0, 0),), state_value=0.0
+            )
             for request in requests
         )
 
@@ -226,6 +228,32 @@ def test_adapter_passes_return_target_and_temperature() -> None:
     )
     assert policy.inputs[0].desired_return == 19.976
     assert policy.inputs[0].temperature == 0.9
+
+
+@pytest.mark.parametrize("wrong_frame", [False, True])
+def test_adapter_checks_processed_sticks_without_changing_commands(wrong_frame: bool) -> None:
+    command = ControllerAction(13 / 80, -79 / 80, 0, 0, 0, 0, 1024)
+
+    class RimPolicy(_TaggedPolicy):
+        def predict(self, requests: tuple[PredictionRequest, ...]):
+            self.inputs.extend(request.observations[-1] for request in requests)
+            return tuple(action_plan(request, (command,), state_value=0.0) for request in requests)
+
+    policy = RimPolicy()
+    adapter = PolicyBatchAdapter(policy, RuntimeConfig(1, (0,)), FrameTiming(0, 0, 0, 1, 1))
+    slot = Slot(0, 1)
+    initial = ObservationRow(0, {"flat": 0}, controller_to_action_vec(NEUTRAL_CONTROLLER_ACTION))
+    chunk = adapter.plan_rows({slot: [initial]})[slot]
+    np.testing.assert_array_equal(chunk[0], controller_to_action_vec(command))
+    observed = ControllerAction(0, (78 if wrong_frame else -78) / 80, 0, 0, 0, 0, 1024)
+    row = ObservationRow(1, {"flat": 1}, controller_to_action_vec(observed))
+    if wrong_frame:
+        with pytest.raises(RuntimeError, match="local controller alignment failed"):
+            adapter.plan_rows({slot: [row]})
+        return
+    chunk = adapter.plan_rows({slot: [row]})[slot]
+    np.testing.assert_array_equal(chunk[0], controller_to_action_vec(command))
+    assert policy.inputs[-1].applied_action == observed
 
 
 @pytest.mark.parametrize("delay", [2, 3])
@@ -244,7 +272,7 @@ def test_adapter_pairs_actual_actions_and_orders_pending_queue(
         returned.append(due)
         applied = due
 
-    tags = [ControllerAction(index / 10, 0, 0, 0, 0, 0, 0) for index in range(1, delay + 4)]
+    tags = [ControllerAction(0.3 + index / 20, 0, 0, 0, 0, 0, 0) for index in range(1, delay + 4)]
     assert returned == [NEUTRAL_CONTROLLER_ACTION] * delay + tags[:3]
     assert policy.requests[delay].fixed_actions == tuple(tags[:delay])
     assert policy.inputs[delay + 1].applied_action == tags[0]
