@@ -102,6 +102,23 @@ def test_microbatch_fallback_preserves_the_global_optimizer_batch() -> None:
     assert cfg.max_steps == 714_752
 
 
+def test_training_batches_use_the_live_policy_feature_keys() -> None:
+    cfg = _MODULE.proxy_config()
+    expected = _MODULE.synthetic_awr_batch(cfg, torch.device("cpu"))
+    sparse_context = _MODULE.Context(
+        features={name: value for name, value in expected.context.features.items() if not name.endswith("_mask")},
+        ctx_pad=expected.context.ctx_pad,
+    )
+    sparse_batch = _MODULE.TrainBatch(sparse_context, expected.target, ("replay",) * cfg.local_batch_size)
+
+    actual = _MODULE._canonical_training_batch(sparse_batch)
+
+    assert tuple(actual.context.features) == tuple(expected.context.features)
+    for name, value in actual.context.features.items():
+        torch.testing.assert_close(value, expected.context.features[name])
+    assert actual.replay_ids == sparse_batch.replay_ids
+
+
 def test_rank_partitions_are_disjoint_and_cover_every_source() -> None:
     cfg = _MODULE.TrainConfig()
     full = _MODULE.data_selection(cfg)

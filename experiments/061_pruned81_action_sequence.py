@@ -123,6 +123,7 @@ from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.benchmark import DecodeTelemetry
+from hal.inference.warmup import canonical_context
 from hal.inference.warmup import synthetic_context as build_synthetic_context
 from hal.inference.window_policy import DecodedPlan
 from hal.inference.window_policy import DenseWindowPredictionPolicy
@@ -1046,12 +1047,15 @@ def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -
         device,
         items=True,
     )
-    return Context(
-        features={
-            **context.features,
-            "ego_player_id": torch.zeros(batch_size, cfg.arch.L_ctx, dtype=torch.long, device=device),
-        },
-        ctx_pad=context.ctx_pad,
+    return canonical_context(
+        Context(
+            features={
+                **context.features,
+                "ego_player_id": torch.zeros(batch_size, cfg.arch.L_ctx, dtype=torch.long, device=device),
+            },
+            ctx_pad=context.ctx_pad,
+        ),
+        items=True,
     )
 
 
@@ -1427,6 +1431,7 @@ class _UpdateTimer:
 
 def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> ReturnBatch:
     """Attach ``G_{t+1}`` and its validity mask to each context position."""
+    batch = _canonical_training_batch(batch)
     next_frames = slice(1, L_ctx + 1)
     calibration = AWRCalibration()
     returns = np.stack([window[calibration.ego_return_column] for window in windows])[:, next_frames]
@@ -1441,6 +1446,11 @@ def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> 
             np.stack([window["ego_return60_valid"][:L_ctx] for window in windows])
         ).bool(),
     )
+
+
+def _canonical_training_batch(batch: TrainBatch) -> TrainBatch:
+    """Give compiled training and live inference the same fixed feature keys."""
+    return TrainBatch(canonical_context(batch.context, items=True), batch.target, batch.replay_ids)
 
 
 @jaxtyped(typechecker=beartype)
@@ -3218,7 +3228,7 @@ def _collate_o61_batch(
         extra=ITEM_PLAYER_COLUMNS,
         projection=projection,
     )
-    batch = TrainBatch(batch.context, batch.target, replay_ids)
+    batch = _canonical_training_batch(TrainBatch(batch.context, batch.target, replay_ids))
     next_frames = slice(1, context_length + 1)
     returns = columns[return_column][:, next_frames]
     eligible = columns[return_valid_column][:, next_frames]

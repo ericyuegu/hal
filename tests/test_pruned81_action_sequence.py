@@ -81,3 +81,19 @@ def test_pruned81_checkpoint_rejects_the_legacy_layout() -> None:
 
     with pytest.raises(ValueError, match="parameter contract"):
         _O61.config_from_state(values)
+
+
+def test_pruned81_training_batches_use_the_live_policy_feature_keys() -> None:
+    cfg = _O61.proxy_config()
+    expected = _O61.synthetic_awr_batch(cfg, torch.device("cpu"))
+    sparse_context = _O61.Context(
+        features={name: value for name, value in expected.context.features.items() if not name.endswith("_mask")},
+        ctx_pad=expected.context.ctx_pad,
+    )
+    sparse_batch = _O61.TrainBatch(sparse_context, expected.target, ("replay",) * cfg.local_batch_size)
+
+    actual = _O61._canonical_training_batch(sparse_batch)
+
+    assert tuple(actual.context.features) == tuple(expected.context.features)
+    for name, value in actual.context.features.items():
+        torch.testing.assert_close(value, expected.context.features[name])
