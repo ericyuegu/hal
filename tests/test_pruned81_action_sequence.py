@@ -52,8 +52,9 @@ def test_pruned81_production_parameter_and_compute_contracts() -> None:
     counts = _O61.subsystem_parameter_counts(model)
 
     assert model.codec.group_vocabs == (256, 81, 9, 25)
-    assert counts["total"] == 197_620_669
-    assert _O61.compute_equivalent_parameter_count(cfg, counts) == 3_958_066_689
+    assert counts["return_conditioner"] == 0
+    assert counts["total"] == 193_393_341
+    assert _O61.compute_equivalent_parameter_count(cfg, counts) == 3_953_839_361
     assert cfg.max_steps == 714_752
     assert cfg.supervised_positions_per_update == 16_384
     assert cfg.target_positions == 11_710_496_768
@@ -64,12 +65,14 @@ def test_pruned81_proxy_matches_the_depth_treatment() -> None:
     treatment = _O61.proxy_config()
     assert (control.arch.n_layers, control.arch.temporal_layers) == (6, 8)
     assert (treatment.arch.n_layers, treatment.arch.temporal_layers) == (6, 8)
+    assert control.arch.head_offsets == treatment.arch.head_offsets == tuple(range(1, 31))
+    assert not control.return_conditioning and not treatment.return_conditioning
     assert control.target_positions == treatment.target_positions == 2**30
     with torch.device("meta"):
         model = _O61.make_model(treatment)
     counts = _O61.subsystem_parameter_counts(model)
-    assert counts["total"] == 14_186_557
-    assert _O61.compute_equivalent_parameter_count(treatment, counts) == 260_109_057
+    assert counts["total"] == 14_702_397
+    assert _O61.compute_equivalent_parameter_count(treatment, counts) == 306_237_953
 
 
 def test_pruned81_checkpoint_rejects_the_legacy_layout() -> None:

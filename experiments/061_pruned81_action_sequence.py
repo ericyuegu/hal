@@ -8,8 +8,8 @@ schema-v6 projectile block (``item{0..3}_*``) in every observation.
 This file is deliberately standalone. It retains the O41 detached-value light
 AWR and O49 ego-identity contracts without importing another experiment. The
 temporal decoder uses 4x MLP expansion and matched nonlinear decoder and
-trunk-skip logit heads. A 60-frame return modulates each decoder block's norms;
-the trunk, critic, history memory, and trunk-skip heads remain return-independent.
+trunk-skip logit heads. Return conditioning is absent; return targets are used
+only by the critic and AWR objective.
 
 The four item slots are ordered by ascending spawn id, so a slot keeps its item
 until an OLDER item despawns and the remaining items shift down. A pooled set
@@ -184,14 +184,14 @@ from hal.training.validation_replay_loader import make_validation_replay_loader
 from hal.wire import ACTION_DIM
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "061_pruned81_action_sequence_v1"
+_EXPERIMENT_ID: Final[str] = "061_pruned81_action_sequence_v2"
 _CHECKPOINT_FORMAT_VERSION: Final[int] = 1
 _DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 1
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (1 / 30,) * 30
-COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_958_066_689
-FLOPS_PER_SUPERVISED_POSITION: Final[int] = 23_748_400_134
+COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_953_839_361
+FLOPS_PER_SUPERVISED_POSITION: Final[int] = 23_723_036_166
 SCALING_FIT_A: Final[float] = 89.11185023618282
 SCALING_FIT_B: Final[float] = 2009.4388275435915
 SCALING_FIT_ALPHA: Final[float] = 0.3680109101792296
@@ -335,16 +335,16 @@ def _nats_to_bits(values: Tensor) -> Tensor:
 
 def conditioning_protocol() -> dict[str, object]:
     return {
-        "version": 1,
+        "version": 2,
         "horizon": RETURN_HORIZON,
         "gamma": 0.99855,
         "reward": "damage_opp-damage_ego+120*(stock_loss_opp-stock_loss_ego)+50*(last_stock_opp-last_stock_ego)",
         "scale": RETURN_SCALE,
         "alignment": "sum(k=1..60, gamma**(k-1)*r[t+k])",
         "availability": "full observed horizon or known terminal with zero rewards thereafter",
-        "evaluation": "positive p90 at every replan; separate unconditioned comparison",
-        "modulation": "per-block RMSNorm affine, 128-wide SiLU, biased zero-initialized projections",
-        "dropout": "independent CPU generator, per context position",
+        "evaluation": "unconditioned",
+        "modulation": "omitted",
+        "dropout": "none",
         "calibration_windows": CALIBRATION_WINDOWS,
     }
 
@@ -508,7 +508,7 @@ class Architecture:
     temporal_heads: int = 16
     temporal_ff_dim: int = 4096
     group_head_dim: int = 1024
-    return_embed_dim: int = 128
+    return_embed_dim: int = 0
     action_embed_dim: int = 32
     offset_embed_dim: int = 16
     action_vocab: int = 1024
@@ -539,9 +539,9 @@ class Architecture:
                 "group_heads": 4_574_579,
                 "trunk_skip_heads": 4_574_579,
                 "value_head": 1_049_089,
-                "return_conditioner": 4_227_328,
+                "return_conditioner": 0,
                 "other": 1_230_790,
-                "total": 197_620_669,
+                "total": 193_393_341,
             }
         proxy_treatment = Architecture(
             d_model=256,
@@ -552,20 +552,20 @@ class Architecture:
             temporal_d_model=256,
             temporal_layers=8,
             temporal_heads=4,
-            temporal_ff_dim=1024,
+            temporal_ff_dim=1408,
             group_head_dim=256,
             value_hidden_dim=128,
         )
         if self == proxy_treatment:
             return {
                 "trunk": 4_718_592,
-                "temporal_decoder": 6_768_912,
+                "temporal_decoder": 8_341_776,
                 "group_heads": 357_491,
                 "trunk_skip_heads": 357_491,
                 "value_head": 65_665,
-                "return_conditioner": 1_057_024,
+                "return_conditioner": 0,
                 "other": 861_382,
-                "total": 14_186_557,
+                "total": 14_702_397,
             }
         proxy_control = Architecture(
             d_model=256,
@@ -587,9 +587,9 @@ class Architecture:
                 "group_heads": 113_395,
                 "trunk_skip_heads": 178_931,
                 "value_head": 65_665,
-                "return_conditioner": 264_448,
+                "return_conditioner": 0,
                 "other": 861_382,
-                "total": 14_934_461,
+                "total": 14_670_013,
             }
         raise ValueError(f"no parameter contract for architecture {self}")
 
@@ -697,8 +697,8 @@ class TrainConfig:
     process_metrics_interval_s: float = 30.0
     cache_metrics_interval_s: float = 30.0
     identity_dropout: float = 0.10
-    return_conditioning: bool = True
-    return_dropout: float = 0.2
+    return_conditioning: bool = False
+    return_dropout: float = 0.0
     parent_run_name: Annotated[str | None, tyro.conf.Suppress] = None
     parent_checkpoint_name: Annotated[str | None, tyro.conf.Suppress] = None
     parent_checkpoint_sha256: Annotated[str | None, tyro.conf.Suppress] = None
@@ -904,8 +904,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(f"grad_clip must be finite and positive, got {cfg.grad_clip}")
     if not 0.0 <= cfg.identity_dropout <= 1.0:
         raise ValueError("identity_dropout must be in [0, 1]")
-    if not isinstance(cfg.return_conditioning, bool) or not 0.0 <= cfg.return_dropout <= 1.0:
-        raise ValueError("return conditioning requires a boolean enablement and dropout in [0, 1]")
+    if cfg.return_conditioning or cfg.return_dropout != 0.0 or cfg.arch.return_embed_dim != 0:
+        raise ValueError("O61 omits return conditioning")
     expected_identity = TrainConfig()
     if cfg.player_vocab_size != expected_identity.player_vocab_size:
         raise ValueError(f"player_vocab_size must be {expected_identity.player_vocab_size}")
@@ -990,7 +990,7 @@ def proxy_config() -> TrainConfig:
             temporal_d_model=256,
             temporal_layers=8,
             temporal_heads=4,
-            temporal_ff_dim=1024,
+            temporal_ff_dim=1408,
             group_head_dim=256,
             value_hidden_dim=128,
         ),
@@ -2781,7 +2781,7 @@ def compute_equivalent_parameter_count(cfg: TrainConfig, parameter_counts: Mappi
 
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
     """Return six times every parameter use in one optimizer update."""
-    if cfg.arch == Architecture() and parameter_counts["total"] != 197_620_669:
+    if cfg.arch == Architecture() and parameter_counts["total"] != 193_393_341:
         raise ValueError("production parameter count changed")
     return (
         compute_flops_per_supervised_position(compute_equivalent_parameter_count(cfg, parameter_counts))
@@ -2791,7 +2791,7 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 
 def model_tag(cfg: TrainConfig) -> str:
     return (
-        f"o61v1-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
+        f"o61v2-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
         f"dual-nonlinear-head-rc{int(cfg.return_conditioning)}e{cfg.arch.return_embed_dim}-drop{cfg.return_dropout:g}-"
         f"{cfg.optimizer}-wsd-b{cfg.awr.beta:g}-wmax{cfg.awr.weight_max:g}-g{cfg.awr.gamma:g}"
@@ -3430,7 +3430,7 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
             "gpt",
             "temporal-mtp",
             "advantage-weighted-bc",
-            "return-conditioned",
+            "return-unconditioned",
             "scaled",
             "061",
             "compute-optimal",
@@ -3838,7 +3838,7 @@ def spawn_closed_loop_evaluation(
     expected_checkpoint_sha256: str,
     n_matchups: int,
     *,
-    return_target: Literal["p90", "unconditioned"] = "p90",
+    return_target: Literal["p90", "unconditioned"] = "unconditioned",
 ) -> str:
     """Ask the launcher to spawn its same-app L40S evaluator."""
     raw_fd = os.environ.get("HAL_MODAL_EVAL_FD")
@@ -3903,6 +3903,7 @@ def _finalize_training(
     update: int,
     actual_loss_positions: int,
     smoke: bool,
+    defer_gameplay_evaluations: bool,
     resume_lineage: tuple[ResumeLineage, ...] = (),
 ) -> dict[str, object]:
     """Save the final model and queue evaluation for a separate L40S worker."""
@@ -3940,18 +3941,11 @@ def _finalize_training(
             checkpoint_sha = checkpoint_sha256(final_path)
             validation = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
             final_metrics = {f"val/{name}": value for name, value in validation.items()}
-            if not smoke:
+            if not smoke and not defer_gameplay_evaluations:
                 if uploader is None:
                     raise RuntimeError("production evaluation requires R2 checkpoint upload")
                 uploader.wait()
                 spawn_closed_loop_evaluation(run_dir.name, update, checkpoint_sha, cfg.final_eval_n_matchups)
-                spawn_closed_loop_evaluation(
-                    run_dir.name,
-                    update,
-                    checkpoint_sha,
-                    cfg.final_eval_n_matchups,
-                    return_target="unconditioned",
-                )
             wandb.log({"global_step": update, **final_metrics})
 
             assert wait_lists is not None
@@ -4100,6 +4094,7 @@ def train(
     resume_checkpoint_sha256: str | None = None,
     smoke: bool = False,
     proxy: bool = False,
+    defer_gameplay_evaluations: bool = False,
     stop_after_update: int | None = None,
     qualification_output: Path | None = None,
 ) -> None:
@@ -4292,7 +4287,7 @@ def train(
                 torch.cuda.reset_peak_memory_stats()
 
             val_due = cfg.val_every > 0 and update % cfg.val_every == 0 and update < run_stop
-            eval_due = update in evaluation_updates and update < run_stop
+            eval_due = not defer_gameplay_evaluations and update in evaluation_updates and update < run_stop
             ckpt_due = cfg.ckpt_every > 0 and update % cfg.ckpt_every == 0 and update < run_stop
             boundary_due = val_due or eval_due or ckpt_due
             state_boundary_due = boundary_due or update == run_stop
@@ -4505,6 +4500,7 @@ def train(
             update=run_stop,
             actual_loss_positions=actual_positions,
             smoke=smoke,
+            defer_gameplay_evaluations=defer_gameplay_evaluations,
         )
         if distributed.is_primary and qualification_output is not None:
             write_smoke_qualification(
@@ -4680,7 +4676,7 @@ def eval_checkpoint(
     delay_frames: int | None = None,
     replan_interval_frames: int | None = None,
     wandb_namespace: str = "eval",
-    return_target: Literal["p90", "unconditioned"] = "p90",
+    return_target: Literal["p90", "unconditioned"] = "unconditioned",
 ) -> dict[str, float]:
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
@@ -4695,8 +4691,8 @@ def eval_checkpoint(
     calibration.load_state_dict(state["return_calibration"])
     desired_return = calibration.targets()[2] if return_target == "p90" else None
     calibration_hash = cast(str, calibration.state_dict()["sha256"])
-    if return_target == "unconditioned" and (output_name is None or wandb_namespace == "eval"):
-        raise ValueError("unconditioned comparisons require a separate output directory and W&B namespace")
+    if return_target != "unconditioned":
+        raise ValueError("O61 checkpoints do not support return-conditioned evaluation")
     if player_code is None:
         ego_player_id = MASKED_PLAYER_ID
         ego_player_code = None
@@ -4782,6 +4778,7 @@ class TrainArgs:
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
     smoke: bool = False
+    defer_gameplay_evaluations: bool = False
     stop_after_update: int | None = None
     qualification_output: Path | None = None
     eval_max_parallel: int | None = None
@@ -4802,7 +4799,7 @@ class EvalArgs:
     delay_frames: int | None = None
     replan_interval_frames: int | None = None
     wandb_namespace: str = "eval"
-    return_target: Literal["p90", "unconditioned"] = "p90"
+    return_target: Literal["p90", "unconditioned"] = "unconditioned"
 
 
 type Command = (
@@ -4900,6 +4897,7 @@ def main(args: Command) -> None:
             resume_state=resume_state,
             smoke=args.smoke,
             proxy=args.proxy_arm != "none",
+            defer_gameplay_evaluations=args.defer_gameplay_evaluations,
             stop_after_update=args.stop_after_update,
             qualification_output=args.qualification_output,
         )

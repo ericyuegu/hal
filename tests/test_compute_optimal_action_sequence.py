@@ -29,14 +29,17 @@ def test_production_architecture_and_parameter_contract() -> None:
     assert cfg.arch.temporal_d_model == 1_024
     assert cfg.arch.temporal_layers == 8
     assert cfg.arch.temporal_heads == 16
+    assert cfg.arch.return_embed_dim == 0
+    assert not cfg.return_conditioning
     assert cfg.arch.head_offsets == tuple(range(1, 31))
     assert cfg.arch.sample_chunk_length == 30
     assert cfg.arch.main_stick_layout == "legacy65"
     with torch.device("meta"):
         model = _MODULE.make_model(cfg)
     counts = _MODULE.subsystem_parameter_counts(model)
-    assert counts["total"] == 197_587_357
-    assert _MODULE.compute_equivalent_parameter_count(cfg, counts) == 3_957_542_929
+    assert counts["return_conditioner"] == 0
+    assert counts["total"] == 193_360_029
+    assert _MODULE.compute_equivalent_parameter_count(cfg, counts) == 3_953_315_601
 
 
 def test_parameter_matched_proxy_arms_change_the_depth_allocation() -> None:
@@ -45,6 +48,9 @@ def test_parameter_matched_proxy_arms_change_the_depth_allocation() -> None:
 
     assert (control.arch.n_layers, control.arch.temporal_layers) == (16, 4)
     assert (treatment.arch.n_layers, treatment.arch.temporal_layers) == (6, 8)
+    assert control.arch.head_offsets == treatment.arch.head_offsets == tuple(range(1, 31))
+    assert not control.return_conditioning and not treatment.return_conditioning
+    assert control.arch.return_embed_dim == treatment.arch.return_embed_dim == 0
     assert control.target_positions == treatment.target_positions == 2**30
     assert control.max_steps == treatment.max_steps == 65_536
     with torch.device("meta"):
@@ -52,18 +58,18 @@ def test_parameter_matched_proxy_arms_change_the_depth_allocation() -> None:
         treatment_model = _MODULE.make_model(treatment)
     control_counts = _MODULE.subsystem_parameter_counts(control_model)
     treatment_counts = _MODULE.subsystem_parameter_counts(treatment_model)
-    assert control_counts["total"] == 14_929_821
-    assert treatment_counts["total"] == 14_177_821
+    assert control_counts["total"] == 14_665_373
+    assert treatment_counts["total"] == 14_693_661
     assert abs(treatment_counts["total"] / control_counts["total"] - 1) < 0.06
-    assert _MODULE.compute_equivalent_parameter_count(control, control_counts) == 137_614_737
-    assert _MODULE.compute_equivalent_parameter_count(treatment, treatment_counts) == 259_966_225
+    assert _MODULE.compute_equivalent_parameter_count(control, control_counts) == 137_350_289
+    assert _MODULE.compute_equivalent_parameter_count(treatment, treatment_counts) == 306_095_121
 
 
 def test_compute_curve_weights_schedule_and_batch_arithmetic() -> None:
     cfg = _MODULE.TrainConfig()
     _MODULE.validate_config(cfg)
     assert _MODULE.OFFSET_LOSS_WEIGHTS == (1 / 30,) * 30
-    assert _MODULE.compute_flops_per_supervised_position(3_957_542_929) == 23_745_257_574
+    assert _MODULE.compute_flops_per_supervised_position(3_953_315_601) == 23_719_893_606
     assert cfg.batch_size == cfg.world_size * cfg.local_batch_size == 512
     assert cfg.microbatch_size == cfg.local_batch_size == 256
     assert cfg.supervised_positions_per_update == cfg.policy_prefixes_per_update == 16_384

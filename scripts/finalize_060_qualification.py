@@ -64,7 +64,7 @@ def main(args: Args) -> None:
     ddp = records["ddp"]
     smoke = records["smoke"]
     resume = records["resume"]
-    experiment_id = "060_compute_optimal_action_sequence_v1"
+    experiment_id = "060_compute_optimal_action_sequence_v2"
     failures: list[str] = []
     for name, record in records.items():
         if record.get("experiment_id") != experiment_id:

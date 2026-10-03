@@ -274,22 +274,33 @@ class ReturnConditioner(nn.Module):
 
     def __init__(self, cfg: ActionSequenceConfig) -> None:
         super().__init__()
+        if cfg.return_embed_dim < 0:
+            raise ValueError("return_embed_dim must be non-negative")
+        if cfg.return_embed_dim == 0 and cfg.return_conditioning:
+            raise ValueError("return conditioning requires a positive return_embed_dim")
         self.width = cfg.temporal_d_model
+        self.layers = cfg.temporal_layers
         self.enabled = cfg.return_conditioning
-        self.embedding = nn.Linear(1, cfg.return_embed_dim, bias=True)
+        self.omitted = cfg.return_embed_dim == 0
+        self.embedding: nn.Module = nn.Identity() if self.omitted else nn.Linear(1, cfg.return_embed_dim, bias=True)
         self.projections = nn.ModuleList(
-            nn.Linear(cfg.return_embed_dim, 4 * self.width, bias=True) for _ in range(cfg.temporal_layers)
+            ()
+            if self.omitted
+            else (nn.Linear(cfg.return_embed_dim, 4 * self.width, bias=True) for _ in range(cfg.temporal_layers))
         )
-        nn.init.normal_(self.embedding.weight, std=cfg.hidden_std_multiplier)
-        nn.init.zeros_(self.embedding.bias)
+        if isinstance(self.embedding, nn.Linear):
+            nn.init.normal_(self.embedding.weight, std=cfg.hidden_std_multiplier)
+            nn.init.zeros_(self.embedding.bias)
         for module in self.projections:
             projection = cast(nn.Linear, module)
             nn.init.zeros_(projection.weight)
             nn.init.zeros_(projection.bias)
 
-    def forward(self, return_value: Tensor, condition_present: Tensor) -> tuple[Tensor, ...]:
+    def forward(self, return_value: Tensor, condition_present: Tensor) -> tuple[Tensor, ...] | None:
         if return_value.shape != condition_present.shape or condition_present.dtype != torch.bool:
             raise ValueError("return values and boolean presence must have the same shape")
+        if self.omitted:
+            return None
         present = condition_present & self.enabled
         safe = torch.where(present, return_value, 0.0)
         embedded = F.silu(self.embedding((safe / RETURN_SCALE)[..., None]))
@@ -320,14 +331,33 @@ class TemporalBlock(nn.Module):
         self.up = nn.Linear(self.d_model, cfg.temporal_ff_dim, bias=False)
         self.down = nn.Linear(cfg.temporal_ff_dim, self.d_model, bias=False)
 
-    def _qkv(self, x: Tensor, scale: Tensor, shift: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    @staticmethod
+    def _modulated_norm(x: Tensor, scale: Tensor | None, shift: Tensor | None) -> Tensor:
+        normalized = decoder_rmsnorm(x)
+        if scale is None:
+            if shift is not None:
+                raise ValueError("modulation scale and shift must both be present")
+            return normalized
+        if shift is None:
+            raise ValueError("modulation scale and shift must both be present")
+        return (1 + scale) * normalized + shift
+
+    def _qkv(
+        self,
+        x: Tensor,
+        scale: Tensor | None,
+        shift: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
         batch, length, _ = x.shape
-        q, k, v = self.qkv((1 + scale) * decoder_rmsnorm(x) + shift).split(self.d_model, dim=-1)
+        q, k, v = self.qkv(self._modulated_norm(x, scale, shift)).split(self.d_model, dim=-1)
         shape = (batch, length, self.n_heads, self.head_dim)
         return q.view(shape), k.view(shape), v.view(shape)
 
-    def forward(self, x: Tensor, modulation: Tensor) -> Tensor:
-        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+    def forward(self, x: Tensor, modulation: Tensor | None) -> Tensor:
+        if modulation is None:
+            scale_attn = shift_attn = scale_mlp = shift_mlp = None
+        else:
+            scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
         q, k, v = self._qkv(x, scale_attn, shift_attn)
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
@@ -349,13 +379,23 @@ class TemporalBlock(nn.Module):
         )
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        return x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
+        return x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
 
     def forward_step(
-        self, x: Tensor, past: tuple[Tensor, Tensor] | None, modulation: Tensor
+        self,
+        x: Tensor,
+        past: tuple[Tensor, Tensor] | None,
+        modulation: Tensor | None,
     ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
-        q, k, v = self._qkv(x[:, None], scale_attn[:, None], shift_attn[:, None])
+        if modulation is None:
+            scale_attn = shift_attn = scale_mlp = shift_mlp = None
+        else:
+            scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        q, k, v = self._qkv(
+            x[:, None],
+            None if scale_attn is None else scale_attn[:, None],
+            None if shift_attn is None else shift_attn[:, None],
+        )
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         if past is not None:
@@ -367,12 +407,15 @@ class TemporalBlock(nn.Module):
         attended = F.scaled_dot_product_attention(q, rotated_k, v)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        x = x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
+        x = x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
         return x, (k, v)
 
-    def prefill(self, x: Tensor, modulation: Tensor) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+    def prefill(self, x: Tensor, modulation: Tensor | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         """Advance a known action prefix in parallel and retain its unrotated K/V."""
-        scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        if modulation is None:
+            scale_attn = shift_attn = scale_mlp = shift_mlp = None
+        else:
+            scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
         q, k, v = self._qkv(x, scale_attn, shift_attn)
         cos, sin = self.rotary(q)
         query = apply_rotary_emb(q, cos, sin).transpose(1, 2)
@@ -381,7 +424,7 @@ class TemporalBlock(nn.Module):
         attended = F.scaled_dot_product_attention(query, key, value, is_causal=True)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
-        x = x + self.mlp_scale * self.down(F.silu(self.up((1 + scale_mlp) * decoder_rmsnorm(x) + shift_mlp)))
+        x = x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
         return x, (k.transpose(1, 2), value)
 
 
@@ -562,7 +605,7 @@ class CausalTemporalDecoder(nn.Module):
         state_bias: Tensor,
         caches: list[tuple[Tensor, Tensor] | None],
         history: tuple[Tensor, Tensor, Tensor, Tensor] | KVMemory,
-        conditioning: tuple[Tensor, ...],
+        conditioning: tuple[Tensor, ...] | None,
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
         """Advance the temporal chain by one selected frame offset."""
         offsets = torch.full((previous.shape[0],), offset, device=previous.device, dtype=torch.long)
@@ -570,7 +613,8 @@ class CausalTemporalDecoder(nn.Module):
         next_caches: list[tuple[Tensor, Tensor] | None] = []
         for index, (module, past) in enumerate(zip(self.blocks, caches, strict=True)):
             block = cast(TemporalBlock, module)
-            state, present = block.forward_step(state, past, conditioning[index])
+            modulation = None if conditioning is None else conditioning[index]
+            state, present = block.forward_step(state, past, modulation)
             if index == 0:
                 if isinstance(history, KVMemory):
                     state = self.history_attention.forward_with_kv_cache(state[:, None], history)[:, 0]
@@ -594,7 +638,7 @@ class CausalTemporalDecoder(nn.Module):
         forced_prefix: Tensor,
         state_bias: Tensor,
         history: tuple[Tensor, Tensor, Tensor, Tensor] | KVMemory,
-        conditioning: tuple[Tensor, ...],
+        conditioning: tuple[Tensor, ...] | None,
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
         """Compute known prefix states together before the sampled tail."""
         count = forced_prefix.shape[1]
@@ -604,7 +648,8 @@ class CausalTemporalDecoder(nn.Module):
         caches: list[tuple[Tensor, Tensor] | None] = []
         for index, module in enumerate(self.blocks):
             block = cast(TemporalBlock, module)
-            state, present = block.prefill(state, conditioning[index][:, None])
+            modulation = None if conditioning is None else conditioning[index][:, None]
+            state, present = block.prefill(state, modulation)
             if index == 0:
                 if isinstance(history, KVMemory):
                     state = self.history_attention.forward_with_kv_cache(state, history)
@@ -648,7 +693,8 @@ class CausalTemporalDecoder(nn.Module):
         x = x.reshape(hidden.shape[0] * prefix_positions.shape[1], len(self.head_offsets), self.d_model)
         conditioning = self.return_conditioner(return_value, condition_present)
         for index, block in enumerate(self.blocks):
-            x = block(x, conditioning[index].reshape(-1, 1, 4, self.d_model))
+            modulation = None if conditioning is None else conditioning[index].reshape(-1, 1, 4, self.d_model)
+            x = block(x, modulation)
             if index == 0:
                 packed = x.view(hidden.shape[0], -1, self.d_model)
                 key, value = self.history_attention.project_memory(hidden)
