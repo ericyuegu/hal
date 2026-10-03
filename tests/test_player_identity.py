@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -153,6 +155,50 @@ def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
         )
     with pytest.raises(ValueError, match="SHA-256"):
         data_player_identity.load_player_identity_sidecar(destination, expected_sha256="0" * 64)
+
+
+def test_identity_artifact_concurrent_acquisition_uses_unique_temporary_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    _write_manifest(manifest)
+    source = tmp_path / "source.jsonl.gz"
+    summary = data_player_identity.build_player_identity_sidecar(
+        (data_player_identity.ManifestInput("fixture", manifest),),
+        source,
+    )
+    expected = data_player_identity.load_player_identity_sidecar(source)
+    destination = tmp_path / "downloaded" / "sidecar.jsonl.gz"
+    downloads: list[Path] = []
+    download_barrier = threading.Barrier(2)
+    download_lock = threading.Lock()
+
+    class Client:
+        def download_file(self, _bucket: str, _key: str, path: str) -> None:
+            with download_lock:
+                downloads.append(Path(path))
+            download_barrier.wait()
+            Path(path).write_bytes(source.read_bytes())
+
+    monkeypatch.setattr(data_player_identity.r2, "client", lambda: Client())
+
+    def load() -> data_player_identity.PlayerIdentitySidecar:
+        return data_player_identity.load_player_identity_artifact(
+            destination,
+            remote="s3://hal/identity/sidecar.jsonl.gz",
+            expected_sha256=summary["sha256"],
+            expected_vocabulary_size=expected.vocabulary.size,
+            expected_vocabulary_sha256=expected.vocabulary.sha256,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _index: load(), range(2)))
+
+    assert results == (expected, expected)
+    assert len(set(downloads)) == 2
+    assert destination.read_bytes() == source.read_bytes()
+    assert not tuple(destination.parent.glob(f".{destination.name}.*.tmp"))
 
 
 def test_rank_ids_and_checkpoint_vocabulary_round_trip() -> None:
