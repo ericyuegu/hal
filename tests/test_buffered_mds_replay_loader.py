@@ -424,6 +424,33 @@ def test_replay_ring_uses_the_derived_slots_and_window_ordinals() -> None:
     assert max(ring.schedule.reuse_gaps) <= 49
 
 
+def test_disk_backed_replay_ring_preserves_batches_and_cleans_up(tmp_path: Path) -> None:
+    memory_ring = _ReplayRing(100, 4, 4, 25, 10)
+    disk_ring = _ReplayRing(100, 4, 4, 25, 10, storage_root=tmp_path)
+    chunks = (
+        _decoded(tuple(f"replay-{index}" for index in range(64))),
+        _decoded(tuple(f"replay-{index}" for index in range(64, 100)), row_start=64),
+    )
+    for chunk in chunks:
+        memory_ring.append_chunk(chunk)
+        disk_ring.append_chunk(chunk)
+
+    disk_ring.release_cache()
+    expected_ids, expected_columns = memory_ring.sample()
+    actual_ids, actual_columns = disk_ring.sample()
+
+    assert actual_ids == expected_ids
+    assert disk_ring.disk_backed
+    assert isinstance(disk_ring.columns["value"], np.memmap)
+    np.testing.assert_array_equal(actual_columns["value"], expected_columns["value"])
+    assert any(tmp_path.iterdir())
+
+    disk_ring.close()
+    memory_ring.close()
+
+    assert not any(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("seed", [0, 51])
 def test_u1_ring_schedule_has_randomized_reuse_and_zero_period_overlap(seed: int) -> None:
     schedule = _ReplayRingSchedule(114_688, 512, 8, 25, seed)

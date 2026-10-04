@@ -192,6 +192,7 @@ _CHECKPOINT_FORMAT_VERSION: Final[int] = 2
 _DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 2
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 _LOCAL_EVAL_ENV: Final[str] = "HAL_LOCAL_CLOSED_LOOP_EVAL"
+_REPLAY_RING_STORAGE_ROOT: Final[Path] = Path("data/.cache/replay-rings")
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (1 / 30,) * 30
 COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_953_315_601
@@ -3300,6 +3301,8 @@ def _make_train_loader(
     stats: dict[str, FeatureStats],
     player_lookup: ReplayPlayerLookup,
     distributed: DistributedContext,
+    *,
+    ring_storage_root: Path | None = _REPLAY_RING_STORAGE_ROOT,
 ) -> BufferedMDSReplayLoader[ReturnBatch]:
     selection = data_selection(cfg, rank=distributed.rank, world_size=distributed.world_size)
     adapter = MDSStorageAdapter(selection, download_retry=cfg.download_retry)
@@ -3350,6 +3353,7 @@ def _make_train_loader(
         reserved_disk_bytes=cfg.reserved_disk_bytes,
         pin_memory=torch.cuda.is_available(),
         materialization_threads=cfg.materialization_threads(),
+        ring_storage_root=ring_storage_root,
     )
     try:
         _require_loader_disk(train_loader)
@@ -3882,8 +3886,14 @@ def _minimal_system_metrics(metrics: dict[str, float]) -> dict[str, float]:
     """Keep one host metric for each distinct resource constraint."""
     names = {
         "system/cgroup/current_gib": "system/memory_gb",
+        "system/cgroup/peak_gib": "system/memory_peak_gb",
+        "system/cgroup/limit_gib": "system/memory_limit_gb",
         "system/cgroup/usage_fraction": "system/memory_fraction",
+        "system/cgroup/anon_gib": "system/memory_anon_gb",
+        "system/cgroup/file_gib": "system/memory_file_gb",
+        "system/cgroup/shmem_gib": "system/memory_shmem_gb",
         "system/process_tree/pss_gib": "system/process_memory_gb",
+        "system/process_tree/anonymous_gib": "system/process_anonymous_gb",
         "system/cache/allocated_gib": "system/cache_gb",
         "system/network/read_mib_s": "system/network/read_mib_s",
         "system/telemetry_errors": "system/telemetry_errors",
@@ -4374,14 +4384,17 @@ def train(
     if len(prepared_data.first_batch_seconds) != 1:
         raise RuntimeError("first physical-shard batch did not record its fill time")
     cold_fill_seconds = prepared_data.first_batch_seconds[0]
+    replay_buffer_gib = train_loader.buffer_bytes / 2**30
     print(
         f"[loader] workers started in {prepared_data.worker_start_seconds:.1f}s; "
-        f"cold fill completed in {cold_fill_seconds:.1f}s",
+        f"cold fill completed in {cold_fill_seconds:.1f}s; "
+        f"disk-backed replay ring is {replay_buffer_gib:.1f} GiB",
         flush=True,
     )
     if distributed.is_primary and wandb.run is not None:
         wandb.run.summary["loader/worker_start_s"] = prepared_data.worker_start_seconds
         wandb.run.summary["loader/cold_fill_s"] = cold_fill_seconds
+        wandb.run.summary["loader/replay_buffer_gib"] = replay_buffer_gib
     loader_wait_fractions: list[float] = []
     throughput_samples_per_second: list[float] = []
     gpu_peak_gb: list[float] = []
@@ -4504,8 +4517,12 @@ def train(
                     log.update(reduce_metric_dict(loader_metrics, distributed))
                 if _cadence_in_window(first_window_update, update, cfg.system_metrics_every):
                     local_system_metrics = _minimal_system_metrics(host_metrics.snapshot())
-                    memory_gb = local_system_metrics.get("system/memory_gb", 0.0)
-                    log["system/memory_gb"] = reduce_scalar(memory_gb, distributed, maximum=True)
+                    log.update(
+                        {
+                            name: reduce_scalar(value, distributed, maximum=True)
+                            for name, value in local_system_metrics.items()
+                        }
+                    )
                 if DEVICE == "cuda":
                     log["system/gpu_memory_gb"] = reduce_scalar(
                         window_peak_allocated_gb,
@@ -4589,6 +4606,8 @@ def train(
                             if uploader is None:
                                 raise RuntimeError("production evaluation requires R2 checkpoint upload")
                             uploader.wait()
+                            train_loader.release_buffer_cache()
+                            print("[loader] released clean replay-ring pages before evaluation", flush=True)
                             spawn_closed_loop_evaluation(
                                 run_name,
                                 update,

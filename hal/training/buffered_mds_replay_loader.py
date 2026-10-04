@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -1247,6 +1248,8 @@ class _ReplayRing:
         windows_per_generation: int,
         phase_block_batches: int,
         seed: int,
+        *,
+        storage_root: Path | None = None,
     ) -> None:
         if capacity < batch_size:
             raise ValueError("replay ring must cover one batch")
@@ -1262,6 +1265,10 @@ class _ReplayRing:
         self.locators: list[PhysicalRow | None] = [None] * capacity
         self.epochs = np.full(capacity, -1, dtype=np.int64)
         self.windows_seen = np.zeros(capacity, dtype=np.int16)
+        self._storage_dir: Path | None = None
+        if storage_root is not None:
+            storage_root.mkdir(parents=True, exist_ok=True)
+            self._storage_dir = Path(tempfile.mkdtemp(prefix="ring-", dir=storage_root))
         self._size = 0
         self.fifo_head = 0
         self.batch_index = 0
@@ -1273,8 +1280,13 @@ class _ReplayRing:
     def _initialize_columns(self, chunk: DecodedChunk) -> None:
         if self.columns:
             return
-        for name, values in chunk.columns.items():
-            self.columns[name] = np.empty((self.schedule.capacity, *values.shape[1:]), dtype=values.dtype)
+        for index, (name, values) in enumerate(chunk.columns.items()):
+            shape = (self.schedule.capacity, *values.shape[1:])
+            if self._storage_dir is None:
+                self.columns[name] = np.empty(shape, dtype=values.dtype)
+            else:
+                path = self._storage_dir / f"column-{index:03d}.bin"
+                self.columns[name] = np.memmap(path, mode="w+", shape=shape, dtype=values.dtype)
 
     def _write_chunk(
         self,
@@ -1392,6 +1404,34 @@ class _ReplayRing:
     def unique_replays_seen(self) -> int:
         return int(np.count_nonzero(self.windows_seen[: self.size]))
 
+    @property
+    def disk_backed(self) -> bool:
+        return self._storage_dir is not None
+
+    def close(self) -> None:
+        self.flush()
+        arrays = tuple(self.columns.values())
+        self.columns.clear()
+        del arrays
+        if self._storage_dir is not None:
+            shutil.rmtree(self._storage_dir)
+            self._storage_dir = None
+
+    def flush(self) -> None:
+        """Make dirty disk-backed pages reclaimable before memory-heavy work."""
+        for values in self.columns.values():
+            if isinstance(values, np.memmap):
+                cast(Any, values).flush()
+
+    def release_cache(self) -> None:
+        """Flush the ring and ask Linux to reclaim its clean file pages."""
+        self.flush()
+        if self._storage_dir is None:
+            return
+        for path in self._storage_dir.iterdir():
+            with path.open("rb", buffering=0) as handle:
+                os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
 
 class _BufferedMDSReplayIterator[BatchT](Iterator[BatchT]):
     def __init__(self, loader: BufferedMDSReplayLoader[BatchT], chunks: Iterator[DecodedChunk]) -> None:
@@ -1491,6 +1531,7 @@ class BufferedMDSReplayLoader[BatchT]:
         reserved_disk_bytes: int,
         pin_memory: bool,
         materialization_threads: int = 0,
+        ring_storage_root: Path | None = None,
     ) -> None:
         if replay_slots > selection.row_count:
             raise ValueError("replay slots exceed the selected source rows")
@@ -1553,6 +1594,7 @@ class BufferedMDSReplayLoader[BatchT]:
             windows_per_generation,
             replay_phase_block_batches,
             seed ^ 0x51B0FF,
+            storage_root=ring_storage_root,
         )
         self._resume_descriptors: tuple[RingSlotDescriptor, ...] | None = None
         self._resume_position: tuple[int, int] | None = None
@@ -1584,6 +1626,8 @@ class BufferedMDSReplayLoader[BatchT]:
                 "loader/ring_size": float(self._ring.size),
                 "loader/ring_batch_index": float(self._ring.batch_index),
                 "loader/ring_fifo_head": float(self._ring.fifo_head),
+                "loader/replay_buffer_gib": self.buffer_bytes / 2**30,
+                "loader/replay_buffer_disk_backed": float(self._ring.disk_backed),
             }
         )
         if self._ordered_chunks is not None:
@@ -1596,6 +1640,9 @@ class BufferedMDSReplayLoader[BatchT]:
     @property
     def buffer_bytes(self) -> int:
         return sum(values.nbytes for values in self._ring.columns.values())
+
+    def release_buffer_cache(self) -> None:
+        self._ring.release_cache()
 
     @property
     def raw_bytes_read(self) -> int:
@@ -1951,6 +1998,7 @@ class BufferedMDSReplayLoader[BatchT]:
         self._ordered_chunks = None
         self._iterator = None
         _shutdown_data_loader_workers(iterator)
+        self._ring.close()
         close_adapter = getattr(self.adapter, "close", None)
         if callable(close_adapter):
             close_adapter()
