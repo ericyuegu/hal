@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict
 from dataclasses import fields
 from pathlib import Path
@@ -111,3 +112,32 @@ def test_pruned81_compile_warmup_uses_the_real_prefix_sampler_layout() -> None:
 
     assert synthetic.is_contiguous()
     assert synthetic.stride() == sampled.stride() == (_O61.POLICY_PREFIXES_PER_WINDOW, 1)
+
+
+def test_pruned81_offline_validation_can_compile_outside_the_training_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = False
+    calls: list[str] = []
+
+    @contextmanager
+    def stance(name: str):
+        nonlocal active
+        calls.append(name)
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    def raw_metrics(*_args: object) -> dict[str, float]:
+        assert active
+        return {"nll": 1.0}
+
+    monkeypatch.setattr(_O61, "DEVICE", "cuda")
+    monkeypatch.setattr(_O61.torch.compiler, "set_stance", stance)
+    monkeypatch.setattr(_O61, "val_metrics", raw_metrics)
+    monkeypatch.setattr(_O61, "_validation_wandb_metrics", lambda values, _cfg: values)
+
+    assert _O61._offline_validation_metrics(object(), [], _O61.proxy_config()) == {"nll": 1.0}
+    assert calls == ["default"]

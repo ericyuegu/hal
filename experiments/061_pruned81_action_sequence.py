@@ -170,6 +170,7 @@ from hal.training.checkpoints import checkpoint_resume_lineage
 from hal.training.checkpoints import checkpoint_sha256
 from hal.training.checkpoints import download_latest
 from hal.training.checkpoints import load_for_resume
+from hal.training.checkpoints import read_resume_lineage
 from hal.training.checkpoints import save_checkpoint
 from hal.training.checkpoints import validate_resume_provenance
 from hal.training.mfu import bf16_dense_peak_flops
@@ -1945,6 +1946,21 @@ def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dic
         "change_f1": values["change_f1"],
         "sampled_transition_rate": values["sampled_transition_rate"],
     }
+
+
+def _offline_validation_metrics(
+    model: ActionSequenceTransformer,
+    batches: list[ReturnBatch],
+    cfg: TrainConfig,
+) -> dict[str, float]:
+    """Permit validation-only FlexAttention graphs outside the training guard."""
+    stance = (
+        torch.compiler.set_stance("default")
+        if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal)
+        else contextlib.nullcontext()
+    )
+    with stance:
+        return _validation_wandb_metrics(val_metrics(model, batches, cfg), cfg)
 
 
 def _slice_train_batch(batch: TrainBatch, rows: int) -> TrainBatch:
@@ -3949,7 +3965,7 @@ def _finalize_training(
                 uploader.upload(snapshot, key=final_path.name)
 
             checkpoint_sha = checkpoint_sha256(final_path)
-            validation = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
+            validation = _offline_validation_metrics(model, val_cache, cfg)
             final_metrics = {f"val/{name}": value for name, value in validation.items()}
             if not smoke and not defer_gameplay_evaluations:
                 if uploader is None:
@@ -4469,7 +4485,7 @@ def train(
                     try:
                         boundary_metrics: dict[str, float] = {}
                         if val_due:
-                            values = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
+                            values = _offline_validation_metrics(model, val_cache, cfg)
                             boundary_metrics.update({f"val/{name}": value for name, value in values.items()})
                         if eval_due:
                             assert checkpoint_path is not None
@@ -4793,6 +4809,7 @@ class TrainArgs:
     comment: str = ""
     resume: str | None = None
     resume_checkpoint: str = "latest.pt"
+    resume_source_transition: Path | None = None
     smoke: bool = False
     defer_gameplay_evaluations: bool = False
     stop_after_update: int | None = None
@@ -4854,6 +4871,10 @@ def main(args: Command) -> None:
         )
         return
     cfg = args.cfg
+    source_transition = None
+    resume_checkpoint_sha = None
+    if args.resume is None and args.resume_source_transition is not None:
+        raise SystemExit("--resume-source-transition requires --resume")
     if args.proxy_arm != "none":
         proxy = proxy_config_for_arm(args.proxy_arm)
         cfg = replace(
@@ -4899,6 +4920,9 @@ def main(args: Command) -> None:
                     weights_only=False,
                 )
             assert resume_state is not None
+            if args.resume_source_transition is not None:
+                source_transition = read_resume_lineage(args.resume_source_transition)
+                resume_checkpoint_sha = checkpoint_sha256(Path("runs") / args.resume / args.resume_checkpoint)
             cfg = config_from_state(cast(dict, resume_state["cfg"]))
             requested = proxy_config_for_arm(args.proxy_arm)
             if cfg.arch != requested.arch or cfg.target_positions != requested.target_positions:
@@ -4911,6 +4935,8 @@ def main(args: Command) -> None:
             comment=args.comment,
             resume_run=args.resume,
             resume_state=resume_state,
+            source_transition=source_transition,
+            resume_checkpoint_sha256=resume_checkpoint_sha,
             smoke=args.smoke,
             proxy=args.proxy_arm != "none",
             defer_gameplay_evaluations=args.defer_gameplay_evaluations,
