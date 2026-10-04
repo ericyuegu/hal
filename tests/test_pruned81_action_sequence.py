@@ -197,10 +197,13 @@ def test_pruned81_local_closed_loop_evaluation_uses_the_milestone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
+    logged: list[dict[str, float]] = []
 
     def run(command: list[str], *, check: bool, env: dict[str, str]) -> None:
         assert check
         assert env["CUDA_VISIBLE_DEVICES"] == "0"
+        output_index = command.index("--metrics-output") + 1
+        Path(command[output_index]).write_text('{"emulator_fps": 81.0}')
         commands.append(command)
 
     monkeypatch.delenv("HAL_MODAL_EVAL_FD", raising=False)
@@ -208,6 +211,7 @@ def test_pruned81_local_closed_loop_evaluation_uses_the_milestone(
     monkeypatch.setenv("HAL_LOCAL_CLOSED_LOOP_EVAL", "1")
     monkeypatch.setenv("LOCAL_RANK", "0")
     monkeypatch.setattr(_O61.subprocess, "run", run)
+    monkeypatch.setattr(_O61.wandb, "log", logged.append)
 
     result = _O61.spawn_closed_loop_evaluation("pruned81-run", 16_384, "b" * 64, 96)
 
@@ -215,3 +219,5 @@ def test_pruned81_local_closed_loop_evaluation_uses_the_milestone(
     assert len(commands) == 1
     assert "061_pruned81_action_sequence.py" in commands[0][1]
     assert commands[0][4] == "checkpoints/step-0016384.pt"
+    assert "--shared-wandb" not in commands[0]
+    assert logged == [{"global_step": 16_384, "eval/checkpoint_step": 16_384, "eval/emulator_fps": 81.0}]

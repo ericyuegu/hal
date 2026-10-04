@@ -56,6 +56,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -3909,7 +3910,7 @@ def _run_local_closed_loop_evaluation(
     *,
     return_target: Literal["p90", "unconditioned"],
 ) -> str:
-    """Run one isolated evaluator on rank zero's GPU and wait for it."""
+    """Run one isolated evaluator and log its metrics through the training owner."""
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible_devices:
@@ -3920,29 +3921,43 @@ def _run_local_closed_loop_evaluation(
     else:
         eval_device = str(local_rank)
     checkpoint_name = f"checkpoints/step-{update:07d}.pt"
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "eval",
-        "--checkpoint",
-        checkpoint_name,
-        "--run",
-        run_name,
-        "--n-matchups",
-        str(n_matchups),
-        "--shared-wandb",
-        "--expected-checkpoint-sha256",
-        expected_checkpoint_sha256,
-        "--return-target",
-        return_target,
-    ]
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = eval_device
     environment["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
     for name in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         environment.pop(name, None)
     print(f"[eval] running local closed-loop evaluation at update {update}", flush=True)
-    subprocess.run(command, check=True, env=environment)
+    with tempfile.TemporaryDirectory(prefix="hal-local-eval-") as temp_dir:
+        metrics_path = Path(temp_dir) / "metrics.json"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "eval",
+            "--checkpoint",
+            checkpoint_name,
+            "--run",
+            run_name,
+            "--n-matchups",
+            str(n_matchups),
+            "--metrics-output",
+            str(metrics_path),
+            "--expected-checkpoint-sha256",
+            expected_checkpoint_sha256,
+            "--return-target",
+            return_target,
+        ]
+        subprocess.run(command, check=True, env=environment)
+        try:
+            raw_metrics = json.loads(metrics_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise RuntimeError("local evaluator did not write valid metrics") from error
+        if not isinstance(raw_metrics, dict) or not all(
+            isinstance(name, str) and isinstance(value, (int, float)) for name, value in raw_metrics.items()
+        ):
+            raise RuntimeError("local evaluator metrics must be a numeric JSON object")
+        values = {name: float(value) for name, value in raw_metrics.items()}
+    metrics = {f"eval/{name}": value for name, value in _eval_wandb_metrics(values).items()}
+    wandb.log({"global_step": update, "eval/checkpoint_step": update, **metrics})
     return f"local-eval-step-{update:07d}"
 
 
@@ -4818,6 +4833,7 @@ def eval_checkpoint(
     output_name: str | None = None,
     upload_run: str | None = None,
     shared_wandb: bool = False,
+    metrics_output: Path | None = None,
     expected_checkpoint_sha256: str | None = None,
     player_code: str | None = None,
     fixed_ego_character: melee.Character | None = None,
@@ -4890,6 +4906,11 @@ def eval_checkpoint(
     require_complete_eval(values, cfg.final_eval_n_matchups if n_matchups is None else n_matchups)
     if upload_run is not None:
         _upload_eval_evidence(upload_run, replay_dir)
+    if metrics_output is not None:
+        metrics_output.parent.mkdir(parents=True, exist_ok=True)
+        with metrics_output.open("x") as metrics_file:
+            json.dump(values, metrics_file, allow_nan=False, sort_keys=True)
+            metrics_file.write("\n")
     if shared_wandb:
         wandb_id = state.get("wandb_id")
         if not isinstance(wandb_id, str):
@@ -4942,6 +4963,7 @@ class EvalArgs:
     max_parallel: int | None = None
     output_name: str | None = None
     shared_wandb: bool = False
+    metrics_output: Path | None = None
     expected_checkpoint_sha256: str | None = None
     player_code: str | None = None
     fixed_ego_character: str | None = None
@@ -4977,6 +4999,7 @@ def main(args: Command) -> None:
             output_name=args.output_name,
             upload_run=args.run,
             shared_wandb=args.shared_wandb,
+            metrics_output=args.metrics_output,
             expected_checkpoint_sha256=args.expected_checkpoint_sha256,
             player_code=args.player_code,
             fixed_ego_character=_parse_character(args.fixed_ego_character),

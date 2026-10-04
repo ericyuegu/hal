@@ -319,9 +319,12 @@ def test_checkpoint_gather_uses_the_cpu_object_group(monkeypatch: pytest.MonkeyP
 
 def test_local_closed_loop_evaluation_uses_an_isolated_device(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], dict[str, str]]] = []
+    logged: list[dict[str, float]] = []
 
     def run(command: list[str], *, check: bool, env: dict[str, str]) -> None:
         assert check
+        output_index = command.index("--metrics-output") + 1
+        Path(command[output_index]).write_text('{"emulator_fps": 80.0}')
         calls.append((command, env))
 
     monkeypatch.delenv("HAL_MODAL_EVAL_FD", raising=False)
@@ -331,6 +334,7 @@ def test_local_closed_loop_evaluation_uses_an_isolated_device(monkeypatch: pytes
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "2")
     monkeypatch.setattr(_MODULE.subprocess, "run", run)
+    monkeypatch.setattr(_MODULE.wandb, "log", logged.append)
 
     result = _MODULE.spawn_closed_loop_evaluation("run-name", 16_384, "a" * 64, 96)
 
@@ -345,7 +349,8 @@ def test_local_closed_loop_evaluation_uses_an_isolated_device(monkeypatch: pytes
         "run-name",
         "--n-matchups",
         "96",
-        "--shared-wandb",
+        "--metrics-output",
+        command[command.index("--metrics-output") + 1],
         "--expected-checkpoint-sha256",
         "a" * 64,
         "--return-target",
@@ -356,3 +361,4 @@ def test_local_closed_loop_evaluation_uses_an_isolated_device(monkeypatch: pytes
     assert "RANK" not in environment
     assert "LOCAL_RANK" not in environment
     assert "WORLD_SIZE" not in environment
+    assert logged == [{"global_step": 16_384, "eval/checkpoint_step": 16_384, "eval/emulator_fps": 80.0}]
