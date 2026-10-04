@@ -36,3 +36,10 @@ isolated subprocess on rank zero's GPU when
 `HAL_LOCAL_CLOSED_LOOP_EVAL=1`; it evaluates the uploaded immutable milestone
 and waits for completion before training continues. The existing Modal broker
 path is unchanged.
+
+The proxy runs now restart from update zero on one GPU each. Their global and
+local batch is 512, with two 256-sample microbatches, 131,072 replay slots, and
+24 loader workers. This keeps the optimizer batch, aggregate replay capacity,
+and 232-update minimum replay gap unchanged. Checkpoint format version 2 rejects
+the earlier two-rank checkpoints because their world size and partition identity
+cannot satisfy exact resume.

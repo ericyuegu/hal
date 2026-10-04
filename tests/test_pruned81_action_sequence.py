@@ -69,11 +69,34 @@ def test_pruned81_proxy_matches_the_depth_treatment() -> None:
     assert control.arch.head_offsets == treatment.arch.head_offsets == tuple(range(1, 31))
     assert not control.return_conditioning and not treatment.return_conditioning
     assert control.target_positions == treatment.target_positions == 2**30
+    assert control.world_size == treatment.world_size == 1
+    assert control.local_batch_size == treatment.local_batch_size == 512
+    assert control.microbatch_size == treatment.microbatch_size == 256
+    assert control.replay_slots == treatment.replay_slots == 131_072
+    assert control.num_workers == treatment.num_workers == 24
     with torch.device("meta"):
         model = _O61.make_model(treatment)
     counts = _O61.subsystem_parameter_counts(model)
     assert counts["total"] == 14_702_397
     assert _O61.compute_equivalent_parameter_count(treatment, counts) == 306_237_953
+
+
+def test_proxy_cli_applies_the_one_gpu_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[object] = []
+
+    class ConfigCaptured(Exception):
+        pass
+
+    def capture(cfg: object) -> None:
+        captured.append(cfg)
+        raise ConfigCaptured
+
+    monkeypatch.setattr(_O61, "init_distributed", capture)
+
+    with pytest.raises(ConfigCaptured):
+        _O61.main(_O61.TrainArgs(proxy_arm="treatment"))
+
+    assert captured == [_O61.proxy_config()]
 
 
 def test_pruned81_checkpoint_rejects_the_legacy_layout() -> None:

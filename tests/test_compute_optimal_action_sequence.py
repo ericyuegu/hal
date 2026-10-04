@@ -54,6 +54,16 @@ def test_parameter_matched_proxy_arms_change_the_depth_allocation() -> None:
     assert control.arch.return_embed_dim == treatment.arch.return_embed_dim == 0
     assert control.target_positions == treatment.target_positions == 2**30
     assert control.max_steps == treatment.max_steps == 65_536
+    for cfg in (control, treatment):
+        assert cfg.world_size == 1
+        assert cfg.local_batch_size == 512
+        assert cfg.microbatch_size == 256
+        assert cfg.batch_size == cfg.world_size * cfg.local_batch_size == 512
+        assert cfg.replay_slots == 131_072
+        assert cfg.num_workers == 24
+        assert cfg.replay_slots // cfg.local_batch_size - cfg.replay_phase_block_batches + 1 == 232
+        assert cfg.replay_slots * cfg.world_size == _MODULE.TrainConfig().replay_slots * 2
+        assert _MODULE.data_partition_hashes(cfg) == (cfg.selection_sha256,)
     with torch.device("meta"):
         control_model = _MODULE.make_model(control)
         treatment_model = _MODULE.make_model(treatment)
@@ -64,6 +74,24 @@ def test_parameter_matched_proxy_arms_change_the_depth_allocation() -> None:
     assert abs(treatment_counts["total"] / control_counts["total"] - 1) < 0.06
     assert _MODULE.compute_equivalent_parameter_count(control, control_counts) == 137_350_289
     assert _MODULE.compute_equivalent_parameter_count(treatment, treatment_counts) == 306_095_121
+
+
+def test_proxy_cli_applies_the_one_gpu_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[object] = []
+
+    class ConfigCaptured(Exception):
+        pass
+
+    def capture(cfg: object) -> None:
+        captured.append(cfg)
+        raise ConfigCaptured
+
+    monkeypatch.setattr(_MODULE, "init_distributed", capture)
+
+    with pytest.raises(ConfigCaptured):
+        _MODULE.main(_MODULE.TrainArgs(proxy_arm="treatment"))
+
+    assert captured == [_MODULE.proxy_config()]
 
 
 def test_compute_curve_weights_schedule_and_batch_arithmetic() -> None:
@@ -134,6 +162,59 @@ def test_compile_warmup_uses_the_real_prefix_sampler_layout() -> None:
     assert synthetic.stride() == sampled.stride() == (_MODULE.POLICY_PREFIXES_PER_WINDOW, 1)
 
 
+def test_compile_warmup_uses_the_training_microbatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _MODULE.proxy_config()
+    sliced: list[tuple[int, int]] = []
+    observed: dict[str, float | int] = {}
+
+    class Batch:
+        def row_slice(self, start: int, stop: int) -> Batch:
+            sliced.append((start, stop))
+            return self
+
+    class Model:
+        def train(self) -> None:
+            return None
+
+        def zero_grad(self, *, set_to_none: bool) -> None:
+            assert set_to_none
+
+    def microbatch_loss(
+        _model: object,
+        _batch: object,
+        _cfg: object,
+        *,
+        valid_prefixes: int,
+        prefix_positions: torch.Tensor,
+        value_loss_scale: float,
+        **_kwargs: object,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        observed["batch"] = prefix_positions.shape[0]
+        observed["valid_prefixes"] = valid_prefixes
+        observed["value_loss_scale"] = value_loss_scale
+        loss = torch.ones((), requires_grad=True)
+        return loss, torch.zeros(1), {}
+
+    monkeypatch.setattr(_MODULE, "DEVICE", "cpu")
+    monkeypatch.setattr(_MODULE, "synthetic_awr_batch", lambda _cfg, _device: Batch())
+    monkeypatch.setattr(_MODULE, "microbatch_loss", microbatch_loss)
+
+    _MODULE._compile_synthetic_forward_backward(
+        Model(),
+        cfg,
+        step=0,
+        trunk_fn=lambda: None,
+        temporal_fn=lambda: None,
+    )
+
+    assert sliced == [(0, 256)]
+    assert observed == {
+        "batch": 256,
+        "valid_prefixes": 512 * _MODULE.POLICY_PREFIXES_PER_WINDOW,
+        "value_loss_scale": 0.5,
+    }
+
+
 def test_offline_validation_can_compile_outside_the_training_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     active = False
     calls: list[str] = []
@@ -202,6 +283,9 @@ def test_resume_rejects_changed_distributed_geometry() -> None:
     }
     assert _MODULE.rank_resume_state(state, cfg, context)["loader"] == {"next_batch": 0}
     changed = replace(cfg, microbatch_size=128)
+    with pytest.raises(ValueError, match="world, batch, partition, architecture, offsets, or weights"):
+        _MODULE.rank_resume_state(state, changed, context)
+    changed = replace(cfg, replay_slots=131_072)
     with pytest.raises(ValueError, match="world, batch, partition, architecture, offsets, or weights"):
         _MODULE.rank_resume_state(state, changed, context)
 

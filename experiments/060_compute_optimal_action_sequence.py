@@ -29,9 +29,10 @@ treatment uses a 6-layer trunk and 8-layer 256-wide decoder. All other experimen
 inputs stay fixed. Gameplay evaluation selects between the proxy arms; offline
 validation metrics are diagnostic only.
 
-Training requires ``torchrun --standalone --nproc-per-node=2``. Each rank owns a
-disjoint half of every source, a local batch of 256, 65,536 replay slots, twelve
-loader workers, and independent checkpointed random streams. Rank zero alone
+Production training uses ``torchrun --standalone --nproc-per-node=2``. Proxy
+training uses one rank with a local batch of 512, two 256-sample microbatches,
+131,072 replay slots, and 24 loader workers. This preserves the optimizer batch,
+aggregate replay memory, and 232-update minimum replay gap. Rank zero alone
 writes checkpoints, validation, W&B, and R2 artifacts.
 
 Run:
@@ -187,8 +188,8 @@ from hal.wire import ACTION_DIM
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _EXPERIMENT_ID: Final[str] = "060_compute_optimal_action_sequence_v2"
-_CHECKPOINT_FORMAT_VERSION: Final[int] = 1
-_DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 1
+_CHECKPOINT_FORMAT_VERSION: Final[int] = 2
+_DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 2
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 _LOCAL_EVAL_ENV: Final[str] = "HAL_LOCAL_CLOSED_LOOP_EVAL"
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
@@ -643,7 +644,6 @@ class TrainConfig:
     selection_sha256: ClassVar[str] = "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
-    replay_slots: ClassVar[int] = 65_536
     windows_per_generation: ClassVar[int] = 8
     replay_phase_block_batches: ClassVar[int] = 25
     minimum_replay_gap_batches: ClassVar[int] = 232
@@ -698,6 +698,7 @@ class TrainConfig:
     download_retry: int = 8
     val_split: str = "val"
     num_workers: int = 12
+    replay_slots: int = 65_536
     push_to_r2: bool = True
     system_metrics_every: int = 25
     system_metrics_interval_s: float = 5.0
@@ -804,14 +805,22 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O60 architecture must be the production shape or one of its fixed proxy arms")
     if cfg.batch_size != 512 or cfg.seed != 0:
         raise ValueError("O60 freezes the global batch at 512 and seed at zero")
-    if (cfg.world_size, cfg.local_batch_size) != (2, 256):
-        raise ValueError("O60 freezes two ranks with a local batch of 256")
     if cfg.batch_size != cfg.world_size * cfg.local_batch_size:
         raise ValueError("global batch must equal world_size * local_batch_size")
     if cfg.microbatch_size not in (128, 256) or cfg.local_batch_size % cfg.microbatch_size:
         raise ValueError("microbatch_size must be 128 or 256 and divide the local batch")
-    if cfg.num_workers != 12 or cfg.replay_slots != 65_536:
-        raise ValueError("each O60 rank requires 12 workers and 65,536 replay slots")
+    geometry = (
+        cfg.world_size,
+        cfg.local_batch_size,
+        cfg.microbatch_size,
+        cfg.num_workers,
+        cfg.replay_slots,
+    )
+    if cfg.arch == production:
+        if geometry[:2] != (2, 256) or geometry[3:] != (12, 65_536):
+            raise ValueError("O60 production requires two ranks with batch 256, 12 workers, and 65,536 slots")
+    elif geometry != (1, 512, 256, 24, 131_072):
+        raise ValueError("O60 proxies require one rank with batch 512, microbatch 256, 24 workers, and 131,072 slots")
     positive = {
         "d_model": cfg.arch.d_model,
         "n_layers": cfg.arch.n_layers,
@@ -834,6 +843,7 @@ def validate_config(cfg: TrainConfig) -> None:
         "local_batch_size": cfg.local_batch_size,
         "microbatch_size": cfg.microbatch_size,
         "world_size": cfg.world_size,
+        "replay_slots": cfg.replay_slots,
         "max_steps": cfg.max_steps,
         "warmup_steps": cfg.warmup_steps,
         "target_positions": cfg.target_positions,
@@ -1005,6 +1015,11 @@ def proxy_config() -> TrainConfig:
         stable_updates=TrainConfig.reference_positions // (512 * POLICY_PREFIXES_PER_WINDOW),
         decay_start_update=None,
         decay_duration=None,
+        local_batch_size=512,
+        microbatch_size=256,
+        world_size=1,
+        num_workers=24,
+        replay_slots=131_072,
     )
 
 
@@ -1028,6 +1043,11 @@ def proxy_control_config() -> TrainConfig:
         stable_updates=TrainConfig.reference_positions // (512 * POLICY_PREFIXES_PER_WINDOW),
         decay_start_update=None,
         decay_duration=None,
+        local_batch_size=512,
+        microbatch_size=256,
+        world_size=1,
+        num_workers=24,
+        replay_slots=131_072,
     )
 
 
@@ -2966,6 +2986,8 @@ def distributed_training_contract(cfg: TrainConfig) -> dict[str, object]:
         "global_batch_size": cfg.batch_size,
         "local_batch_size": cfg.local_batch_size,
         "microbatch_size": cfg.microbatch_size,
+        "loader_workers": cfg.num_workers,
+        "replay_slots": cfg.replay_slots,
         "partition_sha256": data_partition_hashes(cfg),
         "architecture": asdict(cfg.arch),
         "head_offsets": cfg.arch.head_offsets,
@@ -4138,9 +4160,9 @@ def _compile_synthetic_forward_backward(
             model.zero_grad(set_to_none=True)
             if DEVICE == "cuda" and (cfg.compile_trunk or cfg.compile_temporal):
                 torch.compiler.cudagraph_mark_step_begin()
-            batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
+            batch = synthetic_awr_batch(cfg, torch.device(DEVICE)).row_slice(0, cfg.microbatch_size)
             valid_prefixes = cfg.local_batch_size * POLICY_PREFIXES_PER_WINDOW
-            prefix_positions = _synthetic_prefix_positions(cfg, torch.device(DEVICE))
+            prefix_positions = _synthetic_prefix_positions(cfg, torch.device(DEVICE))[: cfg.microbatch_size]
             loss, _nll, _metrics = microbatch_loss(
                 model,
                 batch,
@@ -4150,6 +4172,7 @@ def _compile_synthetic_forward_backward(
                 trunk_fn=trunk_fn,
                 temporal_fn=temporal_fn,
                 prefix_positions=prefix_positions,
+                value_loss_scale=cfg.microbatch_size / cfg.local_batch_size,
             )
             loss.backward()
             if DEVICE == "cuda":
@@ -4952,6 +4975,11 @@ def main(args: Command) -> None:
             stable_updates=proxy.stable_updates,
             decay_start_update=None,
             decay_duration=None,
+            local_batch_size=proxy.local_batch_size,
+            microbatch_size=proxy.microbatch_size,
+            world_size=proxy.world_size,
+            num_workers=proxy.num_workers,
+            replay_slots=proxy.replay_slots,
         )
     cfg = replace(
         cfg,
