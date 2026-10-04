@@ -190,6 +190,7 @@ _EXPERIMENT_ID: Final[str] = "061_pruned81_action_sequence_v2"
 _CHECKPOINT_FORMAT_VERSION: Final[int] = 1
 _DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 1
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
+_LOCAL_EVAL_ENV: Final[str] = "HAL_LOCAL_CLOSED_LOOP_EVAL"
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (1 / 30,) * 30
 COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_953_839_361
@@ -251,6 +252,7 @@ class DistributedContext:
     local_rank: int
     world_size: int
     device: torch.device
+    object_group: dist.ProcessGroup | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.rank < self.world_size:
@@ -289,7 +291,10 @@ def init_distributed(cfg: TrainConfig, *, backend: str | None = None) -> Distrib
     else:
         raise ValueError(f"unsupported distributed backend {selected_backend!r}")
     dist.init_process_group(backend=selected_backend, rank=rank, world_size=world_size)
-    return DistributedContext(rank, local_rank, world_size, device)
+    # PyTorch 2.11.0+cu130 NCCL object collectives hung on the G4 RTX PRO 6000 host.
+    # Keep tensor collectives on NCCL and carry pickled control state over Gloo.
+    object_group = dist.new_group(backend="gloo") if selected_backend == "nccl" else None
+    return DistributedContext(rank, local_rank, world_size, device, object_group)
 
 
 def _all_reduce_sum(value: Tensor) -> Tensor:
@@ -2997,7 +3002,7 @@ def gather_rank_checkpoint_states(
 ) -> tuple[dict[str, object], ...] | None:
     """Gather ordered rank state on rank zero without replicating it elsewhere."""
     gathered: list[object] | None = [None] * distributed.world_size if distributed.is_primary else None
-    dist.gather_object(local_state, gathered, dst=0)
+    dist.gather_object(local_state, gathered, dst=0, group=distributed.object_group)
     if gathered is None:
         return None
     if not all(isinstance(state, dict) for state in gathered):
@@ -3858,6 +3863,51 @@ def _minimal_system_metrics(metrics: dict[str, float]) -> dict[str, float]:
     return {output: metrics[source] for source, output in names.items() if source in metrics}
 
 
+def _run_local_closed_loop_evaluation(
+    run_name: str,
+    update: int,
+    expected_checkpoint_sha256: str,
+    n_matchups: int,
+    *,
+    return_target: Literal["p90", "unconditioned"],
+) -> str:
+    """Run one isolated evaluator on rank zero's GPU and wait for it."""
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices:
+        devices = visible_devices.split(",")
+        if not 0 <= local_rank < len(devices):
+            raise RuntimeError("LOCAL_RANK is outside CUDA_VISIBLE_DEVICES")
+        eval_device = devices[local_rank]
+    else:
+        eval_device = str(local_rank)
+    checkpoint_name = f"checkpoints/step-{update:07d}.pt"
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "eval",
+        "--checkpoint",
+        checkpoint_name,
+        "--run",
+        run_name,
+        "--n-matchups",
+        str(n_matchups),
+        "--shared-wandb",
+        "--expected-checkpoint-sha256",
+        expected_checkpoint_sha256,
+        "--return-target",
+        return_target,
+    ]
+    environment = os.environ.copy()
+    environment["CUDA_VISIBLE_DEVICES"] = eval_device
+    environment["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+    for name in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+        environment.pop(name, None)
+    print(f"[eval] running local closed-loop evaluation at update {update}", flush=True)
+    subprocess.run(command, check=True, env=environment)
+    return f"local-eval-step-{update:07d}"
+
+
 def spawn_closed_loop_evaluation(
     run_name: str,
     update: int,
@@ -3866,10 +3916,23 @@ def spawn_closed_loop_evaluation(
     *,
     return_target: Literal["p90", "unconditioned"] = "unconditioned",
 ) -> str:
-    """Ask the launcher to spawn its same-app L40S evaluator."""
+    """Run a local evaluator or ask Modal to spawn a separate evaluator."""
     raw_fd = os.environ.get("HAL_MODAL_EVAL_FD")
+    local_evaluation = os.environ.get(_LOCAL_EVAL_ENV) == "1"
+    if raw_fd is not None and local_evaluation:
+        raise RuntimeError("closed-loop evaluation launchers are ambiguous")
     if raw_fd is None:
-        raise RuntimeError("HAL_MODAL_EVAL_FD is required for automatic closed-loop evaluation")
+        if local_evaluation:
+            return _run_local_closed_loop_evaluation(
+                run_name,
+                update,
+                expected_checkpoint_sha256,
+                n_matchups,
+                return_target=return_target,
+            )
+        raise RuntimeError(
+            "HAL_MODAL_EVAL_FD or HAL_LOCAL_CLOSED_LOOP_EVAL=1 is required for automatic closed-loop evaluation"
+        )
     try:
         fd = int(raw_fd)
     except ValueError as e:
@@ -3932,9 +3995,14 @@ def _finalize_training(
     defer_gameplay_evaluations: bool,
     resume_lineage: tuple[ResumeLineage, ...] = (),
 ) -> dict[str, object]:
-    """Save the final model and queue evaluation for a separate L40S worker."""
+    """Save the final model and dispatch the configured evaluation."""
     wait_lists: list[object] | None = [None] * distributed.world_size if distributed.is_primary else None
-    dist.gather_object(loader_wait_fractions, wait_lists, dst=0)
+    dist.gather_object(
+        loader_wait_fractions,
+        wait_lists,
+        dst=0,
+        group=distributed.object_group,
+    )
     snapshot = save_boundary_checkpoint(
         run_dir,
         update=update,
@@ -3989,10 +4057,10 @@ def _finalize_training(
             }
         except Exception as error:
             failure[0] = f"rank-zero finalization failed: {type(error).__name__}: {error}"
-    dist.broadcast_object_list(failure, src=0)
+    dist.broadcast_object_list(failure, src=0, group=distributed.object_group)
     if failure[0] is not None:
         raise RuntimeError(failure[0])
-    dist.broadcast_object_list(summary, src=0)
+    dist.broadcast_object_list(summary, src=0, group=distributed.object_group)
     if not isinstance(summary[0], dict):
         raise RuntimeError("rank zero did not broadcast finalization metrics")
     return cast(dict[str, object], summary[0])
@@ -4164,7 +4232,7 @@ def train(
         if distributed.is_primary
         else None
     ]
-    dist.broadcast_object_list(names, src=0)
+    dist.broadcast_object_list(names, src=0, group=distributed.object_group)
     run_name = names[0]
     if not isinstance(run_name, str):
         raise RuntimeError("rank zero did not broadcast a run name")
@@ -4502,7 +4570,7 @@ def train(
                             wandb.log({"global_step": update, **boundary_metrics})
                     except Exception as error:
                         boundary_failure[0] = f"rank-zero boundary work failed: {type(error).__name__}: {error}"
-                dist.broadcast_object_list(boundary_failure, src=0)
+                dist.broadcast_object_list(boundary_failure, src=0, group=distributed.object_group)
                 if boundary_failure[0] is not None:
                     raise RuntimeError(boundary_failure[0])
             if update < run_stop and boundary_due:
@@ -4909,7 +4977,7 @@ def main(args: Command) -> None:
                     name=args.resume_checkpoint,
                 )
             found: list[object] = [resume_state is not None]
-            dist.broadcast_object_list(found, src=0)
+            dist.broadcast_object_list(found, src=0, group=distributed.object_group)
             if not found[0]:
                 raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
             dist.barrier()

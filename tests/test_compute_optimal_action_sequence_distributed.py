@@ -44,7 +44,8 @@ def _gloo_worker(rank: int, rendezvous: str, result_dir: str) -> None:
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     try:
         cfg = _MODULE.TrainConfig()
-        context = _MODULE.DistributedContext(rank, rank, 2, torch.device("cpu"))
+        object_group = dist.new_group(backend="gloo")
+        context = _MODULE.DistributedContext(rank, rank, 2, torch.device("cpu"), object_group)
         selection = _MODULE.data_selection(cfg, rank=rank, world_size=2)
         assert selection.sha256 == _MODULE.data_partition_hashes(cfg)[rank]
 

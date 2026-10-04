@@ -204,3 +204,60 @@ def test_resume_rejects_changed_distributed_geometry() -> None:
     changed = replace(cfg, microbatch_size=128)
     with pytest.raises(ValueError, match="world, batch, partition, architecture, offsets, or weights"):
         _MODULE.rank_resume_state(state, changed, context)
+
+
+def test_checkpoint_gather_uses_the_cpu_object_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    object_group = object()
+    context = _MODULE.DistributedContext(0, 0, 1, torch.device("cpu"), object_group)
+    local_state = {"rank": 0, "loader": {"next_batch": 1}}
+
+    def gather_object(value: object, gathered: list[object], *, dst: int, group: object) -> None:
+        assert value is local_state
+        assert dst == 0
+        assert group is object_group
+        gathered[0] = value
+
+    monkeypatch.setattr(_MODULE.dist, "gather_object", gather_object)
+
+    assert _MODULE.gather_rank_checkpoint_states(local_state, context) == (local_state,)
+
+
+def test_local_closed_loop_evaluation_uses_an_isolated_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(command: list[str], *, check: bool, env: dict[str, str]) -> None:
+        assert check
+        calls.append((command, env))
+
+    monkeypatch.delenv("HAL_MODAL_EVAL_FD", raising=False)
+    monkeypatch.setenv("HAL_LOCAL_CLOSED_LOOP_EVAL", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(_MODULE.subprocess, "run", run)
+
+    result = _MODULE.spawn_closed_loop_evaluation("run-name", 16_384, "a" * 64, 96)
+
+    assert result == "local-eval-step-0016384"
+    assert len(calls) == 1
+    command, environment = calls[0]
+    assert command[2:] == [
+        "eval",
+        "--checkpoint",
+        "checkpoints/step-0016384.pt",
+        "--run",
+        "run-name",
+        "--n-matchups",
+        "96",
+        "--shared-wandb",
+        "--expected-checkpoint-sha256",
+        "a" * 64,
+        "--return-target",
+        "unconditioned",
+    ]
+    assert environment["CUDA_VISIBLE_DEVICES"] == "4"
+    assert environment["TORCHINDUCTOR_COMPILE_THREADS"] == "1"
+    assert "RANK" not in environment
+    assert "LOCAL_RANK" not in environment
+    assert "WORLD_SIZE" not in environment

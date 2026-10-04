@@ -141,3 +141,43 @@ def test_pruned81_offline_validation_can_compile_outside_the_training_guard(
 
     assert _O61._offline_validation_metrics(object(), [], _O61.proxy_config()) == {"nll": 1.0}
     assert calls == ["default"]
+
+
+def test_pruned81_checkpoint_gather_uses_the_cpu_object_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    object_group = object()
+    context = _O61.DistributedContext(0, 0, 1, torch.device("cpu"), object_group)
+    local_state = {"rank": 0, "loader": {"next_batch": 1}}
+
+    def gather_object(value: object, gathered: list[object], *, dst: int, group: object) -> None:
+        assert value is local_state
+        assert dst == 0
+        assert group is object_group
+        gathered[0] = value
+
+    monkeypatch.setattr(_O61.dist, "gather_object", gather_object)
+
+    assert _O61.gather_rank_checkpoint_states(local_state, context) == (local_state,)
+
+
+def test_pruned81_local_closed_loop_evaluation_uses_the_milestone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], *, check: bool, env: dict[str, str]) -> None:
+        assert check
+        assert env["CUDA_VISIBLE_DEVICES"] == "0"
+        commands.append(command)
+
+    monkeypatch.delenv("HAL_MODAL_EVAL_FD", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("HAL_LOCAL_CLOSED_LOOP_EVAL", "1")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setattr(_O61.subprocess, "run", run)
+
+    result = _O61.spawn_closed_loop_evaluation("pruned81-run", 16_384, "b" * 64, 96)
+
+    assert result == "local-eval-step-0016384"
+    assert len(commands) == 1
+    assert "061_pruned81_action_sequence.py" in commands[0][1]
+    assert commands[0][4] == "checkpoints/step-0016384.pt"
