@@ -43,3 +43,8 @@ local batch is 512, with two 256-sample microbatches, 131,072 replay slots, and
 and 232-update minimum replay gap unchanged. Checkpoint format version 2 rejects
 the earlier two-rank checkpoints because their world size and partition identity
 cannot satisfy exact resume.
+
+The first one-GPU launches reached the initial accumulated update, then PyTorch
+failed inside its DDP reducer with `expect_autograd_hooks_`. A one-rank job has
+no gradients to synchronize, so proxy training now keeps the compiled training
+owner unwrapped. Multi-rank production training still uses DDP.

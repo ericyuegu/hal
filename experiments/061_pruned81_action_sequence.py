@@ -3713,9 +3713,11 @@ def wrap_training_owner(
     distributed: DistributedContext,
     trunk_fn: Callable,
     temporal_fn: Callable,
-) -> DistributedDataParallel:
+) -> _TrainingOwner | DistributedDataParallel:
     """Wrap the owner after its inner trunk and decoder functions are compiled."""
     owner = _TrainingOwner(model, cfg, trunk_fn, temporal_fn)
+    if distributed.world_size == 1:
+        return owner
     device_ids = [distributed.local_rank] if distributed.device.type == "cuda" else None
     output_device = distributed.local_rank if distributed.device.type == "cuda" else None
     return DistributedDataParallel(
@@ -3806,7 +3808,7 @@ class _TrainingMetricAccumulator:
 
 def train_step(
     model: ActionSequenceTransformer,
-    training_owner: DistributedDataParallel,
+    training_owner: _TrainingOwner | DistributedDataParallel,
     batch: ReturnBatch,
     cfg: TrainConfig,
     *,
@@ -3834,7 +3836,11 @@ def train_step(
     additive_metrics = {"train/loss", "train/near_loss", "train/far_nll", "train/objective"}
     for index, start in enumerate(range(0, cfg.local_batch_size, cfg.microbatch_size)):
         stop = start + cfg.microbatch_size
-        sync = contextlib.nullcontext() if index + 1 == microbatches else training_owner.no_sync()
+        if cfg.world_size == 1 or index + 1 == microbatches:
+            sync = contextlib.nullcontext()
+        else:
+            assert isinstance(training_owner, DistributedDataParallel)
+            sync = training_owner.no_sync()
         with sync:
             loss, batch_nll, batch_metrics = training_owner(
                 batch.row_slice(start, stop),

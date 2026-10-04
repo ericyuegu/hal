@@ -99,6 +99,17 @@ def test_proxy_cli_applies_the_one_gpu_geometry(monkeypatch: pytest.MonkeyPatch)
     assert captured == [_O61.proxy_config()]
 
 
+def test_one_rank_proxy_does_not_wrap_the_training_owner_with_ddp() -> None:
+    cfg = _O61.proxy_config()
+    model = torch.nn.Linear(1, 1)
+    distributed = _O61.DistributedContext(0, 0, 1, torch.device("cpu"))
+
+    owner = _O61.wrap_training_owner(model, cfg, distributed, lambda: None, lambda: None)
+
+    assert isinstance(owner, _O61._TrainingOwner)
+    assert owner.model is model
+
+
 def test_pruned81_checkpoint_rejects_the_legacy_layout() -> None:
     values = _O61._checkpoint_config(_O61.TrainConfig())
     values["architecture"]["main_stick_layout"] = "legacy65"

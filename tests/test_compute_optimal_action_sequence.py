@@ -215,6 +215,17 @@ def test_compile_warmup_uses_the_training_microbatch(monkeypatch: pytest.MonkeyP
     }
 
 
+def test_one_rank_proxy_does_not_wrap_the_training_owner_with_ddp() -> None:
+    cfg = _MODULE.proxy_config()
+    model = torch.nn.Linear(1, 1)
+    distributed = _MODULE.DistributedContext(0, 0, 1, torch.device("cpu"))
+
+    owner = _MODULE.wrap_training_owner(model, cfg, distributed, lambda: None, lambda: None)
+
+    assert isinstance(owner, _MODULE._TrainingOwner)
+    assert owner.model is model
+
+
 def test_offline_validation_can_compile_outside_the_training_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     active = False
     calls: list[str] = []
