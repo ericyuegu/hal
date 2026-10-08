@@ -51,6 +51,8 @@ analysis = [
     "pandas",
 ]
 dev = [
+    "cairosvg>=2.9.1",
+    "imageio-ffmpeg>=0.6.0",
     "pre-commit",
     "pytest",
     "ruff",
