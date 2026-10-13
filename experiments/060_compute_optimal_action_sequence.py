@@ -252,6 +252,8 @@ PROXY_UPDATES: Final[int] = 16_384
 PROXY_DECAY_START_UPDATE: Final[int] = 12_288
 PROXY_COOLDOWN_UPDATES: Final[int] = 4_096
 PROXY_SOURCE_NAMES: Final[tuple[str, ...]] = ("ranked-anonymized-1-policy-world-v8",)
+# ranked-anonymized-1's validation split yields 1,189 windows.
+PROXY_VAL_SAMPLES: Final[int] = 1_024
 
 
 RETURN_HORIZON: Final[int] = 60
@@ -863,13 +865,17 @@ def validate_config(cfg: TrainConfig) -> None:
             raise ValueError("microbatch_size must be 128 or 256 and divide the local batch")
         if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
             raise ValueError("O60 production requires all 44 policy-world-v8 sources")
-    elif (cfg.world_size, cfg.local_batch_size, cfg.microbatch_size, tuple(cfg.source_names)) != (
+    elif (cfg.world_size, cfg.local_batch_size, cfg.microbatch_size, tuple(cfg.source_names), cfg.val_n_samples) != (
         1,
         512,
         512,
         PROXY_SOURCE_NAMES,
+        PROXY_VAL_SAMPLES,
     ):
-        raise ValueError("the O60 proxy freezes one rank, batch 512 without accumulation, and ranked-anonymized-1")
+        raise ValueError(
+            "the O60 proxy freezes one rank, batch 512 without accumulation, ranked-anonymized-1, "
+            "and 1,024 validation windows"
+        )
     if cfg.num_workers != 12 or cfg.replay_slots != 65_536:
         raise ValueError("each O60 rank requires 12 workers and 65,536 replay slots")
     positive = {
@@ -1058,6 +1064,7 @@ def proxy_config(*, state_prediction: bool = True) -> TrainConfig:
         local_batch_size=512,
         microbatch_size=512,
         source_names=PROXY_SOURCE_NAMES,
+        val_n_samples=PROXY_VAL_SAMPLES,
         target_positions=PROXY_TARGET_POSITIONS,
         stable_updates=PROXY_DECAY_START_UPDATE,
         decay_start_update=PROXY_DECAY_START_UPDATE,
@@ -5243,6 +5250,7 @@ def main(args: Command) -> None:
             local_batch_size=proxy.local_batch_size,
             microbatch_size=proxy.microbatch_size,
             source_names=proxy.source_names,
+            val_n_samples=proxy.val_n_samples,
             target_positions=proxy.target_positions,
             stable_updates=proxy.stable_updates,
             decay_start_update=proxy.decay_start_update,

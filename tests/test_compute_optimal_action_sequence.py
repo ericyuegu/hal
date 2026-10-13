@@ -65,6 +65,7 @@ def test_proxy_arms_differ_only_by_the_state_head() -> None:
     assert (state.arch.d_model, state.arch.n_layers, state.arch.temporal_layers) == (512, 6, 8)
     assert (state.world_size, state.local_batch_size, state.microbatch_size, state.batch_size) == (1, 512, 512, 512)
     assert state.source_names == ("ranked-anonymized-1-policy-world-v8",)
+    assert state.val_n_samples == 1_024
     assert state.target_positions == 2**28
     assert state.max_steps == 16_384
     assert state.minimum_replay_gap_batches == 104
@@ -93,6 +94,8 @@ def test_proxy_schedule_decays_over_the_last_quarter() -> None:
         _MODULE.validate_config(replace(cfg, decay_start_update=None, decay_duration=None))
     with pytest.raises(ValueError, match="one rank, batch 512"):
         _MODULE.validate_config(replace(cfg, microbatch_size=256))
+    with pytest.raises(ValueError, match="1,024 validation windows"):
+        _MODULE.validate_config(replace(cfg, val_n_samples=2_048))
     with pytest.raises(ValueError, match="one rank, batch 512"):
         _MODULE.validate_config(replace(cfg, source_names=_MODULE.TrainConfig().source_names))
 
