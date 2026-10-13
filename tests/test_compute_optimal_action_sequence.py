@@ -636,3 +636,13 @@ def test_warmup_prefixes_share_the_sampler_layout() -> None:
         suffix_start=cfg.arch.direct_loss_start,
     )
     assert (warmup.shape, warmup.stride(), warmup.dtype) == (sampled.shape, sampled.stride(), sampled.dtype)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="dense validation attention compiles only on CUDA")
+def test_validation_compiles_inside_the_training_recompile_guard() -> None:
+    cfg = _small_config()
+    model = _MODULE.make_model(cfg).cuda()
+    batch = _MODULE.synthetic_awr_batch(cfg, torch.device("cuda"))
+    with torch.compiler.set_stance("fail_on_recompile"):
+        metrics = _MODULE.validation_wandb_metrics(model, [batch], cfg)
+    assert "executed_nll" in metrics

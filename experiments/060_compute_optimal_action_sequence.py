@@ -2281,6 +2281,18 @@ def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dic
     }
 
 
+def validation_wandb_metrics(
+    model: ActionStateSequenceTransformer, batches: list[ReturnBatch], cfg: TrainConfig
+) -> dict[str, float]:
+    """Validate outside the training recompile guard.
+
+    Dense validation attention compiles its own graphs on first use. The guard
+    exists to catch recompiles of the training graphs, not these.
+    """
+    with torch.compiler.set_stance("default"):
+        return _validation_wandb_metrics(val_metrics(model, batches, cfg), cfg)
+
+
 def _slice_train_batch(batch: TrainBatch, rows: int) -> TrainBatch:
     if rows < 1 or rows > batch.context.batch:
         raise ValueError(f"cannot take {rows} rows from a batch of {batch.context.batch}")
@@ -4351,7 +4363,7 @@ def _finalize_training(
                 uploader.upload(snapshot, key=final_path.name)
 
             checkpoint_sha = checkpoint_sha256(final_path)
-            validation = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
+            validation = validation_wandb_metrics(model, val_cache, cfg)
             final_metrics = {f"val/{name}": value for name, value in validation.items()}
             if not smoke and not defer_gameplay_evaluations:
                 if uploader is None:
@@ -4874,7 +4886,7 @@ def train(
                     try:
                         boundary_metrics: dict[str, float] = {}
                         if val_due:
-                            values = _validation_wandb_metrics(val_metrics(model, val_cache, cfg), cfg)
+                            values = validation_wandb_metrics(model, val_cache, cfg)
                             boundary_metrics.update({f"val/{name}": value for name, value in values.items()})
                         if eval_due:
                             assert checkpoint_path is not None
