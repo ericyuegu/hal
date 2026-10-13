@@ -147,6 +147,7 @@ from hal.eval.scheduling import FrameTiming
 from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.benchmark import DecodeTelemetry
+from hal.inference.warmup import canonical_context
 from hal.inference.warmup import synthetic_context as build_synthetic_context
 from hal.inference.window_policy import DecodedPlan
 from hal.inference.window_policy import DenseWindowPredictionPolicy
@@ -1094,12 +1095,14 @@ def synthetic_context(cfg: TrainConfig, batch_size: int, device: torch.device) -
         device,
         items=True,
     )
-    return Context(
-        features={
-            **context.features,
-            "ego_player_id": torch.zeros(batch_size, cfg.arch.L_ctx, dtype=torch.long, device=device),
-        },
-        ctx_pad=context.ctx_pad,
+    return canonical_context(
+        Context(
+            features={
+                **context.features,
+                "ego_player_id": torch.zeros(batch_size, cfg.arch.L_ctx, dtype=torch.long, device=device),
+            },
+            ctx_pad=context.ctx_pad,
+        )
     )
 
 
@@ -1714,7 +1717,7 @@ def collate_awr_batch(
         stats,
     )
     return ReturnBatch(
-        batch=batch,
+        batch=replace(batch, context=canonical_context(batch.context)),
         returns=torch.from_numpy(np.ascontiguousarray(returns)),
         eligible=torch.from_numpy(np.ascontiguousarray(eligible)).bool(),
         future_return=torch.from_numpy(np.stack([window["ego_return60"][:L_ctx] for window in windows])),
@@ -3600,7 +3603,9 @@ def _collate_o60_batch(
         extra=ITEM_PLAYER_COLUMNS,
         projection=projection,
     )
-    batch = TrainBatch(batch.context, batch.target, replay_ids)
+    # preprocess emits a mask only when a batch has a missing value; compiled
+    # graphs need every mask key, and the model reads an absent mask as zeros.
+    batch = TrainBatch(canonical_context(batch.context), batch.target, replay_ids)
     next_frames = slice(1, context_length + 1)
     returns = columns[return_column][:, next_frames]
     eligible = columns[return_valid_column][:, next_frames]
@@ -4410,6 +4415,19 @@ def write_smoke_qualification(
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 
 
+def synthetic_prefix_positions(cfg: TrainConfig, device: torch.device) -> Tensor:
+    """Return warmup prefixes with PrefixSampler's contiguous layout, so compiled guards match."""
+    return (
+        torch.arange(
+            cfg.arch.direct_loss_start,
+            cfg.arch.direct_loss_start + POLICY_PREFIXES_PER_WINDOW,
+            device=device,
+        )
+        .expand(cfg.local_batch_size, -1)
+        .contiguous()
+    )
+
+
 def _compile_synthetic_forward_backward(
     model: ActionStateSequenceTransformer,
     cfg: TrainConfig,
@@ -4444,11 +4462,7 @@ def _compile_synthetic_forward_backward(
                 torch.compiler.cudagraph_mark_step_begin()
             batch = synthetic_awr_batch(cfg, torch.device(DEVICE))
             valid_prefixes = cfg.local_batch_size * POLICY_PREFIXES_PER_WINDOW
-            prefix_positions = torch.arange(
-                cfg.arch.direct_loss_start,
-                cfg.arch.direct_loss_start + POLICY_PREFIXES_PER_WINDOW,
-                device=DEVICE,
-            ).expand(cfg.local_batch_size, -1)
+            prefix_positions = synthetic_prefix_positions(cfg, torch.device(DEVICE))
             loss, _nll, _metrics = microbatch_loss(
                 model,
                 batch,

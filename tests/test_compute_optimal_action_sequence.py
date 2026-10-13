@@ -590,3 +590,40 @@ def test_evaluation_executes_offsets_after_a_21_frame_delay() -> None:
         values[f"rollout_nll_o23_{name}"] = 0.0
         values[f"exposure_gap_o23_{name}"] = 0.0
     assert _MODULE._validation_wandb_metrics(values, cfg)["executed_nll"] == 22.5
+
+
+def test_training_batches_keep_the_compiled_feature_keys_without_missing_values() -> None:
+    cfg = _MODULE.proxy_config()
+    synthetic = _MODULE.synthetic_context(cfg, 2, torch.device("cpu"))
+    full_context = _MODULE.synthetic_context(replace(cfg, arch=replace(cfg.arch, L_ctx=286)), 2, torch.device("cpu"))
+    columns = {name: value.numpy() for name, value in full_context.features.items() if not name.endswith("_mask")}
+    columns["ctx_pad"] = np.zeros(2, dtype=np.int64)
+    for name in ("ego_awr_return", "ego_return60"):
+        columns[name] = np.zeros((2, 286), dtype=np.float32)
+        columns[f"{name}_valid"] = np.ones((2, 286), dtype=bool)
+    for player in ("ego", "opp"):
+        columns[f"{player}_direction"][:] = 1
+    stats = {consolidate_key(name): FeatureStats(mean=0, std=1, min=-1, max=1) for name in columns}
+    training = _MODULE._collate_o60_batch(
+        ("left", "right"),
+        columns,
+        stats=stats,
+        projection=_MODULE.ITEM_PLAYER_PROJECTION,
+        context_length=256,
+        return_column="ego_awr_return",
+        return_valid_column="ego_awr_return_valid",
+    )
+    # A batch without missing values must match the warmup graph's keys and order.
+    assert list(training.context.features) == list(synthetic.features)
+    assert not training.context.features["ego_direction_mask"].any()
+
+
+def test_warmup_prefixes_share_the_sampler_layout() -> None:
+    cfg = _MODULE.proxy_config()
+    warmup = _MODULE.synthetic_prefix_positions(cfg, torch.device("cpu"))
+    sampled = _MODULE.PrefixSampler(0, "cpu").sample(
+        torch.zeros(cfg.local_batch_size, dtype=torch.long),
+        length=cfg.arch.L_ctx,
+        suffix_start=cfg.arch.direct_loss_start,
+    )
+    assert (warmup.shape, warmup.stride(), warmup.dtype) == (sampled.shape, sampled.stride(), sampled.dtype)
