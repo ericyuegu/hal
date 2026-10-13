@@ -42,9 +42,13 @@ write_state = _MODULE.write_state
 EXPERIMENT = "experiments/059_muon_action_sequence.py"
 
 
-def test_evaluation_experiment_recognizes_only_maintained_program() -> None:
+def test_evaluation_experiment_recognizes_only_maintained_programs() -> None:
+    o60 = "experiments/060_compute_optimal_action_sequence.py"
     assert evaluation_experiment(("uv", "run", EXPERIMENT, "train")) == EXPERIMENT
+    assert evaluation_experiment(("env", "RANK=0", "uv", "run", o60, "train")) == o60
     assert evaluation_experiment(("uv", "run", "archive/experiments/059_muon_action_sequence.py")) is None
+    with pytest.raises(ValueError, match="more than one"):
+        evaluation_experiment(("uv", "run", EXPERIMENT, o60))
 
 
 def test_defaults_request_b200_with_burst_resources_and_ephemeral_ssd() -> None:

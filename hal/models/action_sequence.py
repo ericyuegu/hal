@@ -734,6 +734,7 @@ class CausalTemporalDecoder(nn.Module):
         dict[str, Tensor],
         tuple[Tensor, Tensor, Tensor],
         dict[str, tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
+        Tensor,
     ]:
         """Return group logits and tensors at the action projection boundaries."""
         states = self.teacher_forced_states(
@@ -775,7 +776,7 @@ class CausalTemporalDecoder(nn.Module):
             raise RuntimeError("button head was not evaluated")
         button_mask = self.codec.button_mask(targets[..., TRIGGERS_GROUP])
         logits["buttons"] = logits["buttons"].masked_fill(button_mask, float("-inf"))
-        return logits, (*button_values, button_mask), projection_values
+        return logits, (*button_values, button_mask), projection_values, states
 
     def teacher_forced_logits_by_group(
         self,
@@ -787,10 +788,26 @@ class CausalTemporalDecoder(nn.Module):
         return_value: Tensor,
         condition_present: Tensor,
     ) -> dict[str, Tensor]:
-        logits, _button_values, _projection_values = self._teacher_forced_outputs(
+        logits, _button_values, _projection_values, _states = self._teacher_forced_outputs(
             hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
         return logits
+
+    def teacher_forced_logits_with_states(
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+    ) -> tuple[dict[str, Tensor], Tensor]:
+        """Return action logits and the decoder features from the same pass."""
+        logits, _button_values, _projection_values, states = self._teacher_forced_outputs(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
+        )
+        return logits, states
 
     @staticmethod
     def nll_from_logits(logits: dict[str, Tensor], targets: Tensor) -> Tensor:
@@ -830,14 +847,30 @@ class CausalTemporalDecoder(nn.Module):
         condition_present: Tensor,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Return NLL plus a compact button-boundary stability signal."""
-        logits, button_values, projection_values = self._teacher_forced_outputs(
+        nll, metrics, _states = self.teacher_forced_nll_with_states(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
+        )
+        return nll, metrics
+
+    def teacher_forced_nll_with_states(
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor], Tensor]:
+        """Expose decoder features for auxiliary heads without a second decode."""
+        logits, button_values, projection_values, states = self._teacher_forced_outputs(
             hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
         )
         metrics = self._button_metrics(*button_values, targets)
         if self.training_diagnostics:
             for name, values in projection_values.items():
                 metrics.update(self._group_metrics(name, values, logits[name]))
-        return self.nll_from_logits(logits, targets), metrics
+        return self.nll_from_logits(logits, targets), metrics, states
 
     @staticmethod
     def _button_metrics(

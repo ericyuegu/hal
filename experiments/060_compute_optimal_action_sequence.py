@@ -2,14 +2,29 @@
 
 This experiment trains AWR over the complete policy-world corpus. A learned
 value head estimates the return from each trunk state, and the detached
-``G_{t+1} - V(s_t)`` advantage weights the policy objective. It includes the
-schema-v6 projectile block (``item{0..3}_*``) in every observation.
+``G_{t+1} - V(s_t)`` advantage weights the policy objective at all 30 offsets.
+It includes the schema-v6 projectile block (``item{0..3}_*``) in every
+observation.
 
 This file is deliberately standalone. It retains the O41 detached-value light
 AWR and O49 ego-identity contracts without importing another experiment. The
 temporal decoder uses 4x MLP expansion and matched nonlinear decoder and
 trunk-skip logit heads. Return conditioning is absent; return targets are used
 only by the critic and AWR objective.
+
+A joint state head predicts, for both players at each controller offset, the
+change in x, y, percent, and shield from the prefix frame; facing; airborne; and
+one of 512 animation-action ids. Targets use the same stored replay frame as
+the controller target, not an additional next-frame shift. Changes are in
+corpus standard deviations and use a Gaussian NLL with a learned scale per
+offset, player, and field; a change that crosses a stock loss is excluded.
+Facing and airborne use binary cross-entropy, and action uses categorical
+cross-entropy. The six field terms have equal coefficients and are not
+advantage-weighted. Missing fields are excluded. Future states never enter the
+observation or decoder inputs. Supplied or sampled controller chunks can
+be scored with ``predict_chunk_states``; gameplay still executes controllers.
+The prior training schedule remains fixed as an experimental invariant. Its
+action-only scaling fit is not an optimum established for this joint objective.
 
 The four item slots are ordered by ascending spawn id, so a slot keeps its item
 until an OLDER item despawns and the remaining items shift down. A pooled set
@@ -23,22 +38,30 @@ loss coefficients. The policy samples 32 suffix prefixes per replay window, so
 scaling-law data D counts those 32 positions. The critic and AWR normalizer still
 use all 128 suffix prefixes and are accounted for separately in training FLOPs.
 
-Two parameter-matched proxy arms test the depth allocation before production:
-the prior 15M shape uses a 16-layer trunk and 4-layer 128-wide decoder; the
-treatment uses a 6-layer trunk and 8-layer 256-wide decoder. All other experiment
-inputs stay fixed. Gameplay evaluation selects between the proxy arms; offline
-validation metrics are diagnostic only.
+Two 50M proxy arms test the state head before production. Both use the
+production allocation at width 512: a 6-layer trunk and an 8-layer decoder. The
+``state`` arm trains the state head; the ``action_only`` arm omits it. Both arms
+share the action-path initialization, data order, and prefix draws. Each runs on
+one GPU with a batch of 512 windows and no gradient accumulation, reads only
+ranked-anonymized-1, trains on 2**28 policy positions (16,384 updates), and
+decays the learning rate over the last 4,096 updates. One rank at batch 512
+halves the replay ring's reuse gap to 104 batches. Gameplay evaluation selects
+between the proxy arms; offline validation metrics are diagnostic only.
 
-Training requires ``torchrun --standalone --nproc-per-node=2``. Each rank owns a
-disjoint half of every source, a local batch of 256, 65,536 replay slots, twelve
-loader workers, and independent checkpointed random streams. Rank zero alone
-writes checkpoints, validation, W&B, and R2 artifacts.
+Production training requires ``torchrun --standalone --nproc-per-node=2``. Each
+rank owns a disjoint half of every source, a local batch of 256, 65,536 replay
+slots, twelve loader workers, and independent checkpointed random streams. Rank
+zero alone writes checkpoints, validation, W&B, and R2 artifacts. A proxy runs
+as one rank, without torchrun, so a launcher's inherited descriptors reach it:
+``RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=29500``.
 
 Run:
     torchrun --standalone --nproc-per-node=2 \
         experiments/060_compute_optimal_action_sequence.py train
     torchrun --standalone --nproc-per-node=2 \
         experiments/060_compute_optimal_action_sequence.py train --resume <run>
+    env RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+        uv run experiments/060_compute_optimal_action_sequence.py train --proxy-arm state
     uv run experiments/060_compute_optimal_action_sequence.py eval --checkpoint runs/<run>/final.pt
 """
 
@@ -100,6 +123,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from hal import r2
 from hal import streams
 from hal.data.feature_stats import FeatureStats
+from hal.data.feature_stats import consolidate_key
 from hal.data.feature_stats import load_consolidated_mixture_stats
 from hal.data.player_identity import PlayerIdentitySidecar
 from hal.data.player_identity import ReplayPlayerLookup
@@ -134,6 +158,7 @@ from hal.models.action_sequence import SwiGLU
 from hal.models.action_sequence import activation_input_metrics
 from hal.models.action_sequence import activation_output_metrics
 from hal.models.action_sequence import decoder_rmsnorm
+from hal.models.action_sequence import mup_readout_std
 from hal.models.controller_codec import BUTTON_LEFT_CHANNEL
 from hal.models.controller_codec import BUTTON_RIGHT_CHANNEL
 from hal.models.controller_codec import BUTTONS_GROUP
@@ -148,6 +173,7 @@ from hal.representation.features import ITEM_PLAYER_COLUMNS
 from hal.representation.features import ITEM_PLAYER_PROJECTION
 from hal.representation.features import Context
 from hal.representation.features import FeatureProjection
+from hal.representation.features import mask_sentinel_positions
 from hal.representation.features import stack_actions
 from hal.representation.player_identity import MASKED_PLAYER_ID
 from hal.representation.player_identity import PlayerVocabulary
@@ -184,14 +210,33 @@ from hal.training.validation_replay_loader import make_validation_replay_loader
 from hal.wire import ACTION_DIM
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_EXPERIMENT_ID: Final[str] = "060_compute_optimal_action_sequence_v2"
-_CHECKPOINT_FORMAT_VERSION: Final[int] = 1
+_EXPERIMENT_ID: Final[str] = "060_compute_optimal_action_sequence_v3"
+_CHECKPOINT_FORMAT_VERSION: Final[int] = 2
 _DISTRIBUTED_CHECKPOINT_VERSION: Final[int] = 1
 _STARTUP_LOG_INTERVAL_S: Final[float] = 60.0
 POLICY_PREFIXES_PER_WINDOW: Final[int] = 32
+STATE_PLAYERS: Final[tuple[str, ...]] = ("ego", "opp")
+# Stored per player and frame. The first four are predicted as a change from the
+# prefix frame in units of the column's corpus standard deviation; stock only
+# masks changes that cross a stock loss.
+STATE_COLUMNS: Final[tuple[str, ...]] = (
+    "position_x",
+    "position_y",
+    "percent",
+    "shield",
+    "direction",
+    "airborne",
+    "action",
+    "stock",
+)
+STATE_CHANGE_FIELDS: Final[tuple[str, ...]] = STATE_COLUMNS[:4]
+STATE_FIELD_COUNT: Final[int] = 7
+STATE_ACTION_CLASSES: Final[int] = 512
+STATE_OUTPUTS_PER_PLAYER: Final[int] = len(STATE_CHANGE_FIELDS) + 2 + STATE_ACTION_CLASSES
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (1 / 30,) * 30
-COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_953_315_601
-FLOPS_PER_SUPERVISED_POSITION: Final[int] = 23_719_893_606
+SCHEDULE_REFERENCE_PARAMETERS: Final[int] = 3_953_315_601
+COMPUTE_EQUIVALENT_PARAMETERS: Final[int] = 3_989_158_041
+FLOPS_PER_SUPERVISED_POSITION: Final[int] = 23_934_948_246
 SCALING_FIT_A: Final[float] = 89.11185023618282
 SCALING_FIT_B: Final[float] = 2009.4388275435915
 SCALING_FIT_ALPHA: Final[float] = 0.3680109101792296
@@ -201,6 +246,12 @@ TARGET_POSITIONS: Final[int] = 11_710_496_768
 WARMUP_UPDATES: Final[int] = 4_096
 DECAY_START_UPDATE: Final[int] = 536_576
 COOLDOWN_UPDATES: Final[int] = 178_176
+PROXY_TARGET_POSITIONS: Final[int] = 2**28
+PROXY_UPDATES: Final[int] = 16_384
+# The last quarter decays, close to production's 178,176 / 714,752.
+PROXY_DECAY_START_UPDATE: Final[int] = 12_288
+PROXY_COOLDOWN_UPDATES: Final[int] = 4_096
+PROXY_SOURCE_NAMES: Final[tuple[str, ...]] = ("ranked-anonymized-1-policy-world-v8",)
 
 
 RETURN_HORIZON: Final[int] = 60
@@ -225,7 +276,7 @@ def fitted_optimal_positions(compute_equivalent_parameters: int) -> float:
     )
 
 
-FITTED_OPTIMAL_POSITIONS: Final[float] = fitted_optimal_positions(COMPUTE_EQUIVALENT_PARAMETERS)
+FITTED_OPTIMAL_POSITIONS: Final[float] = fitted_optimal_positions(SCHEDULE_REFERENCE_PARAMETERS)
 
 
 def checkpoint_rounded_updates(
@@ -267,7 +318,7 @@ def init_distributed(cfg: TrainConfig, *, backend: str | None = None) -> Distrib
     missing = [name for name in required if name not in os.environ]
     if missing:
         raise RuntimeError(
-            f"O60 training requires torchrun --standalone --nproc-per-node=2; missing {', '.join(missing)}"
+            f"O60 training requires torchrun or explicit single-rank variables; missing {', '.join(missing)}"
         )
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -407,6 +458,8 @@ class ReturnBatch:
     future_return: Tensor
     available: Tensor
     condition_present: Tensor
+    state_targets: Tensor  # [B, L_ctx + L_chunk, player, (x, y, facing class, action)]
+    state_valid: Tensor
 
     @property
     def context(self) -> Context:
@@ -424,6 +477,8 @@ class ReturnBatch:
             self.future_return.to(device, non_blocking=True),
             self.available.to(device, non_blocking=True),
             self.condition_present.to(device, non_blocking=True),
+            self.state_targets.to(device, non_blocking=True),
+            self.state_valid.to(device, non_blocking=True),
         )
 
     def pin_memory(self) -> ReturnBatch:
@@ -434,11 +489,21 @@ class ReturnBatch:
             self.future_return.pin_memory(),
             self.available.pin_memory(),
             self.condition_present.pin_memory(),
+            self.state_targets.pin_memory(),
+            self.state_valid.pin_memory(),
         )
 
     def record_stream(self, stream: torch.cuda.Stream) -> None:
         self.batch.record_stream(stream)
-        for tensor in (self.returns, self.eligible, self.future_return, self.available, self.condition_present):
+        for tensor in (
+            self.returns,
+            self.eligible,
+            self.future_return,
+            self.available,
+            self.condition_present,
+            self.state_targets,
+            self.state_valid,
+        ):
             tensor.record_stream(stream)
 
     def slice(self, count: int) -> ReturnBatch:
@@ -462,6 +527,8 @@ class ReturnBatch:
             self.future_return[rows],
             self.available[rows],
             self.condition_present[rows],
+            self.state_targets[rows],
+            self.state_valid[rows],
         )
 
 
@@ -541,62 +608,43 @@ class Architecture:
                 "value_head": 1_049_089,
                 "return_conditioner": 0,
                 "other": 1_230_790,
-                "total": 193_360_029,
+                "state_head": 1_194_748,
+                "total": 194_554_777,
             }
-        proxy_treatment = Architecture(
-            d_model=256,
-            n_layers=6,
-            n_heads=4,
-            sample_chunk_length=30,
-            head_offsets=tuple(range(1, 31)),
-            temporal_d_model=256,
-            temporal_layers=8,
-            temporal_heads=4,
-            temporal_ff_dim=1408,
-            group_head_dim=256,
-            value_hidden_dim=128,
-        )
-        if self == proxy_treatment:
+        if self == proxy_architecture():
             return {
-                "trunk": 4_718_592,
-                "temporal_decoder": 8_341_264,
-                "group_heads": 353_379,
-                "trunk_skip_heads": 353_379,
-                "value_head": 65_665,
+                "trunk": 18_874_368,
+                "temporal_decoder": 26_762_768,
+                "group_heads": 1_230_691,
+                "trunk_skip_heads": 1_230_691,
+                "value_head": 262_401,
                 "return_conditioner": 0,
-                "other": 861_382,
-                "total": 14_693_661,
-            }
-        proxy_control = Architecture(
-            d_model=256,
-            n_layers=16,
-            n_heads=4,
-            sample_chunk_length=30,
-            head_offsets=tuple(range(1, 31)),
-            temporal_d_model=128,
-            temporal_layers=4,
-            temporal_heads=2,
-            temporal_ff_dim=384,
-            group_head_dim=128,
-            value_hidden_dim=128,
-        )
-        if self == proxy_control:
-            return {
-                "trunk": 12_582_912,
-                "temporal_decoder": 867_216,
-                "group_heads": 111_331,
-                "trunk_skip_heads": 176_867,
-                "value_head": 65_665,
-                "return_conditioner": 0,
-                "other": 861_382,
-                "total": 14_665_373,
+                "other": 984_518,
+                "state_head": 664_316,
+                "total": 50_009_753,
             }
         raise ValueError(f"no parameter contract for architecture {self}")
+
+
+def proxy_architecture() -> Architecture:
+    """Return the 50M proxy: the production allocation at half width."""
+    return Architecture(
+        d_model=512,
+        n_layers=6,
+        n_heads=8,
+        temporal_d_model=512,
+        temporal_layers=8,
+        temporal_heads=8,
+        temporal_ff_dim=2048,
+        group_head_dim=512,
+        value_hidden_dim=256,
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class AWRCalibration:
     return_suffix: ClassVar[str] = "awr_return"
+    # Offsets 1..6 are reported separately; AWR weights every offset.
     near_offsets: ClassVar[int] = 6
     start_update: ClassVar[int] = 4097
 
@@ -639,15 +687,18 @@ class TrainConfig:
     replay_slots: ClassVar[int] = 65_536
     windows_per_generation: ClassVar[int] = 8
     replay_phase_block_batches: ClassVar[int] = 25
-    minimum_replay_gap_batches: ClassVar[int] = 232
     reserved_disk_bytes: ClassVar[int] = 256 * 2**30
     player_sidecar_remote: ClassVar[str] = "s3://hal/processed/player-identity-v1/professional-code-v1.jsonl.gz"
 
     arch: Annotated[Architecture, tyro.conf.Suppress] = Architecture()
     awr: Annotated[AWRCalibration, tyro.conf.Suppress] = AWRCalibration()
+    state_prediction: bool = True
+    state_loss_weight: float = 1.0
 
-    prediction_frames: int = 4
-    delay_frames: int = 2
+    # A 21-frame delay executes offsets 22 and 23, where the state head's effect
+    # on far-offset action prediction should matter most.
+    prediction_frames: int = 23
+    delay_frames: int = 21
     replan_interval_frames: int = 2
     inference_mode: str = "compiled"  # explicit "eager" is for debugging
     # Hardware-derived by default. An explicit power of two is a reproducibility
@@ -742,6 +793,11 @@ class TrainConfig:
         return self.batch_size * (self.arch.L_ctx - self.arch.direct_loss_start)
 
     @property
+    def minimum_replay_gap_batches(self) -> int:
+        """Return the ring's guaranteed reuse gap: 232 batches on two ranks, 104 on one."""
+        return self.replay_slots // self.local_batch_size - self.replay_phase_block_batches + 1
+
+    @property
     def minimum_replay_frames(self) -> int:
         return self.arch.L_ctx + self.arch.sample_chunk_length + self.windows_per_generation - 1
 
@@ -772,6 +828,8 @@ class TrainConfig:
 
 
 def validate_config(cfg: TrainConfig) -> None:
+    if not math.isfinite(cfg.state_loss_weight) or cfg.state_loss_weight <= 0:
+        raise ValueError("state_loss_weight must be finite and positive")
     if compute_flops_per_supervised_position(COMPUTE_EQUIVALENT_PARAMETERS) != FLOPS_PER_SUPERVISED_POSITION:
         raise RuntimeError("O60 compute accounting constants disagree")
     if (
@@ -792,17 +850,26 @@ def validate_config(cfg: TrainConfig) -> None:
     if cfg.train_compile_mode not in ("reduce-overhead", "max-autotune"):
         raise ValueError("unsupported training compile mode")
     production = Architecture()
-    proxies = (proxy_config().arch, proxy_control_config().arch)
-    if cfg.arch not in (production, *proxies):
-        raise ValueError("O60 architecture must be the production shape or one of its fixed proxy arms")
+    if cfg.arch not in (production, proxy_architecture()):
+        raise ValueError("O60 architecture must be the production shape or the fixed proxy shape")
     if cfg.batch_size != 512 or cfg.seed != 0:
         raise ValueError("O60 freezes the global batch at 512 and seed at zero")
-    if (cfg.world_size, cfg.local_batch_size) != (2, 256):
-        raise ValueError("O60 freezes two ranks with a local batch of 256")
     if cfg.batch_size != cfg.world_size * cfg.local_batch_size:
         raise ValueError("global batch must equal world_size * local_batch_size")
-    if cfg.microbatch_size not in (128, 256) or cfg.local_batch_size % cfg.microbatch_size:
-        raise ValueError("microbatch_size must be 128 or 256 and divide the local batch")
+    if cfg.arch == production:
+        if (cfg.world_size, cfg.local_batch_size) != (2, 256):
+            raise ValueError("O60 production freezes two ranks with a local batch of 256")
+        if cfg.microbatch_size not in (128, 256) or cfg.local_batch_size % cfg.microbatch_size:
+            raise ValueError("microbatch_size must be 128 or 256 and divide the local batch")
+        if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
+            raise ValueError("O60 production requires all 44 policy-world-v8 sources")
+    elif (cfg.world_size, cfg.local_batch_size, cfg.microbatch_size, tuple(cfg.source_names)) != (
+        1,
+        512,
+        512,
+        PROXY_SOURCE_NAMES,
+    ):
+        raise ValueError("the O60 proxy freezes one rank, batch 512 without accumulation, and ranked-anonymized-1")
     if cfg.num_workers != 12 or cfg.replay_slots != 65_536:
         raise ValueError("each O60 rank requires 12 workers and 65,536 replay slots")
     positive = {
@@ -852,8 +919,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O60 requires equal 1/30 offset loss coefficients")
     if cfg.arch == Architecture() and cfg.minimum_replay_frames != 293:
         raise ValueError("eight distinct O60 windows require at least 293 replay frames")
-    if (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) != (4, 2, 2):
-        raise ValueError("evaluation protocol is frozen to prediction=4, delay=2, replan=2")
+    if (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) != (23, 21, 2):
+        raise ValueError("evaluation protocol is frozen to prediction=23, delay=21, replan=2")
     if (cfg.eval_every, cfg.eval_n_matchups, cfg.final_eval_n_matchups) != (8192, 96, 96):
         raise ValueError("automatic evaluation is frozen to 96 matchups every 8,192 updates and at completion")
     if cfg.inference_mode not in ("compiled", "eager"):
@@ -925,8 +992,6 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(
             f"policy_world_schema_version {cfg.policy_world_schema_version} != {POLICY_WORLD_SCHEMA_VERSION}"
         )
-    if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
-        raise ValueError("O60 requires all 44 policy-world-v8 sources")
     if cfg.depth_alpha != 0.5 or cfg.hidden_std_multiplier != 0.5 or cfg.readout_init != "mup-normal":
         raise ValueError("O60 uses O50's selected depth and initialization parameterization")
     if (cfg.adam_beta1, cfg.adam_beta2, cfg.adam_eps) != (*cfg.base_adam_betas, cfg.base_adam_eps):
@@ -964,8 +1029,14 @@ def validate_config(cfg: TrainConfig) -> None:
         or cfg.decay_duration != COOLDOWN_UPDATES
     ):
         raise ValueError("O60 training boundaries are frozen")
-    if cfg.arch != Architecture() and (cfg.decay_start_update is not None or cfg.decay_duration is not None):
-        raise ValueError("the O60 proxy has no production cooldown")
+    if cfg.arch == proxy_architecture() and (
+        cfg.max_steps != PROXY_UPDATES
+        or cfg.target_positions != PROXY_TARGET_POSITIONS
+        or cfg.stable_updates != PROXY_DECAY_START_UPDATE
+        or cfg.decay_start_update != PROXY_DECAY_START_UPDATE
+        or cfg.decay_duration != PROXY_COOLDOWN_UPDATES
+    ):
+        raise ValueError("O60 proxy training boundaries are frozen")
     if any(
         value is not None
         for value in (
@@ -978,63 +1049,33 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O60 does not fork the schedule from a parent checkpoint")
 
 
-def proxy_config() -> TrainConfig:
-    """Return the 15M treatment proxy with a shallow trunk and deeper decoder."""
+def proxy_config(*, state_prediction: bool = True) -> TrainConfig:
+    """Return the single-GPU 50M proxy with the production cooldown fraction."""
     return TrainConfig(
-        arch=Architecture(
-            d_model=256,
-            n_layers=6,
-            n_heads=4,
-            sample_chunk_length=30,
-            head_offsets=tuple(range(1, 31)),
-            temporal_d_model=256,
-            temporal_layers=8,
-            temporal_heads=4,
-            temporal_ff_dim=1408,
-            group_head_dim=256,
-            value_hidden_dim=128,
-        ),
-        target_positions=TrainConfig.reference_positions,
-        stable_updates=TrainConfig.reference_positions // (512 * POLICY_PREFIXES_PER_WINDOW),
-        decay_start_update=None,
-        decay_duration=None,
+        arch=proxy_architecture(),
+        state_prediction=state_prediction,
+        world_size=1,
+        local_batch_size=512,
+        microbatch_size=512,
+        source_names=PROXY_SOURCE_NAMES,
+        target_positions=PROXY_TARGET_POSITIONS,
+        stable_updates=PROXY_DECAY_START_UPDATE,
+        decay_start_update=PROXY_DECAY_START_UPDATE,
+        decay_duration=PROXY_COOLDOWN_UPDATES,
     )
 
 
-def proxy_control_config() -> TrainConfig:
-    """Return the prior 15M allocation used as the proxy control."""
-    return TrainConfig(
-        arch=Architecture(
-            d_model=256,
-            n_layers=16,
-            n_heads=4,
-            sample_chunk_length=30,
-            head_offsets=tuple(range(1, 31)),
-            temporal_d_model=128,
-            temporal_layers=4,
-            temporal_heads=2,
-            temporal_ff_dim=384,
-            group_head_dim=128,
-            value_hidden_dim=128,
-        ),
-        target_positions=TrainConfig.reference_positions,
-        stable_updates=TrainConfig.reference_positions // (512 * POLICY_PREFIXES_PER_WINDOW),
-        decay_start_update=None,
-        decay_duration=None,
-    )
-
-
-ProxyArm = Literal["none", "control", "treatment"]
+ProxyArm = Literal["none", "state", "action_only"]
 
 
 def proxy_config_for_arm(arm: ProxyArm) -> TrainConfig:
     """Resolve a command-line proxy arm without an implicit fallback."""
     if arm == "none":
         return TrainConfig()
-    if arm == "control":
-        return proxy_control_config()
-    if arm == "treatment":
-        return proxy_config()
+    if arm == "state":
+        return proxy_config(state_prediction=True)
+    if arm == "action_only":
+        return proxy_config(state_prediction=False)
     raise ValueError(f"unknown proxy arm {arm!r}")
 
 
@@ -1068,6 +1109,21 @@ def synthetic_awr_batch(cfg: TrainConfig, device: torch.device) -> ReturnBatch:
         returns.clone(),
         eligible.clone(),
         eligible.clone(),
+        torch.zeros(
+            cfg.local_batch_size,
+            cfg.arch.L_ctx + cfg.arch.sample_chunk_length,
+            len(STATE_PLAYERS),
+            len(STATE_COLUMNS),
+            device=device,
+        ),
+        torch.ones(
+            cfg.local_batch_size,
+            cfg.arch.L_ctx + cfg.arch.sample_chunk_length,
+            len(STATE_PLAYERS),
+            len(STATE_COLUMNS),
+            dtype=torch.bool,
+            device=device,
+        ),
     )
 
 
@@ -1112,12 +1168,100 @@ def model_config(cfg: TrainConfig) -> ActionSequenceConfig:
     )
 
 
-def make_model(cfg: TrainConfig, vocabulary: PlayerVocabulary | None = None) -> ActionSequenceTransformer:
-    return ActionSequenceTransformer(
+class StateHead(nn.Module):
+    """Predict both players' future state from one decoder feature."""
+
+    def __init__(self, in_features: int, n_offsets: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, len(STATE_PLAYERS) * STATE_OUTPUTS_PER_PLAYER)
+        # A Gaussian log scale per offset, player, and change field puts the
+        # continuous terms in nats, on the same footing as the categorical terms.
+        self.log_scale = nn.Parameter(torch.zeros(n_offsets, len(STATE_PLAYERS), len(STATE_CHANGE_FIELDS)))
+        nn.init.normal_(self.linear.weight, std=mup_readout_std(in_features, 128))
+        nn.init.zeros_(self.linear.bias)
+
+    def forward(self, features: Tensor) -> Tensor:
+        return self.linear(features).view(*features.shape[:-1], len(STATE_PLAYERS), STATE_OUTPUTS_PER_PLAYER)
+
+
+class ActionStateSequenceTransformer(ActionSequenceTransformer):
+    def __init__(
+        self,
+        cfg: ActionSequenceConfig,
+        vocabulary: PlayerVocabulary | None,
+        *,
+        live_horizons: tuple[int, ...],
+        training_diagnostics: bool,
+        state_prediction: bool,
+    ) -> None:
+        super().__init__(cfg, vocabulary, live_horizons=live_horizons, training_diagnostics=training_diagnostics)
+        # Built after the base model, so both proxy arms share the action-path initialization.
+        self.state_head = (
+            StateHead(cfg.temporal_d_model + CONTROLLER_GROUP_COUNT * cfg.action_embed_dim, len(cfg.head_offsets))
+            if state_prediction
+            else None
+        )
+
+    def state_predictions(self, states: Tensor, actions: Tensor) -> Tensor:
+        if self.state_head is None:
+            raise RuntimeError("this model has no state head")
+        return self.state_head(torch.cat((states, self.codec.embed_frame(actions)), dim=-1))
+
+    def joint_teacher_forced_nll(
+        self,
+        hidden: Tensor,
+        ctx_pad: Tensor,
+        prefix_positions: Tensor,
+        observed: Tensor,
+        targets: Tensor,
+        return_value: Tensor,
+        condition_present: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor], Tensor | None]:
+        nll, metrics, states = self.temporal.teacher_forced_nll_with_states(
+            hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present
+        )
+        if self.state_head is None:
+            return nll, metrics, None
+        return nll, metrics, self.state_predictions(states, targets)
+
+    def predict_chunk_states(
+        self,
+        context: Context,
+        actions: Tensor,
+    ) -> Tensor:
+        """Predict states for a supplied quantized controller chunk, without future observations.
+
+        Columns are the changes in x, y, percent, and shield from the last context
+        frame in corpus standard deviations, then facing (-1, +1), airborne (0, 1),
+        and animation-action id. Each state uses its controller action's frame.
+        """
+        hidden = self(context.features, context.ctx_pad)
+        positions = torch.full((hidden.shape[0], 1), hidden.shape[1] - 1, device=hidden.device)
+        observed = self.codec.quantize(stack_actions(context.features))[:, -1:]
+        zero = torch.zeros_like(positions, dtype=hidden.dtype)
+        states = self.temporal.teacher_forced_states(
+            hidden, context.ctx_pad, positions, observed, actions[:, None], zero, zero.bool()
+        )
+        prediction = self.state_predictions(states, actions[:, None])[:, 0].float()
+        changes = len(STATE_CHANGE_FIELDS)
+        return torch.cat(
+            (
+                prediction[..., :changes],
+                torch.where(prediction[..., changes] > 0, 1.0, -1.0)[..., None],
+                (prediction[..., changes + 1] > 0).float()[..., None],
+                prediction[..., changes + 2 :].argmax(-1)[..., None].float(),
+            ),
+            dim=-1,
+        )
+
+
+def make_model(cfg: TrainConfig, vocabulary: PlayerVocabulary | None = None) -> ActionStateSequenceTransformer:
+    return ActionStateSequenceTransformer(
         model_config(cfg),
         vocabulary,
         live_horizons=(cfg.prediction_frames,),
         training_diagnostics=cfg.optimizer == "adamw",
+        state_prediction=cfg.state_prediction,
     )
 
 
@@ -1253,7 +1397,7 @@ class PrefixSampler:
 
 @jaxtyped(typechecker=beartype)
 def prepared_targets(
-    model: ActionSequenceTransformer, batch: TrainBatch | ReturnBatch
+    model: ActionStateSequenceTransformer, batch: TrainBatch | ReturnBatch
 ) -> tuple[
     Int[Tensor, "B L_ctx n_groups"],
     Int[Tensor, "B L_ctx n_offsets n_groups"],
@@ -1425,12 +1569,143 @@ class _UpdateTimer:
         return mean, p95
 
 
-def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> ReturnBatch:
+def future_state_labels(
+    columns: Mapping[str, np.ndarray],
+    stats: dict[str, FeatureStats],
+) -> tuple[Tensor, Tensor]:
+    """Return stored state columns ``[B, T, player, STATE_COLUMNS]`` and their masks."""
+    targets: list[Tensor] = []
+    masks: list[Tensor] = []
+    for player in STATE_PLAYERS:
+        values: list[np.ndarray] = []
+        valid_fields: list[np.ndarray] = []
+        for name in STATE_COLUMNS:
+            column = f"{player}_{name}"
+            raw = np.asarray(columns[column])
+            valid = ~mask_sentinel_positions(raw)
+            observed = raw[valid]
+            if name in STATE_CHANGE_FIELDS:
+                std = stats[consolidate_key(column)].std
+                if not math.isfinite(std) or std <= 0:
+                    raise ValueError(f"{column} needs a finite positive corpus standard deviation")
+                value = raw / std
+            elif name == "direction":
+                if not np.isin(observed, (-1.0, 1.0)).all():
+                    raise ValueError(f"{column} contains unsupported facing values")
+                value = raw > 0
+            elif name == "airborne":
+                if not np.isin(observed, (0, 1)).all():
+                    raise ValueError(f"{column} contains unsupported airborne values")
+                value = raw
+            else:
+                if raw.dtype.kind not in ("i", "u"):
+                    raise ValueError(f"{column} must contain integer ids")
+                limit = STATE_ACTION_CLASSES if name == "action" else 256
+                if ((observed < 0) | (observed >= limit)).any():
+                    raise ValueError(f"{column} contains unsupported {name} values")
+                value = raw
+            value = np.where(valid, value, 0).astype(np.float32)
+            if not np.isfinite(value).all():
+                raise ValueError(f"{column} contains non-finite state targets")
+            values.append(value)
+            valid_fields.append(valid)
+        targets.append(torch.from_numpy(np.stack(values, axis=-1)))
+        masks.append(torch.from_numpy(np.stack(valid_fields, axis=-1)))
+    return torch.stack(targets, dim=-2), torch.stack(masks, dim=-2)
+
+
+def aligned_state_targets(
+    batch: ReturnBatch,
+    prefix_positions: Tensor,
+    offsets: tuple[int, ...],
+) -> tuple[Tensor, Tensor]:
+    """Return ``[B, P, n_offsets, player, STATE_FIELD_COUNT]`` targets for each prefix."""
+    frames = prefix_positions[..., None] + torch.tensor(offsets, device=prefix_positions.device)
+    rows = torch.arange(frames.shape[0], device=frames.device)[:, None, None]
+    future = batch.state_targets[rows, frames]
+    future_valid = batch.state_valid[rows, frames]
+    current = batch.state_targets[rows[..., 0], prefix_positions][:, :, None]
+    current_valid = batch.state_valid[rows[..., 0], prefix_positions][:, :, None]
+    changes = len(STATE_CHANGE_FIELDS)
+    stock = STATE_COLUMNS.index("stock")
+    same_life = (future[..., stock] == current[..., stock]) & future_valid[..., stock] & current_valid[..., stock]
+    targets = torch.cat((future[..., :changes] - current[..., :changes], future[..., changes:stock]), dim=-1)
+    valid = torch.cat(
+        (
+            future_valid[..., :changes] & current_valid[..., :changes] & same_life[..., None],
+            future_valid[..., changes:stock],
+        ),
+        dim=-1,
+    )
+    return targets, valid
+
+
+def state_objective(
+    prediction: Tensor,
+    targets: Tensor,
+    observed: Tensor,
+    log_scale: Tensor,
+    valid_prefixes: int,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    """Sum equal-weight field NLLs; missing fields contribute zero, and AWR does not apply.
+
+    Continuous changes use a Gaussian NLL without its constant ``log(2 pi) / 2``.
+    """
+    changes = len(STATE_CHANGE_FIELDS)
+    facing, airborne, action = changes, changes + 1, changes + 2
+    prediction = prediction.float()
+    safe_targets = targets.masked_fill(~observed, 0)
+    log_scale = log_scale.float()
+    standardized = (prediction[..., :changes] - safe_targets[..., :changes]) * torch.exp(-log_scale)
+    gaussian = (0.5 * standardized.square() + log_scale).masked_fill(~observed[..., :changes], 0)
+
+    def binary(index: int) -> Tensor:
+        loss = F.binary_cross_entropy_with_logits(prediction[..., index], safe_targets[..., index], reduction="none")
+        return loss.masked_fill(~observed[..., index], 0).sum()
+
+    action_loss = (
+        F.cross_entropy(
+            prediction[..., action:].reshape(-1, STATE_ACTION_CLASSES),
+            safe_targets[..., action].long().reshape(-1),
+            reduction="none",
+        )
+        .view_as(targets[..., action])
+        .masked_fill(~observed[..., action], 0)
+        .sum()
+    )
+    denominator = valid_prefixes * prediction.shape[2] * len(STATE_PLAYERS)
+    components = {
+        "state/position_nll": gaussian[..., :2].sum() / 2 / denominator,
+        "state/percent_nll": gaussian[..., 2].sum() / denominator,
+        "state/shield_nll": gaussian[..., 3].sum() / denominator,
+        "state/facing_nll": binary(facing) / denominator,
+        "state/airborne_nll": binary(airborne) / denominator,
+        "state/action_nll": action_loss / denominator,
+    }
+    loss = torch.stack(list(components.values())).sum()
+    return loss, {"state/loss": loss.detach(), **{name: value.detach() for name, value in components.items()}}
+
+
+def collate_awr_batch(
+    windows: list[dict],
+    batch: TrainBatch,
+    *,
+    L_ctx: int,
+    stats: dict[str, FeatureStats],
+) -> ReturnBatch:
     """Attach ``G_{t+1}`` and its validity mask to each context position."""
     next_frames = slice(1, L_ctx + 1)
     calibration = AWRCalibration()
     returns = np.stack([window[calibration.ego_return_column] for window in windows])[:, next_frames]
     eligible = np.stack([window[calibration.ego_return_valid_column] for window in windows])[:, next_frames]
+    state_targets, state_valid = future_state_labels(
+        {
+            f"{player}_{name}": np.stack([window[f"{player}_{name}"] for window in windows])
+            for player in STATE_PLAYERS
+            for name in STATE_COLUMNS
+        },
+        stats,
+    )
     return ReturnBatch(
         batch=batch,
         returns=torch.from_numpy(np.ascontiguousarray(returns)),
@@ -1440,6 +1715,8 @@ def collate_awr_batch(windows: list[dict], batch: TrainBatch, *, L_ctx: int) -> 
         condition_present=torch.from_numpy(
             np.stack([window["ego_return60_valid"][:L_ctx] for window in windows])
         ).bool(),
+        state_targets=state_targets,
+        state_valid=state_valid,
     )
 
 
@@ -1566,11 +1843,10 @@ def temporal_objective_parts(
         raise ValueError(f"expected {len(OFFSET_LOSS_WEIGHTS)} offsets, got {n_offsets}")
     joint_nll = nll.float().sum(dim=-1)
     joint_nll = torch.where(valid[..., None], joint_nll, 0)
-    awr_weights = weight.float()[..., None]
+    weighted = joint_nll * weight.float()[..., None] * torch.tensor(OFFSET_LOSS_WEIGHTS, device=nll.device)
     near_offsets = AWRCalibration.near_offsets
-    coefficients = torch.tensor(OFFSET_LOSS_WEIGHTS, device=nll.device)
-    near = (joint_nll[..., :near_offsets] * awr_weights * coefficients[:near_offsets]).sum() / valid_prefixes
-    far = (joint_nll[..., near_offsets:] * coefficients[near_offsets:]).sum() / valid_prefixes
+    near = weighted[..., :near_offsets].sum() / valid_prefixes
+    far = weighted[..., near_offsets:].sum() / valid_prefixes
     total = near + far
     return near, far, total
 
@@ -1584,13 +1860,10 @@ def projection_local_target_gradient_l1(
     valid: Tensor,
 ) -> dict[str, Tensor]:
     """Attribute the exact policy gradient on each target logit."""
-    near_offsets = AWRCalibration.near_offsets
     if len(offsets) != len(OFFSET_LOSS_WEIGHTS) or nll.shape[-2] != len(offsets):
         raise ValueError("gradient attribution requires all O60 offsets")
     offset_coefficients = torch.tensor(OFFSET_LOSS_WEIGHTS, device=nll.device)
-    coefficients = offset_coefficients.expand(*weight.shape, -1).clone()
-    coefficients[..., :near_offsets] *= weight.detach().float()[..., None]
-    coefficients /= valid_prefixes
+    coefficients = weight.detach().float()[..., None] * offset_coefficients / valid_prefixes
     target_derivative = -torch.expm1(-nll.detach().float())
     values = torch.where(valid[..., None, None], target_derivative * coefficients[..., None], 0).sum(dim=(0, 1))
     metrics: dict[str, Tensor] = {}
@@ -1622,7 +1895,7 @@ def value_with_activation_diagnostics(head: SwiGLU, inputs: Tensor) -> tuple[Ten
 
 
 def microbatch_loss(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     batch: ReturnBatch,
     cfg: TrainConfig,
     *,
@@ -1658,11 +1931,7 @@ def microbatch_loss(
             batch.future_return[batch_indices, prefix_positions],
             batch.condition_present[batch_indices, prefix_positions],
         )
-        if isinstance(temporal_output, Tensor):
-            dense_nll = temporal_output
-            button_diagnostics: dict[str, Tensor] = {}
-        else:
-            dense_nll, button_diagnostics = temporal_output
+        dense_nll, button_diagnostics, state_prediction = temporal_output
     value_hidden = hidden[:, suffix_start:]
     value_features = decoder_rmsnorm(value_hidden).detach()
     if cfg.optimizer == "adamw":
@@ -1712,11 +1981,24 @@ def microbatch_loss(
         else {}
     )
     loss = policy_loss + value_loss_scale * cfg.awr.value_loss_weight * value_loss
+    state_metrics: dict[str, Tensor] = {}
+    if model.state_head is not None:
+        if state_prediction is None:
+            raise RuntimeError("the state head produced no prediction")
+        state_targets, state_valid = aligned_state_targets(batch, prefix_positions, model.head_offsets)
+        state_loss, state_metrics = state_objective(
+            state_prediction,
+            state_targets,
+            state_valid & valid[..., None, None, None],
+            model.state_head.log_scale,
+            valid_prefixes,
+        )
+        loss = loss + cfg.state_loss_weight * state_loss
     nll_sum = torch.where(valid[..., None, None], dense_nll.float(), 0).sum(dim=(0, 1))
     extra = {
         "train/loss": _nats_to_bits(policy_loss.detach()),
         "train/near_loss": _nats_to_bits(near.detach()),
-        "train/far_nll": _nats_to_bits(far.detach()),
+        "train/far_loss": _nats_to_bits(far.detach()),
         "train/objective": loss.detach(),
         "value/loss": value_stats["value_loss"],
         "value/rmse": value_stats["value_rmse"],
@@ -1730,6 +2012,7 @@ def microbatch_loss(
         **button_diagnostics,
         **value_diagnostics,
         **projection_attribution,
+        **state_metrics,
     }
     return loss, nll_sum.detach(), extra
 
@@ -1783,7 +2066,9 @@ def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) ->
 
 
 @torch.no_grad()
-def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cfg: TrainConfig) -> dict[str, float]:
+def val_metrics(
+    model: ActionStateSequenceTransformer, batches: list[ReturnBatch], cfg: TrainConfig
+) -> dict[str, float]:
     """Score teacher-forced and rollout policies on the same final-prefix rows."""
     was_training = model.training
     model.eval()
@@ -1800,6 +2085,8 @@ def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cf
     sampled_rows: list[Tensor] = []
     observed_rows: list[Tensor] = []
     quantization_squared = quantization_count = invalid_triggers = 0.0
+    state_error = torch.zeros(STATE_FIELD_COUNT, dtype=torch.float64)
+    state_count = torch.zeros(STATE_FIELD_COUNT, dtype=torch.float64)
     try:
         for cpu_batch in batches:
             batch = cpu_batch.to(device)
@@ -1809,7 +2096,7 @@ def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cf
                 prefix_positions = torch.arange(cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=device).expand(
                     hidden.shape[0], -1
                 )
-                logits = model.temporal.teacher_forced_logits_by_group(
+                logits, decoder_states = model.temporal.teacher_forced_logits_with_states(
                     hidden,
                     batch.context.ctx_pad,
                     prefix_positions,
@@ -1819,9 +2106,29 @@ def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cf
                     batch.available[:, cfg.arch.direct_loss_start :],
                 )
                 dense_nll = model.temporal.nll_from_logits(logits, targets)
+                state_prediction = (
+                    None
+                    if model.state_head is None
+                    else model.state_predictions(decoder_states[:, -1:], targets[:, -1:])
+                )
             row_valid = batch.context.ctx_pad < cfg.arch.L_ctx
             if not bool(row_valid.any()):
                 continue
+            if state_prediction is not None:
+                state_target, state_valid = aligned_state_targets(batch, prefix_positions[:, -1:], model.head_offsets)
+                state_valid = state_valid & row_valid[:, None, None, None, None]
+                prediction = state_prediction.float()
+                changes = len(STATE_CHANGE_FIELDS)
+                state_values = torch.cat(
+                    (
+                        (prediction[..., :changes] - state_target[..., :changes]).square(),
+                        ((prediction[..., changes : changes + 2] > 0) == state_target[..., changes : changes + 2]),
+                        (prediction[..., changes + 2 :].argmax(-1) == state_target[..., changes + 2])[..., None],
+                    ),
+                    dim=-1,
+                )
+                state_error += state_values.masked_fill(~state_valid, 0).double().sum(dim=(0, 1, 2, 3)).cpu()
+                state_count += state_valid.double().sum(dim=(0, 1, 2, 3)).cpu()
             selected_nll = dense_nll[:, -1][row_valid]
             nll_sum += selected_nll.double().sum(dim=0).cpu()
             count += selected_nll.shape[0]
@@ -1913,6 +2220,21 @@ def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cf
     out["invalid_trigger_count_sampled"] = float(
         (~model.codec.button_valid_for_trigger[sampled[..., TRIGGERS_GROUP], sampled[..., BUTTONS_GROUP]]).sum()
     )
+    if model.state_head is not None:
+        if bool((state_count == 0).any()):
+            raise ValueError("validation has no observed labels for one or more state fields")
+        state_means = state_error / state_count
+        out.update(
+            {
+                **{
+                    f"state_{name}_change_rmse": float(state_means[index].sqrt())
+                    for index, name in enumerate(STATE_CHANGE_FIELDS)
+                },
+                "state_facing_acc": float(state_means[4]),
+                "state_airborne_acc": float(state_means[5]),
+                "state_action_acc": float(state_means[6]),
+            }
+        )
     nonfinite = {name: value for name, value in out.items() if not math.isfinite(value)}
     if nonfinite:
         raise FloatingPointError(f"validation produced non-finite metrics: {nonfinite}")
@@ -1922,18 +2244,21 @@ def val_metrics(model: ActionSequenceTransformer, batches: list[ReturnBatch], cf
 def _validation_wandb_metrics(values: dict[str, float], cfg: TrainConfig) -> dict[str, float]:
     """Reduce detailed validation evidence to orthogonal W&B signals."""
     horizon = cfg.prediction_frames
+    executed = range(cfg.delay_frames + 1, cfg.delay_frames + cfg.replan_interval_frames + 1)
     rollout_nll = sum(values[f"rollout_nll_o{horizon:02d}_{name}"] for name in CONTROLLER_GROUP_NAMES)
     exposure_gap = sum(values[f"exposure_gap_o{horizon:02d}_{name}"] for name in CONTROLLER_GROUP_NAMES)
     return {
         "nll": values["loss_unweighted"],
         "near_nll": values["temporal_loss_near_unweighted"],
         "far_nll": values["temporal_loss_far_unweighted"],
+        "executed_nll": sum(values[f"nll_o{offset:02d}"] for offset in executed) / len(executed),
         "rollout_nll": rollout_nll,
         "exposure_gap": exposure_gap,
         "exact_frame_acc": values["exact_frame_acc"],
         "sequence_acc": values["dense_four_sequence_acc"],
         "change_f1": values["change_f1"],
         "sampled_transition_rate": values["sampled_transition_rate"],
+        **{name: value for name, value in values.items() if name.startswith("state_")},
     }
 
 
@@ -2000,7 +2325,15 @@ def _train_batch_sha256(batch: TrainBatch) -> str:
     return digest.hexdigest()
 
 
-RETURN_BATCH_FIELDS = ("returns", "eligible", "future_return", "available", "condition_present")
+RETURN_BATCH_FIELDS = (
+    "returns",
+    "eligible",
+    "future_return",
+    "available",
+    "condition_present",
+    "state_targets",
+    "state_valid",
+)
 
 
 def _return_batch_state(batch: ReturnBatch) -> dict[str, object]:
@@ -2031,7 +2364,7 @@ def _return_batch_sha256(batch: ReturnBatch) -> str:
 
 
 def make_window_policy(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     cfg: TrainConfig,
     *,
     bucket: int | None = None,
@@ -2103,7 +2436,7 @@ class _ActionTraceRecorder:
 
 
 def make_policy(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     stats: dict[str, FeatureStats],
     cfg: TrainConfig,
     *,
@@ -2194,7 +2527,7 @@ class EvalProtocol:
 
 @dataclass(slots=True)
 class _EvalPolicyFactory:
-    model: ActionSequenceTransformer
+    model: ActionStateSequenceTransformer
     stats: dict[str, FeatureStats]
     cfg: TrainConfig
     inference: WindowPolicy
@@ -2245,7 +2578,7 @@ def assert_protocol_diversity(n_matchups: int) -> tuple[int, int, int, str]:
 
 def _eval_protocol(
     cfg: TrainConfig,
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     *,
     n_matchups: int,
     checkpoint_sha256: str,
@@ -2337,7 +2670,7 @@ def _write_eval_evidence(
 
 
 def eval_vs_cpu(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     stats: dict[str, FeatureStats],
     cfg: TrainConfig,
     *,
@@ -2564,6 +2897,7 @@ def _is_final_readout(name: str) -> bool:
         (name.startswith("temporal.outputs.") and ".down." in name)
         or (name.startswith("temporal.trunk_outputs.") and ".down." in name)
         or name.startswith("value_head.down.")
+        or name == "state_head.linear.weight"
     )
 
 
@@ -2572,12 +2906,14 @@ def _output_fan_in_multiplier(name: str, cfg: TrainConfig) -> float:
         return cfg.arch.group_head_dim / 128
     if name.startswith("temporal.trunk_outputs."):
         return cfg.arch.group_head_dim / 128
+    if name == "state_head.linear.weight":
+        return (cfg.arch.temporal_d_model + CONTROLLER_GROUP_COUNT * cfg.arch.action_embed_dim) / 128
     if name.startswith("value_head.down."):
         return cfg.arch.value_hidden_dim / 128
     raise ValueError(f"{name!r} is not a final readout")
 
 
-def optimizer_roles(model: ActionSequenceTransformer, cfg: TrainConfig) -> dict[str, OptimizerRole]:
+def optimizer_roles(model: ActionStateSequenceTransformer, cfg: TrainConfig) -> dict[str, OptimizerRole]:
     """Assign each parameter by its semantic role."""
     embedding_prefixes = (
         "codec.class_embeddings.",
@@ -2621,7 +2957,7 @@ def optimizer_roles(model: ActionSequenceTransformer, cfg: TrainConfig) -> dict[
             roles[name] = OptimizerRole("adamw", "input", False)
         elif name.startswith((*finite_prefixes, "temporal.return_conditioner.")):
             roles[name] = OptimizerRole("adamw", "input" if parameter.ndim >= 2 else "vector", parameter.ndim >= 2)
-        elif name == "temporal.token_projection.bias":
+        elif name in ("temporal.token_projection.bias", "state_head.linear.bias", "state_head.log_scale"):
             roles[name] = OptimizerRole("adamw", "vector", False)
         else:
             raise RuntimeError(f"O60 has no optimizer role for {name} {tuple(parameter.shape)}")
@@ -2636,7 +2972,7 @@ def _role_lr(role: OptimizerRole, cfg: TrainConfig) -> float:
     return lr / role.fan_in_multiplier if role.lr_kind == "output" else lr
 
 
-def make_optimizer(model: ActionSequenceTransformer, cfg: TrainConfig) -> torch.optim.Optimizer:
+def make_optimizer(model: ActionStateSequenceTransformer, cfg: TrainConfig) -> torch.optim.Optimizer:
     """Build the selected optimizer with O51's semantic learning-rate roles."""
     roles = optimizer_roles(model, cfg)
     named = dict(model.named_parameters())
@@ -2685,7 +3021,7 @@ def make_optimizer(model: ActionSequenceTransformer, cfg: TrainConfig) -> torch.
     )
 
 
-def _button_path_parameters(model: ActionSequenceTransformer) -> dict[str, nn.Parameter]:
+def _button_path_parameters(model: ActionStateSequenceTransformer) -> dict[str, nn.Parameter]:
     """Return the action-path matrices monitored before clipping."""
     button_head = cast(NonlinearActionHead, model.temporal.outputs["buttons"])
     return {
@@ -2695,7 +3031,7 @@ def _button_path_parameters(model: ActionSequenceTransformer) -> dict[str, nn.Pa
     }
 
 
-def _button_gradient_abs_max(model: ActionSequenceTransformer) -> Tensor:
+def _button_gradient_abs_max(model: ActionStateSequenceTransformer) -> Tensor:
     """Return one pre-clipping action-path gradient guardrail."""
     maxima: list[Tensor] = []
     for name, parameter in _button_path_parameters(model).items():
@@ -2705,7 +3041,7 @@ def _button_gradient_abs_max(model: ActionSequenceTransformer) -> Tensor:
     return torch.stack(maxima).amax()
 
 
-def parameter_subsystems(model: ActionSequenceTransformer) -> dict[str, tuple[nn.Parameter, ...]]:
+def parameter_subsystems(model: ActionStateSequenceTransformer) -> dict[str, tuple[nn.Parameter, ...]]:
     """Partition every parameter by the model subsystem that owns it."""
     all_parameters = tuple(model.parameters())
     trunk_ids = {id(parameter) for parameter in model.trunk.parameters()}
@@ -2718,6 +3054,7 @@ def parameter_subsystems(model: ActionSequenceTransformer) -> dict[str, tuple[nn
         if id(parameter) not in head_ids | trunk_skip_ids | conditioner_ids
     }
     value_ids = {id(parameter) for parameter in model.value_head.parameters()}
+    state_ids = set() if model.state_head is None else {id(parameter) for parameter in model.state_head.parameters()}
     other_ids = (
         {id(parameter) for parameter in all_parameters}
         - trunk_ids
@@ -2726,6 +3063,7 @@ def parameter_subsystems(model: ActionSequenceTransformer) -> dict[str, tuple[nn
         - trunk_skip_ids
         - value_ids
         - conditioner_ids
+        - state_ids
     )
     partition_ids = {
         "trunk": trunk_ids,
@@ -2733,6 +3071,7 @@ def parameter_subsystems(model: ActionSequenceTransformer) -> dict[str, tuple[nn
         "group_heads": head_ids,
         "trunk_skip_heads": trunk_skip_ids,
         "value_head": value_ids,
+        "state_head": state_ids,
         "return_conditioner": conditioner_ids,
         "other": other_ids,
     }
@@ -2745,16 +3084,25 @@ def parameter_subsystems(model: ActionSequenceTransformer) -> dict[str, tuple[nn
     return partitions
 
 
-def subsystem_parameter_counts(model: ActionSequenceTransformer) -> dict[str, int]:
+def expected_parameter_counts(arch: Architecture, *, state_prediction: bool) -> dict[str, int]:
+    counts = dict(arch.parameter_count_contract)
+    if not state_prediction:
+        counts["total"] -= counts["state_head"]
+        counts["state_head"] = 0
+    return counts
+
+
+def subsystem_parameter_counts(model: ActionStateSequenceTransformer) -> dict[str, int]:
     partitions = parameter_subsystems(model)
     counts = {name: sum(parameter.numel() for parameter in parameters) for name, parameters in partitions.items()}
     counts["total"] = sum(parameter.numel() for parameter in model.parameters())
     if sum(value for name, value in counts.items() if name != "total") != counts["total"]:
         raise RuntimeError("parameter subsystem partition is incomplete")
     try:
-        expected = Architecture(
-            **{item.name: getattr(model.cfg, item.name) for item in fields(Architecture)}
-        ).parameter_count_contract
+        expected = expected_parameter_counts(
+            Architecture(**{item.name: getattr(model.cfg, item.name) for item in fields(Architecture)}),
+            state_prediction=model.state_head is not None,
+        )
     except ValueError as error:
         raise RuntimeError(str(error)) from error
     if counts != expected:
@@ -2771,7 +3119,7 @@ def compute_equivalent_parameter_count(cfg: TrainConfig, parameter_counts: Mappi
         + policy_positions * (parameter_counts["trunk_skip_heads"] + parameter_counts["return_conditioner"])
         + policy_positions
         * len(cfg.arch.head_offsets)
-        * (parameter_counts["temporal_decoder"] + parameter_counts["group_heads"])
+        * (parameter_counts["temporal_decoder"] + parameter_counts["group_heads"] + parameter_counts["state_head"])
     )
     count, remainder = divmod(parameter_uses, policy_positions)
     if remainder:
@@ -2781,7 +3129,7 @@ def compute_equivalent_parameter_count(cfg: TrainConfig, parameter_counts: Mappi
 
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
     """Return six times every parameter use in one optimizer update."""
-    if cfg.arch == Architecture() and parameter_counts["total"] != 193_360_029:
+    if cfg.arch == Architecture() and parameter_counts["total"] != 194_554_777:
         raise ValueError("production parameter count changed")
     return (
         compute_flops_per_supervised_position(compute_equivalent_parameter_count(cfg, parameter_counts))
@@ -2791,7 +3139,7 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 
 def model_tag(cfg: TrainConfig) -> str:
     return (
-        f"o60v2-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
+        f"o60v3-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
         f"dual-nonlinear-head-rc{int(cfg.return_conditioning)}e{cfg.arch.return_embed_dim}-drop{cfg.return_dropout:g}-"
         f"{cfg.optimizer}-wsd-b{cfg.awr.beta:g}-wmax{cfg.awr.weight_max:g}-g{cfg.awr.gamma:g}"
@@ -2821,8 +3169,9 @@ def data_selection(
     world_size: int | None = None,
 ) -> PhysicalShardSelection:
     """Return the full corpus or one deterministic per-source rank partition."""
-    if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
-        raise ValueError("O60 selection requires all policy-world-v8 sources in registry order")
+    full_corpus = tuple(cfg.source_names) == tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES)
+    if not full_corpus and tuple(cfg.source_names) != PROXY_SOURCE_NAMES:
+        raise ValueError("O60 selection requires all policy-world-v8 sources or the proxy source")
     if (rank is None) != (world_size is None):
         raise ValueError("rank and world_size must be provided together")
     if rank is None:
@@ -2842,7 +3191,7 @@ def data_selection(
             for name in cfg.source_names
         )
     selection = PhysicalShardSelection.from_sources(sources)
-    if rank is None and selection.sha256 != cfg.selection_sha256:
+    if rank is None and full_corpus and selection.sha256 != cfg.selection_sha256:
         raise RuntimeError(f"policy-world-v8 selection hash changed: {selection.sha256} != {cfg.selection_sha256}")
     if rank is None and selection.row_count != cfg.train_replays:
         raise RuntimeError(f"policy-world-v8 selection has {selection.row_count} rows, expected {cfg.train_replays}")
@@ -2871,7 +3220,7 @@ def validate_batch_geometry(
 ) -> None:
     if isinstance(batch, ReturnBatch):
         expected = (batch.target.shape[0], cfg.arch.L_ctx)
-        for name in RETURN_BATCH_FIELDS:
+        for name in RETURN_BATCH_FIELDS[:5]:
             value = getattr(batch, name)
             if value.shape != expected:
                 raise ValueError(f"{name} must have shape {expected}")
@@ -2882,6 +3231,23 @@ def validate_batch_geometry(
             raise ValueError("conditioning cannot be present for unavailable labels")
         if not bool(torch.isfinite(batch.future_return[batch.available]).all()):
             raise ValueError("available return labels must be finite")
+        state_shape = (
+            batch.target.shape[0],
+            cfg.arch.L_ctx + cfg.arch.sample_chunk_length,
+            len(STATE_PLAYERS),
+            len(STATE_COLUMNS),
+        )
+        if batch.state_targets.shape != state_shape or batch.state_valid.shape != state_shape:
+            raise ValueError(f"state targets and masks must have shape {state_shape}")
+        if batch.state_valid.dtype != torch.bool or not batch.state_targets.is_floating_point():
+            raise ValueError("state targets must be floating point and state masks must be boolean")
+        if not bool(torch.isfinite(batch.state_targets[batch.state_valid]).all()):
+            raise ValueError("observed state labels must be finite")
+        for name, vocab in (("direction", 2), ("airborne", 2), ("action", STATE_ACTION_CLASSES), ("stock", 256)):
+            field = STATE_COLUMNS.index(name)
+            labels = batch.state_targets[..., field][batch.state_valid[..., field]]
+            if bool(((labels < 0) | (labels >= vocab) | (labels != labels.floor())).any()):
+                raise ValueError("state labels contain unsupported categorical ids")
     if batch.target.shape[1:] != (cfg.arch.sample_chunk_length, ACTION_DIM):
         raise ValueError(
             f"target must be [B, {cfg.arch.sample_chunk_length}, {ACTION_DIM}], got {tuple(batch.target.shape)}"
@@ -2939,6 +3305,11 @@ def distributed_training_contract(cfg: TrainConfig) -> dict[str, object]:
         "architecture": asdict(cfg.arch),
         "head_offsets": cfg.arch.head_offsets,
         "offset_loss_weights": OFFSET_LOSS_WEIGHTS,
+        "state_loss_weight": cfg.state_loss_weight,
+        "state_players": STATE_PLAYERS,
+        "state_prediction": cfg.state_prediction,
+        "state_columns": STATE_COLUMNS,
+        "state_action_classes": STATE_ACTION_CLASSES,
     }
 
 
@@ -3028,7 +3399,7 @@ def save_boundary_checkpoint(
     run_dir: Path,
     *,
     update: int,
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     calibration: ReturnCalibration,
     optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
@@ -3150,7 +3521,9 @@ def run_provenance(cfg: TrainConfig) -> dict[str, object]:
     statistics = {
         name: checkpoint_sha256(streams.BY_NAME[name].local_root / "stats.json") for name in cfg.source_names
     }
-    compute_equivalent_parameters = compute_equivalent_parameter_count(cfg, cfg.arch.parameter_count_contract)
+    compute_equivalent_parameters = compute_equivalent_parameter_count(
+        cfg, expected_parameter_counts(cfg.arch, state_prediction=cfg.state_prediction)
+    )
     return {
         "schema_version": 1,
         "git_sha": git_sha,
@@ -3176,7 +3549,9 @@ def run_provenance(cfg: TrainConfig) -> dict[str, object]:
         "compute": {
             "compute_equivalent_parameters": compute_equivalent_parameters,
             "flops_per_supervised_position": compute_flops_per_supervised_position(compute_equivalent_parameters),
-            "fitted_optimal_positions": fitted_optimal_positions(compute_equivalent_parameters),
+            "schedule_reference_parameters": SCHEDULE_REFERENCE_PARAMETERS,
+            "action_only_fit_reference_positions": FITTED_OPTIMAL_POSITIONS,
+            "schedule_protocol": "fixed action-only schedule; joint-objective optimum is unmeasured",
             "target_positions": cfg.target_positions,
         },
         "environment": {
@@ -3222,6 +3597,7 @@ def _collate_o60_batch(
     next_frames = slice(1, context_length + 1)
     returns = columns[return_column][:, next_frames]
     eligible = columns[return_valid_column][:, next_frames]
+    state_targets, state_valid = future_state_labels(columns, stats)
     return ReturnBatch(
         batch,
         torch.from_numpy(np.ascontiguousarray(returns)),
@@ -3229,6 +3605,8 @@ def _collate_o60_batch(
         torch.from_numpy(np.ascontiguousarray(columns["ego_return60"][:, :context_length])),
         torch.from_numpy(np.ascontiguousarray(columns["ego_return60_valid"][:, :context_length])).bool(),
         torch.from_numpy(np.ascontiguousarray(columns["ego_return60_valid"][:, :context_length])).bool(),
+        state_targets,
+        state_valid,
     )
 
 
@@ -3251,10 +3629,10 @@ def _make_train_loader(
     selection = data_selection(cfg, rank=distributed.rank, world_size=distributed.world_size)
     adapter = MDSStorageAdapter(selection, download_retry=cfg.download_retry)
     adapter.validate_manifests(
-        expected_sha256=streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256,
+        expected_sha256={name: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[name] for name in cfg.source_names},
         expected_index_version=cfg.mds_index_version,
         expected_schema_sha256=cfg.mds_manifest_schema_sha256,
-        expected_rows=streams.POLICY_WORLD_V8_TRAIN_REPLAYS,
+        expected_rows={name: streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] for name in cfg.source_names},
     )
     projection = FeatureProjection(
         columns=ITEM_PLAYER_PROJECTION.columns
@@ -3265,7 +3643,9 @@ def _make_train_loader(
         adapter=adapter,
         tasks=build_shard_plan(selection, adapter.manifests),
         data_protocol=cfg.data_protocol,
-        source_manifest_sha256=streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256,
+        source_manifest_sha256={
+            name: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[name] for name in cfg.source_names
+        },
         batch_transform=functools.partial(
             _collate_o60_batch,
             stats=stats,
@@ -3303,7 +3683,7 @@ def _make_train_loader(
         if sum(train_loader.source_sample_counts.values()) != selection.row_count:
             raise ValueError("physical-shard loader does not expose every rank-selected training row")
         if train_loader.minimum_replay_gap_batches < cfg.minimum_replay_gap_batches:
-            raise ValueError("replay ring is too small for the 232-batch reuse-gap contract")
+            raise ValueError(f"replay ring is too small for the {cfg.minimum_replay_gap_batches}-batch reuse gap")
     except Exception:
         train_loader.close()
         raise
@@ -3337,7 +3717,7 @@ def _make_loaders(
                 columns=ITEM_PLAYER_PROJECTION.columns
                 | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
             ),
-            batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx),
+            batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx, stats=stats),
             replay_labels=ReturnLabels(
                 returns_lib.PolicyReturnLabels(
                     player_lookup,
@@ -3468,11 +3848,13 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None) -> N
     wandb.define_metric("eval/checkpoint_step", step_metric="global_step", summary="max")
     wandb.run.summary["nll_semantics"] = (
         "train/loss is weighted policy loss in bits; train/nll is its unweighted counterpart; "
-        "train/objective is the optimized policy-plus-value objective"
+        "train/objective is the optimized policy-plus-value-plus-state objective; "
+        "state NLLs are in nats and position MSE uses normalized coordinates"
     )
     wandb.run.summary["architecture/treatment"] = (
         f"O60 d{cfg.arch.d_model} trunk L{cfg.arch.n_layers}, temporal L{cfg.arch.temporal_layers}, "
-        "offsets 1..30 with equal weights, and 32 sampled policy positions per window"
+        "offsets 1..30 with equal weights, 32 sampled policy positions per window, "
+        "and both-player x/y, facing, and animation-action prediction"
     )
     wandb.run.summary["optimizer/name"] = "Muon+AdamW" if cfg.optimizer == "muon" else "AdamW"
     wandb.run.summary["optimizer/all_parameters_use_adamw"] = cfg.optimizer == "adamw"
@@ -3584,11 +3966,11 @@ def _log_training_summary(
 
 
 def _training_functions(
-    model: ActionSequenceTransformer, cfg: TrainConfig, *, compile_mode: str | None = None
+    model: ActionStateSequenceTransformer, cfg: TrainConfig, *, compile_mode: str | None = None
 ) -> tuple[Callable, Callable]:
     """Return eager or singly compiled trunk and temporal training functions."""
     trunk_fn: Callable = model.forward
-    temporal_fn: Callable = model.temporal.teacher_forced_nll_with_diagnostics
+    temporal_fn: Callable = model.joint_teacher_forced_nll
     mode = cfg.train_compile_mode if compile_mode is None else compile_mode
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
@@ -3621,7 +4003,7 @@ class _TrainingOwner(nn.Module):
 
     def __init__(
         self,
-        model: ActionSequenceTransformer,
+        model: ActionStateSequenceTransformer,
         cfg: TrainConfig,
         trunk_fn: Callable,
         temporal_fn: Callable,
@@ -3655,7 +4037,7 @@ class _TrainingOwner(nn.Module):
 
 
 def wrap_training_owner(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     cfg: TrainConfig,
     distributed: DistributedContext,
     trunk_fn: Callable,
@@ -3752,7 +4134,7 @@ class _TrainingMetricAccumulator:
 
 
 def train_step(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     training_owner: DistributedDataParallel,
     batch: ReturnBatch,
     cfg: TrainConfig,
@@ -3778,7 +4160,16 @@ def train_step(
     nll_sum: Tensor | None = None
     metrics: dict[str, Tensor] = {}
     microbatches = cfg.local_batch_size // cfg.microbatch_size
-    additive_metrics = {"train/loss", "train/near_loss", "train/far_nll", "train/objective"}
+    additive_metrics = {
+        "train/loss",
+        "train/near_loss",
+        "train/far_loss",
+        "train/objective",
+        "state/loss",
+        "state/position_mse",
+        "state/facing_nll",
+        "state/action_nll",
+    }
     for index, start in enumerate(range(0, cfg.local_batch_size, cfg.microbatch_size)):
         stop = start + cfg.microbatch_size
         sync = contextlib.nullcontext() if index + 1 == microbatches else training_owner.no_sync()
@@ -3884,7 +4275,7 @@ def spawn_closed_loop_evaluation(
 
 def _finalize_training(
     *,
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     calibration: ReturnCalibration,
     optimizer: torch.optim.Optimizer,
     scheduler: LambdaLR,
@@ -4013,7 +4404,7 @@ def write_smoke_qualification(
 
 
 def _compile_synthetic_forward_backward(
-    model: ActionSequenceTransformer,
+    model: ActionStateSequenceTransformer,
     cfg: TrainConfig,
     *,
     step: int,
@@ -4529,7 +4920,9 @@ def _checkpoint_config(cfg: TrainConfig) -> dict[str, object]:
     values = asdict(cfg)
     architecture = values.pop("arch")
     calibration = values.pop("awr")
-    compute_equivalent_parameters = compute_equivalent_parameter_count(cfg, cfg.arch.parameter_count_contract)
+    compute_equivalent_parameters = compute_equivalent_parameter_count(
+        cfg, expected_parameter_counts(cfg.arch, state_prediction=cfg.state_prediction)
+    )
     return {
         "experiment_id": _EXPERIMENT_ID,
         "checkpoint_format_version": _CHECKPOINT_FORMAT_VERSION,
@@ -4580,7 +4973,9 @@ def config_from_state(values: dict) -> TrainConfig:
     calibration = AWRCalibration(**calibration_values)
     runtime = {name: values[name] for name in runtime_fields}
     cfg = TrainConfig(arch=architecture, awr=calibration, **runtime)
-    compute_equivalent_parameters = compute_equivalent_parameter_count(cfg, cfg.arch.parameter_count_contract)
+    compute_equivalent_parameters = compute_equivalent_parameter_count(
+        cfg, expected_parameter_counts(cfg.arch, state_prediction=cfg.state_prediction)
+    )
     derived = {name: values[name] for name in derived_fields}
     expected_derived = {
         "max_steps": cfg.max_steps,
@@ -4609,7 +5004,7 @@ def validate_conditioning_state(state: Mapping[str, object], cfg: TrainConfig) -
 
 def load_checkpoint(
     path: str, *, device: str = DEVICE
-) -> tuple[ActionSequenceTransformer, TrainConfig, dict[str, FeatureStats], dict]:
+) -> tuple[ActionStateSequenceTransformer, TrainConfig, dict[str, FeatureStats], dict]:
     state = torch.load(path, map_location=device, weights_only=False)
     cfg = config_from_state(state["cfg"])
     validate_config(cfg)
@@ -4843,10 +5238,15 @@ def main(args: Command) -> None:
         cfg = replace(
             cfg,
             arch=proxy.arch,
+            state_prediction=proxy.state_prediction,
+            world_size=proxy.world_size,
+            local_batch_size=proxy.local_batch_size,
+            microbatch_size=proxy.microbatch_size,
+            source_names=proxy.source_names,
             target_positions=proxy.target_positions,
             stable_updates=proxy.stable_updates,
-            decay_start_update=None,
-            decay_duration=None,
+            decay_start_update=proxy.decay_start_update,
+            decay_duration=proxy.decay_duration,
         )
     cfg = replace(
         cfg,
@@ -4885,7 +5285,11 @@ def main(args: Command) -> None:
             assert resume_state is not None
             cfg = config_from_state(cast(dict, resume_state["cfg"]))
             requested = proxy_config_for_arm(args.proxy_arm)
-            if cfg.arch != requested.arch or cfg.target_positions != requested.target_positions:
+            if (cfg.arch, cfg.target_positions, cfg.state_prediction) != (
+                requested.arch,
+                requested.target_positions,
+                requested.state_prediction,
+            ):
                 raise SystemExit("--proxy-arm must match the resumed checkpoint treatment")
         stats = load_stats(cfg)
         train(

@@ -349,7 +349,7 @@ def test_teacher_forced_action_head_does_not_renormalize_after_film() -> None:
     present = torch.ones(1, 1, dtype=torch.bool)
     states = decoder.teacher_forced_states(hidden, ctx_pad, prefixes, observed, targets, return_value, present)
     expected = decoder.outputs["buttons"].normalize(states) * 1.25 + 0.5
-    _logits, button_values, projections = decoder._teacher_forced_outputs(
+    _logits, button_values, projections, _states = decoder._teacher_forced_outputs(
         hidden, ctx_pad, prefixes, observed, targets, return_value, present
     )
     head_input, _combined_logits, _mask = button_values

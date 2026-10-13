@@ -25,7 +25,7 @@ _O60 = _load_experiment("060_compute_optimal_action_sequence")
 _O61 = _load_experiment("061_pruned81_action_sequence")
 
 
-def test_pruned81_is_the_only_production_treatment_change() -> None:
+def test_pruned81_preserves_action_only_config_apart_from_controller_layout() -> None:
     control = _O60.TrainConfig()
     treatment = _O61.TrainConfig()
 
@@ -40,6 +40,12 @@ def test_pruned81_is_the_only_production_treatment_change() -> None:
     assert changed == {"main_stick_layout": ("legacy65", "pruned81")}
     control_values = asdict(control)
     treatment_values = asdict(treatment)
+    # 061 retains the action-only objective and short-delay protocol from before
+    # 060 added future states and moved evaluation to a 21-frame delay.
+    assert control_values.pop("state_prediction") is True
+    assert control_values.pop("state_loss_weight") == 1.0
+    assert (control_values.pop("prediction_frames"), treatment_values.pop("prediction_frames")) == (23, 4)
+    assert (control_values.pop("delay_frames"), treatment_values.pop("delay_frames")) == (21, 2)
     treatment_values["arch"]["main_stick_layout"] = "legacy65"
     assert control_values == treatment_values
 
@@ -53,6 +59,7 @@ def test_pruned81_production_parameter_and_compute_contracts() -> None:
 
     assert model.codec.group_vocabs == (256, 81, 9, 25)
     assert counts["return_conditioner"] == 0
+    assert "state_head" not in counts
     assert counts["total"] == 193_393_341
     assert _O61.compute_equivalent_parameter_count(cfg, counts) == 3_953_839_361
     assert cfg.max_steps == 714_752
@@ -60,14 +67,13 @@ def test_pruned81_production_parameter_and_compute_contracts() -> None:
     assert cfg.target_positions == 11_710_496_768
 
 
-def test_pruned81_proxy_matches_the_depth_treatment() -> None:
-    control = _O60.proxy_config()
+def test_pruned81_proxy_keeps_the_depth_treatment() -> None:
+    # 060's proxy moved to a 50M single-GPU state-head ablation; 061 keeps the 15M depth treatment.
     treatment = _O61.proxy_config()
-    assert (control.arch.n_layers, control.arch.temporal_layers) == (6, 8)
     assert (treatment.arch.n_layers, treatment.arch.temporal_layers) == (6, 8)
-    assert control.arch.head_offsets == treatment.arch.head_offsets == tuple(range(1, 31))
-    assert not control.return_conditioning and not treatment.return_conditioning
-    assert control.target_positions == treatment.target_positions == 2**30
+    assert treatment.arch.head_offsets == tuple(range(1, 31))
+    assert not treatment.return_conditioning
+    assert treatment.target_positions == 2**30
     with torch.device("meta"):
         model = _O61.make_model(treatment)
     counts = _O61.subsystem_parameter_counts(model)

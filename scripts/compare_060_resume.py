@@ -104,7 +104,7 @@ def main(args: Args) -> None:
     )
     record = {
         "schema_version": 1,
-        "experiment_id": "060_compute_optimal_action_sequence_v2",
+        "experiment_id": control["cfg"]["experiment_id"],
         "git_sha": control_provenance.get("git_sha"),
         "command": sys.argv,
         "update": int(control["step"]) + 1,
