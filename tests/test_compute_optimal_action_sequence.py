@@ -283,10 +283,19 @@ def test_state_labels_scale_changes_encode_binary_fields_and_mask_missing_values
     assert not valid[0, 2, 0, 0] and not valid[0, 2, 0, 6]
     assert valid[0, :, 1].all()
     assert torch.isfinite(targets).all()
+    rare = {name: values.copy() for name, values in columns.items()}
+    rare["ego_action"][0, 0] = 65_535
+    rare["opp_action"][0, 1] = 511
+    rare["ego_direction"][0, 1] = 0.0
+    targets, valid = _MODULE.future_state_labels(rare, _STATE_STATS)
+    # Engine action ids at or above 511 share the last class, and facing 0 is unlabeled.
+    assert targets[0, 0, 0, 6] == targets[0, 1, 1, 6] == 511
+    assert valid[0, 0, 0, 6] and valid[0, 1, 1, 6]
+    assert not valid[0, 1, 0, 4] and valid[0, 0, 0, 4]
     for column, value, message in (
-        ("ego_action", 512, "unsupported action"),
-        ("ego_direction", 0.0, "unsupported facing"),
-        ("ego_airborne", 2, "unsupported airborne"),
+        ("ego_action", 65_536, r"unsupported action values \[65536\]"),
+        ("ego_direction", 0.5, r"unsupported facing values \[0.5\]"),
+        ("ego_airborne", 2, r"unsupported airborne values \[2\]"),
     ):
         changed = {name: values.copy() for name, values in columns.items()}
         changed[column][0, 0] = value

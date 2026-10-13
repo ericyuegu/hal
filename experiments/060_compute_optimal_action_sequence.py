@@ -232,7 +232,11 @@ STATE_COLUMNS: Final[tuple[str, ...]] = (
 )
 STATE_CHANGE_FIELDS: Final[tuple[str, ...]] = STATE_COLUMNS[:4]
 STATE_FIELD_COUNT: Final[int] = 7
+# Observed animation-action ids stay below 400. Stored engine ids are uint16, so
+# ids at or above 511 share the last class, as the input embedding clamps ids at
+# its last row.
 STATE_ACTION_CLASSES: Final[int] = 512
+STATE_ACTION_MAX_ID: Final[int] = 65_535
 STATE_OUTPUTS_PER_PLAYER: Final[int] = len(STATE_CHANGE_FIELDS) + 2 + STATE_ACTION_CLASSES
 OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (1 / 30,) * 30
 SCHEDULE_REFERENCE_PARAMETERS: Final[int] = 3_953_315_601
@@ -1600,20 +1604,25 @@ def future_state_labels(
                     raise ValueError(f"{column} needs a finite positive corpus standard deviation")
                 value = raw / std
             elif name == "direction":
-                if not np.isin(observed, (-1.0, 1.0)).all():
-                    raise ValueError(f"{column} contains unsupported facing values")
+                unsupported = observed[~np.isin(observed, (-1.0, 0.0, 1.0))]
+                if unsupported.size:
+                    raise ValueError(f"{column} contains unsupported facing values {np.unique(unsupported)[:8]}")
+                # The schema stores facing 0, but the binary facing label has no class for it.
+                valid &= raw != 0
                 value = raw > 0
             elif name == "airborne":
-                if not np.isin(observed, (0, 1)).all():
-                    raise ValueError(f"{column} contains unsupported airborne values")
+                unsupported = observed[~np.isin(observed, (0, 1))]
+                if unsupported.size:
+                    raise ValueError(f"{column} contains unsupported airborne values {np.unique(unsupported)[:8]}")
                 value = raw
             else:
                 if raw.dtype.kind not in ("i", "u"):
                     raise ValueError(f"{column} must contain integer ids")
-                limit = STATE_ACTION_CLASSES if name == "action" else 256
-                if ((observed < 0) | (observed >= limit)).any():
-                    raise ValueError(f"{column} contains unsupported {name} values")
-                value = raw
+                limit = STATE_ACTION_MAX_ID + 1 if name == "action" else 256
+                unsupported = observed[(observed < 0) | (observed >= limit)]
+                if unsupported.size:
+                    raise ValueError(f"{column} contains unsupported {name} values {np.unique(unsupported)[:8]}")
+                value = np.minimum(raw, STATE_ACTION_CLASSES - 1) if name == "action" else raw
             value = np.where(valid, value, 0).astype(np.float32)
             if not np.isfinite(value).all():
                 raise ValueError(f"{column} contains non-finite state targets")
