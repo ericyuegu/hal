@@ -93,6 +93,7 @@ ignore = ["E501"]
 "experiments/059_muon_action_sequence.py" = ["F722"]
 "experiments/060_compute_optimal_action_sequence.py" = ["F722"]
 "experiments/061_pruned81_action_sequence.py" = ["F722"]
+"experiments/062_production_bc_action_sequence.py" = ["F722"]
 "hal/models/attention.py" = ["F722"]
 
 [tool.pytest.ini_options]
