@@ -309,6 +309,16 @@ def test_validation_metrics_do_not_depend_on_the_forward_chunk_size() -> None:
         assert chunked[name] == pytest.approx(value, rel=1e-4, abs=1e-6), name
 
 
+def test_validation_metrics_do_not_record_gradients() -> None:
+    cfg = replace(_small_config(), local_batch_size=2, microbatch_size=2)
+    model = _MODULE.make_model(cfg)
+    batch = _MODULE.synthetic_awr_batch(cfg, torch.device("cpu"))
+    grad_enabled: list[bool] = []
+    model.temporal.blocks[0].register_forward_hook(lambda *_: grad_enabled.append(torch.is_grad_enabled()))
+    _MODULE.val_metrics(model, [batch], cfg, forward_rows=1)
+    assert grad_enabled and not any(grad_enabled)
+
+
 def test_prefetcher_prepares_batches_in_order_off_the_training_thread() -> None:
     import threading
 

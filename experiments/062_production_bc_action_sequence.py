@@ -2245,13 +2245,13 @@ def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) ->
     }
 
 
-@torch.no_grad()
 def _row_chunks(batches: list[ReturnBatch], rows: int) -> Iterator[ReturnBatch]:
     for batch in batches:
         for start in range(0, batch.target.shape[0], rows):
             yield batch.row_slice(start, min(start + rows, batch.target.shape[0]))
 
 
+@torch.no_grad()
 def val_metrics(
     model: ActionStateSequenceTransformer,
     batches: list[ReturnBatch],
