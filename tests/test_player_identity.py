@@ -155,6 +155,47 @@ def test_identity_artifact_acquires_and_validates_hash_and_vocabulary(
         data_player_identity.load_player_identity_sidecar(destination, expected_sha256="0" * 64)
 
 
+def test_concurrent_identity_downloads_do_not_delete_each_others_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    _write_manifest(manifest)
+    source = tmp_path / "source.jsonl.gz"
+    summary = data_player_identity.build_player_identity_sidecar(
+        (data_player_identity.ManifestInput("fixture", manifest),),
+        source,
+    )
+    expected = data_player_identity.load_player_identity_sidecar(source)
+    destination = tmp_path / "downloaded" / "sidecar.jsonl.gz"
+
+    def load() -> object:
+        return data_player_identity.load_player_identity_artifact(
+            destination,
+            remote="s3://hal/identity/sidecar.jsonl.gz",
+            expected_sha256=summary["sha256"],
+            expected_vocabulary_size=expected.vocabulary.size,
+            expected_vocabulary_sha256=expected.vocabulary.sha256,
+        )
+
+    concurrent: list[object] = []
+
+    class Client:
+        def download_file(self, bucket: str, key: str, path: str) -> None:
+            Path(path).write_bytes(source.read_bytes())
+            # A second rank runs the whole load while this download is in flight.
+            if not concurrent:
+                concurrent.append(None)
+                concurrent[0] = load()
+
+    monkeypatch.setattr(data_player_identity.r2, "client", lambda: Client())
+    sidecar = load()
+
+    assert sidecar == expected == concurrent[0]
+    assert destination.read_bytes() == source.read_bytes()
+    assert not list(destination.parent.glob("*.tmp"))
+
+
 def test_rank_ids_and_checkpoint_vocabulary_round_trip() -> None:
     vocabulary = representation_player_identity.PlayerVocabulary(("AA#1", "aa#1"))
     encoded = representation_player_identity.vocabulary_buffer(vocabulary)

@@ -3,6 +3,8 @@
 import gzip
 import hashlib
 import json
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -271,8 +273,12 @@ def load_player_identity_artifact(
         if not remote.startswith("s3://") or not separator or not bucket or not key:
             raise ValueError(f"player identity remote must be an s3 URI, got {remote!r}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.unlink(missing_ok=True)
+        # Every distributed rank may download at once; a per-process name keeps
+        # one rank's cleanup from deleting another rank's download before its
+        # atomic replace.
+        descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+        os.close(descriptor)
+        temporary = Path(name)
         download = (bucket, key)
 
     candidate = path if temporary is None else temporary
