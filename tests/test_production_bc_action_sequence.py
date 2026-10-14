@@ -295,3 +295,15 @@ def test_activation_memory_budget_must_be_a_fraction() -> None:
     for budget in (0.0, 1.5):
         with pytest.raises(ValueError, match="activation_memory_budget"):
             _MODULE.validate_config(replace(_MODULE.production_config(), activation_memory_budget=budget))
+
+
+def test_validation_metrics_do_not_depend_on_the_forward_chunk_size() -> None:
+    cfg = replace(_small_config(), local_batch_size=4, microbatch_size=4)
+    torch.manual_seed(0)
+    model = _MODULE.make_model(cfg)
+    batch = _MODULE.synthetic_awr_batch(cfg, torch.device("cpu"))
+    whole = _MODULE.val_metrics(model, [batch], cfg, forward_rows=4)
+    chunked = _MODULE.val_metrics(model, [batch], cfg, forward_rows=1)
+    assert whole.keys() == chunked.keys()
+    for name, value in whole.items():
+        assert chunked[name] == pytest.approx(value, rel=1e-4, abs=1e-6), name

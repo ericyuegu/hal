@@ -285,6 +285,10 @@ RETURN_SCALE: Final[float] = 120.0
 CALIBRATION_WINDOWS: Final[int] = 65_536
 # Eight steady-state updates cover several loader cohorts and every update phase.
 PROFILE_UPDATES: Final[int] = 8
+# Validation scores all 128 suffix prefixes, so each row puts 3,840 tokens
+# through the decoder. Beside the training CUDA graphs' 70.5 GiB pool, a
+# 128-row forward needed a 7.5 GiB feed-forward buffer on an RTX PRO 6000.
+VALIDATION_FORWARD_ROWS: Final[int] = 16
 
 
 def compute_flops_per_supervised_position(compute_equivalent_parameters: int) -> int:
@@ -2232,10 +2236,23 @@ def _transition_metrics(target: Tensor, prediction: Tensor, observed: Tensor) ->
 
 
 @torch.no_grad()
+def _row_chunks(batches: list[ReturnBatch], rows: int) -> Iterator[ReturnBatch]:
+    for batch in batches:
+        for start in range(0, batch.target.shape[0], rows):
+            yield batch.row_slice(start, min(start + rows, batch.target.shape[0]))
+
+
 def val_metrics(
-    model: ActionStateSequenceTransformer, batches: list[ReturnBatch], cfg: TrainConfig
+    model: ActionStateSequenceTransformer,
+    batches: list[ReturnBatch],
+    cfg: TrainConfig,
+    *,
+    forward_rows: int = VALIDATION_FORWARD_ROWS,
 ) -> dict[str, float]:
-    """Score teacher-forced and rollout policies on the same final-prefix rows."""
+    """Score teacher-forced and rollout policies on the same final-prefix rows.
+
+    Every metric sums over rows, so the forward chunk size changes only peak memory.
+    """
     was_training = model.training
     model.eval()
     device = next(model.parameters()).device
@@ -2254,7 +2271,7 @@ def val_metrics(
     state_error = torch.zeros(STATE_FIELD_COUNT, dtype=torch.float64)
     state_count = torch.zeros(STATE_FIELD_COUNT, dtype=torch.float64)
     try:
-        for cpu_batch in batches:
+        for cpu_batch in _row_chunks(batches, forward_rows):
             batch = cpu_batch.to(device)
             history, targets, valid = prepared_targets(model, batch)
             with amp_context(cfg, device):
@@ -4179,7 +4196,7 @@ def _training_functions(
     mode = cfg.train_compile_mode if compile_mode is None else compile_mode
     if cfg.activation_memory_budget is not None:
         # The partitioner reads this process-wide setting when the first call compiles.
-        functorch_config.activation_memory_budget = cfg.activation_memory_budget
+        functorch_config.activation_memory_budget = float(cfg.activation_memory_budget)
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.
