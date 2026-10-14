@@ -135,7 +135,8 @@ if [ -e "$launch_marker" ]; then
 fi
 touch "$launch_marker"
 set +e
-/usr/local/sbin/hal-run "$HAL_GIT_SHA" "$HAL_TRAIN_CMD_B64"
+# The same systemd unit as scripts/gce_run.py, so --attach and --stop apply.
+systemd-run --quiet --collect --wait --pipe --unit=hal-job /usr/local/sbin/hal-run "$HAL_GIT_SHA" "$HAL_TRAIN_CMD_B64"
 code=$?
 set -e
 finish "$code"
