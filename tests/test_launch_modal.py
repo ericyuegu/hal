@@ -42,10 +42,12 @@ write_state = _MODULE.write_state
 EXPERIMENT = "experiments/059_muon_action_sequence.py"
 
 
-def test_evaluation_experiment_recognizes_only_maintained_programs() -> None:
+def test_evaluation_experiment_recognizes_any_maintained_program() -> None:
     o60 = "experiments/060_compute_optimal_action_sequence.py"
+    o62 = "experiments/062_production_bc_action_sequence.py"
     assert evaluation_experiment(("uv", "run", EXPERIMENT, "train")) == EXPERIMENT
     assert evaluation_experiment(("env", "RANK=0", "uv", "run", o60, "train")) == o60
+    assert evaluation_experiment(("uv", "run", "torchrun", "--nproc-per-node=4", o62, "train")) == o62
     assert evaluation_experiment(("uv", "run", "archive/experiments/059_muon_action_sequence.py")) is None
     with pytest.raises(ValueError, match="more than one"):
         evaluation_experiment(("uv", "run", EXPERIMENT, o60))

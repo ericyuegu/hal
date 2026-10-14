@@ -27,8 +27,16 @@ batch and duration rules for Adam epsilon and input learning rate. The Adam
 betas follow O60's rule but never fall below their base values. Gameplay evaluation of the final
 checkpoints selects the batch; validation NLL is diagnostic only.
 
-The production configuration is not yet frozen: it waits for the proxy batch
-result, so the production shape is rejected.
+The proxy arms selected the production batch: 2,048 windows with the Muon rate
+scaled by sqrt(2048 / 512) tied batch 512 in play, while the fixed rate lost
+about 0.1 net stocks per minute. Production trains the d1024 shape on all 44
+policy-world-v8 sources for 204,800 updates on four B200s with 512 windows each
+and no accumulation. Unlike the proxies, it restores O59's advantage weighting
+(``AWRCalibration``) from update 4,097; the value head and returns are unchanged.
+
+Run production on four B200s; the Modal launcher brokers closed-loop evaluations:
+    uv run scripts/launch_modal.py --gpu B200:4 -- uv run torchrun --standalone --nproc-per-node=4 \
+        experiments/062_production_bc_action_sequence.py train
 
 Run the batch-1024 arm on four GPUs:
     torchrun --standalone --nproc-per-node=4 \
@@ -224,6 +232,20 @@ TARGET_POSITIONS: Final[int] = 11_710_496_768
 WARMUP_UPDATES: Final[int] = 4_096
 DECAY_START_UPDATE: Final[int] = 536_576
 COOLDOWN_UPDATES: Final[int] = 178_176
+# Production trains on every policy-world-v8 source at the proxy-selected batch:
+# 2,048 windows with the Muon rate scaled by sqrt(2048 / 512). 204,800 updates
+# supervise 13.42B positions, one pass over the 13.27B training frames rounded
+# to 100 checkpoint intervals of 2,048. Warmup keeps the proxy's 2**26 positions;
+# decay is the last quarter.
+PRODUCTION_BATCH: Final[int] = 2048
+PRODUCTION_DEVICE_BATCH: Final[int] = 512
+PRODUCTION_MUON_LR_MULTIPLIER: Final[float] = 2.0
+PRODUCTION_UPDATES: Final[int] = 204_800
+PRODUCTION_WARMUP_UPDATES: Final[int] = 1_024
+PRODUCTION_DECAY_START_UPDATE: Final[int] = 153_600
+PRODUCTION_DECAY_UPDATES: Final[int] = 51_200
+PRODUCTION_VALIDATION_EVERY: Final[int] = 2_048
+PRODUCTION_CHECKPOINT_EVERY: Final[int] = 1_024
 PROXY_TARGET_POSITIONS: Final[int] = 2**29
 # Warmup and validation are fixed in positions so that every batch arm sees the
 # same data before its learning rate peaks and between validations.
@@ -717,6 +739,9 @@ class TrainConfig:
     state_prediction: bool = False
     state_loss_weight: float = 1.0
     stick_features: StickFeatures = "polar"
+    # Production restores O59's advantage weighting from AWRCalibration.start_update;
+    # the proxy arms trained behavior cloning.
+    advantage_weighting: bool = False
     warmup_updates: int = WARMUP_UPDATES
     replay_slots: int = 65_536
     replay_phase_block_batches: int = 25
@@ -858,15 +883,21 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O62 omits the state head")
     if cfg.stick_features not in ("xy", "polar"):
         raise ValueError(f"unknown stick features {cfg.stick_features!r}")
-    if cfg.arch != proxy_architecture():
-        raise ValueError("O62 production waits for the proxy batch result; only proxy arms can train")
-    if cfg.batch_size not in PROXY_BATCH_SIZES:
-        raise ValueError(f"O62 proxy batch must be one of {PROXY_BATCH_SIZES}")
-    if cfg.muon_lr_multiplier not in PROXY_MUON_LR_MULTIPLIERS or proxy_training_fields(cfg) != proxy_training_fields(
-        proxy_config(
-            batch_size=cfg.batch_size,
-            stick_features=cfg.stick_features,
-            muon_lr_multiplier=cfg.muon_lr_multiplier,
+    if cfg.arch == Architecture():
+        if training_fields(cfg) != training_fields(production_config()):
+            raise ValueError("O62 production is frozen; train it without --proxy-arm")
+    elif cfg.arch != proxy_architecture():
+        raise ValueError("O62 trains only the production shape or a proxy arm")
+    elif (
+        cfg.batch_size not in PROXY_BATCH_SIZES
+        or cfg.muon_lr_multiplier not in PROXY_MUON_LR_MULTIPLIERS
+        or training_fields(cfg)
+        != training_fields(
+            proxy_config(
+                batch_size=cfg.batch_size,
+                stick_features=cfg.stick_features,
+                muon_lr_multiplier=cfg.muon_lr_multiplier,
+            )
         )
     ):
         raise ValueError("O62 proxy arms are frozen; select one with --proxy-arm")
@@ -880,12 +911,10 @@ def validate_config(cfg: TrainConfig) -> None:
     if cfg.batch_size != cfg.world_size * cfg.local_batch_size:
         raise ValueError("global batch must equal world_size * local_batch_size")
     if cfg.arch == production:
-        if (cfg.world_size, cfg.local_batch_size) != (2, 256):
-            raise ValueError("O60 production freezes two ranks with a local batch of 256")
-        if cfg.microbatch_size not in (128, 256) or cfg.local_batch_size % cfg.microbatch_size:
-            raise ValueError("microbatch_size must be 128 or 256 and divide the local batch")
+        if (cfg.local_batch_size, cfg.microbatch_size) != (PRODUCTION_DEVICE_BATCH, PRODUCTION_DEVICE_BATCH):
+            raise ValueError("O62 production uses 512 windows per rank without accumulation")
         if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
-            raise ValueError("O60 production requires all 44 policy-world-v8 sources")
+            raise ValueError("O62 production requires all 44 policy-world-v8 sources")
     elif (cfg.local_batch_size, cfg.microbatch_size, tuple(cfg.source_names), cfg.val_n_samples) != (
         PROXY_DEVICE_BATCH,
         PROXY_DEVICE_BATCH,
@@ -1045,16 +1074,18 @@ def validate_config(cfg: TrainConfig) -> None:
     ):
         raise ValueError("O60 optimizer hyperparameters are frozen")
     if cfg.arch == Architecture() and (
-        cfg.max_steps != TARGET_UPDATES
-        or cfg.target_positions != TARGET_POSITIONS
-        or cfg.warmup_steps != WARMUP_UPDATES
-        or cfg.stable_updates != DECAY_START_UPDATE
-        or cfg.decay_start_update != DECAY_START_UPDATE
-        or cfg.decay_duration != COOLDOWN_UPDATES
+        cfg.max_steps != PRODUCTION_UPDATES
+        or cfg.warmup_steps * cfg.supervised_positions_per_update != PROXY_WARMUP_POSITIONS
+        or cfg.decay_start_update != PRODUCTION_DECAY_START_UPDATE
+        or cfg.max_steps != PRODUCTION_DECAY_START_UPDATE + PRODUCTION_DECAY_UPDATES
+        or cfg.decay_duration != PRODUCTION_DECAY_UPDATES
+        or cfg.eval_every % cfg.ckpt_every
+        or cfg.val_every % cfg.ckpt_every
     ):
-        raise ValueError("O60 training boundaries are frozen")
+        raise ValueError("O62 production training boundaries are frozen")
     if cfg.arch == proxy_architecture() and (
-        cfg.target_positions != PROXY_TARGET_POSITIONS
+        cfg.advantage_weighting
+        or cfg.target_positions != PROXY_TARGET_POSITIONS
         or cfg.warmup_steps * cfg.supervised_positions_per_update != PROXY_WARMUP_POSITIONS
         or cfg.val_every * cfg.supervised_positions_per_update != PROXY_VALIDATION_POSITIONS
         or cfg.decay_start_update != cfg.max_steps * 3 // 4
@@ -1100,11 +1131,35 @@ def proxy_config(*, batch_size: int, stick_features: StickFeatures, muon_lr_mult
     )
 
 
-def proxy_training_fields(cfg: TrainConfig) -> tuple[object, ...]:
-    """Return every field that defines a proxy arm's training run."""
+def production_config() -> TrainConfig:
+    """Return the 4-rank B200 production run with O59's advantage weighting."""
+    positions_per_update = PRODUCTION_BATCH * POLICY_PREFIXES_PER_WINDOW
+    return TrainConfig(
+        stick_features="polar",
+        advantage_weighting=True,
+        muon_lr_multiplier=PRODUCTION_MUON_LR_MULTIPLIER,
+        batch_size=PRODUCTION_BATCH,
+        world_size=PRODUCTION_BATCH // PRODUCTION_DEVICE_BATCH,
+        local_batch_size=PRODUCTION_DEVICE_BATCH,
+        microbatch_size=PRODUCTION_DEVICE_BATCH,
+        replay_slots=65_536,
+        replay_phase_block_batches=25,
+        val_every=PRODUCTION_VALIDATION_EVERY,
+        ckpt_every=PRODUCTION_CHECKPOINT_EVERY,
+        target_positions=PRODUCTION_UPDATES * positions_per_update,
+        warmup_updates=PRODUCTION_WARMUP_UPDATES,
+        stable_updates=PRODUCTION_DECAY_START_UPDATE,
+        decay_start_update=PRODUCTION_DECAY_START_UPDATE,
+        decay_duration=PRODUCTION_DECAY_UPDATES,
+    )
+
+
+def training_fields(cfg: TrainConfig) -> tuple[object, ...]:
+    """Return every field that defines a frozen O62 training run."""
     return (
         cfg.arch,
         cfg.stick_features,
+        cfg.advantage_weighting,
         cfg.muon_lr_multiplier,
         cfg.state_prediction,
         cfg.batch_size,
@@ -1121,6 +1176,7 @@ def proxy_training_fields(cfg: TrainConfig) -> tuple[object, ...]:
         cfg.stable_updates,
         cfg.decay_start_update,
         cfg.decay_duration,
+        cfg.ckpt_every,
     )
 
 
@@ -2035,8 +2091,7 @@ def microbatch_loss(
         beta=cfg.awr.beta,
         valid=dense_valid,
     )
-    # O62 trains behavior cloning: every advantage weight is one.
-    active = False
+    active = cfg.advantage_weighting and step + 1 >= cfg.awr.start_update
     weights, stats = advantage_weights(
         advantage,
         batch.eligible[:, suffix_start:],
@@ -3245,8 +3300,6 @@ def compute_equivalent_parameter_count(cfg: TrainConfig, parameter_counts: Mappi
 
 def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: dict[str, int]) -> int:
     """Return six times every parameter use in one optimizer update."""
-    if cfg.arch == Architecture() and parameter_counts["total"] != 194_554_777:
-        raise ValueError("production parameter count changed")
     return (
         compute_flops_per_supervised_position(compute_equivalent_parameter_count(cfg, parameter_counts))
         * cfg.supervised_positions_per_update
@@ -3258,7 +3311,7 @@ def model_tag(cfg: TrainConfig) -> str:
         f"o62-{cfg.stick_features}-b{cfg.batch_size}-mlr{cfg.muon_lr * cfg.muon_lr_multiplier:.4g}-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
         f"dual-nonlinear-head-rc{int(cfg.return_conditioning)}e{cfg.arch.return_embed_dim}-drop{cfg.return_dropout:g}-"
-        f"{cfg.optimizer}-wsd-bc-g{cfg.awr.gamma:g}"
+        f"{cfg.optimizer}-wsd-{'awr' if cfg.advantage_weighting else 'bc'}-g{cfg.awr.gamma:g}"
     )
 
 
@@ -5000,7 +5053,9 @@ def train(
                             wandb.log({"global_step": update, **boundary_metrics})
                     except Exception as error:
                         boundary_failure[0] = f"rank-zero boundary work failed: {type(error).__name__}: {error}"
-                dist.broadcast_object_list(boundary_failure, src=0)
+                # Rank zero may wait for validation and the R2 checkpoint upload here,
+                # which can outlast the NCCL watchdog; the gloo group allows 30 minutes.
+                dist.broadcast_object_list(boundary_failure, src=0, group=distributed.object_group)
                 if boundary_failure[0] is not None:
                     raise RuntimeError(boundary_failure[0])
             if update < run_stop and boundary_due:
@@ -5374,9 +5429,9 @@ def main(args: Command) -> None:
         )
         return
     cfg = args.cfg
-    proxy = proxy_config_for_arm(args.proxy_arm)
+    selected = production_config() if args.proxy_arm == "none" else proxy_config_for_arm(args.proxy_arm)
     cfg = replace(
-        proxy,
+        selected,
         eval_max_parallel=cfg.eval_max_parallel,
         compiled_inference_bucket=cfg.compiled_inference_bucket,
         inference_mode=cfg.inference_mode,
@@ -5417,8 +5472,8 @@ def main(args: Command) -> None:
                 )
             assert resume_state is not None
             cfg = config_from_state(cast(dict, resume_state["cfg"]))
-            requested = proxy_config_for_arm(args.proxy_arm)
-            if proxy_training_fields(cfg) != proxy_training_fields(requested):
+            requested = production_config() if args.proxy_arm == "none" else proxy_config_for_arm(args.proxy_arm)
+            if training_fields(cfg) != training_fields(requested):
                 raise SystemExit("--proxy-arm must match the resumed checkpoint treatment")
         stats = load_stats(cfg)
         train(

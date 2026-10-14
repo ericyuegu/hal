@@ -67,7 +67,7 @@ def test_stick_control_differs_only_by_stick_features() -> None:
 
 def test_production_state_head_and_off_arm_configs_are_rejected() -> None:
     cfg = _MODULE.proxy_config_for_arm("b1024")
-    with pytest.raises(ValueError, match="production waits"):
+    with pytest.raises(ValueError, match="production is frozen"):
         _MODULE.validate_config(_MODULE.TrainConfig())
     with pytest.raises(ValueError, match="omits the state head"):
         _MODULE.validate_config(replace(cfg, state_prediction=True))
@@ -209,3 +209,52 @@ def test_rank_checkpoint_states_gather_over_the_cpu_object_group(tmp_path: Path)
         process.join(timeout=120)
         assert process.exitcode == 0
     assert results.get(timeout=5) == [2**20, 2 * 2**20]
+
+
+def test_production_config_is_the_selected_batch_on_all_sources_with_awr() -> None:
+    cfg = _MODULE.production_config()
+    _MODULE.validate_config(cfg)
+    assert (cfg.batch_size, cfg.world_size, cfg.local_batch_size, cfg.microbatch_size) == (2048, 4, 512, 512)
+    assert cfg.muon_lr * cfg.muon_lr_multiplier == pytest.approx(0.014)
+    assert cfg.advantage_weighting and cfg.stick_features == "polar" and not cfg.state_prediction
+    assert len(cfg.source_names) == 44 and cfg.val_n_samples == 2048
+    assert cfg.max_steps == 204_800 and cfg.max_steps * cfg.supervised_positions_per_update >= cfg.train_frames
+    assert cfg.warmup_steps * cfg.supervised_positions_per_update == 2**26
+    assert cfg.decay_start_update + cfg.decay_duration == cfg.max_steps and cfg.decay_duration * 4 == cfg.max_steps
+    assert cfg.eval_every % cfg.ckpt_every == 0 and cfg.val_every % cfg.ckpt_every == 0
+    assert cfg.max_steps % cfg.eval_every == 0 and cfg.decay_start_update % cfg.ckpt_every == 0
+    assert cfg.replay_slots <= cfg.train_replays // cfg.world_size
+    assert _MODULE.training_fields(replace(cfg, advantage_weighting=False)) != _MODULE.training_fields(cfg)
+    with pytest.raises(ValueError, match="production is frozen"):
+        _MODULE.validate_config(replace(cfg, advantage_weighting=False))
+    with pytest.raises(ValueError, match="proxy arms are frozen|proxy training boundaries"):
+        _MODULE.validate_config(replace(_MODULE.proxy_config_for_arm("b2048"), advantage_weighting=True))
+
+
+def test_production_parameter_contract_drops_the_state_head_and_adds_polar_features() -> None:
+    torch.manual_seed(0)
+    counts = _MODULE.subsystem_parameter_counts(_MODULE.make_model(_MODULE.production_config()))
+    assert counts["state_head"] == 0
+    assert counts["total"] == 194_554_777 - 1_194_748 + 64
+
+
+@pytest.mark.parametrize(("step", "weighted"), [(0, False), (_MODULE.AWRCalibration.start_update - 1, True)])
+def test_advantage_weighting_starts_at_the_o59_update(step: int, weighted: bool) -> None:
+    cfg = replace(_small_config(), advantage_weighting=True)
+    torch.manual_seed(1)
+    model = _MODULE.make_model(cfg)
+    batch = _MODULE.synthetic_awr_batch(cfg, torch.device("cpu"))
+    batch = replace(batch, returns=torch.randn_like(batch.returns) * 500)
+    trunk, temporal = _MODULE._training_functions(model, cfg)
+    _, _, metrics = _MODULE.microbatch_loss(
+        model,
+        batch,
+        cfg,
+        step=step,
+        valid_prefixes=4,
+        trunk_fn=trunk,
+        temporal_fn=temporal,
+        prefix_positions=torch.tensor([[4, 7], [5, 6]]),
+    )
+    assert bool(metrics["awr/active"]) == weighted
+    assert (float(metrics["awr/weight_max"]) > 1.0 + 1e-6) == weighted

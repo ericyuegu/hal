@@ -84,13 +84,11 @@ FORK_SOURCE_FLAGS: Final[frozenset[str]] = frozenset(
 )
 STATE_SCHEMA: Final[int] = 1
 INTERRUPT_GRACE_S: Final[int] = 20
-CLOSED_LOOP_EXPERIMENTS: Final[tuple[str, ...]] = (
-    "experiments/059_muon_action_sequence.py",
-    "experiments/060_compute_optimal_action_sequence.py",
-)
+# A maintained experiment owns its evaluation cadence; the broker only requires an
+# experiment program whose ``eval`` command accepts the arguments built below.
+CLOSED_LOOP_EXPERIMENT: Final[re.Pattern[str]] = re.compile(r"experiments/[0-9]{3}_[a-z0-9_]+\.py")
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
-CLOSED_LOOP_EVERY: Final[int] = 8192
 CLOSED_LOOP_BROKER_FD: Final[str] = "HAL_MODAL_EVAL_FD"
 CLOSED_LOOP_REQUEST_MAX_BYTES: Final[int] = 4096
 
@@ -622,14 +620,14 @@ def _drain_run_names(
 
 
 def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
-    found = [experiment for experiment in CLOSED_LOOP_EXPERIMENTS if experiment in argv]
+    found = list(dict.fromkeys(token for token in argv if CLOSED_LOOP_EXPERIMENT.fullmatch(token)))
     if len(found) > 1:
         raise ValueError(f"command names more than one closed-loop experiment: {found}")
     return found[0] if found else None
 
 
 def _valid_evaluation_update(experiment: str, update: int) -> bool:
-    return experiment in CLOSED_LOOP_EXPERIMENTS and update > 0 and update % CLOSED_LOOP_EVERY == 0
+    return CLOSED_LOOP_EXPERIMENT.fullmatch(experiment) is not None and update > 0
 
 
 def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) -> bytes:
@@ -888,7 +886,7 @@ def _run_closed_loop_eval(
     return_target: str = "p90",
 ) -> None:
     """Evaluate one uploaded training endpoint and publish its evidence."""
-    if experiment not in CLOSED_LOOP_EXPERIMENTS:
+    if CLOSED_LOOP_EXPERIMENT.fullmatch(experiment) is None:
         raise ValueError(f"unsupported closed-loop experiment: {experiment!r}")
     if not RUN_NAME.fullmatch(run_name):
         raise ValueError(f"invalid training run name: {run_name!r}")
