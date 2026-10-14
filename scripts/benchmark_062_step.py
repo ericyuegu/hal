@@ -69,6 +69,8 @@ class Args:
     """AOTAutograd's recompute budget in (0, 1]; None keeps PyTorch's default partitioner."""
     profile: bool = False
     """Trace the measured updates and report GPU busy time and top kernels."""
+    validation_batches: int = 0
+    """After training updates, validate this many synthetic validation batches beside the training graphs."""
 
 
 def main(args: Args) -> None:
@@ -159,6 +161,23 @@ def main(args: Args) -> None:
             "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
             "peak_reserved_gib": round(torch.cuda.max_memory_reserved() / 2**30, 2),
         }
+        if args.validation_batches:
+            validation_cfg = replace(cfg, local_batch_size=cfg.val_batch_size, microbatch_size=cfg.val_batch_size)
+            batches = [
+                experiment.synthetic_awr_batch(validation_cfg, torch.device("cpu"))
+                for _ in range(args.validation_batches)
+            ]
+            summary["allocated_before_validation_gib"] = round(torch.cuda.memory_allocated() / 2**30, 2)
+            torch.cuda.reset_peak_memory_stats()
+            started = time.perf_counter()
+            try:
+                experiment.validation_wandb_metrics(model, batches, cfg)
+            except torch.OutOfMemoryError:
+                print(torch.cuda.memory_summary(abbreviated=True), flush=True)
+                raise
+            torch.cuda.synchronize()
+            summary["validation_s"] = round(time.perf_counter() - started, 1)
+            summary["validation_peak_allocated_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
         if profiler is not None:
             summary["gpu_busy_fraction"] = round(gpu_busy_fraction(profile_dir / f"rank{distributed.rank}.json.gz"), 4)
         print(f"[benchmark] {json.dumps(summary)}", flush=True)
