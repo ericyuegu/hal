@@ -102,6 +102,11 @@ def decoder_rmsnorm(x: Tensor) -> Tensor:
     return F.rms_norm(x, (x.shape[-1],), eps=1e-6)
 
 
+# Eager flex_attention runs PyTorch's unfused reference math, which took 70%
+# of O62 validation time. Compiled training graphs inline this wrapper.
+_compiled_flex_attention = torch.compile(flex_attention)
+
+
 def _history_score_mod(
     score: Tensor,
     b: Tensor,
@@ -501,7 +506,7 @@ class HistoryCrossAttention(nn.Module):
         if query.device.type == "cuda":
             attended = cast(
                 Tensor,
-                flex_attention(
+                _compiled_flex_attention(
                     query,
                     key,
                     value,
