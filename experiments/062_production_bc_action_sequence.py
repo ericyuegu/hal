@@ -231,6 +231,12 @@ PROXY_VALIDATION_POSITIONS: Final[int] = 2**26
 # The 50M proxy peaked at 110 GB with 512 windows per device on a B200, above an
 # RTX PRO 6000's 96 GB. Ranks scale with the batch so that no arm accumulates.
 PROXY_DEVICE_BATCH: Final[int] = 256
+# A replay's windows are spaced one ring period apart. Fixing the aggregate ring
+# and the phase block in windows keeps that spacing, and the minimum reuse gap,
+# equal across batch arms. Ranked-anonymized-1 has about 14,000 training replays
+# per rank at eight ranks, below O60's 65,536 slots per rank.
+PROXY_AGGREGATE_REPLAY_SLOTS: Final[int] = 65_536
+PROXY_PHASE_BLOCK_WINDOWS: Final[int] = 16_384
 PROXY_BATCH_SIZES: Final[tuple[int, ...]] = (512, 1024, 2048)
 # A fixed Muon rate takes the same step size per update, so a larger batch moves
 # the weights less over equal data. The scaled arms multiply it by the square
@@ -696,9 +702,7 @@ class TrainConfig:
     selection_sha256: ClassVar[str] = "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
-    replay_slots: ClassVar[int] = 65_536
     windows_per_generation: ClassVar[int] = 8
-    replay_phase_block_batches: ClassVar[int] = 25
     reserved_disk_bytes: ClassVar[int] = 256 * 2**30
     player_sidecar_remote: ClassVar[str] = "s3://hal/processed/player-identity-v1/professional-code-v1.jsonl.gz"
 
@@ -708,6 +712,8 @@ class TrainConfig:
     state_loss_weight: float = 1.0
     stick_features: StickFeatures = "polar"
     warmup_updates: int = WARMUP_UPDATES
+    replay_slots: int = 65_536
+    replay_phase_block_batches: int = 25
 
     # A 21-frame delay executes offsets 22 and 23, where the state head's effect
     # on far-offset action prediction should matter most.
@@ -884,8 +890,8 @@ def validate_config(cfg: TrainConfig) -> None:
             "the O62 proxy freezes 256 windows per rank without accumulation, ranked-anonymized-1, "
             "and 1,024 validation windows"
         )
-    if cfg.num_workers != 12 or cfg.replay_slots != 65_536:
-        raise ValueError("each O60 rank requires 12 workers and 65,536 replay slots")
+    if cfg.num_workers != 12:
+        raise ValueError("each O62 rank requires 12 loader workers")
     positive = {
         "d_model": cfg.arch.d_model,
         "n_layers": cfg.arch.n_layers,
@@ -1075,6 +1081,8 @@ def proxy_config(*, batch_size: int, stick_features: StickFeatures, muon_lr_mult
         world_size=batch_size // PROXY_DEVICE_BATCH,
         local_batch_size=PROXY_DEVICE_BATCH,
         microbatch_size=PROXY_DEVICE_BATCH,
+        replay_slots=PROXY_AGGREGATE_REPLAY_SLOTS // (batch_size // PROXY_DEVICE_BATCH),
+        replay_phase_block_batches=PROXY_PHASE_BLOCK_WINDOWS // batch_size,
         source_names=PROXY_SOURCE_NAMES,
         val_n_samples=PROXY_VAL_SAMPLES,
         val_every=PROXY_VALIDATION_POSITIONS // positions_per_update,
@@ -1097,6 +1105,8 @@ def proxy_training_fields(cfg: TrainConfig) -> tuple[object, ...]:
         cfg.world_size,
         cfg.local_batch_size,
         cfg.microbatch_size,
+        cfg.replay_slots,
+        cfg.replay_phase_block_batches,
         tuple(cfg.source_names),
         cfg.val_n_samples,
         cfg.val_every,

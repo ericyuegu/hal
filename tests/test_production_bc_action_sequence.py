@@ -170,3 +170,15 @@ def test_scaled_adam_betas_never_fall_below_their_base_values() -> None:
     long_run = replace(_MODULE.proxy_config_for_arm("b512"), target_positions=2**32)
     beta1, beta2 = _MODULE.scaled_adam_betas(long_run)
     assert math.isclose(beta1, 1 - 0.1 / 4) and math.isclose(beta2, 1 - 0.05 / 4)
+
+
+def test_replay_spacing_matches_across_batch_arms_and_fits_each_rank() -> None:
+    gaps = set()
+    for arm in ("b512", "b1024", "b2048"):
+        cfg = _MODULE.proxy_config_for_arm(arm)
+        assert cfg.replay_slots * cfg.world_size == 65_536
+        assert cfg.replay_phase_block_batches * cfg.batch_size == 16_384
+        rows_per_rank = cfg.train_replays // cfg.world_size
+        assert cfg.replay_slots <= rows_per_rank
+        gaps.add(cfg.minimum_replay_gap_batches * cfg.batch_size - cfg.batch_size)
+    assert len(gaps) == 1
