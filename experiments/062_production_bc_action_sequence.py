@@ -89,6 +89,7 @@ from typing import cast
 import melee
 import numpy as np
 import torch
+import torch._functorch.config as functorch_config
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -786,6 +787,10 @@ class TrainConfig:
     compile_trunk: bool = True
     compile_temporal: bool = True
     train_compile_mode: Literal["reduce-overhead", "max-autotune"] = "reduce-overhead"
+    # AOTAutograd recomputes the cheapest saved activations to stay under this
+    # fraction of save-everything memory. It changes memory and speed, not the
+    # computed values. None keeps PyTorch's default partitioner.
+    activation_memory_budget: float | None = None
 
     wandb_log_code: bool = True
     val_every: int = 4096
@@ -890,6 +895,8 @@ class TrainConfig:
 
 
 def validate_config(cfg: TrainConfig) -> None:
+    if cfg.activation_memory_budget is not None and not 0 < cfg.activation_memory_budget <= 1:
+        raise ValueError("activation_memory_budget must be in (0, 1]")
     if cfg.state_prediction:
         raise ValueError("O62 omits the state head")
     if cfg.stick_features not in ("xy", "polar"):
@@ -4166,6 +4173,9 @@ def _training_functions(
     trunk_fn: Callable = model.forward
     temporal_fn: Callable = model.joint_teacher_forced_nll
     mode = cfg.train_compile_mode if compile_mode is None else compile_mode
+    if cfg.activation_memory_budget is not None:
+        # The partitioner reads this process-wide setting when the first call compiles.
+        functorch_config.activation_memory_budget = cfg.activation_memory_budget
     if DEVICE == "cuda" and cfg.compile_trunk:
         # Resolve FlexAttention before Dynamo sees the model. This entrypoint is
         # the sole compilation owner for the raw mask and attention operations.

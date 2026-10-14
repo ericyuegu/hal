@@ -289,3 +289,9 @@ def test_export_update_profile_writes_a_compressed_rank_trace(tmp_path: Path) ->
         events = json.load(trace)["traceEvents"]
     assert any(event.get("name") == "train/forward" for event in events)
     assert not (tmp_path / "profile" / "rank0.json").exists()
+
+
+def test_activation_memory_budget_must_be_a_fraction() -> None:
+    for budget in (0.0, 1.5):
+        with pytest.raises(ValueError, match="activation_memory_budget"):
+            _MODULE.validate_config(replace(_MODULE.production_config(), activation_memory_budget=budget))
