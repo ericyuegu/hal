@@ -108,7 +108,14 @@ trap stop_container TERM INT
 set +e
 # A private /dev/shm disappears with the container, so a killed job cannot
 # leave Streaming or DataLoader shared memory behind for the next one.
-docker run --rm --name hal-job --gpus all --shm-size=128g \
+# A systemd daemon-reload, such as the one the guest agent runs when OS Login
+# configures SSH, drops the device cgroup rules that --gpus adds. New CUDA
+# contexts in the running container then fail with "Failed to initialize NVML:
+# Unknown Error" (nvidia-container-toolkit, cgroup v2, driver 580). Explicit
+# --device rules survive the reload.
+gpu_devices=()
+for device in /dev/nvidia*; do [ -c "$device" ] && gpu_devices+=(--device "$device"); done
+docker run --rm --name hal-job --gpus all "${gpu_devices[@]}" --shm-size=128g \
   --env-file /run/hal/job.env \
   -e HAL_GIT_SHA="$1" -e HAL_TRAIN_CMD_B64="$2" \
   -e TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor \

@@ -383,3 +383,9 @@ def test_every_object_collective_uses_the_gloo_object_group() -> None:
     for call in calls:
         groups = [keyword.value for keyword in call.keywords if keyword.arg == "group"]
         assert len(groups) == 1 and ast.unparse(groups[0]) == "distributed.object_group", ast.unparse(call)
+
+
+def test_eval_checkpoint_rejects_a_missing_cuda_device(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        _MODULE.eval_checkpoint(str(tmp_path / "missing.pt"))

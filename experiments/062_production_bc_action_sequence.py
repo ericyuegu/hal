@@ -5379,6 +5379,9 @@ def eval_checkpoint(
     wandb_namespace: str = "eval",
     return_target: Literal["p90", "unconditioned"] = "unconditioned",
 ) -> dict[str, float]:
+    # A CPU policy steps the emulators about 200 times slower; a 96-matchup evaluation would take days.
+    if not torch.cuda.is_available():
+        raise RuntimeError("closed-loop evaluation requires CUDA")
     actual_checkpoint_sha256 = checkpoint_sha256(Path(path))
     if expected_checkpoint_sha256 is not None and actual_checkpoint_sha256 != expected_checkpoint_sha256:
         raise ValueError(
