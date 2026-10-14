@@ -182,3 +182,30 @@ def test_replay_spacing_matches_across_batch_arms_and_fits_each_rank() -> None:
         assert cfg.replay_slots <= rows_per_rank
         gaps.add(cfg.minimum_replay_gap_batches * cfg.batch_size - cfg.batch_size)
     assert len(gaps) == 1
+
+
+def _gather_worker(rank: int, init_file: str, results: Any) -> None:
+    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
+    try:
+        group = torch.distributed.new_group(backend="gloo")
+        context = _MODULE.DistributedContext(rank, rank, 2, torch.device("cpu"), group)
+        states = _MODULE.gather_rank_checkpoint_states({"rank": rank, "payload": b"x" * (rank + 1) * 2**20}, context)
+        if rank == 0:
+            assert states is not None
+            results.put([len(state["payload"]) for state in states])
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_rank_checkpoint_states_gather_over_the_cpu_object_group(tmp_path: Path) -> None:
+    context = torch.multiprocessing.get_context("spawn")
+    results = context.Queue()
+    processes = [
+        context.Process(target=_gather_worker, args=(rank, str(tmp_path / "init"), results)) for rank in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=120)
+        assert process.exitcode == 0
+    assert results.get(timeout=5) == [2**20, 2 * 2**20]

@@ -294,6 +294,10 @@ class DistributedContext:
     local_rank: int
     world_size: int
     device: torch.device
+    # Pickled checkpoint state travels over CPU gloo, not NCCL. On a two-GPU G4
+    # host an NCCL gather of the rank checkpoint state spun for 30 minutes at the
+    # first boundary; gradients still use NCCL.
+    object_group: dist.ProcessGroup | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.rank < self.world_size:
@@ -332,7 +336,8 @@ def init_distributed(cfg: TrainConfig, *, backend: str | None = None) -> Distrib
     else:
         raise ValueError(f"unsupported distributed backend {selected_backend!r}")
     dist.init_process_group(backend=selected_backend, rank=rank, world_size=world_size)
-    return DistributedContext(rank, local_rank, world_size, device)
+    object_group = dist.new_group(backend="gloo")
+    return DistributedContext(rank, local_rank, world_size, device, object_group)
 
 
 def _all_reduce_sum(value: Tensor) -> Tensor:
@@ -3453,7 +3458,7 @@ def gather_rank_checkpoint_states(
 ) -> tuple[dict[str, object], ...] | None:
     """Gather ordered rank state on rank zero without replicating it elsewhere."""
     gathered: list[object] | None = [None] * distributed.world_size if distributed.is_primary else None
-    dist.gather_object(local_state, gathered, dst=0)
+    dist.gather_object(local_state, gathered, dst=0, group=distributed.object_group)
     if gathered is None:
         return None
     if not all(isinstance(state, dict) for state in gathered):
