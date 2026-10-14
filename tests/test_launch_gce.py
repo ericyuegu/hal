@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -36,12 +37,31 @@ def test_startup_script_contains_no_secret_values() -> None:
         image="example/image:tag",
         keep_alive=False,
     )
-    assert base64.b64encode(b"WANDB_API_KEY=wandb-key").decode() in script
+    assert base64.b64encode(b"WANDB_API_KEY=wandb-key\n").decode() in script
     assert "secret-value" not in script
     assert base64.b64encode(b"python train.py --name 'two words'").decode() in script
     assert "export HAL_KEEP_ALIVE=0" in script
     assert "apt-get install --yes --no-install-recommends docker.io" in script
     assert "nvidia-ctk runtime configure --runtime=docker" in script
+
+
+def test_boot_script_reads_every_secret_mapping_including_the_last() -> None:
+    script = startup_script(
+        sha="abc123",
+        train_cmd="true",
+        project="my-project",
+        secrets=[("AWS_BUCKET", "AWS_BUCKET"), ("WANDB_API_KEY", "WANDB_API_KEY")],
+        image="example/image:tag",
+        keep_alive=False,
+    )
+    encoded = next(
+        line.split("=", 1)[1] for line in script.splitlines() if line.startswith("export HAL_SECRET_SPECS_B64=")
+    )
+    loop = (
+        f"while IFS='=' read -r env_name secret_id; do echo \"$env_name\"; done < <(printf '%s' {encoded} | base64 -d)"
+    )
+    read = subprocess.run(["bash", "-c", loop], check=True, capture_output=True, text=True).stdout.split()
+    assert read == ["AWS_BUCKET", "WANDB_API_KEY"]
 
 
 def test_create_command_spot_keyless_service_account() -> None:
