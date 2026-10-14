@@ -6,15 +6,23 @@ descriptors for non-owning prefix probes, and leaves failed shard downloads in
 three failures. Remove a patch only after those tests pass against an upgraded
 Mosaic release.
 
+``single_process_streaming`` serves a dataset that one torchrun rank builds
+alone. Mosaic 0.13.0 reads the rank world from ``RANK`` and ``WORLD_SIZE`` and
+calls ``torch.distributed.barrier`` while constructing a dataset, so a rank-zero
+validation cohort on eight ranks deadlocks and sees one eighth of the split.
+
 This module replaces private APIs. ``patch_streaming`` therefore rejects every
 version except the one validated here and applies the replacements once.
 """
 
+import contextlib
 import os
 import tempfile
+from collections.abc import Iterator
 from importlib.metadata import version
 from multiprocessing import resource_tracker
 from typing import Any
+from typing import Final
 
 import streaming.base.constant as streaming_constants
 import streaming.base.dataset as streaming_dataset
@@ -138,3 +146,47 @@ def patch_streaming() -> None:
         _prepare_shard_without_poisoned_state
     )
     _PATCHED = True
+
+
+_WORLD_ENVIRONMENT: Final[dict[str, str]] = {
+    "RANK": "0",
+    "WORLD_SIZE": "1",
+    "LOCAL_RANK": "0",
+    "LOCAL_WORLD_SIZE": "1",
+}
+
+
+class _NoProcessGroup:
+    """``torch.distributed`` as seen by a dataset that one process builds alone."""
+
+    @staticmethod
+    def is_available() -> bool:
+        return True
+
+    @staticmethod
+    def is_initialized() -> bool:
+        return False
+
+
+@contextlib.contextmanager
+def single_process_streaming() -> Iterator[None]:
+    """Build and read a Mosaic dataset as a one-process world inside a torchrun job.
+
+    Construct and fully iterate the dataset inside this context, with no loader
+    workers: the replacement is process-global and ends when the context exits.
+    """
+    patch_streaming()
+    saved_environment = {name: os.environ.get(name) for name in _WORLD_ENVIRONMENT}
+    saved_modules = (streaming_dataset.dist, streaming_prefix.dist)
+    os.environ.update(_WORLD_ENVIRONMENT)
+    streaming_dataset.dist = _NoProcessGroup  # ty: ignore[invalid-assignment]
+    streaming_prefix.dist = _NoProcessGroup  # ty: ignore[invalid-assignment]
+    try:
+        yield
+    finally:
+        streaming_dataset.dist, streaming_prefix.dist = saved_modules
+        for name, value in saved_environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

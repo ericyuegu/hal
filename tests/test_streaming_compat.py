@@ -165,3 +165,52 @@ def test_failed_download_does_not_poison_shared_shard_state(monkeypatch: pytest.
     with pytest.raises(RuntimeError, match="object-store"):
         streaming_compat._prepare_shard_without_poisoned_state(Dataset(), 0)  # type: ignore[arg-type]
     assert Dataset._shard_states[0] == remote
+
+
+def test_single_process_streaming_reads_the_whole_split_without_collectives(tmp_path: Path) -> None:
+    with MDSWriter(out=str(tmp_path / "val"), columns={"value": "int"}, compression="zstd") as writer:
+        for value in range(8):
+            writer.write({"value": value})
+    program = textwrap.dedent(
+        """\
+        import json
+        import os
+        import sys
+
+        import torch.distributed as dist
+        from hal.data.streaming_compat import patch_streaming, single_process_streaming
+        from streaming import StreamingDataset
+
+        patch_streaming()
+        # A torchrun rank zero of two: the environment names two ranks and a
+        # process group exists, so Mosaic shards the split and calls barriers.
+        os.environ.update(RANK="0", WORLD_SIZE="2", LOCAL_RANK="0", LOCAL_WORLD_SIZE="2")
+        dist.init_process_group("gloo", rank=0, world_size=1, store=dist.HashStore())
+        barriers = []
+        original_barrier = dist.barrier
+        dist.barrier = lambda *args, **kwargs: barriers.append(1) or original_barrier(*args, **kwargs)
+        shared = StreamingDataset(local=sys.argv[1], batch_size=1, shuffle=False)
+        # Iterating a two-rank dataset here would wait for the absent rank.
+        shared_length = len(shared)
+        shared_barriers = len(barriers)
+        del shared
+        with single_process_streaming():
+            alone = StreamingDataset(local=sys.argv[1], batch_size=1, shuffle=False)
+            alone_values = sorted(int(sample["value"]) for sample in alone)
+        print(json.dumps([shared_length, shared_barriers, alone_values, len(barriers), os.environ["WORLD_SIZE"]]))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path / "val")],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    shared_length, shared_barriers, alone_values, total_barriers, world_size = json.loads(
+        completed.stdout.splitlines()[-1]
+    )
+    assert shared_length == 4 and shared_barriers > 0
+    assert alone_values == list(range(8))
+    assert total_barriers == shared_barriers
+    assert world_size == "2"

@@ -101,6 +101,7 @@ from hal.data.player_identity import ReplayPlayerLookup
 from hal.data.player_identity import load_player_identity_artifact
 from hal.data.policy_schema import unpack_player_stock
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.streaming_compat import single_process_streaming
 from hal.eval.action_trace import ActionTraceWriter
 from hal.eval.cross_stage import BOOTSTRAP_RESAMPLES
 from hal.eval.cross_stage import PRIOR_SWEEP_SEED_STAGE
@@ -3816,33 +3817,42 @@ def _make_loaders(
     if not distributed.is_primary:
         return train_loader, []
     try:
-        val_loader = make_validation_replay_loader(
-            sources=tuple(streams.BY_NAME[name] for name in cfg.source_names),
-            stats=stats,
-            context_length=cfg.arch.L_ctx,
-            chunk_length=cfg.arch.sample_chunk_length,
-            batch_size=cfg.val_batch_size,
-            seed=cfg.seed,
-            cache_limit="1792gb",
-            schema_version=cfg.mds_schema_version,
-            extra=ITEM_PLAYER_COLUMNS,
-            projection=FeatureProjection(
-                columns=ITEM_PLAYER_PROJECTION.columns
-                | {cfg.awr.ego_return_column, cfg.awr.ego_return_valid_column, "ego_return60", "ego_return60_valid"},
-            ),
-            batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx, stats=stats),
-            replay_labels=ReturnLabels(
-                returns_lib.PolicyReturnLabels(
-                    player_lookup,
-                    cfg.awr.gamma,
-                    cfg.awr.damage_shaping,
-                    cfg.awr.win_reward,
-                    cfg.awr.stock_value,
-                    cfg.awr.return_suffix,
-                )
-            ),
-        )
-        validation = cache_validation(val_loader, cfg.val_n_samples)
+        # Rank zero builds the validation cohort alone, so Mosaic must neither
+        # shard the split by the torchrun world nor wait on a barrier that the
+        # other ranks never reach.
+        with single_process_streaming():
+            val_loader = make_validation_replay_loader(
+                sources=tuple(streams.BY_NAME[name] for name in cfg.source_names),
+                stats=stats,
+                context_length=cfg.arch.L_ctx,
+                chunk_length=cfg.arch.sample_chunk_length,
+                batch_size=cfg.val_batch_size,
+                seed=cfg.seed,
+                cache_limit="1792gb",
+                schema_version=cfg.mds_schema_version,
+                extra=ITEM_PLAYER_COLUMNS,
+                projection=FeatureProjection(
+                    columns=ITEM_PLAYER_PROJECTION.columns
+                    | {
+                        cfg.awr.ego_return_column,
+                        cfg.awr.ego_return_valid_column,
+                        "ego_return60",
+                        "ego_return60_valid",
+                    },
+                ),
+                batch_transform=functools.partial(collate_awr_batch, L_ctx=cfg.arch.L_ctx, stats=stats),
+                replay_labels=ReturnLabels(
+                    returns_lib.PolicyReturnLabels(
+                        player_lookup,
+                        cfg.awr.gamma,
+                        cfg.awr.damage_shaping,
+                        cfg.awr.win_reward,
+                        cfg.awr.stock_value,
+                        cfg.awr.return_suffix,
+                    )
+                ),
+            )
+            validation = cache_validation(val_loader, cfg.val_n_samples)
     except Exception:
         train_loader.close()
         raise
