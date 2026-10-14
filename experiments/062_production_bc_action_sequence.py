@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import gzip
 import hashlib
 import json
 import math
@@ -281,6 +282,8 @@ PROXY_VAL_SAMPLES: Final[int] = 1_024
 RETURN_HORIZON: Final[int] = 60
 RETURN_SCALE: Final[float] = 120.0
 CALIBRATION_WINDOWS: Final[int] = 65_536
+# Eight steady-state updates cover several loader cohorts and every update phase.
+PROFILE_UPDATES: Final[int] = 8
 
 
 def compute_flops_per_supervised_position(compute_equivalent_parameters: int) -> int:
@@ -4324,6 +4327,36 @@ class _TrainingMetricAccumulator:
         return values, updates
 
 
+def profiled_update_stop(start_update: int, run_stop: int) -> int:
+    """Return the last profiled update; update one is excluded because it compiles."""
+    stop = start_update + PROFILE_UPDATES - 1
+    if start_update <= 1 or stop > run_stop:
+        raise ValueError(f"profiled updates {start_update}–{stop} must start after update 1 and end by {run_stop}")
+    return stop
+
+
+def export_update_profile(
+    profiler: torch.profiler.profile, profile_dir: Path, distributed: DistributedContext
+) -> None:
+    """Write every rank's trace and print rank zero's kernel and phase summary."""
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
+    profiler.stop()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    trace = profile_dir / f"rank{distributed.rank}.json"
+    profiler.export_chrome_trace(str(trace))
+    with trace.open("rb") as source, gzip.open(trace.with_suffix(".json.gz"), "wb") as target:
+        target.writelines(source)
+    trace.unlink()
+    if distributed.is_primary:
+        averages = profiler.key_averages()
+        print(f"[profile] {PROFILE_UPDATES} updates by device time", flush=True)
+        print(averages.table(sort_by="self_device_time_total", row_limit=40), flush=True)
+        print("[profile] by CPU time", flush=True)
+        print(averages.table(sort_by="cpu_time_total", row_limit=25), flush=True)
+    dist.barrier()
+
+
 def train_step(
     model: ActionStateSequenceTransformer,
     training_owner: DistributedDataParallel,
@@ -4365,23 +4398,26 @@ def train_step(
         stop = start + cfg.microbatch_size
         sync = contextlib.nullcontext() if index + 1 == microbatches else training_owner.no_sync()
         with sync:
-            loss, batch_nll, batch_metrics = training_owner(
-                batch.row_slice(start, stop),
-                step=step,
-                valid_prefixes=valid_prefixes,
-                prefix_positions=prefix_positions[start:stop],
-                value_loss_scale=cfg.microbatch_size / cfg.local_batch_size,
-            )
-            if not bool(torch.isfinite(loss)):
-                raise FloatingPointError(f"update {update}: loss is non-finite on the local rank")
-            loss.backward()
+            with torch.profiler.record_function("train/forward"):
+                loss, batch_nll, batch_metrics = training_owner(
+                    batch.row_slice(start, stop),
+                    step=step,
+                    valid_prefixes=valid_prefixes,
+                    prefix_positions=prefix_positions[start:stop],
+                    value_loss_scale=cfg.microbatch_size / cfg.local_batch_size,
+                )
+                if not bool(torch.isfinite(loss)):
+                    raise FloatingPointError(f"update {update}: loss is non-finite on the local rank")
+            with torch.profiler.record_function("train/backward"):
+                loss.backward()
         nll_sum = batch_nll if nll_sum is None else nll_sum + batch_nll
         for name, value in batch_metrics.items():
             scale = 1.0 if name in additive_metrics or "target_logit_grad_l1" in name else 1 / microbatches
             metrics[name] = metrics.get(name, torch.zeros_like(value)) + scale * value
     assert nll_sum is not None
     metrics["stability/action_grad_abs_max"] = _button_gradient_abs_max(model)
-    gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip, error_if_nonfinite=True)
+    with torch.profiler.record_function("train/clip"):
+        gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip, error_if_nonfinite=True)
     metrics["optimizer/clip_fraction"] = (gradient_norm > cfg.grad_clip).float()
     if cfg.optimizer == "muon":
         muon_lr = float(next(group["lr"] for group in optimizer.param_groups if group["use_muon"]))
@@ -4389,7 +4425,8 @@ def train_step(
     else:
         muon_lr = 0.0
         adam_lr = float(max(group["lr"] for group in optimizer.param_groups))
-    optimizer.step()
+    with torch.profiler.record_function("train/optimizer"):
+        optimizer.step()
     scheduler.step()
     return TrainStepResult(nll_sum, gradient_norm, metrics, muon_lr, adam_lr)
 
@@ -4688,6 +4725,7 @@ def train(
     defer_gameplay_evaluations: bool = False,
     stop_after_update: int | None = None,
     qualification_output: Path | None = None,
+    profile_start_update: int | None = None,
 ) -> None:
     validate_config(cfg)
     if qualification_output is not None and (not smoke or stop_after_update != 512):
@@ -4718,6 +4756,9 @@ def train(
         run_stop = cfg.stable_updates
     else:
         run_stop = cfg.max_steps
+    profile_stop_update = (
+        None if profile_start_update is None else profiled_update_stop(profile_start_update, run_stop)
+    )
     names: list[object] = [
         resume_run or make_run_name(Path(__file__).stem, model_tag(cfg), "policy-world-v8", comment)
         if distributed.is_primary
@@ -4862,6 +4903,7 @@ def train(
     window_loader_ready_batches: list[int] = []
     window_peak_allocated_gb = 0.0
     update_timer = _UpdateTimer()
+    profiler: torch.profiler.profile | None = None
     # CUDA compilation must remain on the training thread. Background compilation
     # deadlocked training on both H100 and B200 hosts.
     model.train()
@@ -4873,6 +4915,11 @@ def train(
             recompile_guard.enter_context(torch.compiler.set_stance("fail_on_recompile"))
         for step in range(start_step, run_stop):
             update = step + 1
+            if update == profile_start_update:
+                profiler = torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+                )
+                profiler.start()
             update_timer.start()
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
@@ -4884,7 +4931,8 @@ def train(
             state_boundary_due = boundary_due or update == run_stop
             next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary >= update)
 
-            batch, valid_prefixes = batch_prefetcher.next()
+            with torch.profiler.record_function("loader/next"):
+                batch, valid_prefixes = batch_prefetcher.next()
             lookahead_limit = 0 if state_boundary_due else next_state_boundary - update
             batch_prefetcher.fill_lookahead(lookahead_limit)
             window_loader_submitted_batches.append(batch_prefetcher.submitted_batches)
@@ -4903,7 +4951,8 @@ def train(
                 prefix_sampler=prefix_sampler,
                 prefix_validated_on_cpu=True,
             )
-            loader_wait = batch_prefetcher.stage_next() if not state_boundary_due else 0.0
+            with torch.profiler.record_function("loader/stage_next"):
+                loader_wait = batch_prefetcher.stage_next() if not state_boundary_due else 0.0
             actual_positions += cfg.supervised_positions_per_update
             metric_accumulator.add(result, valid_prefixes)
             window_loader_wait_seconds.append(loader_wait)
@@ -5070,6 +5119,11 @@ def train(
                 next_state_boundary = next(boundary for boundary in loader_state_boundaries if boundary > update)
                 batch_prefetcher.fill_lookahead(next_state_boundary - update)
                 batch_prefetcher.stage_next()
+            if profiler is not None and update == profile_stop_update:
+                export_update_profile(profiler, run_dir / "profile", distributed)
+                profiler = None
+                if uploader is not None:
+                    uploader.upload_tree(run_dir / "profile", base=run_dir)
         if not batch_prefetcher.drained:
             raise RuntimeError("CPU lookahead was not drained at the final update")
         finalization = _finalize_training(
@@ -5381,6 +5435,7 @@ class TrainArgs:
     stop_after_update: int | None = None
     qualification_output: Path | None = None
     eval_max_parallel: int | None = None
+    profile_start_update: int | None = None
 
 
 @dataclass
@@ -5496,6 +5551,7 @@ def main(args: Command) -> None:
             defer_gameplay_evaluations=args.defer_gameplay_evaluations,
             stop_after_update=args.stop_after_update,
             qualification_output=args.qualification_output,
+            profile_start_update=args.profile_start_update,
         )
     finally:
         if dist.is_initialized():

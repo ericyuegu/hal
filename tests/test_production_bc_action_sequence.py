@@ -259,3 +259,33 @@ def test_advantage_weighting_starts_at_the_o59_update(step: int, weighted: bool)
     )
     assert bool(metrics["awr/active"]) == weighted
     assert (float(metrics["awr/weight_max"]) > 1.0 + 1e-6) == weighted
+
+
+def test_profiled_update_window_skips_compile_and_ends_by_run_stop() -> None:
+    assert _MODULE.profiled_update_stop(2, 9) == 9
+    with pytest.raises(ValueError, match="must start after update 1"):
+        _MODULE.profiled_update_stop(1, 100)
+    with pytest.raises(ValueError, match="must start after update 1"):
+        _MODULE.profiled_update_stop(3, 9)
+
+
+def test_export_update_profile_writes_a_compressed_rank_trace(tmp_path: Path) -> None:
+    import gzip
+    import json
+
+    import torch.distributed as dist
+
+    dist.init_process_group("gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1)
+    try:
+        profiler = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU])
+        profiler.start()
+        with torch.profiler.record_function("train/forward"):
+            torch.ones(4) @ torch.ones(4)
+        context = _MODULE.DistributedContext(0, 0, 1, torch.device("cpu"))
+        _MODULE.export_update_profile(profiler, tmp_path / "profile", context)
+    finally:
+        dist.destroy_process_group()
+    with gzip.open(tmp_path / "profile" / "rank0.json.gz", "rt") as trace:
+        events = json.load(trace)["traceEvents"]
+    assert any(event.get("name") == "train/forward" for event in events)
+    assert not (tmp_path / "profile" / "rank0.json").exists()
