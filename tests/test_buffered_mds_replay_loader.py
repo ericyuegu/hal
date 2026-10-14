@@ -324,6 +324,25 @@ def _decoded(
     )
 
 
+def test_worker_chunks_cross_processes_through_shared_memory() -> None:
+    from multiprocessing.reduction import ForkingPickler
+
+    chunk = _decoded(("a", "b"))
+    chunk = DecodedChunk(
+        chunk.request,
+        chunk.task,
+        chunk.replay_ids,
+        chunk.locators,
+        {"value": np.arange(2 * 4 * 2**16, dtype=np.float32).reshape(2, 4, 2**16)},
+        chunk.windows_per_generation,
+    )
+    shared = buffered_loader._share_columns(chunk)
+    restored = buffered_loader._SharedChunk.decoded(ForkingPickler.loads(ForkingPickler.dumps(shared)))
+    assert len(ForkingPickler.dumps(shared)) < chunk.columns["value"].nbytes // 100
+    assert restored.replay_ids == chunk.replay_ids and restored.locators == chunk.locators
+    np.testing.assert_array_equal(restored.columns["value"], chunk.columns["value"])
+
+
 def test_decoded_chunk_requires_fixed_four_window_columns() -> None:
     task = ShardTask("source", 0, 0, 2)
     request = _DecodeChunkRequest(0, 0, 0, 0, 0, (0, 1))

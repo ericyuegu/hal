@@ -32,6 +32,7 @@ from streaming import Stream
 from streaming import StreamingDataset
 from streaming.base.dataset import _ShardState
 from streaming.base.format.mds import MDSReader
+from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from torch.utils.data import Sampler
@@ -957,6 +958,47 @@ def _identity(value: DecodedChunk) -> DecodedChunk:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class _SharedChunk:
+    """A decoded chunk whose columns leave a worker as tensors.
+
+    DataLoader moves tensor storage through shared memory and pickles only a
+    handle. It pickles NumPy arrays whole through the worker's result pipe,
+    which limited an 8-rank cold fill of 32,768 replays per rank to 28–545 s.
+    """
+
+    request: _DecodeChunkRequest
+    task: ShardTask
+    replay_ids: tuple[str, ...]
+    locators: tuple[PhysicalRow, ...]
+    columns: dict[str, Tensor]
+    windows_per_generation: int
+    raw_bytes_read: int
+
+    def decoded(self) -> DecodedChunk:
+        return DecodedChunk(
+            request=self.request,
+            task=self.task,
+            replay_ids=self.replay_ids,
+            locators=self.locators,
+            columns={name: column.numpy() for name, column in self.columns.items()},
+            windows_per_generation=self.windows_per_generation,
+            raw_bytes_read=self.raw_bytes_read,
+        )
+
+
+def _share_columns(chunk: DecodedChunk) -> _SharedChunk:
+    return _SharedChunk(
+        request=chunk.request,
+        task=chunk.task,
+        replay_ids=chunk.replay_ids,
+        locators=chunk.locators,
+        columns={name: torch.from_numpy(column) for name, column in chunk.columns.items()},
+        windows_per_generation=chunk.windows_per_generation,
+        raw_bytes_read=chunk.raw_bytes_read,
+    )
+
+
 class _OrderedChunks(Iterator[DecodedChunk]):
     """Restore logical request order after out-of-order worker completion."""
 
@@ -1684,7 +1726,7 @@ class BufferedMDSReplayLoader[BatchT]:
                 batch_size=None,
                 sampler=sampler,
                 num_workers=self.num_workers,
-                collate_fn=cast(Any, _identity),
+                collate_fn=cast(Any, _share_columns),
                 pin_memory=False,
                 worker_init_fn=_limit_worker_threads,
                 generator=torch.Generator().manual_seed(self.seed),
@@ -1706,7 +1748,10 @@ class BufferedMDSReplayLoader[BatchT]:
                 in_order=False,
             )
         data_iterator = iter(data_loader)
-        ordered_chunks = _OrderedChunks(data_iterator)
+        chunks = (
+            (cast(_SharedChunk, chunk).decoded() for chunk in data_iterator) if self.num_workers else data_iterator
+        )
+        ordered_chunks = _OrderedChunks(chunks)
         materializer = None
         if self.materialization_threads:
             materialization_order = _materialization_task_order(
