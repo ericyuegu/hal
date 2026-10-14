@@ -31,7 +31,8 @@ The proxy arms selected the production batch: 2,048 windows with the Muon rate
 scaled by sqrt(2048 / 512) tied batch 512 in play, while the fixed rate lost
 about 0.1 net stocks per minute. Production trains the d1024 shape on all 44
 policy-world-v8 sources for 204,800 updates on four B200s with 512 windows each
-and no accumulation. Unlike the proxies, it restores O59's advantage weighting
+and no accumulation. It keeps O60's (x, y) stick features: the b1024 polar and
+(x, y) arms tied in play. Unlike the proxies, it restores O59's advantage weighting
 (``AWRCalibration``) from update 4,097; the value head and returns are unchanged.
 
 Run production on four B200s; the Modal launcher brokers closed-loop evaluations:
@@ -1135,7 +1136,7 @@ def production_config() -> TrainConfig:
     """Return the 4-rank B200 production run with O59's advantage weighting."""
     positions_per_update = PRODUCTION_BATCH * POLICY_PREFIXES_PER_WINDOW
     return TrainConfig(
-        stick_features="polar",
+        stick_features="xy",
         advantage_weighting=True,
         muon_lr_multiplier=PRODUCTION_MUON_LR_MULTIPLIER,
         batch_size=PRODUCTION_BATCH,

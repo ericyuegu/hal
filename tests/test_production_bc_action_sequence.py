@@ -216,7 +216,7 @@ def test_production_config_is_the_selected_batch_on_all_sources_with_awr() -> No
     _MODULE.validate_config(cfg)
     assert (cfg.batch_size, cfg.world_size, cfg.local_batch_size, cfg.microbatch_size) == (2048, 4, 512, 512)
     assert cfg.muon_lr * cfg.muon_lr_multiplier == pytest.approx(0.014)
-    assert cfg.advantage_weighting and cfg.stick_features == "polar" and not cfg.state_prediction
+    assert cfg.advantage_weighting and cfg.stick_features == "xy" and not cfg.state_prediction
     assert len(cfg.source_names) == 44 and cfg.val_n_samples == 2048
     assert cfg.max_steps == 204_800 and cfg.max_steps * cfg.supervised_positions_per_update >= cfg.train_frames
     assert cfg.warmup_steps * cfg.supervised_positions_per_update == 2**26
@@ -231,11 +231,11 @@ def test_production_config_is_the_selected_batch_on_all_sources_with_awr() -> No
         _MODULE.validate_config(replace(_MODULE.proxy_config_for_arm("b2048"), advantage_weighting=True))
 
 
-def test_production_parameter_contract_drops_the_state_head_and_adds_polar_features() -> None:
+def test_production_parameter_contract_drops_the_state_head() -> None:
     torch.manual_seed(0)
     counts = _MODULE.subsystem_parameter_counts(_MODULE.make_model(_MODULE.production_config()))
     assert counts["state_head"] == 0
-    assert counts["total"] == 194_554_777 - 1_194_748 + 64
+    assert counts["total"] == 194_554_777 - 1_194_748
 
 
 @pytest.mark.parametrize(("step", "weighted"), [(0, False), (_MODULE.AWRCalibration.start_update - 1, True)])
