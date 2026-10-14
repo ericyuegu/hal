@@ -15,14 +15,16 @@ This experiment copies O60 v3 and changes four things:
 - The global batch is an experimental choice. Proxy arms compare batches of
   512, 1024, and 2048 windows at an equal 2**29 policy positions, with warmup
   and validation at equal positions and decay over the last quarter of updates.
-  The ``b1024_xy`` arm keeps O60's (x, y) stick features at batch 1024, so it
-  differs from ``b1024`` only by the stick features.
+  The ``b1024_sqrt_lr`` and ``b2048_sqrt_lr`` arms scale the Muon learning
+  rate by the square root of the batch relative to 512; the other arms keep
+  0.007. The ``b1024_xy`` arm keeps O60's (x, y) stick features at batch 1024,
+  so it differs from ``b1024`` only by the stick features.
 
 Every proxy arm uses the 50M O60 proxy shape, 256 windows per rank without
 gradient accumulation, ranked-anonymized-1, and 1,024 validation windows, so
 batches of 512, 1024, and 2048 run on 2, 4, and 8 GPUs. The arms use O60's
-batch and duration rules for Adam betas, epsilon, and input learning rate, and
-they keep the Muon learning rate fixed. Gameplay evaluation of the final
+batch and duration rules for Adam epsilon and input learning rate. The Adam
+betas follow O60's rule but never fall below their base values. Gameplay evaluation of the final
 checkpoints selects the batch; validation NLL is diagnostic only.
 
 The production configuration is not yet frozen: it waits for the proxy batch
@@ -230,6 +232,10 @@ PROXY_VALIDATION_POSITIONS: Final[int] = 2**26
 # RTX PRO 6000's 96 GB. Ranks scale with the batch so that no arm accumulates.
 PROXY_DEVICE_BATCH: Final[int] = 256
 PROXY_BATCH_SIZES: Final[tuple[int, ...]] = (512, 1024, 2048)
+# A fixed Muon rate takes the same step size per update, so a larger batch moves
+# the weights less over equal data. The scaled arms multiply it by the square
+# root of the batch relative to 512.
+PROXY_MUON_LR_MULTIPLIERS: Final[tuple[float, ...]] = (1.0, math.sqrt(2), 2.0)
 PROXY_SOURCE_NAMES: Final[tuple[str, ...]] = ("ranked-anonymized-1-policy-world-v8",)
 # ranked-anonymized-1's validation split yields 1,189 windows.
 PROXY_VAL_SAMPLES: Final[int] = 1_024
@@ -844,8 +850,12 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O62 production waits for the proxy batch result; only proxy arms can train")
     if cfg.batch_size not in PROXY_BATCH_SIZES:
         raise ValueError(f"O62 proxy batch must be one of {PROXY_BATCH_SIZES}")
-    if proxy_training_fields(cfg) != proxy_training_fields(
-        proxy_config(batch_size=cfg.batch_size, stick_features=cfg.stick_features)
+    if cfg.muon_lr_multiplier not in PROXY_MUON_LR_MULTIPLIERS or proxy_training_fields(cfg) != proxy_training_fields(
+        proxy_config(
+            batch_size=cfg.batch_size,
+            stick_features=cfg.stick_features,
+            muon_lr_multiplier=cfg.muon_lr_multiplier,
+        )
     ):
         raise ValueError("O62 proxy arms are frozen; select one with --proxy-arm")
     if cfg.optimizer != "muon":
@@ -1022,8 +1032,6 @@ def validate_config(cfg: TrainConfig) -> None:
         or cfg.grad_clip != 1.0
     ):
         raise ValueError("O60 optimizer hyperparameters are frozen")
-    if cfg.muon_lr_multiplier != 1.0:
-        raise ValueError("O60 freezes optimizer hyperparameters across continuations")
     if cfg.arch == Architecture() and (
         cfg.max_steps != TARGET_UPDATES
         or cfg.target_positions != TARGET_POSITIONS
@@ -1053,7 +1061,7 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("O60 does not fork the schedule from a parent checkpoint")
 
 
-def proxy_config(*, batch_size: int, stick_features: StickFeatures) -> TrainConfig:
+def proxy_config(*, batch_size: int, stick_features: StickFeatures, muon_lr_multiplier: float = 1.0) -> TrainConfig:
     """Return a two-rank 50M proxy whose schedule is fixed in positions."""
     if batch_size not in PROXY_BATCH_SIZES:
         raise ValueError(f"proxy batch must be one of {PROXY_BATCH_SIZES}, got {batch_size}")
@@ -1062,6 +1070,7 @@ def proxy_config(*, batch_size: int, stick_features: StickFeatures) -> TrainConf
     return TrainConfig(
         arch=proxy_architecture(),
         stick_features=stick_features,
+        muon_lr_multiplier=muon_lr_multiplier,
         batch_size=batch_size,
         world_size=batch_size // PROXY_DEVICE_BATCH,
         local_batch_size=PROXY_DEVICE_BATCH,
@@ -1082,6 +1091,7 @@ def proxy_training_fields(cfg: TrainConfig) -> tuple[object, ...]:
     return (
         cfg.arch,
         cfg.stick_features,
+        cfg.muon_lr_multiplier,
         cfg.state_prediction,
         cfg.batch_size,
         cfg.world_size,
@@ -1098,7 +1108,7 @@ def proxy_training_fields(cfg: TrainConfig) -> tuple[object, ...]:
     )
 
 
-ProxyArm = Literal["none", "b512", "b1024", "b2048", "b1024_xy"]
+ProxyArm = Literal["none", "b512", "b1024", "b1024_sqrt_lr", "b2048", "b2048_sqrt_lr", "b1024_xy"]
 
 
 def proxy_config_for_arm(arm: ProxyArm) -> TrainConfig:
@@ -1107,8 +1117,12 @@ def proxy_config_for_arm(arm: ProxyArm) -> TrainConfig:
         return proxy_config(batch_size=512, stick_features="polar")
     if arm == "b1024":
         return proxy_config(batch_size=1024, stick_features="polar")
+    if arm == "b1024_sqrt_lr":
+        return proxy_config(batch_size=1024, stick_features="polar", muon_lr_multiplier=math.sqrt(2))
     if arm == "b2048":
         return proxy_config(batch_size=2048, stick_features="polar")
+    if arm == "b2048_sqrt_lr":
+        return proxy_config(batch_size=2048, stick_features="polar", muon_lr_multiplier=2.0)
     if arm == "b1024_xy":
         return proxy_config(batch_size=1024, stick_features="xy")
     raise ValueError(f"O62 requires a proxy arm, got {arm!r}")
@@ -2943,7 +2957,13 @@ def scaling_multipliers(cfg: TrainConfig) -> tuple[float, float]:
 def scaled_adam_betas(cfg: TrainConfig) -> tuple[float, float]:
     batch_multiplier, duration_multiplier = scaling_multipliers(cfg)
     ratio = batch_multiplier / duration_multiplier
-    betas = (1 - (1 - cfg.adam_beta1) * ratio, 1 - (1 - cfg.adam_beta2) * ratio)
+    # A short run at a large batch would push the betas far below their base
+    # values (beta1 0.2 at batch 2048 over 2**29 positions), so they never fall
+    # below the base values; a long run still raises them.
+    betas = (
+        max(cfg.adam_beta1, 1 - (1 - cfg.adam_beta1) * ratio),
+        max(cfg.adam_beta2, 1 - (1 - cfg.adam_beta2) * ratio),
+    )
     if any(not 0 <= beta < 1 for beta in betas):
         raise ValueError(f"scaled Adam betas are invalid: {betas}")
     return betas
@@ -3219,7 +3239,7 @@ def approximate_training_flops_per_update(cfg: TrainConfig, parameter_counts: di
 
 def model_tag(cfg: TrainConfig) -> str:
     return (
-        f"o62-{cfg.stick_features}-b{cfg.batch_size}-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
+        f"o62-{cfg.stick_features}-b{cfg.batch_size}-mlr{cfg.muon_lr * cfg.muon_lr_multiplier:.4g}-d{cfg.arch.d_model}-L{cfg.arch.n_layers}-h{cfg.arch.n_heads}-c{cfg.arch.L_ctx}-"
         f"t{cfg.arch.temporal_d_model}x{cfg.arch.temporal_layers}-ff{cfg.arch.temporal_ff_dim}-"
         f"dual-nonlinear-head-rc{int(cfg.return_conditioning)}e{cfg.arch.return_embed_dim}-drop{cfg.return_dropout:g}-"
         f"{cfg.optimizer}-wsd-bc-g{cfg.awr.gamma:g}"
@@ -5373,11 +5393,7 @@ def main(args: Command) -> None:
             assert resume_state is not None
             cfg = config_from_state(cast(dict, resume_state["cfg"]))
             requested = proxy_config_for_arm(args.proxy_arm)
-            if (cfg.arch, cfg.batch_size, cfg.stick_features) != (
-                requested.arch,
-                requested.batch_size,
-                requested.stick_features,
-            ):
+            if proxy_training_fields(cfg) != proxy_training_fields(requested):
                 raise SystemExit("--proxy-arm must match the resumed checkpoint treatment")
         stats = load_stats(cfg)
         train(

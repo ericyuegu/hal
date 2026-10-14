@@ -148,3 +148,25 @@ def test_policy_loss_is_unweighted_behavior_cloning_after_awr_would_start() -> N
     for name in weight_keys:
         if name.endswith(("_mean", "_max")) and "correlation" not in name:
             assert math.isclose(float(metrics[name]), 1.0, rel_tol=0, abs_tol=1e-6), name
+
+
+@pytest.mark.parametrize(
+    ("arm", "multiplier"),
+    [("b512", 1.0), ("b1024", 1.0), ("b1024_sqrt_lr", math.sqrt(2)), ("b2048", 1.0), ("b2048_sqrt_lr", 2.0)],
+)
+def test_muon_rate_arms_differ_from_their_batch_control_only_by_the_rate(arm: str, multiplier: float) -> None:
+    cfg = _MODULE.proxy_config_for_arm(arm)
+    _MODULE.validate_config(cfg)
+    assert cfg.muon_lr_multiplier == multiplier
+    control = _MODULE.proxy_config_for_arm(f"b{cfg.batch_size}")
+    assert replace(cfg, muon_lr_multiplier=1.0) == control
+    with pytest.raises(ValueError, match="arms are frozen"):
+        _MODULE.validate_config(replace(cfg, muon_lr_multiplier=1.5))
+
+
+def test_scaled_adam_betas_never_fall_below_their_base_values() -> None:
+    for arm in ("b512", "b1024", "b2048"):
+        assert _MODULE.scaled_adam_betas(_MODULE.proxy_config_for_arm(arm)) == (0.9, 0.95)
+    long_run = replace(_MODULE.proxy_config_for_arm("b512"), target_positions=2**32)
+    beta1, beta2 = _MODULE.scaled_adam_betas(long_run)
+    assert math.isclose(beta1, 1 - 0.1 / 4) and math.isclose(beta2, 1 - 0.05 / 4)
