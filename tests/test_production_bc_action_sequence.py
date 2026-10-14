@@ -214,7 +214,8 @@ def test_rank_checkpoint_states_gather_over_the_cpu_object_group(tmp_path: Path)
 def test_production_config_is_the_selected_batch_on_all_sources_with_awr() -> None:
     cfg = _MODULE.production_config()
     _MODULE.validate_config(cfg)
-    assert (cfg.batch_size, cfg.world_size, cfg.local_batch_size, cfg.microbatch_size) == (2048, 4, 512, 512)
+    assert (cfg.batch_size, cfg.world_size, cfg.local_batch_size, cfg.microbatch_size) == (2048, 8, 256, 256)
+    assert cfg.replay_slots * cfg.world_size == 262_144 and cfg.minimum_replay_gap_batches == 104
     assert cfg.muon_lr * cfg.muon_lr_multiplier == pytest.approx(0.014)
     assert cfg.advantage_weighting and cfg.stick_features == "xy" and not cfg.state_prediction
     assert len(cfg.source_names) == 44 and cfg.val_n_samples == 2048

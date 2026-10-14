@@ -30,13 +30,15 @@ checkpoints selects the batch; validation NLL is diagnostic only.
 The proxy arms selected the production batch: 2,048 windows with the Muon rate
 scaled by sqrt(2048 / 512) tied batch 512 in play, while the fixed rate lost
 about 0.1 net stocks per minute. Production trains the d1024 shape on all 44
-policy-world-v8 sources for 204,800 updates on four B200s with 512 windows each
-and no accumulation. It keeps O60's (x, y) stick features: the b1024 polar and
-(x, y) arms tied in play. Unlike the proxies, it restores O59's advantage weighting
+policy-world-v8 sources for 204,800 updates on eight B200s with 256 windows each
+and no accumulation; 512 windows per B200 ran out of memory. It keeps O60's
+(x, y) stick features: the b1024 polar and (x, y) arms tied in play. Unlike the
+proxies, it restores O59's advantage weighting
 (``AWRCalibration``) from update 4,097; the value head and returns are unchanged.
 
-Run production on four B200s; the Modal launcher brokers closed-loop evaluations:
-    uv run scripts/launch_modal.py --gpu B200:4 -- uv run torchrun --standalone --nproc-per-node=4 \
+Run production on eight B200s; the Modal launcher brokers closed-loop evaluations:
+    uv run scripts/launch_modal.py --gpu B200:8 --no-gpu-memory-snapshot -- \
+        uv run torchrun --standalone --nproc-per-node=8 \
         experiments/062_production_bc_action_sequence.py train
 
 Run the batch-1024 arm on four GPUs:
@@ -239,7 +241,12 @@ COOLDOWN_UPDATES: Final[int] = 178_176
 # to 100 checkpoint intervals of 2,048. Warmup keeps the proxy's 2**26 positions;
 # decay is the last quarter.
 PRODUCTION_BATCH: Final[int] = 2048
-PRODUCTION_DEVICE_BATCH: Final[int] = 512
+# 512 windows per B200 ran out of memory in the decoder's forward pass at
+# 167.8 GiB allocated, so production uses eight ranks of 256.
+PRODUCTION_DEVICE_BATCH: Final[int] = 256
+# Eight rings of 32,768 replays keep the four-rank plan's 262,144-replay
+# aggregate and its 104-128-update gap between a replay's windows.
+PRODUCTION_REPLAY_SLOTS: Final[int] = 32_768
 PRODUCTION_MUON_LR_MULTIPLIER: Final[float] = 2.0
 PRODUCTION_UPDATES: Final[int] = 204_800
 PRODUCTION_WARMUP_UPDATES: Final[int] = 1_024
@@ -913,7 +920,7 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("global batch must equal world_size * local_batch_size")
     if cfg.arch == production:
         if (cfg.local_batch_size, cfg.microbatch_size) != (PRODUCTION_DEVICE_BATCH, PRODUCTION_DEVICE_BATCH):
-            raise ValueError("O62 production uses 512 windows per rank without accumulation")
+            raise ValueError("O62 production uses 256 windows per rank without accumulation")
         if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
             raise ValueError("O62 production requires all 44 policy-world-v8 sources")
     elif (cfg.local_batch_size, cfg.microbatch_size, tuple(cfg.source_names), cfg.val_n_samples) != (
@@ -1133,7 +1140,7 @@ def proxy_config(*, batch_size: int, stick_features: StickFeatures, muon_lr_mult
 
 
 def production_config() -> TrainConfig:
-    """Return the 4-rank B200 production run with O59's advantage weighting."""
+    """Return the 8-rank B200 production run with O59's advantage weighting."""
     positions_per_update = PRODUCTION_BATCH * POLICY_PREFIXES_PER_WINDOW
     return TrainConfig(
         stick_features="xy",
@@ -1143,7 +1150,7 @@ def production_config() -> TrainConfig:
         world_size=PRODUCTION_BATCH // PRODUCTION_DEVICE_BATCH,
         local_batch_size=PRODUCTION_DEVICE_BATCH,
         microbatch_size=PRODUCTION_DEVICE_BATCH,
-        replay_slots=65_536,
+        replay_slots=PRODUCTION_REPLAY_SLOTS,
         replay_phase_block_batches=25,
         val_every=PRODUCTION_VALIDATION_EVERY,
         ckpt_every=PRODUCTION_CHECKPOINT_EVERY,
