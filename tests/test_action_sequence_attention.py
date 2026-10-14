@@ -76,6 +76,12 @@ def test_rotary_lookup_table_matches_computed_factors(dtype: torch.dtype) -> Non
     assert torch.equal(rounded, computed.half().at(30, torch.device("cpu"))[0])
 
 
+def test_rotary_lookup_table_survives_meta_construction() -> None:
+    with torch.device("meta"):
+        rotary = Rotary(16, table_length=30)
+    assert torch.equal(rotary.cos_table, Rotary(16, table_length=30).cos_table)
+
+
 @pytest.mark.parametrize(
     "device",
     ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))],

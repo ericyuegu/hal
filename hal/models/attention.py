@@ -75,8 +75,11 @@ class Rotary(nn.Module):
         # Compiled training otherwise recomputes sin and cos inside every
         # rotation kernel. For the decoder's 30 positions that cost about 4 ms
         # per layer per update on an RTX PRO 6000. The table is derived state,
-        # so checkpoints do not store it.
-        angles = torch.outer(torch.arange(table_length, dtype=torch.float32), inv_freq)
+        # so checkpoints do not store it. It is built on the CPU so a model
+        # constructed on the meta device and then loaded still has its values.
+        cpu = torch.device("cpu")
+        cpu_inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=cpu).float() / dim))
+        angles = torch.outer(torch.arange(table_length, dtype=torch.float32, device=cpu), cpu_inv_freq)
         self.register_buffer("cos_table", angles.cos(), persistent=False)
         self.register_buffer("sin_table", angles.sin(), persistent=False)
         self.cache_key = None
