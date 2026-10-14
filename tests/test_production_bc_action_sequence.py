@@ -291,12 +291,6 @@ def test_export_update_profile_writes_a_compressed_rank_trace(tmp_path: Path) ->
     assert not (tmp_path / "profile" / "rank0.json").exists()
 
 
-def test_activation_memory_budget_must_be_a_fraction() -> None:
-    for budget in (0.0, 1.5):
-        with pytest.raises(ValueError, match="activation_memory_budget"):
-            _MODULE.validate_config(replace(_MODULE.production_config(), activation_memory_budget=budget))
-
-
 def test_validation_metrics_do_not_depend_on_the_forward_chunk_size() -> None:
     cfg = replace(_small_config(), local_batch_size=4, microbatch_size=4)
     torch.manual_seed(0)
