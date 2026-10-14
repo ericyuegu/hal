@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 import numpy as np
 import torch
@@ -71,6 +72,8 @@ class Args:
     """Trace the measured updates and report GPU busy time and top kernels."""
     validation_batches: int = 0
     """After training updates, validate this many synthetic validation batches beside the training graphs."""
+    compile_mode: Literal["reduce-overhead", "max-autotune"] | None = None
+    """Override the production training compile mode."""
 
 
 def main(args: Args) -> None:
@@ -91,6 +94,8 @@ def main(args: Args) -> None:
         push_to_r2=False,
         wandb_log_code=False,
     )
+    if args.compile_mode is not None:
+        cfg = replace(cfg, train_compile_mode=args.compile_mode)
     distributed = experiment.init_distributed(cfg)
     try:
         process_seed = experiment.rank_seed(cfg.seed, distributed.rank)
@@ -154,6 +159,7 @@ def main(args: Args) -> None:
             "world_size": world_size,
             "local_batch": args.local_batch,
             "activation_memory_budget": args.activation_memory_budget,
+            "compile_mode": cfg.train_compile_mode,
             "compile_s": round(compile_seconds, 1),
             "update_s_median": round(median_s, 4),
             "update_s_p95": round(float(np.percentile(update_seconds, 95)), 4),
