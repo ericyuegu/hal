@@ -211,6 +211,20 @@ def test_rank_checkpoint_states_gather_over_the_cpu_object_group(tmp_path: Path)
     assert results.get(timeout=5) == [2**20, 2 * 2**20]
 
 
+def test_object_group_waits_longer_than_nccl_for_slow_replay_fills(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in {"RANK": "0", "LOCAL_RANK": "0", "WORLD_SIZE": "1"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+    monkeypatch.setenv("MASTER_PORT", "29517")
+    groups: list[dict[str, object]] = []
+    monkeypatch.setattr(torch.distributed, "new_group", lambda **kwargs: groups.append(kwargs) or "gloo-group")
+    monkeypatch.setattr(torch.distributed, "init_process_group", lambda **_: None)
+    context = _MODULE.init_distributed(replace(_MODULE.production_config(), world_size=1), backend="gloo")
+    assert context.object_group == "gloo-group"
+    assert groups == [{"backend": "gloo", "timeout": _MODULE.OBJECT_GROUP_TIMEOUT}]
+    assert torch.distributed.constants.default_pg_nccl_timeout < _MODULE.OBJECT_GROUP_TIMEOUT
+
+
 def test_production_config_is_the_selected_batch_on_all_sources_with_awr() -> None:
     cfg = _MODULE.production_config()
     _MODULE.validate_config(cfg)

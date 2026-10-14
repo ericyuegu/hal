@@ -78,6 +78,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from dataclasses import fields
 from dataclasses import replace
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Annotated
@@ -285,6 +286,8 @@ RETURN_SCALE: Final[float] = 120.0
 CALIBRATION_WINDOWS: Final[int] = 65_536
 # Eight steady-state updates cover several loader cohorts and every update phase.
 PROFILE_UPDATES: Final[int] = 8
+# Bounds the startup barrier, which waits for every rank's replay-ring fill.
+OBJECT_GROUP_TIMEOUT: Final[timedelta] = timedelta(minutes=30)
 # Validation scores all 128 suffix prefixes, so each row puts 3,840 tokens
 # through the decoder. Beside the training CUDA graphs' 70.5 GiB pool, a
 # 128-row forward needed a 7.5 GiB feed-forward buffer on an RTX PRO 6000.
@@ -375,7 +378,7 @@ def init_distributed(cfg: TrainConfig, *, backend: str | None = None) -> Distrib
     else:
         raise ValueError(f"unsupported distributed backend {selected_backend!r}")
     dist.init_process_group(backend=selected_backend, rank=rank, world_size=world_size)
-    object_group = dist.new_group(backend="gloo")
+    object_group = dist.new_group(backend="gloo", timeout=OBJECT_GROUP_TIMEOUT)
     return DistributedContext(rank, local_rank, world_size, device, object_group)
 
 
@@ -4923,6 +4926,10 @@ def train(
         f"cold fill completed in {cold_fill_seconds:.1f}s",
         flush=True,
     )
+    # Cold fills took 28–545 s per rank on an 8-GPU RTX PRO 6000 node. Waiting
+    # on gloo keeps a slow fill from expiring the first NCCL collective's
+    # 10-minute timeout on the ranks that finished early.
+    dist.barrier(group=distributed.object_group)
     if distributed.is_primary and wandb.run is not None:
         wandb.run.summary["loader/worker_start_s"] = prepared_data.worker_start_seconds
         wandb.run.summary["loader/cold_fill_s"] = cold_fill_seconds
