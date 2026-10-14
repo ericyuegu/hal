@@ -1174,10 +1174,6 @@ def production_config() -> TrainConfig:
         stable_updates=PRODUCTION_DECAY_START_UPDATE,
         decay_start_update=PRODUCTION_DECAY_START_UPDATE,
         decay_duration=PRODUCTION_DECAY_UPDATES,
-        # Without recomputation, 256 windows need more than an RTX PRO 6000's
-        # 95 GiB. Budgets of 0.6–0.99 measured 0.89 s per one-GPU update at
-        # 69–74 GiB reserved; a budget of 1.0 ran out of memory.
-        activation_memory_budget=0.9,
     )
 
 
