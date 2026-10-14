@@ -97,3 +97,14 @@ def test_create_command_rejects_g4_gpu_count_mismatch() -> None:
     args = Args(cmd=["python", "train.py"], machine_type="g4-standard-96", gpu_count=1)
     with pytest.raises(ValueError, match="has 2 integrated GPUs"):
         create_command(args, project="project", name="hal-o60", startup_file="/tmp/start.sh")
+
+
+def test_startup_script_keeps_repository_shards_and_caches_on_the_boot_disk() -> None:
+    script = startup_script(
+        sha="abc123", train_cmd="true", project="p", secrets=[], image="example/image:tag", keep_alive=True
+    )
+    assert "-v /var/lib/hal/repo:/opt/hal" in script
+    assert "-e TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor" in script
+    assert "flock -n 9" in script
+    assert "launch command already ran on this disk" in script
+    subprocess.run(["bash", "-n", "-c", script], check=True)

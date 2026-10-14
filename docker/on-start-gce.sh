@@ -1,6 +1,10 @@
 # Google Compute Engine startup lifecycle. scripts/launch_gce.py prepends the
 # non-secret HAL_* configuration before placing this script in instance metadata.
 # Secret values are fetched at boot from Secret Manager with the VM service account.
+#
+# The repository, replay shards, fixtures, and compiler caches live under
+# /var/lib/hal on the persistent boot disk, so a kept-alive VM can run later
+# commits with `scripts/gce_run.py` without re-downloading or recompiling.
 set -euo pipefail
 
 log() { echo "[hal-gce] $*"; }
@@ -11,6 +15,7 @@ finish() {
     log "job exited ${code}; HAL_KEEP_ALIVE=1, leaving VM running"
     exit "$code"
   fi
+  rm -f /run/hal/job.env
   log "job exited ${code}; shutting VM down (delete it later to remove the boot disk)"
   shutdown -h now
   exit "$code"
@@ -47,21 +52,30 @@ fi
 nvidia-smi
 log "pulling ${HAL_IMAGE}"
 docker pull "$HAL_IMAGE"
+install -d -m 0755 /var/lib/hal /var/lib/hal/repo /var/lib/hal/cache /var/lib/hal/logs
+printf '%s\n' "$HAL_IMAGE" > /var/lib/hal/image
 
-# The runtime script lives outside the repository because the exact SHA has not
-# been cloned yet. It executes inside the prebuilt HAL image and uses its /opt/venv.
-cat > /run/hal/run.sh <<'HAL_RUNTIME'
+# The container runtime lives outside the repository because the exact SHA has
+# not been checked out yet. It runs inside the prebuilt image's /opt/venv.
+cat > /var/lib/hal/container-run.sh <<'HAL_RUNTIME'
 #!/usr/bin/env bash
 set -euo pipefail
 log() { echo "[hal-container] $*"; }
 trap 'code=$?; log "boot failed at line ${LINENO}"; exit "$code"' ERR
 
-cd /
-rm -rf /opt/hal
-log "cloning HAL @ ${HAL_GIT_SHA}"
-git clone --quiet "https://github.com/ericyuegu/hal.git" /opt/hal
 cd /opt/hal
-git checkout --quiet "$HAL_GIT_SHA"
+if [ ! -d .git ]; then
+  log "cloning HAL"
+  git clone --quiet "https://github.com/ericyuegu/hal.git" /tmp/hal-clone
+  mv /tmp/hal-clone/.git .git
+  rm -rf /tmp/hal-clone
+fi
+git config --global --add safe.directory /opt/hal
+log "checking out HAL @ ${HAL_GIT_SHA}"
+git fetch --quiet origin
+git reset --quiet --hard "$HAL_GIT_SHA"
+# Ignored paths (data/, runs/) hold the warm shards, fixtures, and run outputs.
+git clean --quiet -fd
 uv sync --locked
 
 log "fetching fixtures"
@@ -72,17 +86,56 @@ uv run python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavaila
 ulimit -n "$(ulimit -Hn)" || true
 
 cmd="$(printf '%s' "$HAL_TRAIN_CMD_B64" | base64 -d)"
-log "training: ${cmd}"
+log "running: ${cmd}"
 bash -c "$cmd"
 HAL_RUNTIME
-chmod 0700 /run/hal/run.sh
 
+# hal-run SHA CMD_B64 runs one command in the HAL image against the warm disk.
+# It holds a lock so two jobs never share the GPUs, and records the exit code
+# beside the log so a detached client can report it.
+cat > /usr/local/sbin/hal-run <<'HAL_RUN'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 2 ] || { echo "usage: hal-run GIT_SHA CMD_B64" >&2; exit 2; }
+exec 9>/var/lib/hal/run.lock
+flock -n 9 || { echo "[hal-run] another job holds /var/lib/hal/run.lock" >&2; exit 75; }
+[ -f /run/hal/job.env ] || { echo "[hal-run] /run/hal/job.env is missing; reboot to reload secrets" >&2; exit 78; }
+log_file=/var/lib/hal/logs/job.log
+rm -f /var/lib/hal/logs/job.exit
+: > "$log_file"
+stop_container() { docker stop --time 60 hal-job >/dev/null 2>&1 || true; }
+trap stop_container TERM INT
 set +e
-docker run --rm --gpus all --ipc=host \
+docker run --rm --name hal-job --gpus all --ipc=host \
   --env-file /run/hal/job.env \
-  -e HAL_GIT_SHA -e HAL_TRAIN_CMD_B64 \
-  -v /run/hal/run.sh:/run/hal/run.sh:ro \
-  "$HAL_IMAGE" bash /run/hal/run.sh 2>&1 | tee /var/log/hal-training.log
-code=${PIPESTATUS[0]}
-rm -f /run/hal/job.env
+  -e HAL_GIT_SHA="$1" -e HAL_TRAIN_CMD_B64="$2" \
+  -e TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor \
+  -e TORCHINDUCTOR_FX_GRAPH_CACHE=1 -e TORCHINDUCTOR_AUTOGRAD_CACHE=1 \
+  -e TRITON_CACHE_DIR=/opt/hal-cache/triton \
+  -e CUDA_CACHE_PATH=/opt/hal-cache/cuda \
+  -e UV_CACHE_DIR=/opt/hal-cache/uv \
+  -v /var/lib/hal/repo:/opt/hal \
+  -v /var/lib/hal/cache:/opt/hal-cache \
+  -v /var/lib/hal/container-run.sh:/run/hal/container-run.sh:ro \
+  "$(cat /var/lib/hal/image)" bash /run/hal/container-run.sh > >(tee -a "$log_file") 2>&1 &
+wait $!
+code=$?
+set -e
+echo "$code" > /var/lib/hal/logs/job.exit
+exit "$code"
+HAL_RUN
+chmod 0755 /usr/local/sbin/hal-run
+
+# A restart of a kept-alive VM reloads secrets and tooling but does not rerun
+# the launch command; scripts/gce_run.py starts later jobs explicitly.
+launch_marker="/var/lib/hal/launched-$(printf '%s %s' "$HAL_GIT_SHA" "$HAL_TRAIN_CMD_B64" | sha256sum | cut -c1-16)"
+if [ -e "$launch_marker" ]; then
+  log "launch command already ran on this disk; waiting for scripts/gce_run.py"
+  exit 0
+fi
+touch "$launch_marker"
+set +e
+/usr/local/sbin/hal-run "$HAL_GIT_SHA" "$HAL_TRAIN_CMD_B64"
+code=$?
+set -e
 finish "$code"

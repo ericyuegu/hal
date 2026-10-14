@@ -25,6 +25,10 @@ Launch examples::
         torchrun --standalone --nproc-per-node=2 \
         experiments/060_compute_optimal_action_sequence.py train --smoke --stop-after-update 512
 
+For repeated runs, launch once with ``--keep-alive`` and run later commits with
+``scripts/gce_run.py``. The boot disk keeps the repository, replay shards,
+fixtures, and compiler caches; stop the VM to pause GPU billing and keep them.
+
 The startup log is available with ``gcloud compute instances get-serial-port-output``.
 On completion the VM shuts down, stopping compute charges but retaining its boot
 disk for inspection. Delete the instance when it is no longer needed.
