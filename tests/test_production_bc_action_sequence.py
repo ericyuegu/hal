@@ -307,3 +307,39 @@ def test_validation_metrics_do_not_depend_on_the_forward_chunk_size() -> None:
     assert whole.keys() == chunked.keys()
     for name, value in whole.items():
         assert chunked[name] == pytest.approx(value, rel=1e-4, abs=1e-6), name
+
+
+def test_prefetcher_prepares_batches_in_order_off_the_training_thread() -> None:
+    import threading
+
+    cfg = _small_config()
+    batches = [_MODULE.synthetic_awr_batch(cfg, torch.device("cpu")) for _ in range(3)]
+    for batch in batches:
+        batch.context.features["ego_player_id"].fill_(1)
+
+    class RecordingMasker(_MODULE.IdentityMasker):
+        threads: list[threading.Thread] = []
+
+        def __call__(self, batch: Any) -> Any:
+            self.threads.append(threading.current_thread())
+            return super().__call__(batch)
+
+    serial_identity = _MODULE.IdentityMasker(3, 0.5)
+    serial_return = _MODULE.ReturnMasker(5, 0.5)
+    expected = [serial_return(serial_identity(batch)) for batch in batches]
+    masker = RecordingMasker(3, 0.5)
+    prefetch = _MODULE.DeviceBatchPrefetcher(batches, cfg, "cpu", masker, return_masker=_MODULE.ReturnMasker(5, 0.5))
+    try:
+        consumed = []
+        for index in range(len(batches)):
+            batch, _ = prefetch.next()
+            consumed.append(batch)
+            if index + 1 < len(batches):
+                prefetch.fill_lookahead(1)
+                prefetch.stage_next()
+    finally:
+        prefetch.close()
+    for actual, wanted in zip(consumed, expected, strict=True):
+        assert torch.equal(actual.context.features["ego_player_id"], wanted.context.features["ego_player_id"])
+        assert torch.equal(actual.condition_present, wanted.condition_present)
+    assert threading.current_thread() not in RecordingMasker.threads

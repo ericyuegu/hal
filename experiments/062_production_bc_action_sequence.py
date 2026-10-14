@@ -1579,7 +1579,13 @@ def prepared_targets(
 
 
 class DeviceBatchPrefetcher:
-    """Keep a bounded serial CPU lookahead and stage one device batch."""
+    """Keep a bounded serial CPU lookahead and stage one device batch.
+
+    One background thread fetches, masks, and validates batches in order, so
+    the masker RNG streams match serial preparation. The training thread only
+    enqueues the host-to-device copy. Lookahead drains at every state boundary,
+    so masker state is checkpointed with no prepared batch outstanding.
+    """
 
     def __init__(
         self,
@@ -1607,15 +1613,19 @@ class DeviceBatchPrefetcher:
         if first_batch_future is None:
             self.fill_lookahead(1)
         else:
-            self._futures.append(first_batch_future)
+            self._futures.append(self._pool.submit(self._prepare_future, first_batch_future))
         self.stage_next()
 
     def _load_cpu_batch(self) -> ReturnBatch:
         try:
-            return next(self._iterator)
+            cpu_batch = next(self._iterator)
         except StopIteration:
             self._iterator = iter(self._loader)
-            return next(self._iterator)
+            cpu_batch = next(self._iterator)
+        return self._prepare_cpu_batch(cpu_batch)
+
+    def _prepare_future(self, future: Future[ReturnBatch]) -> ReturnBatch:
+        return self._prepare_cpu_batch(future.result())
 
     def _prepare_cpu_batch(self, cpu_batch: ReturnBatch) -> ReturnBatch:
         """Apply the parent-side transforms to an already-fetched batch."""
@@ -1660,8 +1670,7 @@ class DeviceBatchPrefetcher:
             raise RuntimeError("fill lookahead before staging another batch")
         started = time.monotonic()
         future = self._futures.popleft()
-        cpu_batch = self._prepare_cpu_batch(future.result())
-        self._stage(cpu_batch)
+        self._stage(future.result())
         return time.monotonic() - started
 
     def next(self) -> tuple[ReturnBatch, int]:
