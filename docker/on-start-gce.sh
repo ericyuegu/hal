@@ -106,7 +106,9 @@ rm -f /var/lib/hal/logs/job.exit
 stop_container() { docker stop --time 60 hal-job >/dev/null 2>&1 || true; }
 trap stop_container TERM INT
 set +e
-docker run --rm --name hal-job --gpus all --ipc=host \
+# A private /dev/shm disappears with the container, so a killed job cannot
+# leave Streaming or DataLoader shared memory behind for the next one.
+docker run --rm --name hal-job --gpus all --shm-size=128g \
   --env-file /run/hal/job.env \
   -e HAL_GIT_SHA="$1" -e HAL_TRAIN_CMD_B64="$2" \
   -e TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor \

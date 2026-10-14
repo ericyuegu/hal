@@ -106,5 +106,6 @@ def test_startup_script_keeps_repository_shards_and_caches_on_the_boot_disk() ->
     assert "-v /var/lib/hal/repo:/opt/hal" in script
     assert "-e TORCHINDUCTOR_CACHE_DIR=/opt/hal-cache/torchinductor" in script
     assert "flock -n 9" in script
+    assert "--shm-size=128g" in script and "--ipc=host" not in script
     assert "launch command already ran on this disk" in script
     subprocess.run(["bash", "-n", "-c", script], check=True)
