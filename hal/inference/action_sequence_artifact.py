@@ -342,6 +342,8 @@ def read_checkpoint(path: Path) -> tuple[dict[str, object], CheckpointContract, 
     with torch.random.fork_rng(devices=[]):
         codec_buffers = dict(DiscreteControllerCodec(cfg.model.action_embed_dim).named_buffers())
     for name, expected in model.named_buffers():
+        if name not in reference:
+            continue  # Non-persistent buffers are derived at construction.
         if name.startswith("codec."):
             expected = codec_buffers[name.removeprefix("codec.")]
         elif name.endswith("rotary.inv_freq"):

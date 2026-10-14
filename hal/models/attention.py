@@ -61,12 +61,24 @@ class Rotary(nn.Module):
     cos_cached: Tensor | None
     sin_cached: Tensor | None
 
-    def __init__(self, dim: int, base: int = 10000) -> None:
+    cos_table: Tensor
+    sin_table: Tensor
+
+    def __init__(self, dim: int, base: int = 10000, *, table_length: int = 0) -> None:
         super().__init__()
+        if table_length < 0:
+            raise ValueError(f"table_length must be non-negative, got {table_length}")
         self.dim = dim
         self.base = base
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
+        # Compiled training otherwise recomputes sin and cos inside every
+        # rotation kernel. For the decoder's 30 positions that cost about 4 ms
+        # per layer per update on an RTX PRO 6000. The table is derived state,
+        # so checkpoints do not store it.
+        angles = torch.outer(torch.arange(table_length, dtype=torch.float32), inv_freq)
+        self.register_buffer("cos_table", angles.cos(), persistent=False)
+        self.register_buffer("sin_table", angles.sin(), persistent=False)
         self.cache_key = None
         self.cos_cached = None
         self.sin_cached = None
@@ -91,6 +103,12 @@ class Rotary(nn.Module):
         source whenever it is still fp32, so neither the checkpoint keys nor the fp32 arithmetic
         move."""
         output_dtype = self.inv_freq.dtype if dtype is None else dtype
+        table = self.cos_table
+        if length <= table.shape[0] and table.dtype == torch.float32 and table.device == torch.device(device):
+            return (
+                self.cos_table[:length].to(output_dtype)[None, :, None, :],
+                self.sin_table[:length].to(output_dtype)[None, :, None, :],
+            )
         key = (length, device, output_dtype)
         if torch.compiler.is_compiling():
             # A cached tensor created while CUDA Graph capture is tracing becomes

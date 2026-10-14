@@ -46,6 +46,8 @@ def checkpoint_payload() -> dict[str, object]:
     }
     codec_buffers = dict(DiscreteControllerCodec(contract.model.action_embed_dim).named_buffers())
     for name, reference in model.named_buffers():
+        if name not in tensors:
+            continue
         if name.startswith("codec."):
             reference = codec_buffers[name.removeprefix("codec.")]
         elif name.endswith("rotary.inv_freq"):

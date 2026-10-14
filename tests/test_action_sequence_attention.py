@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from hal.models.action_sequence import short_causal_attention
+from hal.models.attention import Rotary
 from hal.models.attention import Trunk
 from hal.models.attention import TrunkConfig
 from hal.models.attention import apply_rotary_emb
@@ -57,6 +59,37 @@ def test_rotary_preserves_activation_dtype() -> None:
     cosine, sine = rotary(values)
     assert cosine.dtype == sine.dtype == values.dtype
     assert apply_rotary_emb(values, cosine, sine).dtype == values.dtype
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_rotary_lookup_table_matches_computed_factors(dtype: torch.dtype) -> None:
+    computed = Rotary(16)
+    tabled = Rotary(16, table_length=30)
+    assert "cos_table" not in tabled.state_dict()
+    for length in (1, 30, 31):
+        for table_value, reference in zip(
+            tabled.at(length, torch.device("cpu"), dtype), computed.at(length, torch.device("cpu"), dtype), strict=True
+        ):
+            assert table_value.dtype == dtype
+            assert torch.equal(table_value, reference)
+    rounded, _ = tabled.half().at(30, torch.device("cpu"))
+    assert torch.equal(rounded, computed.half().at(30, torch.device("cpu"))[0])
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))],
+)
+def test_short_causal_attention_matches_explicit_scores(device: str) -> None:
+    generator = torch.Generator().manual_seed(5)
+    dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    query, key, value = (torch.randn(6, 4, 30, 64, generator=generator).to(device, dtype) for _ in range(3))
+    scores = (query.float() @ key.float().transpose(-2, -1)) / 8
+    causal = torch.ones(30, 30, dtype=torch.bool, device=device).tril()
+    expected = scores.masked_fill(~causal, -torch.inf).softmax(-1) @ value.float()
+    actual = short_causal_attention(query, key, value)
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2 if device == "cuda" else 1e-5, rtol=0)
 
 
 def test_attention_rejects_invalid_geometry_and_backend() -> None:

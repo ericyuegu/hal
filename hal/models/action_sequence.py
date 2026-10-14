@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.nn.attention import SDPBackend
+from torch.nn.attention import sdpa_kernel
 from torch.nn.attention.flex_attention import flex_attention
 
 from hal.models.attention import KVMemory
@@ -228,18 +230,17 @@ def short_causal_attention(
     key: Tensor,
     value: Tensor,
 ) -> Tensor:
-    """Use explicit causal attention for the 16-token training sequence.
+    """Use memory-efficient SDPA for the short decoder sequence on CUDA.
 
-    On a B200, cuDNN flash SDPA used 149 ms per step for forward and
-    backward. At this length, its launch and layout costs were more than the
-    cost to materialize 121 scores per head. This implementation reduced the
-    full train step by approximately 100 ms.
+    On an RTX PRO 6000 with 8192 sequences of 30 tokens, one compiled decoder
+    block took 72.6 ms forward and backward with this kernel, 76.0 ms with
+    explicit score matrices, and 79.5 and 81.2 ms with flash and cuDNN SDPA.
+    The kernel also keeps no score matrix for backward.
     """
-    scores = query @ key.transpose(-2, -1)
-    scores = scores.float() * (query.shape[-1] ** -0.5)
-    causal = torch.ones(scores.shape[-2:], dtype=torch.bool, device=scores.device).tril()
-    weights = F.softmax(scores.masked_fill(~causal, -torch.inf), dim=-1).to(query.dtype)
-    return weights @ value
+    if query.device.type != "cuda":
+        return F.scaled_dot_product_attention(query, key, value, is_causal=True)
+    with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+        return F.scaled_dot_product_attention(query, key, value, is_causal=True)
 
 
 TEMPORAL_ATTENTION_BATCH = 16_384
@@ -327,7 +328,7 @@ class TemporalBlock(nn.Module):
         self.mlp_scale = rule.mlp
         self.qkv = nn.Linear(self.d_model, 3 * self.d_model, bias=False)
         self.proj = nn.Linear(self.d_model, self.d_model, bias=False)
-        self.rotary = Rotary(self.head_dim)
+        self.rotary = Rotary(self.head_dim, table_length=len(cfg.head_offsets))
         self.up = nn.Linear(self.d_model, cfg.temporal_ff_dim, bias=False)
         self.down = nn.Linear(cfg.temporal_ff_dim, self.d_model, bias=False)
 
@@ -363,8 +364,8 @@ class TemporalBlock(nn.Module):
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         v = v.transpose(1, 2)
-        # Equal attention chunks keep the tiny BMMs efficient. The large linear
-        # and SwiGLU operations use the full batch.
+        # The attention kernel puts the batch on one CUDA grid axis, which
+        # holds at most 65,535 blocks. The linear layers use the full batch.
         attended = torch.cat(
             [
                 short_causal_attention(query, key, values)
