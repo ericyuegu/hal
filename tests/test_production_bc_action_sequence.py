@@ -343,3 +343,19 @@ def test_prefetcher_prepares_batches_in_order_off_the_training_thread() -> None:
         assert torch.equal(actual.context.features["ego_player_id"], wanted.context.features["ego_player_id"])
         assert torch.equal(actual.condition_present, wanted.condition_present)
     assert threading.current_thread() not in RecordingMasker.threads
+
+
+def test_every_object_collective_uses_the_gloo_object_group() -> None:
+    import ast
+
+    source = Path(_SPEC.origin).read_text()
+    object_collectives = {"gather_object", "broadcast_object_list", "all_gather_object", "scatter_object_list"}
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in object_collectives
+    ]
+    assert calls
+    for call in calls:
+        groups = [keyword.value for keyword in call.keywords if keyword.arg == "group"]
+        assert len(groups) == 1 and ast.unparse(groups[0]) == "distributed.object_group", ast.unparse(call)

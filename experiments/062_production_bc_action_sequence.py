@@ -332,9 +332,10 @@ class DistributedContext:
     local_rank: int
     world_size: int
     device: torch.device
-    # Pickled checkpoint state travels over CPU gloo, not NCCL. On a two-GPU G4
+    # Every pickled object travels over CPU gloo, not NCCL. On a two-GPU G4
     # host an NCCL gather of the rank checkpoint state spun for 30 minutes at the
-    # first boundary; gradients still use NCCL.
+    # first boundary, and on an eight-GPU G4 the final NCCL gather failed with
+    # an unhandled CUDA error. Gradients still use NCCL.
     object_group: dist.ProcessGroup | None = None
 
     def __post_init__(self) -> None:
@@ -4567,7 +4568,7 @@ def _finalize_training(
 ) -> dict[str, object]:
     """Save the final model and queue evaluation for a separate L40S worker."""
     wait_lists: list[object] | None = [None] * distributed.world_size if distributed.is_primary else None
-    dist.gather_object(loader_wait_fractions, wait_lists, dst=0)
+    dist.gather_object(loader_wait_fractions, wait_lists, dst=0, group=distributed.object_group)
     snapshot = save_boundary_checkpoint(
         run_dir,
         update=update,
@@ -4622,10 +4623,10 @@ def _finalize_training(
             }
         except Exception as error:
             failure[0] = f"rank-zero finalization failed: {type(error).__name__}: {error}"
-    dist.broadcast_object_list(failure, src=0)
+    dist.broadcast_object_list(failure, src=0, group=distributed.object_group)
     if failure[0] is not None:
         raise RuntimeError(failure[0])
-    dist.broadcast_object_list(summary, src=0)
+    dist.broadcast_object_list(summary, src=0, group=distributed.object_group)
     if not isinstance(summary[0], dict):
         raise RuntimeError("rank zero did not broadcast finalization metrics")
     return cast(dict[str, object], summary[0])
@@ -4804,7 +4805,7 @@ def train(
         if distributed.is_primary
         else None
     ]
-    dist.broadcast_object_list(names, src=0)
+    dist.broadcast_object_list(names, src=0, group=distributed.object_group)
     run_name = names[0]
     if not isinstance(run_name, str):
         raise RuntimeError("rank zero did not broadcast a run name")
@@ -5563,7 +5564,7 @@ def main(args: Command) -> None:
                     name=args.resume_checkpoint,
                 )
             found: list[object] = [resume_state is not None]
-            dist.broadcast_object_list(found, src=0)
+            dist.broadcast_object_list(found, src=0, group=distributed.object_group)
             if not found[0]:
                 raise SystemExit(f"no {args.resume_checkpoint!r} for run {args.resume!r}")
             dist.barrier()
