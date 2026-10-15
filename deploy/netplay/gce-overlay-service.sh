@@ -15,7 +15,7 @@ if [[ ! -L $root/current ]]; then
     -C /usr/local/share/fonts schibsted-grotesk | tar -xf - -C "$release"
   ln -sfn schibsted-grotesk "$release/fonts"
   printf '%s\n' "$sha" > "$release/git-sha"
-  ln -s "$release" "$root/current"
+  ln -s "releases/seed-$sha" "$root/current"
 fi
 
 cat > /etc/systemd/system/hal-netplay-overlay.service <<EOF

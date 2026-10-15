@@ -70,7 +70,7 @@ common=(
   "--boot-disk-size=100GB" "--boot-disk-type=hyperdisk-balanced"
   "--maintenance-policy=TERMINATE" "--restart-on-failure"
   "--service-account=$service_account" "--scopes=cloud-platform"
-  "--metadata=$metadata" "--metadata-from-file=startup-script=$script_dir/gce-startup.sh"
+  "--metadata=$metadata" "--metadata-from-file=startup-script=$script_dir/gce-startup.sh,hal-netplay-overlay-service=$script_dir/gce-overlay-service.sh"
   "--tags=hal-netplay-health" "--labels=app=hal-netplay,workload=runner"
 )
 if (( virtual_workstation )); then

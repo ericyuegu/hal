@@ -187,6 +187,6 @@ systemctl daemon-reload
 systemctl enable hal-netplay-health.service hal-netplay-runner.service
 systemctl restart hal-netplay-health.service
 systemctl restart hal-netplay-runner.service
-docker run --rm --entrypoint cat "$image" /opt/hal/deploy/netplay/gce-overlay-service.sh > /run/hal-netplay/overlay-service.sh
+metadata hal-netplay-overlay-service > /run/hal-netplay/overlay-service.sh
 bash /run/hal-netplay/overlay-service.sh "$image"
 log "runner service started"

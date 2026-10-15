@@ -22,7 +22,7 @@ if [[ -d $release ]]; then
 else
   mv "$staging" "$release"
 fi
-ln -s "$release" "$root/next"
+ln -s "releases/$sha" "$root/next"
 mv -Tf "$root/next" "$root/current"
 rollback() {
   echo "overlay activation failed; restoring the previous release" >&2

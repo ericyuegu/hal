@@ -1,6 +1,7 @@
 import os
 import shlex
 import subprocess
+import tarfile
 import threading
 import urllib.error
 import urllib.request
@@ -164,6 +165,49 @@ def test_runner_keeps_managed_display_sockets_private() -> None:
     assert display_mounts == ["/tmp/.X11-unix/X90:/tmp/.X11-unix/X90:ro"]
 
 
+def test_overlay_seed_release_survives_a_different_container_mount_path(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "hal").mkdir(parents=True)
+    (source / "schibsted-grotesk").mkdir()
+    (source / "hal" / "__init__.py").touch()
+    archive = tmp_path / "seed.tar"
+    with tarfile.open(archive, "w") as output:
+        output.add(source / "hal", arcname="hal")
+        output.add(source / "schibsted-grotesk", arcname="schibsted-grotesk")
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    docker = commands / "docker"
+    docker.write_text(
+        "#!/usr/bin/python3\nimport os, sys\n"
+        'if sys.argv[1] == "image": print("a" * 40)\n'
+        'else: sys.stdout.buffer.write(open(os.environ["SEED_ARCHIVE"], "rb").read())\n'
+    )
+    docker.chmod(0o755)
+    systemctl = commands / "systemctl"
+    systemctl.write_text("#!/bin/sh\nexit 0\n")
+    systemctl.chmod(0o755)
+    root = tmp_path / "host-overlay"
+    units = tmp_path / "units"
+    units.mkdir()
+    script = tmp_path / "service.sh"
+    script.write_text(
+        (_DEPLOY / "gce-overlay-service.sh")
+        .read_text()
+        .replace("/var/lib/hal-overlay", str(root))
+        .replace("/etc/systemd/system", str(units))
+    )
+    subprocess.run(
+        ["bash", str(script), "test-image"],
+        check=True,
+        env=os.environ | {"PATH": f"{commands}:/usr/bin:/bin", "SEED_ARCHIVE": str(archive)},
+        capture_output=True,
+    )
+    mounted = tmp_path / "container-overlay"
+    root.rename(mounted)
+    assert (mounted / "current" / "git-sha").read_text().strip() == _SHA
+    assert (mounted / "current" / "fonts").is_dir()
+
+
 @pytest.mark.parametrize("docker_installed", [False, True])
 def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Path, docker_installed: bool) -> None:
     commands = tmp_path / "bin"
@@ -257,6 +301,7 @@ def test_gce_up_renders_standalone_g4_command(tmp_path: Path) -> None:
     assert "--service-account=runner@hal-project.iam.gserviceaccount.com" in command
     assert "hal-netplay-secret=hal-netplay-runner-env" in command
     assert "startup-script=" in command
+    assert "hal-netplay-overlay-service=" in command
 
 
 @pytest.mark.parametrize("slots", [1, 8, 9, 16])
