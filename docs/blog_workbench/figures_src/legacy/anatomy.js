@@ -1256,7 +1256,7 @@
         yTicks: [1.7, 1.9, 2.1, 2.3, 2.5, 2.7],
         xFormat: compact,
         yFormat: function (value) { return value.toFixed(1); },
-        xLabel: 'effective parameters N · log scale',
+        xLabel: 'compute-equivalent parameters N · log scale',
         yLabel: 'fitted validation NLL',
         margin: {top: 34, right: 28, bottom: 53, left: 65}
       });

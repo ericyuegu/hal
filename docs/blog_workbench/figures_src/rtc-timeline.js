@@ -9,7 +9,7 @@
   window.HALFIG_CUSTOM.data.rtcTimeline = function () {
     return (S && S.arms || []).map(function (a) { return {arm: a.name, run: a.run, updates: a.updates, character_suite_stock: a.character_suite_stock, fox_suite_stock: a.fox_suite_stock, control: 'not run'}; });
   };
-  var W = 880, H = 250;
+  var W = 880, H = 440;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   var mk = D.marker(svg, 'arrow', 'var(--ink-faint)');
   function sub(n) { return String(n).replace(/\d/g, function (c) { return '₀₁₂₃₄₅₆₇₈₉'[c]; }); }
@@ -40,5 +40,20 @@
   // the same rule at training time
   var y2 = 190;
   svg.appendChild(D.el('line', {x1: 16, y1: y2 - 44, x2: W - 16, y2: y2 - 44, stroke: 'var(--rule-dotted)', 'stroke-dasharray': '2 3'}));
+
   row(y2, 'training · O46', 'd random in 0–4', given, produced, 'true actions · no loss', 'loss · offsets to 20', '');
+  D.text(svg,16,278,'Timing example · no network delay · inference 3 frames · replan every 3 frames',{class:'diagram-title'});
+  var tx=function(f){return 200+f*84;};
+  D.text(svg,16,326,'game applies',{class:'diagram-note'});
+  for(var f=0;f<6;f++){
+    D.token(svg,tx(f),306,78,28,'aₜ'+(f?'₊'+sub(f):''),f<3?'given':'played');
+    D.text(svg,tx(f),296,f?'t+'+f:'t',{class:'diagram-note'});
+  }
+  D.text(svg,16,365,'inference',{class:'diagram-note'});
+  svg.appendChild(D.el('rect',{x:tx(0),y:344,width:tx(3)-tx(0),height:28,class:'model-token'}));
+  D.text(svg,tx(0)+10,362,'compute while committed inputs play',{class:'diagram-note'});
+  svg.appendChild(D.el('line',{x1:tx(3),x2:tx(3),y1:288,y2:392,class:'effect-zero'}));
+  D.text(svg,tx(3)+8,388,'plan returns; next replan starts',{class:'diagram-note'});
+  D.text(svg,16,422,'Illustrative schedule, not measured latency. The prediction horizon is six frames.',{class:'diagram-note'});
+
 }());

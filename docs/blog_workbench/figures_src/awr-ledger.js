@@ -51,7 +51,7 @@
     render();
   });
 
-  /* ---- reward math, mirroring the training calibration ---- */
+  /* Reward parameters follow O52; the baseline and unnormalized weights are illustrative. */
   function compute() {
     var g = games[state.game];
     var e = state.ego - 1, o = 1 - e;
@@ -80,6 +80,7 @@
     for (t = 0; t < n; t++) { var raw = Math.exp((G[t] - B[t]) / state.beta); w[t] = Math.min(raw, state.cap); if (raw >= state.cap) clipped++; }
     return {g: g, n: n, gamma: gamma, r: r, dealt: dealt, taken: taken, deathOpp: deathOpp, deathEgo: deathEgo, G: G, B: B, w: w, clipped: clipped, e: e, o: o};
   }
+  document.getElementById('ledger-full').addEventListener('change', render);
   var last = null;
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.awrLedgerRows = function () {
@@ -91,29 +92,37 @@
 
   /* ---- drawing ---- */
   var W = 880, L = 60, R = 16, TOP = 22;
-  var strips = [['events', 70], ['return G', 100], ['weight w', 100]];
+  var strips = [['events', 70], ['return G', 100], ['illustrative weight · log scale', 100]];
   var H = TOP + strips.reduce(function (s, x) { return s + x[1] + 22; }, 0) + 16;
-  function X(t, n) { return L + (t / (n - 1)) * (W - L - R); }
+  var plotStart = 0, plotEnd = 1;
+  function X(t, n) { return L + ((t - plotStart) / (plotEnd - plotStart)) * (W - L - R); }
 
   function render() {
     var c = compute(); last = c;
+    W = window.matchMedia('(max-width:760px)').matches ? 340 : 880;
+    var event = c.deathEgo.findIndex(function(v){return v;});
+    if (event < 0) event = c.deathOpp.findIndex(function(v){return v;});
+    if (event < 0) event = Math.floor(c.n/2);
+    var full = document.getElementById('ledger-full').checked;
+    plotStart = full ? 0 : Math.max(0,event-12*FPS);
+    plotEnd = full ? c.n-1 : Math.min(c.n-1,event+6*FPS);
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     var n = c.n, y = TOP;
     // time axis ticks every 30 s
-    var seconds = n / FPS;
-    for (var s = 0; s <= seconds; s += 30) {
+    var seconds = plotEnd / FPS, tickStep = full ? 30 : 5;
+    for (var s = Math.ceil(plotStart/FPS/tickStep)*tickStep; s <= seconds; s += tickStep) {
       var x = X(s * FPS, n);
       svg.appendChild(el('line', {x1: x, y1: TOP, x2: x, y2: H - 16, class: 'grid'}));
       svg.appendChild(el('text', {x: x, y: H - 4, class: 'tick', 'text-anchor': 'middle'}, s + ' s'));
     }
     // strip 1: events
     var evH = strips[0][1];
-    svg.appendChild(el('text', {x: L, y: y - 6, class: 'lbl'}, 'damage dealt ↑ · damage taken ↓ · stock lost ▲ opponent ▼ ego'));
+    svg.appendChild(el('text', {x: L, y: y - 6, class: 'lbl'}, 'replay events'));
     var mid = y + evH / 2;
     svg.appendChild(el('line', {x1: L, y1: mid, x2: W - R, y2: mid, class: 'axis'}));
-    var maxD = 1; for (var t = 0; t < n; t++) maxD = Math.max(maxD, c.dealt[t], c.taken[t]);
-    for (t = 1; t < n; t++) {
+    var maxD = 1; for (var t = plotStart; t <= plotEnd; t++) maxD = Math.max(maxD, c.dealt[t], c.taken[t]);
+    for (t = Math.max(1,plotStart); t <= plotEnd; t++) {
       if (c.dealt[t]) svg.appendChild(el('line', {x1: X(t, n), y1: mid, x2: X(t, n), y2: mid - (c.dealt[t] / maxD) * (evH / 2 - 8), class: 'ev-dealt'}));
       if (c.taken[t]) svg.appendChild(el('line', {x1: X(t, n), y1: mid, x2: X(t, n), y2: mid + (c.taken[t] / maxD) * (evH / 2 - 8), class: 'ev-taken'}));
       if (c.deathOpp[t]) svg.appendChild(el('path', {d: 'M ' + X(t, n) + ' ' + (y + 2) + ' l -5 8 l 10 0 z', class: 'death-opp'}));
@@ -124,7 +133,7 @@
     var gH = strips[1][1];
     svg.appendChild(el('text', {x: L, y: y - 6, class: 'lbl'}, 'return G · baseline'));
     var lo = Infinity, hi = -Infinity;
-    for (t = 0; t < n; t++) { lo = Math.min(lo, c.G[t], c.B[t]); hi = Math.max(hi, c.G[t], c.B[t]); }
+    for (t = plotStart; t <= plotEnd; t++) { lo = Math.min(lo, c.G[t], c.B[t]); hi = Math.max(hi, c.G[t], c.B[t]); }
     if (hi - lo < 1) { hi += 1; lo -= 1; }
     function Yg(v) { return y + gH - ((v - lo) / (hi - lo)) * gH; }
     if (lo < 0 && hi > 0) svg.appendChild(el('line', {x1: L, y1: Yg(0), x2: W - R, y2: Yg(0), class: 'axis'}));
@@ -137,7 +146,7 @@
     var wH = strips[2][1];
     svg.appendChild(el('text', {x: L, y: y - 6, class: 'lbl'}, 'weight w'));
     var wmin = Infinity, wmax = 0;
-    for (t = 0; t < n; t++) { wmin = Math.min(wmin, c.w[t]); wmax = Math.max(wmax, c.w[t]); }
+    for (t = plotStart; t <= plotEnd; t++) { wmin = Math.min(wmin, c.w[t]); wmax = Math.max(wmax, c.w[t]); }
     var wlo = Math.log(Math.min(wmin / 1.3, 0.7)), whi = Math.log(Math.max(wmax * 1.3, 1.5));
     function Yw(v) { return y + wH - ((Math.log(Math.max(v, 0.05)) - wlo) / (whi - wlo)) * wH; }
     svg.appendChild(el('line', {x1: L, y1: Yw(1), x2: W - R, y2: Yw(1), class: 'rule-one'}));
@@ -146,7 +155,7 @@
       svg.appendChild(el('line', {x1: L, y1: Yw(state.cap), x2: W - R, y2: Yw(state.cap), class: 'rule-cap'}));
       svg.appendChild(el('text', {x: L - 6, y: Yw(state.cap) + 3, class: 'tick', 'text-anchor': 'end'}, 'cap ' + state.cap.toFixed(1)));
     }
-    svg.appendChild(el('path', {d: linePath(c.w, n, Yw) + ' L ' + X(n - 1, n) + ' ' + Yw(1) + ' L ' + L + ' ' + Yw(1) + ' Z', class: 'area-w'}));
+    svg.appendChild(el('path', {d: linePath(c.w, n, Yw) + ' L ' + X(plotEnd, n) + ' ' + Yw(1) + ' L ' + L + ' ' + Yw(1) + ' Z', class: 'area-w'}));
     svg.appendChild(el('path', {d: linePath(c.w, n, Yw), class: 'line-w'}));
     // playhead
     if (state.frame !== null) {
@@ -160,7 +169,7 @@
   }
   function linePath(arr, n, Y) {
     var step = Math.max(1, Math.floor(n / 1400)), d = '';
-    for (var t = 0; t < n; t += step) d += (t ? ' L ' : 'M ') + X(t, n).toFixed(1) + ' ' + Y(arr[t]).toFixed(1);
+    for (var t = plotStart; t <= plotEnd; t += step) d += (t > plotStart ? ' L ' : 'M ') + X(t, n).toFixed(1) + ' ' + Y(arr[t]).toFixed(1);
     return d;
   }
   function readout(c) {
@@ -172,13 +181,15 @@
     }
     host.innerHTML = '<span>t <b>' + (t / FPS).toFixed(2) + ' s</b></span><span>stocks <b>' + c.g.stock[c.e][t] + '–' + c.g.stock[c.o][t] + '</b></span><span>percent <b>' + c.g.pct[c.e][t].toFixed(0) + '% · ' + c.g.pct[c.o][t].toFixed(0) + '%</b></span><span>G <b>' + c.G[t].toFixed(1) + '</b></span><span>A <b>' + (c.G[t] - c.B[t]).toFixed(1) + '</b></span><span>w <b>' + c.w[t].toFixed(2) + '</b></span>';
   }
-  svg.addEventListener('mousemove', function (e) {
+  svg.addEventListener('pointerdown', selectFrame);
+  svg.addEventListener('pointermove', function(e){if(e.pointerType==='mouse') selectFrame(e);});
+  function selectFrame(e) {
     var r = svg.getBoundingClientRect();
     var x = (e.clientX - r.left) / r.width * W;
     var n = games[state.game].n;
-    state.frame = Math.max(0, Math.min(n - 1, Math.round((x - L) / (W - L - R) * (n - 1))));
+    state.frame = Math.max(0, Math.min(n - 1, Math.round(plotStart + (x - L) / (W - L - R) * (plotEnd - plotStart))));
     render();
-  });
+  }
   svg.addEventListener('mouseleave', function () { state.frame = null; render(); });
   function sync() {
     gamesEl.querySelectorAll('button').forEach(function (b, i) { b.setAttribute('aria-pressed', String(i === state.game)); });
@@ -187,5 +198,6 @@
     render();
   }
   beta.value = Math.log10(state.beta);
+  window.matchMedia('(max-width:760px)').addEventListener('change', render);
   sync();
 }());

@@ -35,7 +35,7 @@
   // clusters of three batches, ≈ P batches apart; window k of the replay lands in cluster k
   var clusters = [['b', 'b+1', 'b+2'], ['b+P−1', 'b+P', 'b+P+1'], ['b+2P−1', 'b+2P', 'b+2P+1'], ['b+3P−1', 'b+3P', 'b+3P+1']];
   var placeR = [[0, 1], [1, 2], [0, 3], [2, 1]];   // [column in cluster, slot] for the followed replay's window k
-  var placeQ = [[1, 4], [2, 0], [1, 5], [0, 2]];   // an older replay, entered ≈ P/2 batches earlier
+
   var cw = 3 * (bw + gap) - gap, cgap = 44;
   clusters.forEach(function (cl, k) {
     var cx = x0 + k * (cw + cgap);
@@ -46,10 +46,10 @@
         var sy = by + 8 + s * ((bh - 16) / slots);
         var cls = 'loader-win';
         if (placeR[k][0] === j && placeR[k][1] === s) cls += ' r';
-        else if (placeQ[k][0] === j && placeQ[k][1] === s) cls += ' q';
+
         svg.appendChild(D.el('rect', {x: bx + 6, y: sy, width: bw - 12, height: (bh - 16) / slots - 5, class: cls}));
       }
-      D.text(svg, bx + bw / 2, by + bh + 14, label, {'text-anchor': 'middle', class: 'diagram-note'});
+      D.text(svg, bx + bw / 2, by + bh + 14, 'batch ' + (k * 219 + j + 1), {'text-anchor': 'middle', class: 'diagram-note'});
     });
     if (k < clusters.length - 1) D.text(svg, cx + cw + cgap / 2, by + bh / 2 + 4, '···', {'text-anchor': 'middle', class: 'diagram-note'});
   });
@@ -64,14 +64,13 @@
   [0, 1, 2].forEach(function (k) {
     var a = x0 + k * (cw + cgap) + placeR[k][0] * (bw + gap) + bw / 2, b = x0 + (k + 1) * (cw + cgap) + placeR[k + 1][0] * (bw + gap) + bw / 2;
     svg.appendChild(D.el('path', {d: 'M ' + a + ' ' + (y2 - 6) + ' L ' + a + ' ' + y2 + ' L ' + b + ' ' + y2 + ' L ' + b + ' ' + (y2 - 6), fill: 'none', stroke: FAINT}));
-    D.text(svg, (a + b) / 2, y2 + 13, '≈ P batches', {'text-anchor': 'middle', class: 'diagram-note'});
+    D.text(svg, (a + b) / 2, y2 + 13, 'about 219 batches later', {'text-anchor': 'middle', class: 'diagram-note'});
   });
   // legend
   var ly = 366;
   svg.appendChild(D.el('rect', {x: x0, y: ly - 9, width: 14, height: 10, class: 'loader-win r'}));
   D.text(svg, x0 + 20, ly, 'the replay above · one window per batch', {class: 'diagram-note'});
-  svg.appendChild(D.el('rect', {x: x0 + 400, y: ly - 9, width: 14, height: 10, class: 'loader-win q'}));
-  D.text(svg, x0 + 420, ly, 'an older replay, same schedule', {class: 'diagram-note'});
+
   svg.appendChild(D.el('rect', {x: x0, y: ly + 9, width: 14, height: 10, class: 'loader-win'}));
   D.text(svg, x0 + 20, ly + 18, 'other replays · every window in a batch comes from a different replay', {class: 'diagram-note'});
 }());

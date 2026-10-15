@@ -14,5 +14,5 @@
   window.HALFIG_CUSTOM.data.lrEffects = function () {
     return rows.filter(function (r) { return !r.baseline; }).map(function (r) { return {comparison: 'Muon 0.014 · AdamW 0.000595 → ' + r.label, treatment_run: r.run, baseline_run: '9luwu85n', method: r.method, stock_delta: r.stock.delta, stock_ci95_lo: r.stock.lo, stock_ci95_hi: r.stock.hi, damage_delta: r.damage.delta, damage_ci95_lo: r.damage.lo, damage_ci95_hi: r.damage.hi}; });
   };
-  D.forest(svg, rows, {rowH: 40, header: 'smallest pair → each row · 95% interval'});
+  D.sweep(svg, rows, ARMS.map(function(a){return Number(a[0]);}), ARMS.map(function(a){return a[0];}), null, 'Muon learning rate · log scale');
 }());

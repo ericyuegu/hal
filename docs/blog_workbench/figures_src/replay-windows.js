@@ -9,19 +9,22 @@
   window.HALFIG_CUSTOM.data.replayWindows = function () {
     return [{comparison: 'four → one window per replay', treatment_run: 'shjnxxsu', baseline_run: 'uw05bvm2', method: d.method, stock_delta: d.stock.delta, stock_ci95_lo: d.stock.lo, stock_ci95_hi: d.stock.hi, damage_delta: d.damage.delta, damage_ci95_lo: d.damage.lo, damage_ci95_hi: d.damage.hi}];
   };
-  var W = 26, H = 18, GAP = 4, y0 = 46, rowStep = H + 6;
-  function grid(x, title, hot) {
-    D.text(svg, x, 28, title, {class: 'diagram-title'});
-    for (var r = 0; r < 4; r += 1) {
-      var y = y0 + r * rowStep;
-      D.text(svg, x, y + H / 2 + 4, 'replay ' + String.fromCharCode(65 + r), {class: 'diagram-note'});
-      for (var s = 0; s < 8; s += 1) {
-        svg.appendChild(D.el('rect', {x: x + 64 + s * (W + GAP), y: y, width: W, height: H, class: 'model-token window' + (hot(r, s) ? ' hot' : '')}));
-      }
+
+  var demo = document.createElement('div'); demo.className='replay-batches';
+  [4,16].forEach(function(replays){
+    var section=document.createElement('section');
+    var h=document.createElement('h5');h.textContent=replays===4?'4 replays × 4 windows':'16 replays × 1 window';section.appendChild(h);
+    var grid=document.createElement('div');grid.className='batch-grid';
+    for(var i=0;i<16;i++){
+      var cell=document.createElement('span');var replay=replays===4?Math.floor(i/4):i;
+      cell.textContent=String.fromCharCode(65+replay)+(replays===4?String(i%4+1):'1');
+      cell.style.background='color-mix(in srgb, var(--oxblood) '+(6+(replay%4)*7)+'%, var(--paper))';
+      cell.setAttribute('aria-label','Replay '+String.fromCharCode(65+replay)+', window '+(replays===4?i%4+1:1));
+      grid.appendChild(cell);
     }
-    D.text(svg, x + 64, y0 + 4 * rowStep + 10, 'windows in time order · black = taken into the batch', {class: 'diagram-note'});
-  }
-  grid(16, 'four windows per replay · baseline', function (r, s) { return s >= 1 && s <= 4; });
-  grid(456, 'one window per replay', function (r, s) { return s === 1 + r; });
-  D.forest(svg, [Object.assign({label: 'four → one window per replay', sub: 'old evaluation, few matches per arm'}, d)], {top: 212, rowH: 50});
+    section.appendChild(grid);
+    var p=document.createElement('p');p.className='figure-note';p.textContent='16 windows in this illustrative batch';section.appendChild(p);demo.appendChild(section);
+  });
+  svg.before(demo);
+  D.forest(svg,[Object.assign({label:'four → one window per replay',sub:'old evaluation; few matches per arm'},d)],{rowH:50});
 }());

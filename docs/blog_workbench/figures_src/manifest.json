@@ -2,7 +2,7 @@
  {
   "key": "comparison-key",
   "name": "How a comparison is drawn",
-  "caption": "The legend for the results on this page. A baseline model and a treatment that changes one thing are both played against the level-9 CPU; the difference in net stocks per minute is the result, drawn as a dot with its 95% interval against a zero line. This example, legacy codec → Cartesian codec, shares 96 seeded two-minute episodes between the arms: +0.29 [+0.08, +0.51]. Where a comparison could not be matched (older protocols, unequal budgets, unfinished runs) the figure says so. Intervals measure evaluation noise, not variation between training seeds.",
+  "caption": "Comparison plots show treatment minus baseline and a 95% interval. The example is legacy → Cartesian codec, +0.29 [+0.08,+0.51], over 96 paired boots. Recipe comparisons can change multiple things; those limits are stated locally. Capacity plots show absolute scores. Intervals describe evaluation uncertainty, not training-seed variation.",
   "studies": [
    "codec_legacy_cartesian"
   ],
@@ -24,7 +24,7 @@
  {
   "key": "architecture",
   "name": "The policy, end to end",
-  "caption": "The policy as one dataflow; bars are vectors drawn to width. Each frame’s game state, characters, stage and previous controller frame are concatenated and projected to one token uₜ; N causal blocks over the last L tokens give a state per frame, and play uses only hₜ. The decoder builds one token per future frame from norm(hₜ), the previous written frame and an offset embedding, runs M causal blocks over those, and reads each frame state with four heads in order — later heads conditioned by FiLM on the picks so far, every head an MLP whose logits also receive a linear skip from hₜ. Two written frames are played before the next plan. Click a band for detail.",
+  "caption": "Observation → frame token → history → action decoder → controller → game. The new game state and applied controller frame feed the next observation. Detailed encodings, head wiring and timing are shown separately.",
   "studies": [
    "training_checkpoint_series",
    "optimizer_full_scale",
@@ -33,6 +33,19 @@
   "data": [
    "architectureModules",
    "architectureEdges"
+  ]
+ },
+ {
+  "key": "stage-map",
+  "name": "The five stages, on one time axis",
+  "caption": "Time runs left to right; the hierarchy runs down. The observation encoder makes one token per observed frame; the trunk attends back over the 128 frames it has seen and ends in the current state hₜ, which is the only state that drives the plan. To the right of now, the temporal decoder's ten steps sit at the offsets they predict, 1–6, 9, 12, 16 and 20 frames ahead, and each step picks the four controller groups in order. The runtime sends only the t+1 frame; the other nine offsets never reach Dolphin and shape the trunk in training. Configuration and parameter counts are the 15,053,039-parameter O43 model. Select a stage to inspect its shapes, parameters and configuration.",
+  "studies": [
+   "action_factorization_o37",
+   "o43_action_head_components",
+   "execution_horizon"
+  ],
+  "data": [
+   "stageSpecs"
   ]
  },
  {
@@ -92,6 +105,18 @@
   "data": []
  },
  {
+  "key": "awr-ledger",
+  "name": "Reward, return and weight, frame by frame",
+  "caption": "A replay segment around a stock loss illustrates how the return half-life changes earlier weights. The moving-average or game-mean baseline is a substitute, not the learned O52 value estimate. Displayed weights are unnormalized; O52 normalizes eligible weights across the batch. Reward parameters default to O52 values. Expand settings to change the game, baseline, beta, cap or time range.",
+  "studies": [
+   "awr_actor_weighting",
+   "awr_gamma"
+  ],
+  "data": [
+   "awrLedgerRows"
+  ]
+ },
+ {
   "key": "past-action-encoding",
   "name": "Past-action encoding",
   "caption": "The previous controller frame as a 256-way one-hot class against the class embedding plus a linear map of its physical stick and trigger values. One-hot → learned: +0.26 [+0.08, +0.44] stocks/min, +23.7 [+13.8, +33.6] damage/min, despite fewer examples and fewer parameters.",
@@ -101,18 +126,6 @@
   ],
   "data": [
    "pastActionEffect"
-  ]
- },
- {
-  "key": "awr-ledger",
-  "name": "Reward, return and weight, frame by frame",
-  "caption": "One game from the ego port’s side. Damage dealt and taken and stock changes are the reward; the return discounts it with the chosen half-life; the weight is the capped exponential of the return over a baseline, divided by β. The knobs default to the O52 values.",
-  "studies": [
-   "awr_actor_weighting",
-   "awr_gamma"
-  ],
-  "data": [
-   "awrLedgerRows"
   ]
  },
  {
@@ -155,7 +168,7 @@
  {
   "key": "replay-windows",
   "name": "Windows per replay in one batch",
-  "caption": "Four → one window per replay: +0.73 [−0.07, +1.53] stocks/min, −6.2 [−46.5, +34.1] damage/min. An old evaluation with few matches per arm, so the intervals are wide.",
+  "caption": "The illustration holds batch size at 16 windows: four replays with four windows each versus sixteen replays with one window each. The actual matched training comparison used batch 1,024. Four → one window per replay gave +0.73 [−0.07,+1.53] stocks/min with wide uncertainty under the old evaluation.",
   "studies": [
    "windows_per_replay"
   ],
@@ -222,7 +235,7 @@
  {
   "key": "identity-effects",
   "name": "Player identity",
-  "caption": "One 16M model trained with a player-identity input. It was played against the CPU four times, once per identity, and each is compared with the same model played with the identity masked. Masked → Cody: +0.08 [−0.10, +0.26] stocks/min and +31.3 [+17.1, +45.4] damage/min. Masked → Platinum: −0.32 [−0.48, −0.16] stocks/min. The identity input moves damage more clearly than stocks.",
+  "caption": "Each identity is compared with masked identity. Cody and Mang0 identify individual players; Master and Platinum are pooled ranked-player identities. Cody changes damage more clearly than stocks. Evaluation uncertainty is shown for both metrics.",
   "studies": [
    "player_identity"
   ],
@@ -278,7 +291,7 @@
  {
   "key": "failed-ideas",
   "name": "Ideas that did not pan out",
-  "caption": "Each row is one idea, the test that was run, and what else moved in that test. Matched tests are given as baseline → treatment differences in net stocks per minute with a 95% interval; unmatched systems get their arm scores only, and unfinished runs get nothing. The other objective-level failures (flow matching, value critics, exploration modeling) are in the figure above; the history cross-attention test is in the architecture section.",
+  "caption": "Completed tests with no demonstrated gain, followed by unfinished or inconclusive work. Differences describe the tested systems, with paired or unpaired evaluation intervals. Other changes in each row limit component-level causal interpretation. An interval crossing zero is not a strong rejection.",
   "studies": [
    "rle_bpe_actions",
    "fixed_long_delay",
@@ -296,7 +309,7 @@
  {
   "key": "storage-bars",
   "name": "Bytes per corpus, before and after the compact layout",
-  "caption": "The ranked corpus, 112,409 training replays. The old row format expanded the train split to 802 GB of decoded arrays before a window could be cut; the compact policy layout reads 76 GB for the same frames. On disk, the compressed artifact fell from 30 GB to 13 GB. Fewer bytes per window means fewer bytes read per batch; no matched throughput benchmark was kept across the change, so only the sizes are shown.",
+  "caption": "The ranked corpus uses 802.47 GB of decoded training arrays in the old format versus 76.19 GB in the compact layout, 10.5× smaller. The compressed artifact is 29.82 → 13.34 GB, shown separately as text. No matched throughput benchmark is claimed.",
   "studies": [
    "dataset_v8_cleaning",
    "windows_per_replay"
@@ -330,7 +343,7 @@
  {
   "key": "tier-prediction",
   "name": "Predicting the next data budget",
-  "caption": "For each O54 model, S(D) = S₂₈ + A·(1 − (D/2²⁸)⁻ᵅ) with A ≥ 0 and 0.01 ≤ α ≤ 4 was fitted through the 2²⁸, 2²⁹ and 2³⁰ scores and read off at 2³¹. The fit put the 39M model first (−0.09 predicted, −0.45 observed) and the 125M model third (−0.49 predicted, −0.01 observed). Because the predicted ordering failed, no winner is reported for larger budgets. Fits and predictions are recomputed from the study table; the O54 bootstrap matched the observed order in 0.15% of resamples.",
+  "caption": "Separate models are fitted through D30 and evaluated at D31. Hollow points are predictions at D31; prediction uncertainty is not shown. Filled points and 95% intervals are observed scores. The predicted ranking failed, so the fits are not used to choose a winner at larger budgets.",
   "studies": [
    "capacity_and_latency"
   ],
@@ -341,7 +354,7 @@
  {
   "key": "iso-flop",
   "name": "Validation loss against model size and data",
-  "caption": "The O39 capacity sweep: seven trunk sizes from 5 to 18 layers (30M to 500M effective parameters, N = trunk + 36 · decoder, the count the run's FLOP formula uses) trained to five nested data budgets of 2²⁶ to 2³⁰ supervised positions on the ranked corpus, 33 finished runs. One curve, L(N, D) = 1.635 + 89.1/N⁰·³⁶⁸ + 2009/D⁰·⁴⁹⁸, is fitted through all of them; every run lands within 0.012 of it, and no run was held out. Along a fixed compute budget of 6·N·D the curve's minimum gives a compute-optimal size (≈150M at 10¹⁸ FLOPs). The fit is only trusted inside the shaded size range; the dedicated iso-FLOP study (O48) was canceled before launch.",
+  "caption": "O39: 33 completed runs, five data budgets, seven model sizes. The fit uses all measured points; none were held out. The left panel shows measured loss and fitted data curves. The right panel shows predicted fixed-compute minima under C=6ND. Solid compute segments require both N and D inside the observed ranges; dashed segments extrapolate. Expand the residual panel to inspect measured minus fitted loss. The dedicated O48 study was canceled.",
   "studies": [
    "capacity_and_latency"
   ],

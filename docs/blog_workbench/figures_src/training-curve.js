@@ -68,13 +68,15 @@
     readout.innerHTML = '<span><b>' + u.toLocaleString('en-US') + '</b> updates</span><span>validation NLL <b>' + S.val_nll[i].toFixed(3) + '</b></span>' +
       (e ? '<span>net stocks / min <b>' + D.signed(e.stock, 2) + '</b> [' + D.signed(e.stock_ci95[0], 2) + ', ' + D.signed(e.stock_ci95[1], 2) + ']</span><span>net damage / min <b>' + D.signed(e.damage, 1) + '</b> [' + D.signed(e.damage_ci95[0], 1) + ', ' + D.signed(e.damage_ci95[1], 1) + ']</span>' : '<span>not played at this checkpoint</span>');
   }
-  svg.addEventListener('mousemove', function (e) {
+  function selectPoint(e) {
     var pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
     var p = pt.matrixTransform(svg.getScreenCTM().inverse());
     var best = S.val_updates[0], bd = Infinity;
     S.val_updates.forEach(function (u) { var d = Math.abs(x(u) - p.x); if (d < bd) { bd = d; best = u; } });
     show(best);
-  });
+  }
+  svg.addEventListener('pointerdown', selectPoint);
+  svg.addEventListener('pointermove', function(e){if(e.pointerType==='mouse')selectPoint(e);});
   svg.addEventListener('mouseleave', function () { cursor.setAttribute('visibility', 'hidden'); readout.innerHTML = ''; });
   readout.innerHTML = '<span>hover for the values at each checkpoint</span>';
 }());

@@ -128,7 +128,7 @@ window.HALDIAG = (function () {
     rows.forEach(function (r, i) {
       var y = o.top + i * o.rowH + o.rowH / 2 - 6;
       text(svg, o.labelX, y + (r.sub ? 0 : 4), r.label, {class: 'diagram-title' + (r.accent ? ' accent' : '')});
-      if (r.sub) text(svg, o.labelX, y + 14, r.sub, {class: 'diagram-note'});
+      if (r.sub) text(svg, o.labelX, y + 14, r.sub.replace(/^[a-z0-9]{8} → [a-z0-9]{8} · /, ''), {class: 'diagram-note'});
       if (r.baseline) {
         xs.forEach(function (x, k) { text(svg, x(0) + 6, y + 4, 'baseline', {class: 'diagram-note'}); });
         return;
@@ -136,6 +136,30 @@ window.HALDIAG = (function () {
       effect(svg, xs[0], y, r.stock, {accent: r.accent, digits: 2, valueX: o.cols[0][1] + 8});
       effect(svg, xs[1], y, r.damage, {accent: r.accent, digits: 1, valueX: o.cols[1][1] + 8});
     });
+
+    if (o.top <= 80) {
+      var mobile = document.createElement('div');
+      mobile.className = 'mobile-forest';
+      svg.classList.add('desktop-forest');
+      ['stock', 'damage'].forEach(function (metric, k) {
+        var heading = document.createElement('h5');
+        heading.textContent = k ? 'Change in net damage / min' : 'Change in net stocks / min';
+        mobile.appendChild(heading);
+        var panel = el('svg', {class:'model-diagram', viewBox: '0 0 320 ' + (rows.length * 76 + 32), role: 'img', 'aria-label': heading.textContent + '; treatment minus baseline, 95% intervals'});
+        var mx = scale([30, 266], doms[k].lo, doms[k].hi);
+        effectAxis(panel, mx, doms[k], 32, rows.length * 76 - 4, null);
+        rows.forEach(function (r, i) {
+          var yy = i * 76;
+          text(panel, 8, yy + 18, r.label.replace('behavior cloning', 'BC'), {class:'diagram-title'});
+          if (r.sub) text(panel, 8, yy + 33, r.sub.replace(/^[a-z0-9]{8} → [a-z0-9]{8} · /, ''), {class:'diagram-note'});
+          if (r.baseline) text(panel, mx(0) + 6, yy + 54, 'baseline', {class:'diagram-note'});
+          else effect(panel, mx, yy + 54, r[metric], {accent:r.accent, digits:k ? 1 : 2, valueX:278});
+        });
+        mobile.appendChild(panel);
+      });
+      rows.filter(function(r){return r.loss;}).forEach(function(r){var note=document.createElement('p');note.className='figure-note';note.textContent=r.label+' · validation loss '+r.loss[0].val_loss.toFixed(3)+' → '+r.loss[1].val_loss.toFixed(3)+' ('+r.loss[0].metric+')';mobile.appendChild(note);});
+      svg.after(mobile);
+    }
     return {xs: xs, doms: doms};
   }
   /* Vertical Δ bars with 95% whiskers: rows of {label, sub, stock, damage, accent}; one panel per metric,
@@ -189,5 +213,64 @@ window.HALDIAG = (function () {
       p.classList.add(p.getAttribute('data-module') === moduleId ? 'module-focus' : 'module-dim');
     });
   }
-  return {el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest, effectBars: effectBars, evidence: evidence, study: study};
+
+  function bindReadout(target, callback, label) {
+    target.setAttribute('tabindex', '0');
+    target.setAttribute('role', 'button');
+    if (label) target.setAttribute('aria-label', label);
+    target.addEventListener('mouseenter', callback);
+    target.addEventListener('focus', callback);
+    target.addEventListener('click', callback);
+    target.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); callback(e); }
+    });
+  }
+  function sweep(svg, rows, values, labels, secondary, axisTitle) {
+    var readout=document.createElement('p');readout.className='chart-readout';readout.setAttribute('aria-live','polite');svg.after(readout);
+    function render() {
+      empty(svg);
+      var small = window.matchMedia('(max-width:760px)').matches;
+      var width = small ? 340 : 880, panelWidth = small ? 340 : 430;
+      svg.classList.add('reflow-chart');
+      svg.setAttribute('viewBox', '0 0 ' + width + ' ' + (small ? 660 : 330));
+      ['stock', 'damage'].forEach(function (metric, k) {
+        var g = el('g', {transform:'translate(' + (small ? 0 : k * 450) + ',' + (small ? k * 330 : 0) + ')'});
+        svg.appendChild(g);
+        var domainY = domain(rows.filter(function(r){return !r.baseline;}).map(function(r){return r[metric];}));
+        var yy = scale([228, 38], domainY.lo, domainY.hi);
+        var xx = function(v) {return 50 + Math.log(v/values[0])/Math.log(values[values.length-1]/values[0])*(panelWidth-84);};
+        text(g, 12, 18, k ? 'Δ net damage / min' : 'Δ net stocks / min', {class:'diagram-title'});
+        domainY.ticks.forEach(function(v){
+          g.appendChild(el('line',{x1:50,x2:panelWidth-24,y1:yy(v),y2:yy(v),class:v===0?'effect-zero':'effect-grid'}));
+          text(g,42,yy(v)+4,signed(v,domainY.digits),{class:'diagram-note','text-anchor':'end'});
+        });
+        var points=[];
+        rows.forEach(function(r,i){
+          var d=r.baseline?{delta:0,lo:0,hi:0}:r[metric], cx=xx(values[i]);
+          points.push(cx+','+yy(d.delta));
+          g.appendChild(el('line',{x1:cx,x2:cx,y1:yy(d.lo),y2:yy(d.hi),class:'effect-ci'+(r.accent?' accent':'')}));
+          var dot=el('circle',{cx:cx,cy:yy(d.delta),r:4,class:'effect-pt'+(r.accent?' accent':'')});
+          var title=el('title',{});title.textContent=r.label+': '+signed(d.delta,k?1:2)+' ['+signed(d.lo,2)+', '+signed(d.hi,2)+']';dot.appendChild(title);g.appendChild(dot);
+          bindReadout(dot,function(){readout.textContent=title.textContent+(r.sub?' · '+r.sub:'');},title.textContent);
+          var lineY=small && i%2 ? 268 : 248;
+          text(g,cx,lineY,labels[i],{class:'diagram-note','text-anchor':'middle'});
+          if(secondary) text(g,cx,lineY+12,secondary[i],{class:'diagram-note','text-anchor':'middle'});
+        });
+        g.insertBefore(el('polyline',{points:points.join(' '),class:'chart-line faint'}),g.firstChild);
+        text(g,12,310,axisTitle,{class:'diagram-note'});
+      });
+    }
+    render();
+    window.matchMedia('(max-width:760px)').addEventListener('change',render);
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.fig-src.custom svg.model-diagram').forEach(function(svg) {
+      if (svg.closest('.mobile-forest') || svg.classList.contains('reflow-chart') || svg.classList.contains('desktop-forest')) return;
+      var wrap = document.createElement('div'); wrap.className = 'svg-scroll';
+      wrap.tabIndex = 0; wrap.setAttribute('role','region'); wrap.setAttribute('aria-label',svg.getAttribute('aria-label') || 'Figure detail');
+      svg.before(wrap); wrap.appendChild(svg);
+      var hint=document.createElement('p');hint.className='scroll-hint';hint.textContent='Swipe sideways to inspect the diagram.';wrap.before(hint);
+    });
+  });
+  return {bindReadout:bindReadout, sweep:sweep, el: el, empty: empty, text: text, marker: marker, part: part, token: token, jointToken: jointToken, stacked: stacked, box: box, wire: wire, path: path, note: note, row: row, focus: focus, signed: signed, scale: scale, domain: domain, effect: effect, effectAxis: effectAxis, forest: forest, effectBars: effectBars, evidence: evidence, study: study};
 }());

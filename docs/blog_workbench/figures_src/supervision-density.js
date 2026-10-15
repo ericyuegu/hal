@@ -19,7 +19,7 @@
     return S.comparisons.map(function (c) { return {comparison: c.control + ' → ' + c.treatment, stock_delta: c.stock_delta, ci95_lo: c.delta_ci95[0], ci95_hi: c.delta_ci95[1], method: 'paired bootstrap, 96 boots'}; });
   };
 
-  var W = 880, H = 452;
+  var W = 880, H = 492;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   var mk = D.marker(svg, 'arrow', 'var(--ink-faint)');
 
@@ -50,9 +50,13 @@
   var dom = D.domain(ROWS.map(function (r) { return r.d; }));
   var x = D.scale([560, 780], dom.lo, dom.hi);
   D.text(svg, 16, top - 20, 'baseline → treatment · 95% interval', {class: 'diagram-note'});
-  D.effectAxis(svg, x, dom, top - 6, top + ROWS.length * rowH - 8, 'Δ net stocks / min');
+  D.effectAxis(svg, x, dom, top - 6, top + ROWS.length * rowH + 24, 'Δ net stocks / min');
   ROWS.forEach(function (r, i) {
-    var y = top + i * rowH + rowH / 2 - 6;
+    var y = top + i * rowH + rowH / 2 - 6 + (i ? 32 : 0);
+    if (i === 1) {
+      svg.appendChild(D.el('line',{x1:16,x2:864,y1:y-37,y2:y-37,class:'effect-grid'}));
+      D.text(svg,16,y-18,'Sparse baseline A → cross-attention variants',{class:'diagram-note'});
+    }
     D.text(svg, 16, y, r.label, {class: 'diagram-title' + (r.accent ? ' accent' : '')});
     D.text(svg, 16, y + 14, r.sub, {class: 'diagram-note'});
     D.effect(svg, x, y, r.d, {accent: r.accent, digits: 2, valueX: 792});

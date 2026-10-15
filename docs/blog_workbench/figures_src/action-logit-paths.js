@@ -102,7 +102,12 @@
     // the head: norm → linear → SiLU → linear
     var head = D.part(svg, 'head');
     head.appendChild(D.el('rect', {x: cx - 44, y: YM, width: 88, height: 130, class: 'model-token queued'}));
-    ['norm', 'linear', 'SiLU', 'linear'].forEach(function (label, i) { op(head, cx, YM + 8 + i * 26, 64, label); });
+    if (j === 0) {
+      ['norm', 'linear', 'SiLU', 'linear'].forEach(function (label, i) { op(head, cx, YM + 8 + i * 26, 64, label); });
+    } else {
+      op(head, cx, YM + 50, 78, 'SiLU MLP');
+      D.note(head, cx, YM + 85, 'same structure', 'middle');
+    }
     D.note(head, cx, YM + 121, 'SiLU MLP head', 'middle');
     D.wire(col, cx, YM + 130, cx, YSUM - 10, mk);
     // Σ with the trunk skip from the right
@@ -142,12 +147,18 @@
     var g = D.el('g', {class: 'forest-row'});
     g.appendChild(D.el('rect', {x: 0, y: top + i * rowH - 4, width: W, height: rowH, class: 'hit'}));
     D.text(g, L, y, r.label, {class: 'diagram-title'});
-    D.text(g, L, y + 14, r.sub, {class: 'diagram-note'});
+    D.text(g, L, y + 14, r.sub.split(' · ')[1], {class: 'diagram-note'});
     D.effect(g, x, y - 7, r.char, {digits: 2, valueX: VALX});
     D.effect(g, x, y + 9, r.fox, {digits: 2, valueX: VALX, accent: true});
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('role', 'button');
+    g.setAttribute('aria-label', r.label);
+    g.addEventListener('click', function () { D.focus(svg, r.comp); });
+    g.addEventListener('focus', function () { D.focus(svg, r.comp); });
+    g.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); D.focus(svg, r.comp); } });
     g.addEventListener('mouseenter', function () { D.focus(svg, r.comp); });
     g.addEventListener('mouseleave', function () { D.focus(svg, null); });
     forest.appendChild(g);
   });
-  D.note(forest, L, top + ROWS.length * rowH + 30, 'hover a row to light the part it added');
+  D.note(forest, L, top + ROWS.length * rowH + 30, 'select a row to highlight the part it added');
 }());

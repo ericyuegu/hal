@@ -5,8 +5,8 @@
   var svg = document.getElementById('identity-effects-diagram');
   if (!D || !CI || !svg) return;
   var NAMES = ['Cody', 'Master', 'Mang0', 'Platinum'];
-  var rows = [{label: 'identity masked', sub: 'u1gvby0r · baseline', baseline: true}].concat(NAMES.map(function (n) {
-    return Object.assign({label: n, sub: 'dg0u00w5 · same checkpoint', accent: n === 'Cody'}, CI['player_identity:' + n]);
+  var rows = [{label: 'identity masked', sub: 'baseline', baseline: true}].concat(NAMES.map(function (n) {
+    return Object.assign({label: n, sub: (n === 'Master' || n === 'Platinum') ? 'pooled ranked-player identity' : 'individual player identity', accent: n === 'Cody'}, CI['player_identity:' + n]);
   }));
   window.HALFIG_CUSTOM = window.HALFIG_CUSTOM || {data: {}};
   window.HALFIG_CUSTOM.data.identityEffects = function () {

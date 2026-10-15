@@ -74,9 +74,11 @@
   into(16 + SW + 6, cy + SH / 2, TX - 6, tokenMid + 4);
   into(16 + SW + 6, cy + STEP + SH / 2, TX - 6, tokenMid + 10);
   D.path(svg, 'M ' + (EX + 322) + ' ' + (ay + SH / 2) + ' L ' + BUS + ' ' + (ay + SH / 2) + ' C ' + (BUS + 70) + ' ' + (ay + SH / 2) + ', ' + (TX - 70) + ' ' + (tokenMid + 16) + ', ' + (TX - 6) + ' ' + (tokenMid + 16), mk);
+  D.note(svg, TX + TW / 2, TY - 12, 'concatenate', 'middle');
   D.jointToken(svg, TX, TY, TW, 34, 'sₜ', 'aₜ₋₁');
   svg.appendChild(D.el('rect', {x: 16, y: 478, width: 26, height: 14, class: 'model-token queued'}));
   D.note(svg, 50, 489, 'may be absent · absent block: values zero, mask set · empty slot: gate zero');
+
   // the matched difference for the projectile slots
   var CI = window.HALFIG_CI;
   if (CI && CI.projectile_inputs) {

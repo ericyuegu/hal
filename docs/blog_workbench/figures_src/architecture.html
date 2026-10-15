@@ -1,13 +1,14 @@
 <figure class="breakout architecture-figure arch-figure" id="arch">
-  <div class="artifact interactive">
-    <div class="figure-head">
-      <div>
-        <h4>The policy, end to end</h4>
-        <p>One causal Transformer over the frames seen, one causal decoder over the frames written. Bars are vectors, drawn to width.</p>
-      </div>
-    </div>
-    <svg class="model-diagram" id="arch-overview" role="img" aria-label="Five bands. The observation pieces of one frame are concatenated and projected to a token; a causal trunk turns the token sequence into per-frame states; one decoder token per future frame, built from the trunk state, the previous written frame and an offset embedding, passes through causal blocks to a frame state; the four controller heads read that state in order with FiLM from the picks so far, an MLP head and a linear skip from the trunk state; two of the written frames are played before the next plan."></svg>
-    <div class="arch-cards" id="arch-cards" role="tablist" aria-label="Stages"></div>
-    <div class="arch-detail" id="arch-detail" hidden></div>
-  </div>
+ <div class="artifact">
+  <div class="figure-head"><div><h4>The policy, end to end</h4><p>Each new observation leads to a short plan of controller inputs. The next observation closes the loop.</p></div></div>
+  <ol class="policy-flow">
+   <li><b>Observation</b><span>Players, projectiles, stage, identity and the previous controller frame.</span></li>
+   <li><b>Frame token</b><span>Encode the inputs, concatenate them, and project to one vector.</span></li>
+   <li><b>History</b><span>A causal Transformer reads the frame tokens. The newest state summarizes the history.</span></li>
+   <li><b>Action decoder</b><span>Predict future controller frames, conditioned on the frames already written.</span></li>
+   <li><b>Controller</b><span>Choose C-stick, main stick, triggers and buttons in order.</span></li>
+   <li><b>Game</b><span>Apply the queued inputs. Observe the next frame and replan.</span></li>
+  </ol>
+  <p class="figure-note">Game → observation: the applied controller frame returns with the new game state.</p>
+ </div>
 </figure>

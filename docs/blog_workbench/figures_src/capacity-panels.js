@@ -17,41 +17,34 @@
     return S.arms.map(function (a) { return {model: a.name.split(' at ')[0], run: a.run, data_exponent: a.data_exponent, bc_parameters: a.bc_parameters, delay_frames: a.delay_frames, latency_p99_ms: +a.latency_p99_ms.toFixed(1), stock: a.stock, stock_ci95_lo: a.stock_ci95[0], stock_ci95_hi: a.stock_ci95[1]}; });
   };
 
-  var W = 880, H = 340, L = 64, R = 16, top = 54, bottom = 262, pw = (W - L - R - 3 * 18) / 4;
-  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-  var lo = -1.3, hi = 0.2;
-  var y = D.scale([bottom, top], lo, hi);
-  var superscript = function (n) { return String(n).replace(/\d/g, function (c) { return '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]; }); };
-  D.text(svg, L, 22, 'net stocks / min · each model\u2019s own score against the CPU, dot and 95% interval · no baseline here', {class: 'diagram-note'});
-  D.text(svg, W - R, bottom + 34, 'deployed delay, frames', {class: 'diagram-note', 'text-anchor': 'end'});
-  [-1, -0.5, 0].forEach(function (v) {
-    D.text(svg, L - 8, y(v) + 4, D.signed(v, 1), {class: 'diagram-note', 'text-anchor': 'end'});
-  });
-  TIERS.forEach(function (t, k) {
-    var px = L + k * (pw + 18);
-    var x = D.scale([px + 14, px + pw - 14], 0, 7);
-    [-1, -0.5, 0].forEach(function (v) {
-      svg.appendChild(D.el('line', {x1: px, y1: y(v), x2: px + pw, y2: y(v), class: v === 0 ? 'effect-zero' : 'effect-grid'}));
-    });
-    D.text(svg, px + pw / 2, top - 14, 'D = 2' + superscript(t) + (k === 0 ? ' positions' : ''), {class: 'diagram-title', 'text-anchor': 'middle'});
-    [1, 2, 3, 6].forEach(function (d) { D.text(svg, x(d), bottom + 16, String(d), {class: 'diagram-note', 'text-anchor': 'middle'}); });
-    MODELS.forEach(function (m) {
-      var a = cell[m.w + ':' + t], cx = x(m.delay), cls = m.accent ? ' accent' : '';
-      svg.appendChild(D.el('line', {x1: cx, y1: y(a.stock_ci95[0]), x2: cx, y2: y(a.stock_ci95[1]), class: 'effect-ci' + cls}));
-      var pt = D.el('circle', {cx: cx, cy: y(a.stock), r: 4, class: 'effect-pt' + cls});
-      svg.appendChild(pt);
-      if (k === TIERS.length - 1) D.text(svg, cx + (m.delay === 6 ? -8 : 8), y(a.stock) - 8, m.label, {class: 'diagram-label' + (m.accent ? ' accent-text' : ''), 'text-anchor': m.delay === 6 ? 'end' : 'start'});
-      var hit = D.el('rect', {x: cx - 12, y: top, width: 24, height: bottom - top, class: 'hit', fill: 'transparent'});
-      svg.appendChild(hit);
-      hit.addEventListener('mouseenter', function () {
-        readout.innerHTML = '<span><b>' + m.label + '</b> · W' + m.w + ' · delay ' + m.delay + ' · p99 inference ' + a.latency_p99_ms.toFixed(0) + ' ms</span><span>D = 2' + superscript(t) + '</span><span>net stocks / min <b>' + D.signed(a.stock, 2) + '</b> [' + D.signed(a.stock_ci95[0], 2) + ', ' + D.signed(a.stock_ci95[1], 2) + ']</span><span>' + a.run + '</span>';
+
+  function render(){
+    D.empty(svg);
+    var small=window.matchMedia('(max-width:760px)').matches;
+    var W=small?340:880, pw=small?278:182, gap=18;
+    svg.classList.add('reflow-chart');
+    svg.setAttribute('viewBox','0 0 '+W+' '+(small?1180:310));
+    TIERS.forEach(function(t,k){
+      var g=D.el('g',{transform:'translate('+(small?0:k*(pw+gap))+','+(small?k*295:0)+')'});svg.appendChild(g);
+      var x=D.scale([70,40+pw],0,7), y=D.scale([244,46],-1.3,0.2);
+      D.text(g,50,20,'D = 2'+String(t).replace(/\d/g,function(c){return '⁰¹²³⁴⁵⁶⁷⁸⁹'[c];}),{class:'diagram-title'});
+      [-1,-0.5,0].forEach(function(v){
+        g.appendChild(D.el('line',{x1:50,x2:pw+50,y1:y(v),y2:y(v),class:v===0?'effect-zero':'effect-grid'}));
+        if(small||k===0)D.text(g,44,y(v)+4,D.signed(v,1),{class:'diagram-note','text-anchor':'end'});
+      });
+      MODELS.forEach(function(m){
+        var a=cell[m.w+':'+t],cx=x(m.delay),cls=m.accent?' accent':'';
+        g.appendChild(D.el('line',{x1:cx,x2:cx,y1:y(a.stock_ci95[0]),y2:y(a.stock_ci95[1]),class:'effect-ci'+cls}));
+        g.appendChild(D.el('circle',{cx:cx,cy:y(a.stock),r:4,class:'effect-pt'+cls}));
+        D.text(g,cx,264,String(m.delay),{class:'diagram-note','text-anchor':'middle'});
+        D.text(g,cx,280,m.label,{class:'diagram-note','text-anchor':'middle'});
+        var hit=D.el('rect',{x:cx-10,y:40,width:20,height:208,fill:'transparent'});g.appendChild(hit);
+        D.bindReadout(hit,function(){
+          readout.textContent=m.label+' · '+m.delay+' frames · net stocks/min '+D.signed(a.stock,2)+' ['+D.signed(a.stock_ci95[0],2)+', '+D.signed(a.stock_ci95[1],2)+'] · p99 '+a.latency_p99_ms.toFixed(1)+' ms · '+a.run;
+        },m.label+' at data exponent '+t);
       });
     });
-  });
-  // legend for the accent
-  svg.appendChild(D.el('circle', {cx: L + 6, cy: H - 14, r: 3.6, class: 'effect-pt accent'}));
-  D.text(svg, L + 16, H - 10, '125M at 3 frames · strongest at the largest budget', {class: 'diagram-note'});
-  svg.appendChild(D.el('circle', {cx: L + 430, cy: H - 14, r: 3.6, class: 'effect-pt'}));
-  D.text(svg, L + 440, H - 10, '5M · 1 frame, 39M · 2 frames, 289M · 6 frames', {class: 'diagram-note'});
-  svg.addEventListener('mouseleave', function () { readout.innerHTML = ''; });
+  }
+  render();
+  window.matchMedia('(max-width:760px)').addEventListener('change',render);
 }());

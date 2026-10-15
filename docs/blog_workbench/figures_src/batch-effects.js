@@ -14,5 +14,5 @@
   window.HALFIG_CUSTOM.data.batchEffects = function () {
     return rows.filter(function (r) { return !r.baseline; }).map(function (r) { return {comparison: 'batch 2,048 → ' + r.label, treatment_run: r.run, baseline_run: 'rri7scjc', method: r.method, stock_delta: r.stock.delta, stock_ci95_lo: r.stock.lo, stock_ci95_hi: r.stock.hi, damage_delta: r.damage.delta, damage_ci95_lo: r.damage.lo, damage_ci95_hi: r.damage.hi}; });
   };
-  D.forest(svg, rows, {rowH: 46, header: 'batch 2,048 → each row · 95% interval'});
+  D.sweep(svg, rows, ARMS.map(function(a){return a[0];}), ARMS.map(function(a){return String(a[0]);}), ['16k','8k','4k','2k','1k'], 'batch size · log scale / updates below');
 }());
