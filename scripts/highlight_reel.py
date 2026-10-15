@@ -7,8 +7,9 @@ The title card climbs the opponents' ranks. ``first-cut``, the earlier edit, als
 decisive moments at half speed, where the caption's move names light up as they happen.
 
 Inputs:
-- ``--edit``: which entry of ``EDITS`` to render. An edit names its VOD captures and the Slippi
-  replays that its controllers and captions follow.
+- ``--edit``: which entry of ``EDITS`` to render. An edit names the Slippi replays that its
+  controllers and captions follow, and its footage: clips recorded from those replays by Slippi
+  Playback Dolphin (``--playback``, with the disc at ``--iso``), or VOD captures.
 - ``--controller-svg``: SlippiLab's ``Inputs.tsx``, which holds the GameCube controller SVG.
 - ``--ranks``: Slippi's rank icon SVGs (from slippi.gg), named as in ``RANK_ICONS``.
 - ``--blog``: the blog repository, for its fonts (Schibsted Grotesk and IBM Plex Mono).
@@ -20,12 +21,18 @@ manifest with input and output hashes. ``--preview`` writes a storyboard instead
 import hashlib
 import io
 import json
+import os
 import re
+import signal
+import struct
 import subprocess
+import tempfile
+import time
 from collections.abc import Iterator
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import replace
 from functools import cache
 from functools import lru_cache
 from pathlib import Path
@@ -45,8 +52,39 @@ FPS = 60
 # Slippi frames run at 60000/1001 Hz; VOD timestamps are seconds.
 REPLAY_HZ = 60000 / 1001
 # The game image inside every source capture, and where it lands in the reel.
-SOURCE_CROP = (304, 0, 1312, 1006)
+VOD_CROP = (304, 0, 1312, 1006)
 FEED = (0, 0, 1208, 926)
+# Recordings fill the feed: Dolphin's 4:3 picture scaled to the feed height, trimmed at the sides.
+RECORDING_CROP = (0, 0, FEED[2], FEED[3])
+# Dolphin stamps one frame dump per game frame at this rate.
+DUMP_FPS = 60
+# Tested with Slippi Playback Dolphin 3.5.2 (playback-3.5.2-Linux.zip, sha256 c7fcba0b6114eeab5aa20367d89a669daeebd639ddc43aa9969883b18c49cf1c).
+# Its OpenGL backend renders under Xvfb, on Mesa's llvmpipe when no GPU driver is usable.
+PLAYBACK_INI = """[Core]
+CPUThread = True
+DSPHLE = True
+FastDiscSpeed = True
+EmulationSpeed = 0
+[DSP]
+Backend = No audio output
+DumpAudio = True
+DumpAudioSilent = True
+[Movie]
+DumpFrames = True
+DumpFramesSilent = True
+[Display]
+RenderToMain = True
+[Interface]
+ShowLaunchMessages = False
+OnScreenDisplayMessages = False
+"""
+PLAYBACK_GFX_INI = """[Settings]
+InternalResolution = 2
+InternalResolutionFrameDumps = True
+AspectRatio = 2
+UseFFV1 = True
+ShowFPS = False
+"""
 BAND = 316
 CANVAS = (FEED[2], FEED[3] + BAND)
 
@@ -94,16 +132,28 @@ MONO_FONT = "node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-40
 
 
 @dataclass(frozen=True, slots=True)
+class Recording:
+    """Replay frames ``first`` through ``last`` rendered from the replay by Slippi Playback Dolphin."""
+
+    replay: Path
+    first: int
+    last: int
+
+
+@dataclass(frozen=True, slots=True)
 class Clip:
-    source: Path
+    # A VOD capture, or a recording until main() renders it to a file.
+    source: Path | Recording
     # Index into the edit's games.
     game: int
     start: float
     end: float
     speed: float
     replay: bool
-    # Replay frame = round(VOD seconds * REPLAY_HZ + offset).
+    # Replay frame = round(source seconds * REPLAY_HZ + offset).
     offset: float
+    # The game picture in the source, as (x, y, width, height).
+    crop: tuple[int, int, int, int] = VOD_CROP
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +216,6 @@ FALCO_VOD = Path("outputs/hal-highlights-v3/sources/v2890236934-normalized.mp4")
 GANONDORF_VOD = Path("outputs/hal-highlights-v3/sources/v2890236932-normalized.mp4")
 YOUNG_LINK_VOD = Path("outputs/hal-highlights-v2/sources/v2890236933.mp4")
 ZOEY_VOD = Path("outputs/hal-highlights-v2/sources/v2890236935.mp4")
-CRUSH_VOD = Path("outputs/hal-highlights-v3/sources/v2890236930.mp4")
 
 # Ganondorf's rank is the one HAL played against; the others are the slippi.gg tiers of each
 # opponent's rating when the reel was made.
@@ -267,12 +316,9 @@ FIRST_CUT = Edit(
 
 @dataclass(frozen=True, slots=True)
 class Moment:
-    """A live clip in replay frames, with one caption over all of it."""
+    """Replay frames ``first`` through ``last`` of a game, recorded from its replay, with one caption."""
 
     game: GameSpec
-    source: Path
-    # Replay frame = round(VOD seconds * REPLAY_HZ + offset).
-    offset: float
     first: int
     last: int
     caption: str
@@ -284,13 +330,14 @@ def edit_from(moments: Sequence[Moment]) -> Edit:
     games = list(dict.fromkeys(moment.game for moment in moments))
     clips = tuple(
         Clip(
-            moment.source,
+            Recording(moment.game.replay, moment.first, moment.last),
             games.index(moment.game),
-            (moment.first - moment.offset) / REPLAY_HZ,
-            (moment.last - moment.offset) / REPLAY_HZ,
+            0,
+            (moment.last - moment.first) / REPLAY_HZ,
             1,
             False,
-            moment.offset,
+            moment.first,
+            RECORDING_CROP,
         )
         for moment in moments
     )
@@ -304,60 +351,27 @@ def edit_from(moments: Sequence[Moment]) -> Edit:
     return Edit(tuple(games), clips, tuple(tuple(sorted(c, key=lambda cue: cue.start)) for c in cues))
 
 
-# Draft moments. Offsets were read off the in-game timer in each VOD; each clip starts about a
-# second before the first decisive action and ends about a second after the stock.
-MARTH_COMBO = Moment(
-    MARTH,
-    EARLIER_EDIT,
-    -2423,
-    25,
-    700,
-    "HAL up-tilts after a soft back-air, forcing Marth to double jump before continuing the combo mercilessly "
-    "on-stage.",
-)
+# Each clip starts about a second before the first decisive action and ends about a second after the stock.
+MARTH_COMBO = Moment(MARTH, 25, 700, "HAL juggles Marth on-stage mercilessly after baiting out their double jump.")
 GANONDORF_LEDGE_JUMP = Moment(
-    GANONDORF,
-    GANONDORF_VOD,
-    -426,
-    3420,
-    3821,
-    "HAL is a shark that finds unexpected kills in all sorts of scenarios.",
+    GANONDORF, 3420, 3821, "HAL finds kill confirmations and reversals in all sorts of scenarios."
 )
-FALCO_SHINE_SPIKE = Moment(
-    FALCO_2,
-    FALCO_VOD,
-    -6281,
-    37,
-    309,
-    "HAL catches Falco off guard with a shine spike.",
-)
+FALCO_SHINE_SPIKE = Moment(FALCO_2, 37, 309, "HAL catches Falco off guard with a shine spike.")
 SHEIK_LEDGE = Moment(
-    SHEIK,
-    EARLIER_EDIT,
-    18,
-    2074,
-    2388,
-    "HAL edge cancels side-B, then shine turnaround grabs ledge before Sheik gets there.",
+    SHEIK, 2074, 2388, "HAL edge cancels side-B, then shine turnaround grabs ledge before Sheik gets there."
 )
 YOUNG_LINK_SHINE_SPIKE = Moment(
     YOUNG_LINK,
-    YOUNG_LINK_VOD,
-    -397.7,
     5280,
     5752,
     "HAL sharks with two up-airs on platform, then drops down and shine spikes Young Link's recovery.",
 )
 ZOEY_REVERSAL = Moment(
-    ZOEY_2,
-    ZOEY_VOD,
-    -9854,
-    900,
-    1672,
-    "At a disadvantage, HAL side-Bs past to recover, then steals ledge for the stock.",
+    ZOEY_2, 900, 1630, "At a disadvantage, HAL side-Bs past to recover, then steals ledge for the stock."
 )
 CRUSH_CAPTION = "HAL finds unexpected reversals, but sometimes makes crucial blunders in edge guarding."
-CRUSH_TOO_DEEP = Moment(CRUSH, CRUSH_VOD, -559.4, 6110, 6614, CRUSH_CAPTION)
-CRUSH_LAST_STOCK = Moment(CRUSH, CRUSH_VOD, -559.4, 8160, 8920, CRUSH_CAPTION)
+CRUSH_TOO_DEEP = Moment(CRUSH, 6110, 6614, CRUSH_CAPTION)
+CRUSH_LAST_STOCK = Moment(CRUSH, 8160, 8920, CRUSH_CAPTION)
 EDITS = {
     "first-cut": FIRST_CUT,
     # Combos and recovery, then gimps and reversals, then the edge guards HAL drops.
@@ -400,6 +414,9 @@ class Args:
     edit: Literal["reel", "first-cut"] = "reel"
     controller_svg: Path = Path.home() / "src/slippilab/src/components/panels/Inputs.tsx"
     ranks: Path = Path("outputs/hal-highlights-v2/ranks")
+    # Slippi Playback Dolphin and the NTSC 1.02 disc it plays recordings on.
+    playback: Path = Path.home() / "data/dolphin/playback/Slippi_Playback-x86_64.AppImage"
+    iso: Path = Path.home() / "data/dolphin/ssbm.ciso"
     blog: Path = Path.home() / "src/ericyuegu2"
     output: Path = Path("outputs/hal-highlights")
     # Write still previews of representative frames instead of rendering the reel.
@@ -528,12 +545,128 @@ def frame_count(path: Path) -> int:
     return imageio_ffmpeg.count_frames_and_secs(str(path))[0]
 
 
-def feed_filter() -> str:
+def feed_filter(crop: tuple[int, int, int, int]) -> str:
     x, y, w, h = FEED
-    cx, cy, cw, ch = SOURCE_CROP
+    cx, cy, cw, ch = crop
     return (
         f"crop={cw}:{ch}:{cx}:{cy},scale={w}:{h}:flags=lanczos,pad={CANVAS[0]}:{CANVAS[1]}:{x}:{y}:color={BG},setsar=1"
     )
+
+
+def without_names(replay: bytes) -> bytes:
+    """The replay with its players' name tags, display names, and connect codes zeroed. Slippi
+    Playback draws display names under each player's percentage."""
+    data = bytearray(replay)
+    raw = data.index(b"raw[$U#l") + 12
+    if data[raw] != 0x35:
+        raise ValueError("the replay does not start with an event payloads event")
+    payloads = data[raw + 1] - 1
+    sizes = {data[raw + 2 + i]: struct.unpack(">H", data[raw + 3 + i : raw + 5 + i])[0] for i in range(0, payloads, 3)}
+    start = raw + 1 + data[raw + 1]
+    if data[start] != 0x36:
+        raise ValueError("the replay does not start with a game start event")
+    # Game Start offsets from the Slippi replay spec: name tags, display names, connect codes.
+    for offset, width in ((0x161, 16), (0x1A5, 31), (0x221, 10)):
+        if offset + 4 * width > sizes[0x36] + 1:
+            raise ValueError(f"the game start event is too short for the field at {offset:#x}")
+        data[start + offset : start + offset + 4 * width] = bytes(4 * width)
+    return bytes(data)
+
+
+def dumped_frames(path: Path) -> int:
+    """Frames in a dump that Dolphin may still be writing. Dolphin writes an empty packet for a
+    repeated frame, which a decoder skips, so count timestamps rather than decoded frames."""
+    if not path.is_file():
+        return 0
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-i", str(path), "-map", "0:v", "-c", "copy"]
+    result = subprocess.run([*cmd, "-f", "null", "-", "-progress", "pipe:1"], capture_output=True, text=True)
+    times = re.findall(r"^out_time_us=(\d+)$", result.stdout, re.MULTILINE)
+    return round(int(times[-1]) * DUMP_FPS / 1e6) if times else 0
+
+
+def await_dump(process: subprocess.Popen[bytes], log: Path, dump: Path, frames: int) -> None:
+    """Wait until Dolphin has dumped ``frames`` frames. Its playback log runs ahead of rendering, and
+    after the game's last frame it keeps dumping the end screen."""
+    count, changed = 0, time.monotonic()
+    while count < frames:
+        time.sleep(3)
+        if process.poll() is not None:
+            raise RuntimeError(f"Dolphin exited with {process.returncode}: {log.read_text(errors='replace')[-2000:]}")
+        latest = dumped_frames(dump)
+        if latest != count:
+            count, changed = latest, time.monotonic()
+        elif time.monotonic() - changed > 120:
+            raise RuntimeError(f"Dolphin stopped dumping at {count} of {frames} frames")
+
+
+def record(recording: Recording, args: Args, path: Path) -> None:
+    """Render the recording at the feed size with its game audio."""
+    frames = recording.last - recording.first + 1
+    with tempfile.TemporaryDirectory(prefix="playback-") as tmp:
+        root = Path(tmp)
+        config = root / "User" / "Config"
+        config.mkdir(parents=True)
+        (config / "Dolphin.ini").write_text(PLAYBACK_INI)
+        (config / "GFX.ini").write_text(PLAYBACK_GFX_INI)
+        replay = root / "replay.slp"
+        replay.write_bytes(without_names(recording.replay.read_bytes()))
+        # Dump frame k shows replay frame startFrame + 1 + k.
+        comm = {
+            "mode": "normal",
+            "replay": str(replay),
+            "startFrame": recording.first - 1,
+            "endFrame": recording.last + 2,
+            "commandId": f"{recording.first}-{recording.last}",
+            "isRealTimeMode": False,
+            "outputOverlayFiles": False,
+        }
+        (root / "comm.json").write_text(json.dumps(comm))
+        cmd = [
+            "xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", str(args.playback), "-u", str(root / "User"),
+            "-i", str(root / "comm.json"), "-e", str(args.iso), "-b", "-v", "OGL", "--cout", "--hide-seekbar",
+            "--output-directory", str(root), "-o", "dump",
+        ]  # fmt: skip
+        env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+        # Dolphin keeps running after playback ends, so stop its whole process group once the frames are dumped.
+        with (
+            (root / "dolphin.log").open("wb") as log,
+            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True) as process,
+        ):
+            try:
+                await_dump(process, root / "dolphin.log", root / "dump.avi", frames)
+            finally:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait()
+        width = round(FEED[3] * 4 / 3)
+        video = (
+            # The fps filter repeats the previous frame for each empty packet, keeping frames on their timestamps.
+            f"[0:v]fps={DUMP_FPS},trim=end_frame={frames},setpts=N/(60000/1001)/TB,"
+            f"scale={width}:{FEED[3]}:flags=lanczos,crop={FEED[2]}:{FEED[3]},setsar=1,format=yuv420p[v]"
+        )
+        audio = f"[1:a]atrim=duration={frames / REPLAY_HZ},aresample=48000[a]"
+        ffmpeg(
+            "-i", str(root / "dump.avi"), "-i", str(root / "dump.wav"), "-filter_complex", f"{video};{audio}",
+            "-map", "[v]", "-map", "[a]", "-r", "60000/1001",
+            "-c:v", "libx264", "-preset", "slow", "-crf", "12", "-c:a", "aac", "-b:a", "256k", str(path),
+        )  # fmt: skip
+
+
+def recorded(clip: Clip, args: Args) -> Clip:
+    """The clip with its recording rendered to a file, which is kept and reused."""
+    if not isinstance(clip.source, Recording):
+        return clip
+    recording = clip.source
+    if not recording.replay.is_file():
+        raise FileNotFoundError(recording.replay)
+    path = args.output / "recordings" / f"{sha256(recording.replay)[:12]}-{recording.first}-{recording.last}.mp4"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"recording {recording.replay.name} frames {recording.first}-{recording.last}", flush=True)
+        partial = path.with_suffix(".partial.mp4")
+        record(recording, args, partial)
+        partial.rename(path)
+    return replace(clip, source=path)
 
 
 def encode_segment(segment: Segment, path: Path) -> None:
@@ -542,7 +675,7 @@ def encode_segment(segment: Segment, path: Path) -> None:
     duration = segment.frames / FPS
     # Replays keep the game audio, slowed and ducked, so the cut back to live play keeps its level.
     gain = ",volume=0.45" if clip.replay else ""
-    video = f"[0:v]trim=duration={span},setpts=(PTS-STARTPTS)/{clip.speed},tpad=stop_mode=clone:stop_duration=0.1,fps={FPS},{feed_filter()}[v]"
+    video = f"[0:v]trim=duration={span},setpts=(PTS-STARTPTS)/{clip.speed},tpad=stop_mode=clone:stop_duration=0.1,fps={FPS},{feed_filter(clip.crop)}[v]"
     audio = (
         f"[0:a]atrim=duration={span},asetpts=PTS-STARTPTS,atempo={clip.speed}{gain},apad,atrim=duration={duration}[a]"
     )
@@ -940,7 +1073,8 @@ def source_frame(path: Path, t: float) -> Image.Image:
 
 
 def feed_frame(clip: Clip, t: float) -> Image.Image:
-    cx, cy, cw, ch = SOURCE_CROP
+    assert isinstance(clip.source, Path)
+    cx, cy, cw, ch = clip.crop
     image = source_frame(clip.source, t).crop((cx, cy, cx + cw, cy + ch))
     return image.resize(FEED[2:], Image.Resampling.LANCZOS)
 
@@ -1089,16 +1223,22 @@ def storyboard(overlay: Overlay, segments: Sequence[Segment], backdrop: Image.Im
 
 def main(args: Args) -> None:
     edit = EDITS[args.edit]
-    sources = tuple(dict.fromkeys(clip.source for clip in edit.clips))
     replays = tuple(spec.replay for spec in edit.games)
-    for path in (*sources, *replays):
+    for path in (*replays, args.playback, args.iso):
         if not path.is_file():
             raise FileNotFoundError(path)
+    clips = tuple(recorded(clip, args) for clip in edit.clips)
+    sources: list[Path] = []
+    for clip in clips:
+        if not isinstance(clip.source, Path) or not clip.source.is_file():
+            raise FileNotFoundError(clip.source)
+        if clip.source not in sources:
+            sources.append(clip.source)
     if len(edit.cues) != len(edit.games):
         raise ValueError(f"the edit has cues for {len(edit.cues)} games and {len(edit.games)} games")
     validate_cues(edit.cues)
     games = tuple(load_game(spec) for spec in edit.games)
-    segments = plan(edit.clips)
+    segments = plan(clips)
     total = TITLE_FRAMES + sum(segment.frames for segment in segments)
     overlay = Overlay(args, games, segments, edit.cues)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -1120,7 +1260,7 @@ def main(args: Args) -> None:
     webm, poster = publish(master, args.output)
     git = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     rank_icons = sorted(args.ranks / name for name in RANK_ICONS.values())
-    inputs = (*sources, *replays, args.controller_svg, *rank_icons)
+    inputs = (*sources, *replays, args.playback, args.controller_svg, *rank_icons)
     manifest = {
         "git_sha": git,
         "edit": args.edit,

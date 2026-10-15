@@ -1,3 +1,4 @@
+import struct
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ try:
     from scripts.highlight_reel import Cue
     from scripts.highlight_reel import GameSpec
     from scripts.highlight_reel import Moment
+    from scripts.highlight_reel import Recording
     from scripts.highlight_reel import confirmed_rows
     from scripts.highlight_reel import current_step
     from scripts.highlight_reel import edit_from
@@ -22,6 +24,7 @@ try:
     from scripts.highlight_reel import replay_cuts
     from scripts.highlight_reel import replay_dip
     from scripts.highlight_reel import validate_cues
+    from scripts.highlight_reel import without_names
     from scripts.highlight_reel import wrap
 finally:
     sys.path.pop(0)
@@ -98,18 +101,19 @@ def test_confirmed_rows_take_the_last_occurrence_after_a_rollback() -> None:
         confirmed_rows(np.array([1, 3]))
 
 
-def test_edit_from_numbers_games_by_first_appearance_and_maps_frames_to_vod_seconds() -> None:
+def test_edit_from_numbers_games_by_first_appearance_and_records_each_moment() -> None:
     first, second = GameSpec(Path("a.slp"), "Grandmaster"), GameSpec(Path("b.slp"), "Diamond 1")
     moments = (
-        Moment(first, SOURCE, -100, 500, 620, "One"),
-        Moment(second, SOURCE, 0, 60, 120, "Two"),
-        Moment(first, SOURCE, -100, 200, 300, "Three"),
+        Moment(first, 500, 620, "One"),
+        Moment(second, 60, 120, "Two"),
+        Moment(first, 200, 300, "Three"),
     )
     edit = edit_from(moments)
     assert edit.games == (first, second)
     assert [clip.game for clip in edit.clips] == [0, 1, 0]
     assert [cue.text for cue in edit.cues[0]] == ["Three", "One"]
     clip = edit.clips[0]
+    assert clip.source == Recording(Path("a.slp"), 500, 620)
     assert round(clip.start * 60000 / 1001 + clip.offset) == 500
     assert round(clip.end * 60000 / 1001 + clip.offset) == 620
 
@@ -117,10 +121,29 @@ def test_edit_from_numbers_games_by_first_appearance_and_maps_frames_to_vod_seco
 def test_edit_from_shares_one_cue_across_consecutive_moments_with_the_same_caption() -> None:
     game, other = GameSpec(Path("a.slp"), "Grandmaster"), GameSpec(Path("b.slp"), "Diamond 1")
     moments = (
-        Moment(game, SOURCE, 0, 100, 200, "Same"),
-        Moment(game, SOURCE, 0, 400, 500, "Same"),
-        Moment(other, SOURCE, 0, 60, 120, "Other"),
-        Moment(game, SOURCE, 0, 700, 800, "Same"),
+        Moment(game, 100, 200, "Same"),
+        Moment(game, 400, 500, "Same"),
+        Moment(other, 60, 120, "Other"),
+        Moment(game, 700, 800, "Same"),
     )
     edit = edit_from(moments)
     assert [(cue.start, cue.end) for cue in edit.cues[0]] == [(100, 500), (700, 800)]
+
+
+def test_without_names_zeroes_only_the_game_start_name_fields() -> None:
+    game_start = bytearray(0x249)
+    game_start[0] = 0x36
+    game_start[0x1A5 : 0x1A5 + 3] = b"HAL"
+    game_start[0x221 : 0x221 + 4] = b"HAL#"
+    game_start[0x161 : 0x161 + 2] = b"\x82\xa0"
+    game_start[0x10] = 7
+    payloads = bytes([0x35, 4, 0x36]) + struct.pack(">H", len(game_start) - 1)
+    replay = b"{U\x03raw[$U#l" + struct.pack(">I", 0) + payloads + bytes(game_start) + b"\x37"
+    blanked = without_names(replay)
+    start = replay.index(b"\x36", 14 + 3)
+    assert len(blanked) == len(replay)
+    assert blanked[start + 0x161 : start + 0x249] == bytes(0x249 - 0x161)
+    assert blanked[: start + 0x161] == replay[: start + 0x161]
+    assert blanked[start + 0x249 :] == replay[start + 0x249 :]
+    with pytest.raises(ValueError):
+        without_names(b"{U\x03raw[$U#l" + struct.pack(">I", 0) + bytes([0x36]))
