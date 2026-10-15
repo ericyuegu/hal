@@ -105,6 +105,8 @@ class SessionOptions(TypedDict):
     disable_audio: bool
     polling_mode: bool
     instant_match_restart: bool
+    dolphin_version: melee.console.DolphinVersion | None
+    dolphin_batch: bool
 
 
 # The patch swaps a process-global (``subprocess.Popen``), so concurrent boots
@@ -416,6 +418,12 @@ class PlayerSetup:
     cpu_level: int = 0  # 0 means human/STANDARD; 1..9 for CPU
     name: str = ""
 
+    @property
+    def uses_adapter(self) -> bool:
+        """A person plays this port on a GameCube controller adapter, so the
+        menus and the character are theirs to choose."""
+        return self.controller_type is melee.ControllerType.GCN_ADAPTER
+
 
 @dataclass(frozen=True, slots=True)
 class Matchup:
@@ -499,6 +507,7 @@ class Session:
         gfx_backend: DolphinGraphicsBackend | None = None,
         internal_resolution_scale: int | None = None,
         dolphin_version: melee.console.DolphinVersion | None = None,
+        dolphin_batch: bool = False,
     ) -> None:
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
@@ -567,6 +576,8 @@ class Session:
         self.gfx_backend = gfx_backend
         self.internal_resolution_scale = internal_resolution_scale
         self.dolphin_version = dolphin_version
+        # Batch mode hides the launcher window of GUI Dolphin builds.
+        self.dolphin_batch = dolphin_batch
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._pending_flush_ports: set[int] = set()
@@ -659,6 +670,9 @@ class Session:
         self._matchup = matchup
 
         for player in matchup.players:
+            if player.uses_adapter:
+                self._console.setup_dolphin_controller(player.port, player.controller_type)
+                continue
             # fix_analog_inputs=False so apply_inputs can write the wire
             # format that round-trips raw int8 directly. See
             # hal/sim/inputs.py for the wire math.
@@ -672,7 +686,7 @@ class Session:
             self._controllers[player.port] = controller
 
         fix_dolphin_ini_case(self._console)
-        with popen_with_pdeathsig():
+        with popen_with_pdeathsig(dolphin_batch=self.dolphin_batch):
             self._console.run(iso_path=self.iso_path)
         if not self._console.connect():
             raise RuntimeError("failed to connect to Dolphin Slippi server")
@@ -713,7 +727,7 @@ class Session:
                 self._validate_live_characters(gamestate)
                 return self._canonical(gamestate)
             if gamestate.menu_state == melee.Menu.STAGE_SELECT and self._matchup is not None:
-                autostart_port = min(p.port for p in self._matchup.players)
+                autostart_port = self._autostart_port()
                 cur = getattr(gamestate.players.get(autostart_port), "cursor", None)
                 if cur is not None:
                     sss_box = (
@@ -749,6 +763,8 @@ class Session:
         assert self._matchup is not None
         mismatches = []
         for player in self._matchup.players:
+            if player.uses_adapter:
+                continue
             state = gamestate.players.get(player.port)
             if state is not None and state.character != player.character:
                 mismatches.append(f"p{player.port}: expected {player.character.name}, got {state.character.name}")
@@ -799,13 +815,18 @@ class Session:
         assert self._console is not None
         return step_blocking(self._console, self.step_timeout_seconds)
 
+    def _autostart_port(self) -> int:
+        """Return the lowest port with a libmelee controller.
+
+        In stage select only one controller may autostart. Otherwise both move
+        the cursor and the menu never finishes.
+        """
+        assert self._matchup is not None
+        return min(p.port for p in self._matchup.players if not p.uses_adapter)
+
     def _drive_menus(self, gamestate: melee.GameState) -> None:
         assert self._matchup is not None
-        # libmelee's MenuHelper.menu_helper_simple navigates one port at a
-        # time; in stage-select, only ONE controller may autostart, otherwise
-        # both fight to move the cursor and the menu hangs forever. We pick
-        # the lowest-port player as the autostart driver.
-        autostart_port = min(p.port for p in self._matchup.players)
+        autostart_port = self._autostart_port()
         # In CSS, hold autostart until every CPU port has been toggled from
         # HUMAN to CPU AND the level slider matches. Without this, port 1's
         # coin-down races into the stage select while port 2's slot is still
@@ -826,6 +847,8 @@ class Session:
             if p.cpu_level > 0
         )
         for player in self._matchup.players:
+            if player.uses_adapter:
+                continue
             self._menu_helpers[player.port].menu_helper_simple(
                 gamestate=gamestate,
                 controller=self._controllers[player.port],

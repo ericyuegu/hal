@@ -13,6 +13,9 @@ from hal.data.schema import Rank
 from hal.eval.harness import default_session_cfg
 from hal.eval.harness import resolve_parallelism
 from hal.eval.harness import run_matches_vec
+from hal.eval.local_play import local_matchup
+from hal.eval.local_play import local_session_options
+from hal.eval.local_play import run_local_match
 from hal.eval.matchups import matchups_for_vs_cpu
 from hal.eval.netplay import run_netplay_match
 from hal.eval.policy import PolicyBatchAdapter
@@ -36,6 +39,13 @@ from hal.sim.session import Matchup
 from hal.sim.session import PlayerSetup
 
 _RANK_IDENTITIES = tuple(rank.name for rank in (Rank.PLATINUM, Rank.DIAMOND, Rank.MASTER))
+
+
+def _stage(name: str) -> melee.Stage:
+    try:
+        return melee.Stage[name.upper()]
+    except KeyError as error:
+        raise argparse.ArgumentTypeError(f"unknown Melee stage {name!r}") from error
 
 
 def _character(name: str) -> melee.Character:
@@ -82,6 +92,21 @@ def _policy_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--seed", type=int, default=0)
     evaluate.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
     evaluate.add_argument("--replay-dir", type=Path)
+    # Without an ISO path, evaluation downloads the pinned ISO from R2.
+    evaluate.add_argument("--iso-path", default=os.environ.get("HAL_ISO_PATH"))
+    play = commands.add_parser("play", help="play the policy on a GameCube controller adapter in local Dolphin")
+    play.add_argument("policy")
+    play.add_argument("--character", type=_character, default=melee.Character.FOX)
+    play.add_argument("--stage", type=_stage, default=melee.Stage.FINAL_DESTINATION)
+    play.add_argument("--imitate", type=_normalize_imitate, default="IBDW#0")
+    play.add_argument("--max-frames", type=int, default=8 * 60 * 60)
+    play.add_argument("--replay-dir", type=Path, default=Path("replays/local-play"))
+    play.add_argument("--dolphin-path", default=NETPLAY_EMULATOR_PATH)
+    play.add_argument("--iso-path", default=ISO_PATH)
+    play.add_argument("--slippi-port", type=int, default=51441)
+    play.add_argument("--device", default="cuda")
+    play.add_argument("--seed", type=int)
+    play.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
 
@@ -143,7 +168,7 @@ def _eval(args: argparse.Namespace) -> None:
     )
     freeze_inference_runtime()
     boots = run_matches_vec(
-        default_session_cfg(args.replay_dir),
+        default_session_cfg(args.replay_dir, iso_path=args.iso_path),
         matches,
         factory,
         max_frames=args.max_frames,
@@ -153,6 +178,39 @@ def _eval(args: argparse.Namespace) -> None:
     if completed != args.n_matches:
         raise RuntimeError(f"completed {completed} of {args.n_matches} requested matches")
     print(f"completed {completed} matches with profile {args.profile}")
+
+
+def _play_local(args: argparse.Namespace) -> None:
+    configure_inference_process()
+    timing = FrameTiming(0, 0, 0, 2, 4)
+    policy = load_action_sequence_policy(
+        resolve_checkpoint(args.policy),
+        device=args.device,
+        seed=args.seed,
+        compiled=args.compiled,
+        history_mode="kv_cache",
+        kv_update_frames=2,
+    )
+    runtime = RuntimeConfig(1, (0,), replan_interval_frames=timing.replan_interval_frames)
+    policy.prepare_prediction(runtime, timing.prediction_horizon_frames, timing.fixed_prefix_frames)
+    adapter = PolicyBatchAdapter(
+        policy,
+        runtime,
+        timing,
+        player_identity=args.imitate,
+        desired_return=policy.return_p90,
+    )
+    replay_dir = args.replay_dir.resolve()
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    options = local_session_options(args.iso_path, args.dolphin_path, replay_dir, args.slippi_port)
+    freeze_inference_runtime()
+    print("Pick a character with the controller in adapter port 1. HAL starts the match.")
+    trajectories = run_local_match(
+        options, local_matchup(args.character, args.stage), adapter, max_frames=args.max_frames
+    )
+    if not trajectories:
+        raise RuntimeError("the local match did not finish")
+    print(f"completed {sum(len(item) for item in trajectories)} frames; replays are in {replay_dir}")
 
 
 def _play(args: argparse.Namespace) -> None:
@@ -218,6 +276,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "export":
         export_action_sequence_policy(args.checkpoint, args.output)
         print(args.output.resolve())
+        return
+    if args.command == "play":
+        _play_local(args)
         return
     _eval(args)
 

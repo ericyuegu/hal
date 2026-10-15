@@ -7,3 +7,5 @@ To reproduce a historical result, use its recorded Git commit, Python environmen
 The maintained experiment and its current evidence remain in `experiments/059_muon_action_sequence.py` and `experiments/o59/`.
 
 `archive/scripts/probe_sm120.py` preserves the earlier FlexAttention/Blackwell diagnostic from `docker/probe_sm120.py`. The maintained 059 trunk uses a different attention backend, so this probe is not part of current startup.
+
+`archive/docs/` holds finished design plans and blog drafts.

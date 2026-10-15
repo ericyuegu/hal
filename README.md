@@ -1,143 +1,98 @@
 # HAL
 
-Training superhuman AI for *Super Smash Bros. Melee* via imitation learning and RL.
+HAL trains *Super Smash Bros. Melee* policies on Slippi replays and plays them in Dolphin.
 
-HAL is named after both [HAL Laboratory](https://en.wikipedia.org/wiki/HAL_Laboratory), the developer of Super Smash Bros. Melee, and [HAL 9000](https://en.wikipedia.org/wiki/HAL_9000), the infamous robot villain from 2001: A Space Odyssey.
+- [Blog post](https://ericyuegu.com/hillclimbing-melee)
+- [Model weights](https://huggingface.co/ericyuegu/hal-base-250m-rc)
+- [Dataset](https://huggingface.co/datasets/ericyuegu/hal-mds-dataset)
 
-Blog: https://ericyuegu.com/melee-pt1.
+## Setup
 
-## Quick start
+You need Linux, an NVIDIA GPU, [uv](https://docs.astral.sh/uv/), and a Melee 1.02 NTSC ISO.
 
-Setup venv:
 ```bash
+git clone https://github.com/ericyuegu/hal && cd hal
 uv sync
-source .venv/bin/activate
+uv run fetch --name dolphin-exiai                  # headless Dolphin for CPU matches
+uv run fetch --name Slippi_Online-x86_64.AppImage  # Slippi Dolphin with a window
+export HAL_ISO_PATH=/path/to/ssbm.iso
+curl -LO https://huggingface.co/ericyuegu/hal-base-250m-rc/resolve/main/hal-250m.hal
 ```
 
-Use `uv sync --group analysis` for the retained notebooks, or
-`uv sync --extra netplay-server` for the service and its API tests.
+## Play
 
-To download ready-made datasets and emulator for training and eval, request keys for the S3 bucket from the maintainer [@ericyuegu](https://github.com/ericyuegu).
+Plug your controller into port 1 of a GameCube controller adapter. On Linux, Dolphin needs the adapter's [udev rule](https://dolphin-emu.org/docs/guides/how-use-official-gc-controller-adapter-wii-u/).
 
-You can copy keys to `.env` or your `.bashrc`.
-```
-source .env
-uv run fetch    # will download to `<repo_root>/data/` by default
-```
-
-The maintained training program is experiment 059. It requires the published
-policy-world-v8 corpus and its pinned manifests.
-```
-uv run experiments/059_muon_action_sequence.py
-```
-
-To launch experiments on cloud, wrap your local training command with a launcher script:
-```
-uv run scripts/launch_vast.py --max-price 1.0 -- uv run experiments/059_muon_action_sequence.py
-```
-
-Modal is the default fixed-hardware option. One-time setup requires an authenticated
-Modal profile and a `hal` Secret with the R2 and W&B credentials:
 ```bash
-uv run modal setup
-source .env
-uv run modal secret create hal \
-  AWS_ENDPOINT_URL="$AWS_ENDPOINT_URL" \
-  AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-  AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-  AWS_BUCKET="$AWS_BUCKET" \
-  WANDB_API_KEY="$WANDB_API_KEY"
+uv run hal-policy play hal-250m.hal --character FOX --stage FINAL_DESTINATION
 ```
-The launcher defaults to one B200, 32 requested/48 maximum CPU cores, 128 GiB
-RAM, a 384 GiB memory limit, and a 2 TiB ephemeral SSD. It submits a detached
-Function by default:
+
+Dolphin opens with HAL on port 2. Pick your character, and HAL starts the match. Dolphin waits for each of HAL's actions, so HAL plays with no input delay. Replays go to `replays/local-play/`.
+
+To watch HAL play a level-9 CPU without a window:
+
 ```bash
-uv run scripts/launch_modal.py --dry-run -- uv run experiments/059_muon_action_sequence.py
-uv run scripts/launch_modal.py -- uv run experiments/059_muon_action_sequence.py
-uv run scripts/launch_modal.py --wait -- uv run experiments/059_muon_action_sequence.py
+uv run hal-policy eval hal-250m.hal --n-matches 1
 ```
-Modal can preempt GPU Functions, and each Function attempt is limited to 24 hours.
-The launcher gives an input ten retries and records its run name in the automatically
-created `hal-modal-state` Volume. A replacement attempt adds `--resume <run>` only
-after `runs/<run>/latest.pt` is present in R2. A normal nonzero training exit is
-recorded as terminal and is not run again. PyTorch's training and inference compiler
-caches share the persistent `hal-modal-compile-cache-v1` Volume; temporary compiler
-files remain on the Function's ephemeral SSD. Arbitrary commands must opt out with
-`--no-auto-resume`. Use `uv run scripts/launch_modal.py --help` for resource,
-region, timeout, image, state, compile-cache, and retry options.
 
-Google Compute Engine is also supported. The launcher uses your interactive
-`gcloud auth login` session (no service-account key file) and reads job secrets
-from Secret Manager through the VM's attached service account:
+## Private R2 bucket
+
+The maintainer keeps the training corpus, test fixtures, and checkpoints in a private Cloudflare R2 bucket named `hal`. Setup and play work without it. Everything below reads or writes the bucket and needs its keys in `.env`, copied from `.env.example`:
+
+- `uv run fetch` without `--name` downloads the pinned ISO and the test datasets.
+- Integration tests use those fixtures.
+- Training streams the corpus from `s3://hal/processed/`, downloads the player-identity file, and uploads checkpoints to `s3://hal/runs/`. The Hugging Face dataset holds the same corpus files, but the training code reads only from R2.
+- Closed-loop evaluation during training uses the pinned ISO.
+- `--resume` downloads checkpoints, and `hal-policy export` downloads per-source feature statistics.
+- The cloud launchers pass the keys to their jobs.
+- The netplay service downloads its ISO, policy, and Slippi accounts.
+- `hal/scripts/publish_mds.py` uploads datasets.
+
+Training also logs to W&B, so `.env` needs `WANDB_API_KEY`.
+
+## Train
+
+```bash
+source .env
+uv run experiments/059_muon_action_sequence.py train --proxy   # 17M parameters
+uv run experiments/059_muon_action_sequence.py train           # 247M parameters
+uv run hal-policy export runs/<run>/final.pt policy.hal
 ```
-uv run scripts/launch_gce.py --dry-run --zone us-central1-a -- uv run experiments/059_muon_action_sequence.py
-uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@PROJECT.iam.gserviceaccount.com -- uv run experiments/059_muon_action_sequence.py
+
+To train in the cloud, put a launcher in front of the same command:
+
+```bash
+uv run scripts/launch_modal.py -- uv run experiments/059_muon_action_sequence.py train
 ```
-The service account needs `roles/secretmanager.secretAccessor` on the secrets
-listed by `--secret`. See `uv run scripts/launch_gce.py --help` for GPU, Spot,
-network, disk, and lifecycle options.
 
-## Netplay service
+Modal needs `uv run modal setup` and a `hal` secret with the variables from `.env`. `launch_vast.py` and `launch_gce.py` take the same form. Run any launcher with `--help` for its options.
 
-Start the netplay service locally:
+## Build a dataset
+
+```bash
+uv run hal/scripts/build_index.py --archive replays.7z --output data/processed/mine/index.jsonl
+uv run hal/scripts/filter.py --index data/processed/mine/index.jsonl --output data/processed/mine/paths.txt
+uv run hal/scripts/materialize.py --replay-format policy-world --paths-file data/processed/mine/paths.txt \
+  --index data/processed/mine/index.jsonl --output data/processed/mine/mds
+```
+
+## Serve
 
 ```bash
 cp deploy/netplay/.env.example deploy/netplay/.env
 deploy/netplay/run-local.sh
 ```
 
-See [deploy/netplay/README.md](deploy/netplay/README.md) for requirements,
-Cloudflare publishing, Docker, health checks, and GPU qualification.
-The policy request and timing contract is in [Inference](docs/inference.md).
+[deploy/netplay/README.md](deploy/netplay/README.md) covers hosting.
 
+## Layout
 
-## Data
+| Path | Contents |
+| --- | --- |
+| `hal/` | Library code for data, models, inference, emulation, evaluation, and the netplay service |
+| `experiments/` | Training scripts, with 059 as the maintained recipe |
+| `scripts/` | Cloud launchers and benchmarks |
+| `docs/` | Inference and evaluation details, starting at [inference.md](docs/inference.md) |
+| `archive/` | Earlier experiments and notes |
 
-### Raw datasets
-
-From the Slippi Discord server:
-
-- ranked-anonymized-1-116248: https://drive.google.com/file/d/1pFjgh1dapX34s0T-Q1TC7JUO-qjYbQZf/view
-- ranked-anonymized-2-151807: https://drive.google.com/file/d/1jEIzvhpV3778J2s2-Np9vCVqSLf9lZnk/view
-- ranked-anonymized-3-128787: https://drive.google.com/file/d/1glzlkAPxHC58oXZljJXQV8dsTBKmlhkE/view
-- ranked-anonymized-4-148358: https://drive.google.com/file/d/1qdIZUW4Er_Vu6rD3-VUvyak3lKa1KxVk/view
-- ranked-anonymized-5-133261: https://drive.google.com/file/d/1Hqmj6C8g1BzuRAIqOrQcMDL0MX4GtffE/view
-- ranked-anonymized-6-171694: https://drive.google.com/file/d/1g8yZ-Q4ldyhDEmXLSPBoWxywJRMRVGc3/view
-
-### Data preprocessing
-
-To create your own training datasets from `.slp` files, there are 3 helpful scripts in `hal/scripts/`:
-
-```bash
-# step 1: indexing - supports directly reading from .7z archives on-the-fly
-uv run hal/scripts/build_index.py --archive data/raw/dev.7z --output data/processed/dev/index.jsonl
-
-# step 2: filtering
-uv run hal/scripts/filter.py --index data/processed/dev/index.jsonl --output data/processed/dev/paths.txt
-
-# step 3: materializing
-uv run hal/scripts/materialize.py --paths-file data/processed/dev/paths.txt --index data/processed/dev/index.jsonl --output data/processed/dev/mds
-```
-
-The example writes full replay rows for extraction and roundtrip diagnostics.
-To write packed policy-world rows directly, add `--replay-format policy-world`
-and choose a fresh output directory. This produces a new corpus; it does not
-reproduce the published 059 corpus identity or row order.
-
-Audit and publish an R2 staging prefix into a fresh final prefix:
-
-```bash
-uv run hal/scripts/publish_mds.py --staging r2:hal/staging/dev --final r2:hal/processed/dev
-```
-
-The maintained v8 construction and audit entrypoint is
-`scripts/rematerialize_policy_world_v8_modal.py`. Inspect its deterministic
-44-source job list with `--dry-run`; `--command status` reads existing publication
-records. Experiment 059 continues to use its published manifests, statistics,
-player-identity sidecar, and vocabulary. Replacing those inputs is a new
-experiment. Roundtrip diagnostics read full MDS rows, not packed policy-world rows.
-
-Training, export, local evaluation, H2H, and service contracts are described in
-[inference.md](docs/inference.md). The [refactor acceptance record](docs/refactor-059.md)
-lists current evidence and the gates that remain open.
-Earlier experiments and their original notes are under [archive/](archive/).
+Before you send a change, run the checks in [AGENTS.md](AGENTS.md).

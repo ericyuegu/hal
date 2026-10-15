@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from multiprocessing.connection import Connection
 from typing import Any
+from typing import cast
 
 import numpy as np
 from loguru import logger
@@ -76,6 +77,7 @@ class _SessionWorkerState:
         self.runtime = runtime
         self.ports = tuple(player.port for player in matchup.players)
         self.metadata = _match_metadata(matchup)
+        self.adapter_ports = tuple(player.port for player in matchup.players if player.uses_adapter)
         self.neutral_actions = {port: np.zeros(runtime.action_dim, dtype=np.float32) for port in model_ports}
         self.trajectories: list[Trajectory] = []
         self.segment: list[dict] = []
@@ -94,6 +96,11 @@ class _SessionWorkerState:
 
     def publish(self, current: dict, actions: Mapping[int, np.ndarray], *, reset: bool) -> None:
         self.metadata["stage"] = current.get("stage", self.metadata["stage"])
+        if reset:
+            # A person picks this port's character in the menu, so read it from the game.
+            characters = cast(dict[int, int], self.metadata["character"])
+            for port in self.adapter_ports:
+                characters[port] = int(current["ports"][port]["leader"]["post"]["character"])
         view = {**current, "_matchup": self.metadata}
         flat = flatten_canonical_frame(view)
         for port in self.model_ports:

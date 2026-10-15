@@ -151,7 +151,7 @@ def test_local_profiles_keep_physical_delay_separate_from_fixed_prefix(
     monkeypatch.setattr(cli, "resolve_checkpoint", lambda _path: Path("policy.hal"))
     monkeypatch.setattr(cli, "load_action_sequence_policy", load)
     monkeypatch.setattr(cli, "PolicyBatchAdapter", adapter)
-    monkeypatch.setattr(cli, "default_session_cfg", lambda _replay_dir: None)
+    monkeypatch.setattr(cli, "default_session_cfg", lambda _replay_dir, iso_path: None)
     monkeypatch.setattr(cli, "run_matches_vec", matches)
     cli._eval(cli._policy_parser().parse_args(["eval", "policy.hal", "--profile", profile]))
     assert loaded[0]["history_mode"] == mode
@@ -166,6 +166,13 @@ def test_local_profiles_keep_physical_delay_separate_from_fixed_prefix(
     assert timing == cli.FrameTiming(0, 0, prefix, stride, 4)
     assert options["observed_actions"] is observed
     assert options["desired_return"] == 19.75
+
+
+def test_eval_uses_the_users_iso_instead_of_the_r2_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL_ISO_PATH", "/games/ssbm.iso")
+    assert cli._policy_parser().parse_args(["eval", "policy.hal"]).iso_path == "/games/ssbm.iso"
+    monkeypatch.delenv("HAL_ISO_PATH")
+    assert cli._policy_parser().parse_args(["eval", "policy.hal"]).iso_path is None
 
 
 def test_play_rejects_unqualified_delay() -> None:

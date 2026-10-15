@@ -84,14 +84,17 @@ class SessionConfig:
     instant_match_restart: bool = False
 
 
-def default_session_cfg(replay_dir: Path | None = None, *, instant_match_restart: bool = False) -> SessionConfig:
+def default_session_cfg(
+    replay_dir: Path | None = None, *, instant_match_restart: bool = False, iso_path: str | Path | None = None
+) -> SessionConfig:
     """The standard headless eval Session: exi-ai Dolphin + fixture ISO, fast-
     forward, blocking input, throwaway tmp home. ``replay_dir`` (when not None)
     preserves the match .slps; else they die with the Session's tmp home.
-    ``instant_match_restart`` opts into the many-matches-per-boot eval flow."""
+    ``instant_match_restart`` opts into the many-matches-per-boot eval flow.
+    ``iso_path`` replaces the pinned fixture ISO, which needs R2 access."""
     ensure(DOLPHIN_EXIAI)
     return SessionConfig(
-        iso_path=ensure(ISO),
+        iso_path=ensure(ISO) if iso_path is None else iso_path,
         dolphin_path=EMULATOR_PATH,
         use_exi_inputs=True,
         enable_ffw=True,
@@ -122,6 +125,8 @@ def _session_kwargs(session_cfg: SessionConfig, *, slippi_port: int, replay_dir:
         disable_audio=session_cfg.disable_audio,
         polling_mode=session_cfg.polling_mode,
         instant_match_restart=session_cfg.instant_match_restart,
+        dolphin_version=None,
+        dolphin_batch=False,
     )
 
 
