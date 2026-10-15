@@ -52,8 +52,8 @@ def check_imitations(imitations: tuple[Choice, ...], vocabulary_codes: tuple[str
 def policy_config(
     bundle_sha256: str, vocabulary_sha256: str, capability_version: int, supported_delays: tuple[int, ...]
 ) -> PolicyConfig:
-    if capability_version < 2 or 2 not in supported_delays:
-        raise ValueError("netplay needs a capability-v2 bundle that supports delay 2")
+    if capability_version < 2 or not {2, 3}.issubset(supported_delays):
+        raise ValueError("netplay needs a capability-v2 bundle that supports delays 2 and 3")
     return PolicyConfig(
         bundle_sha256=bundle_sha256,
         bundle_r2_key=policy_bundle_key(bundle_sha256),
@@ -61,7 +61,7 @@ def policy_config(
         characters=CHARACTERS,
         imitations=IMITATIONS,
         stages=STAGES,
-        online_delays=(2,),
+        online_delays=(2, 3),
         desired_return_range=DESIRED_RETURN_RANGE,
         default_desired_return=20.0,
         temperature_range=(0.8, 1.1),

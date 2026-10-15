@@ -31,6 +31,8 @@ from hal.netplay_service.queue_client import SessionState
 from hal.netplay_service.queue_client import parse_job
 from hal.netplay_service.queue_client import parse_session_state
 from hal.netplay_service.queue_contract import SessionEndedError
+from hal.netplay_service.stream_lease import StreamLease
+from hal.netplay_service.stream_lease import write_stream_lease
 
 _MAX_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
@@ -73,11 +75,13 @@ class QueueControl:
         status_path: Path,
         *,
         client: httpx.Client | None = None,
+        stream_lease_path: Path | None = None,
     ) -> None:
         self.remote = endpoint
         self.session_id = session_id
         self._status = status
         self._status_path = status_path
+        self._stream_lease_path = stream_lease_path
         self._http = client or httpx.Client(base_url=endpoint.url, headers=endpoint.headers(), timeout=10)
         self._lock = threading.RLock()
         self._commands = threading.Lock()
@@ -124,6 +128,23 @@ class QueueControl:
         if self._server_thread.is_alive():
             self._server_thread.join(timeout=5)
         self._http.close()
+        if self._stream_lease_path is not None:
+            self._stream_lease_path.unlink(missing_ok=True)
+
+    def _publish_stream_lease(self) -> None:
+        if self._stream_lease_path is None or not self._connected or self._state is None:
+            return
+        state = parse_session_state(self._state)
+        depth = self._capacity.get("queued")
+        if type(depth) is not int or depth < 0:
+            raise QueueProtocolError("invalid stream queue depth")
+        # Capacity changes must not extend a lease after health acknowledgements stop.
+        updated_at = time.time() - (time.monotonic() - self._last_health)
+        try:
+            write_stream_lease(self._stream_lease_path, StreamLease(updated_at, depth, state.stream))
+        except OSError:
+            # Overlay storage failures must not disconnect gameplay's queue control.
+            logger.warning("cannot publish stream lease; overlay authority will expire")
 
     def state(self) -> SessionState:
         with self._lock:
@@ -267,6 +288,8 @@ class QueueControl:
                     self._remember(_object(value["job"]))
                 elif kind == "error":
                     raise QueueProtocolError(str(value.get("detail", "queue rejected control message")))
+                if kind in ("health", "state", "capacity"):
+                    self._publish_stream_lease()
             if isinstance(ack, int) and ack % 32 == 0:
                 ws.send(json.dumps({"type": "ack", "ack": ack}))
 

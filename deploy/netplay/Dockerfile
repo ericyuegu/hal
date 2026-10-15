@@ -46,6 +46,7 @@ RUN mkdir -p /usr/share/glvnd/egl_vendor.d \
 
 # Schibsted Grotesk is the stream overlay's face; Ubuntu does not package it.
 COPY deploy/netplay/fonts/ /usr/local/share/fonts/schibsted-grotesk/
+COPY deploy/netplay/gce-overlay-service.sh deploy/netplay/overlay-fonts.conf /opt/hal/deploy/netplay/
 RUN fc-cache -f /usr/local/share/fonts
 
 COPY --from=builder /.uv/python_install /.uv/python_install

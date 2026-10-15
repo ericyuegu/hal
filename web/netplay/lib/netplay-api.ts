@@ -211,7 +211,7 @@ export const fallbackOptions: Options = {
     ['YOSHIS_STORY', "Yoshi's Story"],
     ['FOUNTAIN_OF_DREAMS', 'Fountain of Dreams'],
   ].map(([value, label]) => ({ value, label })),
-  online_delays: [2],
+  online_delays: [2, 3],
   desired_return_range: [-20, 140],
   default_desired_return: 20,
   temperature_range: [0.8, 1.1],

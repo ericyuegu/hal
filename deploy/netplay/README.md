@@ -1,8 +1,8 @@
 # HAL netplay operations
 
 [Current deployment status](status.md) records the exact deployed versions,
-image, host, asset hashes and pending activation steps. **G4 activation is on
-hold.** This runbook describes the integrated protocol-4 system.
+image, host, asset hashes and activation checks. The current one-GPU host is in
+`us-west4-a`. This runbook describes the protocol-4 system.
 
 ## Architecture
 
@@ -153,6 +153,33 @@ on the 059 policy. The stream shows its player, character, game number, and conn
 status beside the live game. Difficulty appears only on the play page. OBS continues to show menus between games and
 rematches. A light waiting screen stays visible when Dolphin has no render window. Ranked displays the smoothed value head on the right.
 Neither overlay may contain a connect code. Stream failure must not stop gameplay.
+
+### Deploy the overlay without stopping games
+
+GCE runs OBS in `hal-netplay-overlay.service`, separately from the gameplay
+container. The runner retains Dolphin, Xorg window management, and PulseAudio.
+Queue control writes an owner-only, versioned stream lease that expires after
+30 seconds without a health acknowledgement. The overlay reads that lease and
+the existing game-status files; it has no queue or cloud credentials.
+
+After committing overlay changes, deploy only the source and fonts:
+
+```sh
+deploy/netplay/gce-overlay.sh hal-netplay-g4-1015-us-west4-a \
+  --project centering-star-502613-k3 --zone us-west4-a
+```
+
+This uploads a small release, checks its imports against the installed runtime,
+switches the mounted release atomically, and restarts only the overlay service.
+It checks the new service heartbeat and, when a live lease exists, active OBS
+output. Failed activation restores the previous overlay release. Twitch briefly
+reconnects; gameplay, queues, and the inference process keep running. The image
+needs rebuilding only for changes to runtime dependencies or gameplay code.
+
+The current 059 policy offers physical frame delays 2 and 3. Both use horizon 8,
+fixed prefix 4, and replan interval 4. Their inference allowances are 2 frames
+and 1 frame respectively. One shared inference profile is qualified at full
+capacity against delay 3's stricter 16.667 ms p99 limit before admitting games.
 
 ## Verification checklist
 

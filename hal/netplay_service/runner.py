@@ -193,6 +193,7 @@ class RunnerConfig:
     wants_stream: bool = False
     stream_display: str | None = None
     twitch_bandwidth_test: bool = False
+    external_stream: bool = False
 
     def __post_init__(self) -> None:
         if self.graphics_backend not in ("Vulkan", "OGL"):
@@ -236,9 +237,11 @@ class RunnerConfig:
             raise ValueError("streaming requires a managed X display")
         if self.wants_stream and not self.stream_display:
             raise ValueError("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
+        if type(self.external_stream) is not bool or (self.external_stream and not self.wants_stream):
+            raise ValueError("external streaming requires streaming to be enabled")
 
 
-_NETPLAY_TIMINGS = (FrameTiming(2, 2, 4, 4, 8),)
+_NETPLAY_TIMINGS = (FrameTiming(2, 2, 4, 4, 8), FrameTiming(3, 1, 4, 4, 8))
 _ENGINE_RECOVERY_TIMEOUT_SECONDS = 120.0
 _ENGINE_PROGRESS_TIMEOUT_SECONDS = 1.0
 _SLOT_RESET_TIMEOUT_SECONDS = 1.0
@@ -318,51 +321,53 @@ def _prepare_netplay_engine(
     connections: dict[int, Connection],
 ) -> _PreparedNetplayEngine:
     artifact = read_action_sequence_artifact(config.policy)
-    if artifact.capability_version < 2 or 2 not in artifact.spec.supported_transport_delays:
-        raise ValueError("the netplay delay-2 profile requires a qualified 059 capability-v2 bundle")
+    if artifact.capability_version < 2 or not {2, 3}.issubset(artifact.spec.supported_transport_delays):
+        raise ValueError("netplay delays 2 and 3 require a qualified 059 capability-v2 bundle")
     inference_dtype = torch.bfloat16 if torch.device(config.device).type == "cuda" else torch.float32
     registry = ModelRegistry()
     model = registry.register_artifact(artifact, device=config.device, inference_dtype=inference_dtype)
     device = next(model.parameters()).device
-    policies: dict[PreparedInferenceProfile, ActionSequencePolicy] = {}
-    budgets: list[RealtimeBudgetCheck] = []
-    seeds: list[int] = []
-    for timing in _NETPLAY_TIMINGS:
-        runtime = RuntimeConfig(config.capacity, (timing.physical_delay_frames,), timing.replan_interval_frames)
-        policy = ActionSequencePolicy(
-            model,
-            artifact.statistics,
-            artifact.vocabulary.codes,
-            spec=artifact.spec,
-            checkpoint_sha256=artifact.checkpoint_sha256,
-            return_p90=artifact.return_p90,
-            capability_version=artifact.capability_version,
-            device=device,
-            seed=config.seed,
-            compiled=config.compiled,
-            history_mode="kv_cache",
-            kv_update_frames=4,
-        )
-        budget = check_realtime_budget(
-            policy,
-            runtime,
-            config.batch_wait_seconds,
-            shape=(timing.prediction_horizon_frames, timing.fixed_prefix_frames),
-        )
-        if budget.timings != (timing,):
-            raise RuntimeError("netplay timing qualification changed the declared profile")
-        profile = PreparedInferenceProfile(
-            name=f"netplay-delay-{timing.physical_delay_frames}",
-            checkpoint_sha256=artifact.checkpoint_sha256,
-            execution_mode="kv_cache",
-            prediction_horizon_frames=timing.prediction_horizon_frames,
-            fixed_prefix_frames=timing.fixed_prefix_frames,
-            update_shapes=(1, 2, 4),
-            capacity=config.capacity,
-        )
-        policies[profile] = policy
-        budgets.append(budget)
-        seeds.append(policy.sampling_seed)
+    # Both delays use the same prediction shape, so mixed matches share one batch.
+    # Qualify against delay 3's stricter allowance without changing delay 2's schedule.
+    timing = min(_NETPLAY_TIMINGS, key=lambda item: item.inference_allowance_frames)
+    runtime = RuntimeConfig(config.capacity, (timing.physical_delay_frames,), timing.replan_interval_frames)
+    policy = ActionSequencePolicy(
+        model,
+        artifact.statistics,
+        artifact.vocabulary.codes,
+        spec=artifact.spec,
+        checkpoint_sha256=artifact.checkpoint_sha256,
+        return_p90=artifact.return_p90,
+        capability_version=artifact.capability_version,
+        device=device,
+        seed=config.seed,
+        compiled=config.compiled,
+        history_mode="kv_cache",
+        kv_update_frames=4,
+    )
+    budget = check_realtime_budget(
+        policy,
+        runtime,
+        config.batch_wait_seconds,
+        shape=(timing.prediction_horizon_frames, timing.fixed_prefix_frames),
+    )
+    if budget.timings != (timing,) or any(
+        (item.prediction_horizon_frames, item.fixed_prefix_frames, item.replan_interval_frames)
+        != (timing.prediction_horizon_frames, timing.fixed_prefix_frames, timing.replan_interval_frames)
+        for item in _NETPLAY_TIMINGS
+    ):
+        raise RuntimeError("netplay timing qualification changed the shared prediction shape")
+    profile = PreparedInferenceProfile(
+        name="netplay-delays-2-3",
+        checkpoint_sha256=artifact.checkpoint_sha256,
+        execution_mode="kv_cache",
+        prediction_horizon_frames=timing.prediction_horizon_frames,
+        fixed_prefix_frames=timing.fixed_prefix_frames,
+        update_shapes=(1, 2, 4),
+        capacity=config.capacity,
+    )
+    policies = {profile: policy}
+    budgets = tuple(RealtimeBudgetCheck((item,), budget.measurements) for item in _NETPLAY_TIMINGS)
     if registry.model_count != 1:
         raise RuntimeError("netplay profiles allocated more than one checkpoint model")
     freeze_inference_runtime()
@@ -379,7 +384,7 @@ def _prepare_netplay_engine(
         artifact.checkpoint_sha256,
         artifact.capability_version,
         tuple(budgets),
-        tuple(seeds),
+        (policy.sampling_seed,),
         hardware,
         tuple(policies),
     )
@@ -790,7 +795,16 @@ def _slot_worker(
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
             timing = next(s for s in schedules if s.physical_delay_frames == job.online_delay)
-            _handle_reservation(config, store, policy, runtime, job, stop, health, timing)
+            _handle_reservation(
+                config,
+                store,
+                policy,
+                replace(runtime, transport_delays=(job.online_delay,)),
+                job,
+                stop,
+                health,
+                timing,
+            )
 
 
 def _handle_reservation(
@@ -1355,18 +1369,19 @@ def run(
                 write_stream_state(state_path, IdleStreamState())
                 pulse = resources.enter_context(PulseAudio(config.status_path.parent / "pulse"))
                 pulse_environment = tuple(pulse.environment.items())
-                stream_supervisor = resources.enter_context(
-                    StreamSupervisor(
-                        displays[0],
-                        state_path,
-                        config.status_path.with_suffix(".overlay.txt"),
-                        session_client.queue_depth,
-                        pulse.environment,
-                        bandwidth_test=config.twitch_bandwidth_test,
-                        slot_status_path=_slot_status_path(config.status_path, 0),
+                if not config.external_stream:
+                    stream_supervisor = resources.enter_context(
+                        StreamSupervisor(
+                            displays[0],
+                            state_path,
+                            config.status_path.with_suffix(".overlay.txt"),
+                            session_client.queue_depth,
+                            pulse.environment,
+                            bandwidth_test=config.twitch_bandwidth_test,
+                            slot_status_path=_slot_status_path(config.status_path, 0),
+                        )
                     )
-                )
-                stream_supervisor.set_grant(reporter.state().stream)
+                    stream_supervisor.set_grant(reporter.state().stream)
             for attempt in range(2):
                 try:
                     _run_generation(
@@ -1402,8 +1417,8 @@ def run(
 
 
 def _download_session_assets(started: StartedSession, *, local_assets: Path | None) -> tuple[Path, tuple[Path, ...]]:
-    if started.policy.online_delays != (2,):
-        raise ValueError("netplay runner requires a delay-2-only policy")
+    if started.policy.online_delays != (2, 3):
+        raise ValueError("netplay runner requires a policy with delays 2 and 3")
     remote = None
     if local_assets is None:
         remote = r2.client()
@@ -1439,6 +1454,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--display-base", type=int, default=100)
     parser.add_argument("--stream-display", default=os.environ.get("HAL_NETPLAY_STREAM_DISPLAY"))
     parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--external-stream", action="store_true", help="delegate OBS to the overlay service")
     parser.add_argument("--twitch-bandwidth-test", action="store_true")
     parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
     parser.add_argument("--replay-dir", type=Path, default=Path("runs/netplay/replays"))
@@ -1465,6 +1481,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--display-base range is invalid")
     if args.stream and not args.stream_display:
         parser.error("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
+    if args.external_stream and (not args.stream or args.twitch_bandwidth_test):
+        parser.error("--external-stream requires --stream and uses the overlay service's bandwidth-test setting")
 
     start_http_server(args.metrics_port, addr="127.0.0.1")
     iso_path = ensure(ISO)
@@ -1502,7 +1520,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         status = SessionStatus(status_path, started.policy.bundle_sha256, args.slots)
         try:
             with (
-                QueueControl(endpoint, session_id, status, status_path) as control,
+                QueueControl(
+                    endpoint,
+                    session_id,
+                    status,
+                    status_path,
+                    stream_lease_path=status_path.with_suffix(".stream-lease.json") if args.external_stream else None,
+                ) as control,
                 closing(RunnerClient(control.endpoint)) as local_client,
             ):
                 policy, user_jsons = _download_session_assets(started, local_assets=args.local_assets)
@@ -1528,6 +1552,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     wants_stream=args.stream,
                     stream_display=args.stream_display,
                     twitch_bandwidth_test=args.twitch_bandwidth_test,
+                    external_stream=args.external_stream,
                 )
                 run(
                     config,

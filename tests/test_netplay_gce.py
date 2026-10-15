@@ -230,7 +230,11 @@ def test_startup_installs_missing_docker_and_configures_gpu_runtime(tmp_path: Pa
     configure = calls.index("nvidia-ctk runtime configure --runtime=docker")
     stops = [call for call in calls if call.startswith("systemctl stop ")]
     assert stops == (
-        ["systemctl stop hal-netplay-runner.service", "systemctl stop hal-netplay-health.service"]
+        [
+            "systemctl stop hal-netplay-overlay.service",
+            "systemctl stop hal-netplay-runner.service",
+            "systemctl stop hal-netplay-health.service",
+        ]
         if docker_installed
         else []
     )

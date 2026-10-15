@@ -60,7 +60,7 @@ def test_declared_profiles_meet_complete_path_budget(
         assert len(seconds) >= 200
         p95 = seconds[math.ceil(0.95 * len(seconds)) - 1]
         p99 = seconds[math.ceil(0.99 * len(seconds)) - 1]
-        assert p99 < 1 / 60
+        assert p99 < check.timings[0].inference_allowance_frames / 60
         if "RTX 3060" in ready.hardware and capacity == 1 and check.timings[0].physical_delay_frames == 2:
             assert p95 <= 0.012
 

@@ -187,7 +187,7 @@ def test_runner_shares_one_slippi_account(tmp_path: Path) -> None:
         runner._bot_connect_codes((first, second))
 
 
-def test_gpu_preparation_qualifies_the_delay_two_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_preparation_qualifies_both_delay_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from multiprocessing import Pipe
 
     model = torch.nn.Linear(1, 1)
@@ -251,7 +251,9 @@ def test_gpu_preparation_qualifies_the_delay_two_profile(tmp_path: Path, monkeyp
     assert len(built) == 1
     assert len(policies) == 1
     assert len(engine_profiles) == 1
-    assert tuple(qualified) == runner._NETPLAY_TIMINGS
+    assert qualified == [FrameTiming(3, 1, 4, 4, 8)]
+    assert tuple(check.timings[0] for check in prepared.ready.budgets) == runner._NETPLAY_TIMINGS
+    assert prepared.ready.budgets[0].measurements is prepared.ready.budgets[1].measurements
     assert {profile.fixed_prefix_frames for profile in prepared.engine.profiles} == {4}
     assert prepared.ready.profiles == tuple(prepared.engine.profiles)
     assert prepared.ready.checkpoint_sha256 == "a" * 64
@@ -535,15 +537,17 @@ def test_runner_does_not_admit_a_replacement_when_old_child_survives(
     generation.assert_called_once()
 
 
+@pytest.mark.parametrize("external", [False, True])
 def test_runner_owns_stream_resources_across_inference_generations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, external: bool
 ) -> None:
     config = replace(
         _runner_config(tmp_path),
         display_base=100,
         wants_stream=True,
         stream_display=":90",
-        twitch_bandwidth_test=True,
+        twitch_bandwidth_test=not external,
+        external_stream=external,
     )
     closed: list[str] = []
 
@@ -592,11 +596,11 @@ def test_runner_owns_stream_resources_across_inference_generations(
 
     runner.run(config, session_client=client, reporter=reporter)
 
-    assert stream.grants == [grant]
+    assert stream.grants == ([] if external else [grant])
     assert generation.call_args.kwargs["displays"] == (":100",)
     assert generation.call_args.kwargs["pulse_environment"] == tuple(Pulse.environment.items())
-    assert generation.call_args.kwargs["stream_supervisor"] is stream
-    assert closed == ["stream", "pulse", "displays"]
+    assert generation.call_args.kwargs["stream_supervisor"] is (None if external else stream)
+    assert closed == (["pulse", "displays"] if external else ["stream", "pulse", "displays"])
 
 
 def _run_cli(
@@ -628,7 +632,9 @@ def _run_cli(
     monkeypatch.setattr(runner, "runner_endpoint", lambda _environment: _ENDPOINT)
     monkeypatch.setattr(runner, "RunnerClient", lambda _endpoint: client)
     monkeypatch.setattr(runner, "SessionReporter", reporting)
-    monkeypatch.setattr(runner, "QueueControl", lambda *_args: nullcontext(SimpleNamespace(endpoint=_ENDPOINT)))
+    monkeypatch.setattr(
+        runner, "QueueControl", lambda *_args, **_kwargs: nullcontext(SimpleNamespace(endpoint=_ENDPOINT))
+    )
     monkeypatch.setattr(runner, "_download_session_assets", lambda *_args, **_kwargs: (policy, accounts))
     monkeypatch.setattr(runner, "run", run)
     monkeypatch.setattr(runner, "new_session_id", lambda: _SESSION_ID)
@@ -677,6 +683,16 @@ def test_runner_cli_can_opt_out_or_use_twitch_bandwidth_test(tmp_path: Path, mon
 
     config, _ = _run_cli(tmp_path, monkeypatch, "--twitch-bandwidth-test")
     assert config.twitch_bandwidth_test is True
+
+
+def test_runner_cli_can_delegate_obs_to_an_independent_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _ = _run_cli(tmp_path, monkeypatch, "--external-stream")
+    assert config.external_stream
+    assert config.wants_stream
+    with pytest.raises(SystemExit):
+        _run_cli(tmp_path, monkeypatch, "--external-stream", "--no-stream")
 
 
 def test_runner_cli_accepts_explicit_cold_preparation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1045,17 +1061,18 @@ def test_failed_match_measurement_keeps_partial_frame_and_stream_identity(tmp_pa
 def test_runner_cli_accepts_bounded_coalescing_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = _run_cli(tmp_path, monkeypatch, "--batch-wait-ms", "0.25")
     assert config.batch_wait_seconds == 0.00025
-    assert (FrameTiming(2, 2, 4, 4, 8),) == runner._NETPLAY_TIMINGS
+    assert (FrameTiming(2, 2, 4, 4, 8), FrameTiming(3, 1, 4, 4, 8)) == runner._NETPLAY_TIMINGS
 
 
 @pytest.mark.parametrize("after_wait", ["stop", "drain", "job"])
+@pytest.mark.parametrize("delay", [2, 3])
 def test_idle_slot_limits_claims_and_observes_shutdown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_wait: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_wait: str, delay: int
 ) -> None:
     stop, draining = threading.Event(), threading.Event()
     waits: list[float] = []
     store = Mock()
-    store.claim_next.side_effect = [None, _job()]
+    store.claim_next.side_effect = [None, replace(_job(), online_delay=delay)]
     connection = MagicMock()
     health = MagicMock()
     handle = Mock(side_effect=lambda *_args: stop.set())
@@ -1082,7 +1099,7 @@ def test_idle_slot_limits_claims_and_observes_shutdown(
         connection,
         stop,
         draining,
-        (FrameTiming(2, 2, 4, 2, 8),),
+        runner._NETPLAY_TIMINGS,
         128,
         (),
     )
@@ -1090,6 +1107,9 @@ def test_idle_slot_limits_claims_and_observes_shutdown(
     assert waits == [5.0]
     assert store.claim_next.call_count == (2 if after_wait == "job" else 1)
     assert handle.call_count == (1 if after_wait == "job" else 0)
+    if after_wait == "job":
+        assert handle.call_args.args[3].transport_delays == (delay,)
+        assert handle.call_args.args[-1].physical_delay_frames == delay
     store.close.assert_called_once()
     connection.__exit__.assert_called_once()
 
@@ -1197,14 +1217,16 @@ def test_last_slot_exit_during_drain_is_success(
     receive, send = Mock(), Mock()
     receive.poll.return_value = False
     parents, children = {0: Mock(), 1: Mock()}, {0: Mock(), 1: Mock()}
-    timing = runner._NETPLAY_TIMINGS[0]
     ready = runner._EngineReady(
         PolicySpec("059", "o59-history-decoder", (), (0, 2, 3)),
         256,
         "a" * 64,
         2,
-        (RealtimeBudgetCheck((timing,), (LatencyMeasurement(8, 4, (0.02,)),)),),
-        (7,),
+        tuple(
+            RealtimeBudgetCheck((schedule,), (LatencyMeasurement(8, 4, (0.01,)),))
+            for schedule in runner._NETPLAY_TIMINGS
+        ),
+        (7, 8),
         "test GPU",
         (),
     )
@@ -1245,6 +1267,6 @@ def test_last_slot_exit_during_drain_is_success(
 
 def test_runner_rejects_unqualified_published_delay_before_downloading() -> None:
     started = Mock()
-    started.policy.online_delays = (2, 3)
-    with pytest.raises(ValueError, match="delay-2-only"):
+    started.policy.online_delays = (2,)
+    with pytest.raises(ValueError, match="delays 2 and 3"):
         runner._download_session_assets(started, local_assets=None)
