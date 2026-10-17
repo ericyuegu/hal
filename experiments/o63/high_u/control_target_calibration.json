@@ -1,0 +1,11 @@
+{
+  "calibration_sha256": "1eacb7da385ab0677ccd1032499574f9aa2c615bb100858b1910a3cfc2720835",
+  "checkpoint_sha256": "d5c2451224a55fb1713c70843543ed5125bbc259498581a121d21e98a0ceeeaf",
+  "control_raw_target": 20.902456665039068,
+  "empirical_cdf_at_control_target": 0.9767452506294346,
+  "positive_fraction": 0.23247119859617,
+  "positive_samples": 15235,
+  "schema_version": 1,
+  "scope": "Analysis of the existing control checkpoint; no dataset access. Global raw-return ranks are not per-state percentile settings.",
+  "valid_samples": 65535
+}

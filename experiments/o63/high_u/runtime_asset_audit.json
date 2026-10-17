@@ -1,0 +1,83 @@
+{
+  "evaluations": [
+    {
+      "arm": "return60",
+      "container_id": "ta-01M556NKNCSX9V0SA3EVE61Y3R",
+      "development_mds_present": false,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition, 610.57.04, 97887 MiB",
+      "python": "3.14.3",
+      "source_directory_files": [
+        "stats.json"
+      ],
+      "stats_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+      "target": "u95",
+      "torch": "2.11.0"
+    },
+    {
+      "arm": "return60",
+      "container_id": "ta-01M556NKNCJNN4GJJ1X5MSK3JR",
+      "development_mds_present": false,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition, 610.57.04, 97887 MiB",
+      "python": "3.14.3",
+      "source_directory_files": [
+        "stats.json"
+      ],
+      "stats_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+      "target": "u98",
+      "torch": "2.11.0"
+    },
+    {
+      "arm": "return60",
+      "container_id": "ta-01M556NKRZ7ZF2Y14X2JBD43MR",
+      "development_mds_present": false,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition, 610.57.04, 97887 MiB",
+      "python": "3.14.3",
+      "source_directory_files": [
+        "stats.json"
+      ],
+      "stats_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+      "target": "u99",
+      "torch": "2.11.0"
+    },
+    {
+      "arm": "bootstrap30",
+      "container_id": "ta-01M556NKRZM9X1MHPB6EHBCHBR",
+      "development_mds_present": false,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition, 610.57.04, 97887 MiB",
+      "python": "3.14.3",
+      "source_directory_files": [
+        "stats.json"
+      ],
+      "stats_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+      "target": "u95",
+      "torch": "2.11.0"
+    },
+    {
+      "arm": "bootstrap30",
+      "container_id": "ta-01M556NKNC9ZHES6PTRJD7ADHR",
+      "development_mds_present": false,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition, 610.57.04, 97887 MiB",
+      "python": "3.14.3",
+      "source_directory_files": [
+        "stats.json"
+      ],
+      "stats_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+      "target": "u98",
+      "torch": "2.11.0"
+    },
+    {
+      "arm": "bootstrap30",
+      "container_id": "ta-01M556NKNCTTH9YZQVADASER5R",
+      "development_mds_present": false,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition, 610.57.04, 97887 MiB",
+      "python": "3.14.3",
+      "source_directory_files": [
+        "stats.json"
+      ],
+      "stats_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+      "target": "u99",
+      "torch": "2.11.0"
+    }
+  ],
+  "schema_version": 1
+}

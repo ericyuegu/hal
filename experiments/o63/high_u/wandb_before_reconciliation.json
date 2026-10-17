@@ -1,0 +1,40 @@
+{
+  "runs": [
+    {
+      "arm": "return60",
+      "evaluation_summary": {
+        "eval/checkpoint_step": 16384,
+        "eval_u99/boots": 96,
+        "eval_u99/broker_inference_latency_p50_ms": 34.41321,
+        "eval_u99/broker_inference_latency_p95_ms": 41.4890115,
+        "eval_u99/captured_emulator_frames": 691200,
+        "eval_u99/crashed": 0,
+        "eval_u99/damage_dealt_per_min": 207.35704665703227,
+        "eval_u99/damage_taken_per_min": 109.39428626874188,
+        "eval_u99/dead_frame_fraction": 0.021000086813091415,
+        "eval_u99/decode_p95_ms": 19.881845499998008,
+        "eval_u99/decode_predicted_actions_per_s": 4813.460951357596,
+        "eval_u99/delay_frames": 2,
+        "eval_u99/emulator_fps": 777.6076821171241,
+        "eval_u99/net_dmg_lcb": 89.54045411933026,
+        "eval_u99/net_dmg_per_min": 97.9627603882904,
+        "eval_u99/net_stock_lcb": 0.24454260977589065,
+        "eval_u99/net_stock_per_min": 0.37243617596722567,
+        "eval_u99/prediction_frames": 4,
+        "eval_u99/replan_interval_frames": 2,
+        "eval_u99/stocks_lost_per_min": 1.0587828431068274,
+        "eval_u99/stocks_taken_per_min": 1.431219019074053,
+        "eval_u99/wall_s": 952.327220239
+      },
+      "state": "running",
+      "wandb_id": "1c2ru27l"
+    },
+    {
+      "arm": "bootstrap30",
+      "evaluation_summary": {},
+      "state": "running",
+      "wandb_id": "15qi0hke"
+    }
+  ],
+  "schema_version": 1
+}

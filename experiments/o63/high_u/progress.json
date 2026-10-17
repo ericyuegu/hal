@@ -1,0 +1,35 @@
+{
+  "evaluations": [
+    {
+      "arm": "return60",
+      "status": "complete",
+      "target": "u95"
+    },
+    {
+      "arm": "return60",
+      "status": "complete",
+      "target": "u98"
+    },
+    {
+      "arm": "return60",
+      "status": "complete",
+      "target": "u99"
+    },
+    {
+      "arm": "bootstrap30",
+      "status": "complete",
+      "target": "u95"
+    },
+    {
+      "arm": "bootstrap30",
+      "status": "complete",
+      "target": "u98"
+    },
+    {
+      "arm": "bootstrap30",
+      "status": "complete",
+      "target": "u99"
+    }
+  ],
+  "observed_at": "2026-10-17T15:34:31.995241+00:00"
+}
