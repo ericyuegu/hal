@@ -2,19 +2,19 @@
 
 October 16, 2026 (rollout on October 17 UTC). **Activated.**
 Production runs matching runtime and independent overlay
-`37e7ec0d2b2f3188197b219babd585435997a5ef`, with eight healthy
+`687f38bba5e3e3d5ec026c39688228cc57d51c23`, with eight healthy
 slots and admissions open. Earlier candidates were rolled back while the cleanup
 failures below were corrected. Final acceptance passed. The owner authorized a
 bounded, date-specific queue-budget allowance. No training or evaluation VM was
 started. The existing public human queue and stream lease remain in Cloudflare;
-self-play creates no public queue jobs. A later Sheik selection failure was
-corrected and requalified as recorded at the end of this file.
+self-play creates no public queue jobs. Later Sheik selection and Young Link
+alias failures were corrected and requalified as recorded at the end of this file.
 
 ## Behavior
 
 The overlay retains the approved white/teal layout and fonts. It uses exact
 website sprites, actual submitted conditioning for difficulty and imitation,
-physical controller readback, full controller geometry, and a horizontal model
+physical controller readback, full controller geometry, and a horizontal State
 value display. Custom and Unconditioned settings are explicit. The value uses
 the existing six-frame EMA; only the ±120 bar is clipped.
 
@@ -427,3 +427,114 @@ The screenshot is `production-sheik-fixed.png` in the ignored evidence directory
 Existing pending replay sidecars still produce ownership-rejection warnings on
 retry. They were retained for separate investigation; no ownership check was
 weakened and no pending replay was deleted or relabeled as a demo/human game.
+
+## Published character alias failure and correction (October 17)
+
+At 08:56:55 UTC, demo game 17 exited before gameplay. Seed 0 selected
+Young Link/Mario on Dream Land. The website's `YOUNG_LINK` name was used as a
+libmelee enum member; the enum uses `YLINK`. The resulting `KeyError` released
+the demo resources and disabled further demos. Eight human slots remained
+healthy. The earlier Sheik correction held through game 14, but the previous
+acceptance did not cover the full character catalog. Human Young Link requests
+also used the same incorrect lookup.
+
+Runtime source `687f38bba5e3e3d5ec026c39688228cc57d51c23` resolves all 26 public
+characters and six legal stages through one strict libmelee boundary. Both
+human setup paths and self-play use it. The complete catalog resolves on import,
+and a demo resolves its matchup before acquiring inference or Dolphin resources.
+The public names, API, artifact identities, and model are unchanged.
+
+Production now records `--self-play-seed 16`. Its first selection reproduces
+Young Link/Mario on Dream Land, so live acceptance exercises the failing case
+immediately. The startup metadata preserves this seed across restart.
+
+| Command or check | Result |
+| --- | --- |
+| `uv run ruff format --check .` | Passed: 342 files. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed: zero diagnostics. |
+| Focused catalog, reservation, supervisor, and deployment tests | 237 passed in 3.27 seconds. |
+| `uv run pytest -q -m "not integration"` | 2,148 passed, eight unchanged skips, 65 deselected, 26 warnings; 213.07 seconds. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_idle_self_play_integration.py -k 'complete_published_catalog or local_selection_preserves'` | 30 passed, ten deselected, zero skips; 363.28 seconds. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration` | Eight passed, six deselected, zero skips, seven warnings; 58.46 seconds. |
+| Spawned-worker cleanup and hung-worker watchdog emulator tests | Four passed in 29.10 seconds. |
+| API unit tests and TypeScript | 112 tests passed in 14 files; type check passed. |
+| Installed image and independent overlay preflights | Complete catalog, seed-16 matchup, renderer, and installed assets passed. |
+| `git diff --check` | Passed. |
+
+The 26 catalog emulator cases put each published character on both ports and
+cover all six stages. Each checks the selected stage and both character IDs
+for 150 frames from countdown into play. Four further cases cover Sheik on
+either port, two Sheiks, and two Zeldas. The human reservation test covers all
+26 choices through both setup paths. No comparison tolerance was weakened.
+Emulator checks used Xvfb and software OpenGL. The eight unit skips are the same
+optional data and opt-in local GPU checks listed above; production qualification
+tests all eight inference streams. Concurrent user research tests contributed
+to the full unit count; their source was excluded from the release.
+
+The first formatter attempt could not fetch packaging dependencies within the
+sandbox after concurrent packaging changes. Approved-network checks passed.
+Ruff found one extra blank line after an import removal; it was corrected before
+the final checks. The first Cloudflare analytics request used expired OAuth;
+refreshing it succeeded. No catalog emulator check failed.
+
+The matched runner image has digest
+`sha256:93b281d12c0614516eca8b5a508dae2723da80e53933e9616bb08d6e926f3016`.
+The image was built from committed source, excluding unrelated working-tree
+changes. Admissions were paused with zero active or queued human reservations.
+The prior units and overlay link are retained under
+`/var/lib/hal-release-backups/catalog-20261017/`.
+
+The owner-authorized temporary internal allowance was extended to 15,000 extra
+credits by API source `0ce5f39e`. API version
+`36bdf0d3-ffc7-4d9c-9d82-824d2680fdcc` allows 50,000 credits only on October 17
+UTC; the normal 35,000 limit resumes October 18, 00:00 UTC. Existing spending,
+the 200-credit admission reserve, database guard, queue identity, and public
+protocol remain unchanged. Before runtime activation, spending was
+36,856 / 50,000. Provider analytics then reported 15,282 Durable Object requests,
+14,335 row writes, and 245,584 row reads. The request and row-write counts remain
+well below their separate 100,000/day free limits. No provider plan changed.
+
+The activated release qualified both delays at eight-stream load with 200
+samples: p50 **11.045 ms**, p95 **15.217 ms**, p99 **15.320 ms**. These use the
+qualification's nearest-rank percentiles. Delay 2 allows 33.333 ms and delay 3
+allows 16.667 ms. Both retain prefix 4, replan 4, and horizon 8. Production game
+1 started Young Link/Mario on Dream Land, with Medium conditioning, temperature
+1, physical delay 2, the correct Young Link sprite, controller port 1, and State
+value visible in the actual OBS scene. The screenshot is
+`production-catalog-fixed.png` in the ignored evidence directory.
+
+The public Young Link canary released all demo resources within **386 ms** of
+POST start. The claim followed release, and human Dolphin started with `YLINK`.
+The connection menu was ready in **4.403 seconds**. The canary was canceled
+without a peer or human game; self-play resumed as game 2. The 80-second monitor
+observed at most one Dolphin, no retained zombie, and one unchanged OBS process.
+All 79 OBS samples had active output, monotonic duration, zero output skips,
+zero congestion, and no reconnect. Sixty measured self-play samples had median
+**59.939 FPS**, range 59.862–60.005. The last sample had frame-interval p95
+**18.012 ms** and complete client round-trip p95 **7.186 ms**.
+
+Admissions reopened with eight healthy slots, zero active or queued human
+reservations, and **37,024 / 50,000** internal credits used. The same single
+GPU model process remained loaded across the handoff. All other HAL VMs,
+including training and evaluation, remain stopped. The three existing human
+replay sidecars with ownership rejections remain intact for separate repair.
+
+A further 240-second monitor covered games 2–4 with admissions open. Peach/Sheik
+on Dream Land completed naturally, followed by Mr. Game & Watch/Falco on
+Battlefield; Donkey Kong/Mr. Game & Watch then started on Final Destination.
+The monitor saw at most one Dolphin, no retained zombie, and the same OBS PID.
+All 235 stream samples were active with zero output skips, zero congestion,
+no reconnect, and monotonic duration. The 212 rolling self-play FPS samples had
+median **59.941**, range 59.821–60.004. Separately, frame count divided by the
+complete `run_match` wall time was **58.858 FPS** for game 2 (6,927 frames,
+117.689 seconds) and **58.722 FPS** for game 3 (6,126 frames, 104.322 seconds).
+These whole-match ratios differ from the rolling playing-window health metric;
+no performance improvement is claimed. Final admin status remained ready,
+eight healthy slots, no human reservations, admissions open, and unchanged
+37,024 / 50,000 command spending during the idle observation.
+
+VM metadata matches the committed startup script, image revision, and seed.
+Rollback units, images, overlay releases, and all pending replays are retained.
+Temporary deployment and monitor files were removed from the host after copying
+the evidence. No credentials were committed; unrelated user edits were preserved.
