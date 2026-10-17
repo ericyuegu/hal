@@ -104,6 +104,14 @@ The helper decrypts only into memory and the child environment. It supports the
 existing host-bound systemd-creds files; no credential migration is needed.
 Mutating admin commands require the relevant deployment authorization.
 
+The queue normally permits 35,000 command-write credits per UTC day and reserves
+200 credits before each admission. For an authorized maintenance check, the API
+can be deployed with `--var ACCEPTANCE_WRITE_BUDGET_DAY:YYYY-MM-DD`. This permits
+at most 1,000 extra credits on that date, retains the recorded usage, and expires
+at midnight UTC. Omit the variable on the next deployment to remove it. Check
+Cloudflare's measured account usage before enabling this allowance; queue credits
+are conservative internal accounting, not provider usage totals.
+
 Old Phillip campaign and deployment helpers are preserved under
 `archive/netplay-2026-09-operator-tools/`. They target an obsolete protocol and
 are not supported launch tools. The campaign remains paused. `runs/netplay/`

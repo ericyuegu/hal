@@ -76,7 +76,7 @@ export class Queue extends DurableObject<Env> {
       return null;
     });
     const now = () => this.now();
-    this.budget = new WriteBudget(sql, now);
+    this.budget = new WriteBudget(sql, now, env.ACCEPTANCE_WRITE_BUDGET_DAY);
     this.connections = new LiveConnections(ctx, now);
     this.jobs = new JobStore(sql, now, (id, seen) => this.connections.presence(id, seen), (row) => {
       this.runtime ??= this.sessions.runtimeLeases();
