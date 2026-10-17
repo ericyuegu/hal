@@ -1,0 +1,9 @@
+{
+  "app_id": "ap-AMYSuu9LlFf6AHvnvupYea",
+  "benchmark_sha256": "488b2872d3c2801a11bc0e75cc36be3690062726adbc7b14dc654b899e2e60b0",
+  "disposition": "cancelled_to_replace_profiling_harness",
+  "function_call_id": "fc-01M55FG1HGG6BPSJB2C72R0B5Y",
+  "git_sha": "d0398db9ccef2ae4d576ec324e7a191558a2d2e0",
+  "reason": "Disable profiler shape recording and use one profiled update to avoid tensor retention near the GPU memory limit. Add validation-batch-32 check after timed windows.",
+  "recorded_at": "2026-10-17T17:47:22.827705+00:00"
+}

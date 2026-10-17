@@ -1,0 +1,91 @@
+{
+  "base_git_sha": "d0398db9ccef2ae4d576ec324e7a191558a2d2e0",
+  "dataset_downloads": false,
+  "error": "CUDA out of memory. Tried to allocate 1.62 GiB. GPU 0 has a total capacity of 178.34 GiB of which 956.62 MiB is free. Process 1 has 177.39 GiB memory in use. Of the allocated memory 174.37 GiB is allocated by PyTorch, with 168.29 GiB allocated in private pools (e.g., CUDA Graphs), and 2.09 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+  "error_type": "OutOfMemoryError",
+  "experiment_sha256": "6a00acf0d4b48ef1e685d615b66db2ee2b94b6c64a3773bf7fcdb06750a64885",
+  "failure_phase": "full_validation_cohort",
+  "gpu": "NVIDIA B200",
+  "peak_allocated_gib": 166.59852027893066,
+  "peak_learning_rates": [
+    0.00015026019100214136,
+    0.00015026019100214136,
+    0.007,
+    0.007,
+    0.007,
+    1.878252387526767e-05,
+    1.878252387526767e-05,
+    3.756504775053534e-05,
+    3.756504775053534e-05
+  ],
+  "peak_reserved_gib": 176.716796875,
+  "schema_version": 1,
+  "status": "failed",
+  "steps": [
+    {
+      "conditioned_fraction": 0.0,
+      "gradient_norm": 55.18528366088867,
+      "objective": 18.487829208374023,
+      "update": 4096
+    },
+    {
+      "conditioned_fraction": 0.613006591796875,
+      "gradient_norm": 50.266395568847656,
+      "objective": 16.345468521118164,
+      "update": 4097
+    },
+    {
+      "conditioned_fraction": 0.6109161376953125,
+      "gradient_norm": 45.82221221923828,
+      "objective": 14.487171173095703,
+      "update": 4098
+    },
+    {
+      "conditioned_fraction": 0.612152099609375,
+      "gradient_norm": 41.6890983581543,
+      "objective": 12.874799728393555,
+      "update": 4099
+    },
+    {
+      "conditioned_fraction": 0.6134185791015625,
+      "gradient_norm": 37.88798141479492,
+      "objective": 11.499185562133789,
+      "update": 4100
+    },
+    {
+      "conditioned_fraction": 0.6128387451171875,
+      "gradient_norm": 34.78313446044922,
+      "objective": 10.387595176696777,
+      "update": 4101
+    },
+    {
+      "conditioned_fraction": 0.6137847900390625,
+      "gradient_norm": 32.30524826049805,
+      "objective": 9.486913681030273,
+      "update": 4102
+    },
+    {
+      "conditioned_fraction": 0.612701416015625,
+      "gradient_norm": 30.201730728149414,
+      "objective": 8.731748580932617,
+      "update": 4103
+    },
+    {
+      "conditioned_fraction": 0.613250732421875,
+      "gradient_norm": 28.27589988708496,
+      "objective": 8.095236778259277,
+      "update": 4104
+    },
+    {
+      "conditioned_fraction": 0.6143341064453125,
+      "gradient_norm": 26.432100296020508,
+      "objective": 7.559061050415039,
+      "update": 4105
+    }
+  ],
+  "torch": "2.11.0+cu130",
+  "traceback": "Traceback (most recent call last):\n  File \"/tmp/o64_final_validation_preflight.py\", line 53, in qualify\n  File \"/opt/venv/lib/python3.14/site-packages/torch/utils/_contextlib.py\", line 124, in decorate_context\n    return func(*args, **kwargs)\n  File \"/opt/hal/experiments/064_qualified.py\", line 1739, in val_metrics\n    logits = model.temporal.teacher_forced_logits_by_group(\n        hidden,\n    ...<5 lines>...\n        available,\n    )\n  File \"/opt/hal/hal/models/action_sequence.py\", line 791, in teacher_forced_logits_by_group\n    logits, _button_values, _projection_values, _states = self._teacher_forced_outputs(\n                                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/hal/hal/models/action_sequence.py\", line 740, in _teacher_forced_outputs\n    states = self.teacher_forced_states(\n        hidden, ctx_pad, prefix_positions, observed, targets, return_value, condition_present\n    )\n  File \"/opt/hal/hal/models/action_sequence.py\", line 701, in teacher_forced_states\n    packed = self.history_attention.forward_projected(\n        packed,\n    ...<4 lines>...\n        offsets_per_prefix=len(self.head_offsets),\n    )\n  File \"/opt/hal/hal/models/action_sequence.py\", line 503, in forward_projected\n    flex_attention(\n    ~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<2 lines>...\n        score_mod=partial(_history_score_mod, ctx_pad=ctx_pad, query_positions=query_positions),\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ),\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/nn/attention/flex_attention.py\", line 1731, in flex_attention\n    out, lse, max_scores = flex_fn(\n                           ~~~~~~~^\n        query,\n        ^^^^^^\n    ...<5 lines>...\n        kernel_options,\n        ^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py\", line 1024, in compile_wrapper\n    return fn(*args, **kwargs)\n  File \"/opt/venv/lib/python3.14/site-packages/torch/nn/attention/flex_attention.py\", line 1720, in _flex_attention_hop_wrapper\n    def _flex_attention_hop_wrapper(*args, **kwargs):\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py\", line 1263, in _fn\n    return fn(*args, **kwargs)\n  File \"<eval_with_key>.61\", line 16, in forward\n    flex_attention = torch.ops.higher_order.flex_attention(l_args_0_, l_args_1_, l_args_2_, score_mod_0, (1, 1, l_args_4_2_, l_args_4_3_, None, None, l_args_4_6_, l_args_4_7_, None, None, 1073741824, 1073741824, mask_fn_0), 0.125, {'BACKEND': 'AUTO', 'PRESCALE_QK': False, 'ROWS_GUARANTEED_SAFE': False, 'BLOCKS_ARE_CONTIGUOUS': False, 'WRITE_DQ': True, 'OUTPUT_LOGSUMEXP': False, 'OUTPUT_MAX': False}, (l_args_3_keywords_ctx_pad_, l_args_3_keywords_query_positions_), ());  l_args_0_ = l_args_1_ = l_args_2_ = score_mod_0 = l_args_4_2_ = l_args_4_3_ = l_args_4_6_ = l_args_4_7_ = mask_fn_0 = l_args_3_keywords_ctx_pad_ = l_args_3_keywords_query_positions_ = None\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 112, in __call__\n    return super().__call__(\n           ~~~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 533, in __call__\n    return self.dispatch(dispatch_key_set.highestPriorityTypeId(), *args, **kwargs)\n           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 380, in dispatch\n    return kernel(*args, **kwargs)\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 341, in flex_attention_autocast_cuda\n    return _flex_attention_autocast_impl(\n        query,\n    ...<7 lines>...\n        mask_mod_other_buffers,\n    )\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 316, in _flex_attention_autocast_impl\n    return flex_attention(\n        query,\n    ...<7 lines>...\n        mask_mod_other_buffers,\n    )\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 112, in __call__\n    return super().__call__(\n           ~~~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 533, in __call__\n    return self.dispatch(dispatch_key_set.highestPriorityTypeId(), *args, **kwargs)\n           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 380, in dispatch\n    return kernel(*args, **kwargs)\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 928, in flex_attention_autograd\n    out, logsumexp, max_scores = FlexAttentionAutogradOp.apply(\n                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<8 lines>...\n        *score_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/autograd/function.py\", line 596, in apply\n    return super().apply(*args, **kwargs)  # type: ignore[misc]\n           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 780, in forward\n    out, logsumexp, max_scores = flex_attention(\n                                 ~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 112, in __call__\n    return super().__call__(\n           ~~~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 528, in __call__\n    return torch.overrides.handle_torch_function(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self, flat_args, *args, **kwargs\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/overrides.py\", line 1741, in handle_torch_function\n    result = mode.__torch_function__(public_api, types, args, kwargs)\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_dynamo/_trace_wrapped_higher_order_op.py\", line 158, in __torch_function__\n    return func(*args, **(kwargs or {}))\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 112, in __call__\n    return super().__call__(\n           ~~~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 533, in __call__\n    return self.dispatch(dispatch_key_set.highestPriorityTypeId(), *args, **kwargs)\n           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_ops.py\", line 380, in dispatch\n    return kernel(*args, **kwargs)\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 391, in sdpa_dense\n    out, lse, max_scores = math_attention(\n                           ~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 258, in math_attention\n    _, post_mod_scores = _math_attention_inner(\n                         ~~~~~~~~~~~~~~~~~~~~~^\n        query,\n        ^^^^^^\n    ...<7 lines>...\n        mask_mod_other_buffers,\n        ^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_higher_order_ops/flex_attention.py\", line 209, in _math_attention_inner\n    post_mod_scores = torch.where(\n        mask_mod(b, h, m, n, *mask_mod_other_buffers),\n        score_mod(scores, b, h, m, n, *score_mod_other_buffers),\n        torch.tensor(-float(\"inf\"), dtype=working_precision, device=scores.device),\n    )\n  File \"/opt/venv/lib/python3.14/site-packages/torch/_dynamo/_trace_wrapped_higher_order_op.py\", line 158, in __torch_function__\n    return func(*args, **(kwargs or {}))\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.62 GiB. GPU 0 has a total capacity of 178.34 GiB of which 956.62 MiB is free. Process 1 has 177.39 GiB memory in use. Of the allocated memory 174.37 GiB is allocated by PyTorch, with 168.29 GiB allocated in private pools (e.g., CUDA Graphs), and 2.09 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)\n",
+  "train_batch_size": 512,
+  "val_batch_size": 32,
+  "validation_samples": 2048
+}

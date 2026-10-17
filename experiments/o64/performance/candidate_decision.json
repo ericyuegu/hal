@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "source": "candidate_results.json",
+  "rule": "All three candidate windows must beat all six baseline/repeat windows; a winning numerical change then requires stronger warmed-state qualification.",
+  "measurements": [
+    {
+      "variant": "baseline",
+      "windows_per_second": [
+        965.676921672347,
+        963.3297575917519,
+        962.5433807614095
+      ],
+      "combined_windows_per_second": 963.8481830393154,
+      "all_windows_beat_controls": false
+    },
+    {
+      "variant": "cache",
+      "windows_per_second": [
+        970.648938754266,
+        966.9594629552316,
+        967.555234618845
+      ],
+      "combined_windows_per_second": 968.3851809108072,
+      "all_windows_beat_controls": false
+    },
+    {
+      "variant": "rope",
+      "windows_per_second": [
+        963.8593988769143,
+        963.5177447040355,
+        961.9973751886574
+      ],
+      "combined_windows_per_second": 963.124159116636,
+      "all_windows_beat_controls": false
+    },
+    {
+      "variant": "repeat",
+      "windows_per_second": [
+        967.8121059103607,
+        964.4856814868851,
+        961.9252041376388
+      ],
+      "combined_windows_per_second": 964.7349787152694,
+      "all_windows_beat_controls": false
+    }
+  ],
+  "promoted": [],
+  "stronger_numerical_qualification_run": false,
+  "decision": "Retain baseline. Caching overlaps repeated control; rotary backward is slower; Flash SDPA fails with 8GiB backward workspace CUDA OOM."
+}

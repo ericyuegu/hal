@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "source": "matched_profile_results.json",
+  "source_sha256": "f3149e00145d01525697bee11785c4f154e1d0ded5c84be78ee4bb2acbd7ac6d",
+  "dense_bf16_peak_flops_per_second": 2250000000000000,
+  "peak_source": "https://www.nvidia.com/en-us/data-center/hgx/",
+  "timings": [
+    {
+      "case": "059",
+      "windows_per_second": 1325.0168941728666,
+      "seconds_per_update": 0.3864101674866665,
+      "estimated_flops_per_update": 255931441643520,
+      "estimated_mfu": 0.2943693436872232,
+      "peak_allocated_gib": 123.35769033432007,
+      "peak_reserved_gib": 127.68359375
+    },
+    {
+      "case": "063",
+      "windows_per_second": 1305.7506877019973,
+      "seconds_per_update": 0.39211160662,
+      "estimated_flops_per_update": 256356870291456,
+      "estimated_mfu": 0.2905713191668406,
+      "peak_allocated_gib": 124.21095561981201,
+      "peak_reserved_gib": 126.671875
+    },
+    {
+      "case": "064",
+      "windows_per_second": 958.1300307573282,
+      "seconds_per_update": 0.5343742326866671,
+      "estimated_flops_per_update": 340759432495104,
+      "estimated_mfu": 0.28341306036231223,
+      "peak_allocated_gib": 166.59913063049316,
+      "peak_reserved_gib": 175.8515625
+    }
+  ],
+  "recorded_leaf_kernel_ms": {
+    "matrix_multiplication": 244.17873400000036,
+    "other_triton_pointwise_reductions": 126.87052000000004,
+    "normalization_fused": 51.92509299999999,
+    "attention": 65.40185600000005,
+    "other_kernels_and_copies": 12.417506000000866
+  },
+  "limitations": [
+    "Synthetic replay batches; excludes replay loading and actual shard IO.",
+    "Estimated model FLOPs, not hardware instruction counters. MFU excludes non-matmul work in its numerator.",
+    "One profiled update. Kernel groups use names and can combine several operations. Only top100 events were retained.",
+    "Exclude CPU/compiled-graph and optimizer parent annotations to avoid double counting.",
+    "Max-autotune failed with CUDA OOM; the planned final059 repeat did not run."
+  ]
+}

@@ -1,0 +1,139 @@
+import hashlib
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+import modal
+
+SOURCE = Path(sys.argv[1]).resolve()
+OUTPUT = Path(sys.argv[2]).resolve()
+SHA = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=SOURCE, text=True).strip()
+assert not subprocess.check_output(['git', 'status', '--porcelain'], cwd=SOURCE, text=True).strip()
+SOURCE_HASH = hashlib.sha256((SOURCE/'experiments/064_production_percentile.py').read_bytes()).hexdigest()
+image = (
+    modal.Image.from_registry('ghcr.io/ericyuegu/hal:cuda13')
+    .add_local_dir(SOURCE, '/opt/hal', copy=True, ignore=modal.FilePatternMatcher.from_file(SOURCE/'.dockerignore'))
+    .workdir('/opt/hal')
+    .env({'PYTHONPATH': '/opt/hal', 'UV_NO_SYNC': '1'})
+)
+app = modal.App('hal-o64-b200-prefetch-validation-20261017')
+
+
+@app.function(image=image, gpu='B200', cpu=(32,48), memory=(131072,393216), ephemeral_disk=524288, timeout=1800, retries=0, serialized=True, include_source=False)
+def qualify(sha, source_hash):
+    import importlib.util
+    import platform
+    import traceback
+
+    import numpy as np
+    import torch
+
+    for key, suffix in [('TORCHINDUCTOR_CACHE_DIR','torchinductor'),('TRITON_CACHE_DIR','triton'),('CUDA_CACHE_PATH','cuda'),('TMPDIR','tmp')]:
+        path=Path('/opt/hal-local-cache')/suffix
+        path.mkdir(parents=True,exist_ok=True)
+        os.environ[key]=str(path)
+    path=Path('/opt/hal/experiments/064_production_percentile.py')
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==source_hash
+    spec=importlib.util.spec_from_file_location('o64_preflight',path)
+    exp=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=exp
+    spec.loader.exec_module(exp)
+    cfg=exp.TrainConfig(arm='bootstrap30')
+    exp.validate_config(cfg)
+    assert torch.cuda.device_count()==1 and 'B200' in torch.cuda.get_device_name()
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.set_num_threads(32)
+    torch.set_float32_matmul_precision('high' if cfg.allow_tf32 else 'highest')
+    report={'schema_version':1,'git_sha':sha,'experiment_sha256':source_hash,'config':asdict(cfg),'steps':[],
+            'dataset_downloads':False,'torch':torch.__version__,'cuda':torch.version.cuda,'python':platform.python_version(),
+            'gpu':torch.cuda.get_device_name(),'total_memory_gib':torch.cuda.get_device_properties(0).total_memory/2**30}
+    phase='construct'
+    start=time.monotonic()
+    try:
+        model=exp.make_model(cfg).cuda().train()
+        counts=exp.subsystem_parameter_counts(model)
+        assert counts==cfg.arch.parameter_count_contract
+        report['parameters']=counts
+        optimizer=exp.make_optimizer(model,cfg)
+        scheduler=exp.LearningRateScheduler(optimizer,exp.lr_schedule(cfg))
+        sampler=exp.PrefixSampler(cfg.seed,'cuda')
+        labeler=exp.PercentileLabeler(cfg.seed,'cuda')
+        batch=exp.synthetic_awr_batch(cfg,torch.device('cuda'))
+        phase='compile_and_update'
+        trunk_fn,temporal_fn=exp._training_functions(model,cfg)
+        torch.cuda.reset_peak_memory_stats()
+        for index in range(24):
+            torch.cuda.synchronize()
+            tick=time.monotonic()
+            result=exp.train_step(model,batch,cfg,step=4095+index,update=4096+index,valid_prefixes=cfg.batch_size*32,
+                                  trunk_fn=trunk_fn,temporal_fn=temporal_fn,optimizer=optimizer,scheduler=scheduler,
+                                  prefix_sampler=sampler,percentile_labeler=labeler,prefix_validated_on_cpu=True)
+            torch.cuda.synchronize()
+            elapsed=time.monotonic()-tick
+            finite=bool(torch.isfinite(result.gradient_norm)) and all(bool(torch.isfinite(value).all()) for value in result.metrics.values())
+            if not finite:
+                raise FloatingPointError('nonfinite synthetic update')
+            report['steps'].append({'update':4096+index,'seconds':elapsed,'gradient_norm':float(result.gradient_norm),
+                                    'objective':float(result.metrics['train/objective']),
+                                    'conditioned_fraction':float(result.metrics['percentile/conditioned_fraction']),
+                                    'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,
+                                    'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30})
+            print('O64_PREFLIGHT_STEP',json.dumps(report['steps'][-1]),flush=True)
+            del result
+        times=[row['seconds'] for row in report['steps'][4:]]
+        report.update(status='passed',warm_updates=4,measured_updates=len(times),mean_update_seconds=statistics.mean(times),
+                      median_update_seconds=statistics.median(times),samples_per_second=cfg.batch_size/statistics.mean(times),
+                      peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30)
+        phase='prefetch_and_validation'
+        from dataclasses import replace
+        cpu_batch=exp.synthetic_awr_batch(cfg,torch.device('cpu'))
+        masker=exp.ReturnMasker(cfg.seed ^ 0x059C0D,cfg.return_dropout,enabled=cfg.return_conditioning)
+        prefetcher=exp.DeviceBatchPrefetcher([cpu_batch]*8,cfg,'cuda',return_masker=masker)
+        report['prefetch_steps']=[]
+        try:
+            for index in range(8):
+                device_batch,valid_prefixes=prefetcher.next()
+                prefetcher.fill_lookahead(4)
+                result=exp.train_step(model,device_batch,cfg,step=4119+index,update=4120+index,valid_prefixes=valid_prefixes,
+                                      trunk_fn=trunk_fn,temporal_fn=temporal_fn,optimizer=optimizer,scheduler=scheduler,
+                                      prefix_sampler=sampler,percentile_labeler=labeler,prefix_validated_on_cpu=True)
+                prefetcher.stage_next()
+                torch.cuda.synchronize()
+                if not bool(torch.isfinite(result.gradient_norm)):
+                    raise FloatingPointError('nonfinite prefetched update')
+                report['prefetch_steps'].append({'update':4120+index,'conditioned_fraction':float(result.metrics['percentile/conditioned_fraction']),
+                                               'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,
+                                               'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30})
+                print('O64_PREFETCH_STEP',json.dumps(report['prefetch_steps'][-1]),flush=True)
+                del result,device_batch
+        finally:
+            prefetcher.close()
+        del prefetcher,batch
+        torch.cuda.synchronize()
+        tick=time.monotonic()
+        metrics=exp.val_metrics(model,[cpu_batch.slice(cfg.val_batch_size)],cfg)
+        torch.cuda.synchronize()
+        if not all(__import__('math').isfinite(value) for value in metrics.values()):
+            raise FloatingPointError('nonfinite validation metric')
+        report.update(prefetch_passed=True,validation_passed=True,validation_batch_size=cfg.val_batch_size,
+                      validation_seconds=time.monotonic()-tick,validation_metrics=metrics,
+                      peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30)
+    except (torch.OutOfMemoryError,RuntimeError,FloatingPointError) as error:
+        report.update(status='failed',failure_phase=phase,error_type=type(error).__name__,error=str(error),traceback=traceback.format_exc(),
+                      peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30)
+    report['elapsed_seconds']=time.monotonic()-start
+    print('O64_PREFLIGHT_RESULT',json.dumps(report,sort_keys=True),flush=True)
+    return report
+
+
+with app.run(detach=True):
+    call=qualify.spawn(SHA,SOURCE_HASH)
+    OUTPUT.parent.mkdir(parents=True,exist_ok=True)
+    OUTPUT.write_text(json.dumps({'app_id':app.app_id,'function_call_id':call.object_id,'git_sha':SHA,'experiment_sha256':SOURCE_HASH},indent=2)+'\n')
+    print('SUBMITTED',app.app_id,call.object_id,flush=True)

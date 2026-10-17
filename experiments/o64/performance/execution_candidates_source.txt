@@ -1,0 +1,62 @@
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from hal.models.action_sequence import TEMPORAL_ATTENTION_BATCH, TemporalBlock, short_causal_attention
+from hal.models.attention import apply_rotary_emb
+
+
+class FusedRotary(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, cos, sin):
+        ctx.save_for_backward(cos, sin)
+        return apply_rotary_emb(x, cos, sin)
+
+    @staticmethod
+    def backward(ctx, grad):
+        cos, sin = ctx.saved_tensors
+        first, second = grad.chunk(2, dim=-1)
+        return torch.cat((first * cos + second * (-sin), first * sin + second * cos), dim=-1), None, None
+
+
+class CandidateTemporalBlock(TemporalBlock):
+    def __init__(self, cfg, candidate):
+        super().__init__(cfg)
+        self.candidate = candidate
+
+    def forward(self, x: Tensor, modulation: Tensor | None) -> Tensor:
+        if modulation is None:
+            scale_attn = shift_attn = scale_mlp = shift_mlp = None
+        else:
+            scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        q, k, v = self._qkv(x, scale_attn, shift_attn)
+        cos, sin = self.rotary(q)
+        rotate = FusedRotary.apply if self.candidate == 'rope' else apply_rotary_emb
+        q = rotate(q, cos, sin).transpose(1, 2)
+        k = rotate(k, cos, sin).transpose(1, 2)
+        v = v.transpose(1, 2)
+        if self.candidate == 'flash':
+            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                attended = torch.cat([
+                    F.scaled_dot_product_attention(query, key, values, dropout_p=0.0, is_causal=True)
+                    for query, key, values in zip(q.split(TEMPORAL_ATTENTION_BATCH), k.split(TEMPORAL_ATTENTION_BATCH), v.split(TEMPORAL_ATTENTION_BATCH), strict=True)
+                ], dim=0)
+        else:
+            attended = torch.cat([
+                short_causal_attention(query, key, values)
+                for query, key, values in zip(q.split(TEMPORAL_ATTENTION_BATCH), k.split(TEMPORAL_ATTENTION_BATCH), v.split(TEMPORAL_ATTENTION_BATCH), strict=True)
+            ], dim=0)
+        attended = attended.transpose(1, 2).contiguous().view_as(x)
+        x = x + self.scale * self.proj(attended)
+        return x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
+
+
+def replace_blocks(model, candidate):
+    before = torch.get_rng_state()
+    with torch.random.fork_rng(devices=[]):
+        for index, old in enumerate(model.temporal.blocks):
+            block = CandidateTemporalBlock(model.cfg, candidate)
+            block.load_state_dict(old.state_dict(), strict=True)
+            model.temporal.blocks[index] = block
+    assert torch.equal(before, torch.get_rng_state())
+    return model

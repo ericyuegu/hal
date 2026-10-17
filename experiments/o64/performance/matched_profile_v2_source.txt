@@ -1,0 +1,123 @@
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import modal
+
+SOURCE=Path(sys.argv[1]).resolve()
+OUTPUT=Path(sys.argv[2]).resolve()
+SHA=subprocess.check_output(['git','rev-parse','HEAD'],cwd=SOURCE,text=True).strip()
+assert not subprocess.check_output(['git','status','--porcelain'],cwd=SOURCE,text=True).strip()
+CASE_SOURCE=r'''
+import importlib.util,json,os,statistics,sys,time
+from dataclasses import asdict
+from pathlib import Path
+import torch
+
+name,mode,profile=sys.argv[1:]
+script={'059':'059_muon_action_sequence','063':'063_percentile_conditioning','064':'064_production_percentile'}[name]
+path=Path('/opt/hal/experiments')/(script+'.py')
+spec=importlib.util.spec_from_file_location('profile_'+name,path)
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+cfg=m.TrainConfig(**({'arm':'bootstrap30'} if name!='059' else {}),train_compile_mode=mode,val_batch_size=32)
+m.validate_config(cfg)
+torch.set_num_threads(32);torch.manual_seed(cfg.seed);torch.set_float32_matmul_precision('high')
+model=m.make_model(cfg).cuda().train()
+counts=m.subsystem_parameter_counts(model)
+optimizer=m.make_optimizer(model,cfg)
+scheduler=m.LearningRateScheduler(optimizer,m.lr_schedule(cfg))
+sampler=m.PrefixSampler(cfg.seed,'cuda')
+labeler={} if name=='059' else {'percentile_labeler':m.PercentileLabeler(cfg.seed,'cuda')}
+cpu_batch=m.synthetic_awr_batch(cfg,torch.device('cpu')).pin_memory()
+masker=m.ReturnMasker(cfg.seed ^ 0x059C0D,cfg.return_dropout,enabled=cfg.return_conditioning)
+prefetch=m.DeviceBatchPrefetcher([cpu_batch]*8,cfg,'cuda',return_masker=masker)
+trunk_fn,temporal_fn=m._training_functions(model,cfg)
+update=4096
+def step():
+    global update
+    batch,valid_prefixes=prefetch.next();prefetch.fill_lookahead(4)
+    result=m.train_step(model,batch,cfg,step=update-1,update=update,valid_prefixes=valid_prefixes,
+                       trunk_fn=trunk_fn,temporal_fn=temporal_fn,optimizer=optimizer,scheduler=scheduler,
+                       prefix_sampler=sampler,prefix_validated_on_cpu=True,**labeler)
+    prefetch.stage_next();update+=1
+    return result
+
+start=time.monotonic()
+for _ in range(10):
+    result=step()
+    del result
+torch.cuda.synchronize()
+warm_seconds=time.monotonic()-start
+windows=[]
+for window in range(3):
+    torch.cuda.synchronize();start=time.monotonic()
+    for _ in range(50):
+        result=step()
+        del result
+    torch.cuda.synchronize();seconds=time.monotonic()-start
+    windows.append({'updates':50,'seconds':seconds,'windows_per_second':512*50/seconds})
+    print('MATCHED_WINDOW',name,mode,json.dumps(windows[-1]),flush=True)
+report={'case':name,'mode':mode,'cfg':asdict(cfg),'parameter_counts':counts,
+        'estimated_flops_per_update':m.approximate_training_flops_per_update(cfg,counts),
+        'torch':torch.__version__,'gpu':torch.cuda.get_device_name(),'warm_seconds':warm_seconds,'windows':windows,
+        'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30}
+if profile=='yes':
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,torch.profiler.ProfilerActivity.CUDA],record_shapes=False) as prof:
+        for _ in range(1):
+            result=step()
+            del result
+        torch.cuda.synchronize()
+    averages=prof.key_averages(group_by_input_shape=True)
+    events=[]
+    for event in averages:
+        events.append({'name':event.key,'count':event.count,'cpu_total_us':event.cpu_time_total,
+                       'self_cpu_total_us':event.self_cpu_time_total,'device_total_us':event.device_time_total,
+                       'self_device_total_us':event.self_device_time_total,'input_shapes':event.input_shapes})
+    report['profile']={'updates':1,'record_shapes':False,'top_device':sorted(events,key=lambda x:x['self_device_total_us'],reverse=True)[:100],
+                       'top_cpu':sorted(events,key=lambda x:x['self_cpu_total_us'],reverse=True)[:100],
+                       'copies_and_sync':[event for event in events if any(key in event['name'].lower() for key in ('copy','memcpy','synchroniz','to_copy','contiguous'))]}
+if name=='064' and mode=='reduce-overhead':
+    torch.cuda.synchronize();tick=time.monotonic()
+    validation=m.val_metrics(model,[cpu_batch.slice(cfg.val_batch_size)],cfg)
+    torch.cuda.synchronize()
+    report['validation']={'batch_size':cfg.val_batch_size,'seconds':time.monotonic()-tick,'metrics':validation,
+                          'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30}
+prefetch.close()
+print('MATCHED_RESULT '+json.dumps(report,sort_keys=True),flush=True)
+'''
+image=(modal.Image.from_registry('ghcr.io/ericyuegu/hal:cuda13')
+       .add_local_dir(SOURCE,'/opt/hal',copy=True,ignore=modal.FilePatternMatcher.from_file(SOURCE/'.dockerignore'))
+       .workdir('/opt/hal').env({'PYTHONPATH':'/opt/hal','UV_NO_SYNC':'1'}))
+app=modal.App('hal-o64-matched-profile-v2-20261017')
+
+@app.function(image=image,gpu='B200',cpu=(32,48),memory=(131072,393216),ephemeral_disk=524288,timeout=3600,retries=0,serialized=True,include_source=False)
+def benchmark(case_source,sha):
+    import os
+    env=os.environ.copy()
+    for name,suffix in [('TORCHINDUCTOR_CACHE_DIR','torchinductor'),('TRITON_CACHE_DIR','triton'),('CUDA_CACHE_PATH','cuda'),('TMPDIR','tmp')]:
+        path=Path('/opt/hal-local-cache')/suffix;path.mkdir(parents=True,exist_ok=True);env[name]=str(path)
+    result={'schema_version':1,'git_sha':sha,'dataset_downloads':False,'cases':[],'failures':[]}
+    for label,name,mode,profile in [('059','059','reduce-overhead','no'),('063','063','reduce-overhead','no'),
+                                  ('064','064','reduce-overhead','yes'),('064-max-autotune','064','max-autotune','no'),
+                                  ('059-repeat','059','reduce-overhead','no')]:
+        print('MATCHED_START',label,flush=True)
+        child=subprocess.run(['/opt/venv/bin/python','-c',case_source,name,mode,profile],cwd='/opt/hal',env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        print(child.stdout,flush=True)
+        if child.returncode:
+            result['failures'].append({'label':label,'exit_code':child.returncode,'output':child.stdout})
+            break
+        lines=[line.removeprefix('MATCHED_RESULT ') for line in child.stdout.splitlines() if line.startswith('MATCHED_RESULT ')]
+        if len(lines)!=1:
+            raise RuntimeError('missing benchmark result for '+label)
+        case=json.loads(lines[0]);case['label']=label;result['cases'].append(case)
+    result['status']='passed' if not result['failures'] and len(result['cases'])==5 else 'failed'
+    return result
+
+with app.run(detach=True):
+    call=benchmark.spawn(CASE_SOURCE,SHA)
+    OUTPUT.parent.mkdir(parents=True,exist_ok=True)
+    OUTPUT.write_text(json.dumps({'app_id':app.app_id,'function_call_id':call.object_id,'git_sha':SHA,
+                                 'benchmark_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},indent=2)+'\n')
+    print('SUBMITTED',app.app_id,call.object_id,flush=True)

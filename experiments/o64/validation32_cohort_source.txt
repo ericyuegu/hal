@@ -1,0 +1,69 @@
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+import modal
+ROOT=Path('/home/ericgu/src/hal');BASE=Path('/tmp/hal-o63-launch')
+SOURCE=Path('/tmp/o64_final_snapshot.py');SOURCE.write_bytes((ROOT/'experiments/064_production_percentile.py').read_bytes())
+SHA=subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE,text=True).strip()
+SOURCE_HASH=hashlib.sha256(SOURCE.read_bytes()).hexdigest()
+image=(modal.Image.from_registry('ghcr.io/ericyuegu/hal:cuda13')
+       .add_local_dir(BASE,'/opt/hal',copy=True,ignore=modal.FilePatternMatcher.from_file(BASE/'.dockerignore'))
+       .add_local_file(SOURCE,'/opt/hal/experiments/064_qualified.py',copy=True)
+       .workdir('/opt/hal').env({'PYTHONPATH':'/opt/hal','UV_NO_SYNC':'1'}))
+app=modal.App('hal-o64-full-validation-qualification-20261017')
+@app.function(image=image,gpu='B200',cpu=(32,48),memory=(131072,393216),ephemeral_disk=524288,timeout=1800,retries=0,serialized=True,include_source=False)
+def qualify(sha,source_hash):
+ import importlib.util,os,sys,time,traceback
+ from contextlib import closing
+ import torch
+ for key,suffix in [('TORCHINDUCTOR_CACHE_DIR','torchinductor'),('TRITON_CACHE_DIR','triton'),('CUDA_CACHE_PATH','cuda'),('TMPDIR','tmp')]:
+  path=Path('/opt/hal-local-cache')/suffix;path.mkdir(parents=True,exist_ok=True);os.environ[key]=str(path)
+ path=Path('/opt/hal/experiments/064_qualified.py');assert hashlib.sha256(path.read_bytes()).hexdigest()==source_hash
+ spec=importlib.util.spec_from_file_location('o64_final_qualification',path);m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+ cfg=m.TrainConfig(arm='bootstrap30');m.validate_config(cfg)
+ torch.set_num_threads(32);torch.manual_seed(cfg.seed);torch.set_float32_matmul_precision('high')
+ report={'schema_version':1,'base_git_sha':sha,'experiment_sha256':source_hash,'dataset_downloads':False,
+         'torch':torch.__version__,'gpu':torch.cuda.get_device_name(),'train_batch_size':cfg.batch_size,'val_batch_size':cfg.val_batch_size,
+         'validation_samples':cfg.val_n_samples,'steps':[]}
+ phase='construct'
+ try:
+  model=m.make_model(cfg).cuda().train();optimizer=m.make_optimizer(model,cfg)
+  for group in optimizer.param_groups:group['initial_lr']=group['lr']
+  scheduler=m.LearningRateScheduler(optimizer,m.lr_schedule(cfg),last_epoch=4094)
+  report['peak_learning_rates']=[g['lr'] for g in optimizer.param_groups]
+  sampler=m.PrefixSampler(cfg.seed ^ 0x059A11,'cuda');labeler=m.PercentileLabeler(cfg.seed,'cuda')
+  cpu_batch=m.synthetic_awr_batch(cfg,torch.device('cpu')).pin_memory()
+  masker=m.ReturnMasker(cfg.seed ^ 0x059C0D,cfg.return_dropout,enabled=cfg.return_conditioning)
+  with closing(m.DeviceBatchPrefetcher([cpu_batch]*8,cfg,'cuda',return_masker=masker)) as prefetch:
+   trunk_fn,temporal_fn=m._training_functions(model,cfg)
+   def update(index):
+    batch,valid=prefetch.next();prefetch.fill_lookahead(4)
+    outcome=m.train_step(model,batch,cfg,step=4095+index,update=4096+index,valid_prefixes=valid,
+                         trunk_fn=trunk_fn,temporal_fn=temporal_fn,optimizer=optimizer,scheduler=scheduler,
+                         prefix_sampler=sampler,percentile_labeler=labeler,prefix_validated_on_cpu=True)
+    prefetch.stage_next();torch.cuda.synchronize()
+    assert bool(torch.isfinite(outcome.gradient_norm)) and all(bool(torch.isfinite(v).all()) for v in outcome.metrics.values())
+    row={'update':4096+index,'objective':float(outcome.metrics['train/objective']),
+         'gradient_norm':float(outcome.gradient_norm),'conditioned_fraction':float(outcome.metrics['percentile/conditioned_fraction'])}
+    report['steps'].append(row);print('FINAL_PREFLIGHT_STEP',json.dumps(row),flush=True)
+   phase='training_before_validation'
+   for index in range(10):update(index)
+   phase='full_validation_cohort';torch.cuda.synchronize();start=time.monotonic()
+   metrics=m.val_metrics(model,[cpu_batch.slice(cfg.val_batch_size)]*(cfg.val_n_samples//cfg.val_batch_size),cfg)
+   torch.cuda.synchronize()
+   report['validation']={'seconds':time.monotonic()-start,'loss_unweighted':metrics['loss_unweighted'],
+                         'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30}
+   print('FINAL_PREFLIGHT_VALIDATION',json.dumps(report['validation']),flush=True)
+   phase='training_after_validation'
+   for index in range(10,18):update(index)
+   report['status']='passed'
+ except (RuntimeError,FloatingPointError,AssertionError) as error:
+  report.update(status='failed',failure_phase=phase,error_type=type(error).__name__,error=str(error),traceback=traceback.format_exc())
+ report['peak_allocated_gib']=torch.cuda.max_memory_allocated()/2**30;report['peak_reserved_gib']=torch.cuda.max_memory_reserved()/2**30
+ return report
+with app.run(detach=True):
+ call=qualify.spawn(SHA,SOURCE_HASH)
+ (ROOT/'experiments/o64/final_preflight_launch.json').write_text(json.dumps({'app_id':app.app_id,'function_call_id':call.object_id,'base_git_sha':SHA,
+  'experiment_sha256':SOURCE_HASH,'controller_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},indent=2)+'\n')
+ print('SUBMITTED',app.app_id,call.object_id,flush=True)

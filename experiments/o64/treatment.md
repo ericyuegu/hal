@@ -1,8 +1,7 @@
 # O64: production percentile conditioning
 
-Status: implementation and local validation in progress. Production training
-has not been launched. The corpus-length audit passed. A full-batch B200
-qualification must pass before launch.
+Status: implementation, local validation, corpus audit and full-batch B200
+qualification passed. Production launch is pending the clean source commit.
 
 Train the O59 production architecture with the O63 bootstrap30 treatment.
 This scales the strongest observed proxy setting, bootstrap30/u95, and changes
@@ -58,7 +57,12 @@ freezing. The labeler seed remains `seed ^ 0x063AB`.
 - The stable run stops explicitly at update **98,304**. A separate decay
   continuation uses an immutable parent checkpoint and recorded lineage.
 - Checkpoints every 2,048 updates; offline validation every 4,096. Validation
-  NLL is diagnostic and does not select the policy.
+  uses the same 2,048-sample cohort in batches of 128. NLL is diagnostic and
+  does not select the policy. Validation decodes only the final context prefix
+  that it scores; full-prefix reference tests cover the unchanged NLL. It
+  retains full-suffix value/percentile computation and labeler draws. Earlier
+  full-suffix decoder implementations exceeded memory with resident training
+  CUDA graphs at both batch 128 and batch 32. Training is unchanged.
 
 ## Gameplay and hardware
 
@@ -69,10 +73,13 @@ timing at (4, 2, 2), seed 0, and the existing dashboard cluster-bootstrap
 `net_stock_lcb` metric.
 
 Use Modal B200 for training, as in O59 production; use L40S for closed-loop
-evaluation. The B200 synthetic preflight must include batch 512, all 26 offsets,
+evaluation. The B200 synthetic preflight passed with batch 512, all 26 offsets,
 optimizer-state allocation, compilation, CUDA-graph capture and replay, and
-updates across the conditioning/AWR boundary. Record memory and warmed update
-time before filling the production replay ring. Do not change the effective
+updates across the conditioning/AWR boundary. The final check also completed
+all 2,048 validation samples at batch 128 in 7.62 seconds and then passed eight
+more training updates. Peak allocated/reserved memory was 166.60/175.86 GiB.
+Matched warmed training throughput was about 960 windows/s, with estimated
+BF16 MFU 28.3%. See [performance/report.md](performance/report.md). Do not change the effective
 batch, model, or objective to conceal a failed memory check.
 
 The launch must use a clean pushed commit. Record that SHA, the resolved config,

@@ -1726,8 +1726,8 @@ def val_metrics(
             history, targets, valid = prepared_targets(model, batch)
             with amp_context(cfg, device):
                 hidden = model.forward_dense(batch.context.features, batch.context.ctx_pad, None)
-                prefix_positions = torch.arange(cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=device).expand(
-                    hidden.shape[0], -1
+                prefix_positions = torch.full(
+                    (hidden.shape[0], 1), cfg.arch.L_ctx - 1, device=device, dtype=torch.long
                 )
             features = decoder_rmsnorm(hidden[:, cfg.arch.direct_loss_start :]).detach().float()
             value = model.value_head(features).squeeze(-1)
@@ -1740,12 +1740,12 @@ def val_metrics(
                     hidden,
                     batch.context.ctx_pad,
                     prefix_positions,
-                    history,
-                    targets,
-                    conditions,
-                    available,
+                    history[:, -1:],
+                    targets[:, -1:],
+                    conditions[:, -1:],
+                    available[:, -1:],
                 )
-                dense_nll = model.temporal.nll_from_logits(logits, targets)
+                dense_nll = model.temporal.nll_from_logits(logits, targets[:, -1:])
             row_valid = batch.context.ctx_pad < cfg.arch.L_ctx
             if not bool(row_valid.any()):
                 continue

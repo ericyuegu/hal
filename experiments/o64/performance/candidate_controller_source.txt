@@ -1,0 +1,51 @@
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+import modal
+
+ROOT=Path('/home/ericgu/src/hal')
+BASE=Path('/tmp/hal-o63-launch')
+CANDIDATE=Path('/tmp/o64_candidate_snapshot.py')
+CANDIDATE.write_bytes((ROOT/'experiments/064_production_percentile.py').read_bytes())
+HELPER=Path('/tmp/o64_execution_candidates.py')
+CASE=Path('/tmp/o64_candidate_case.txt')
+SHA=subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE,text=True).strip()
+assert not subprocess.check_output(['git','status','--porcelain'],cwd=BASE,text=True).strip()
+identity={'base_git_sha':SHA,'candidate_sha256':hashlib.sha256(CANDIDATE.read_bytes()).hexdigest(),
+          'helper_sha256':hashlib.sha256(HELPER.read_bytes()).hexdigest(),'case_sha256':hashlib.sha256(CASE.read_bytes()).hexdigest()}
+image=(modal.Image.from_registry('ghcr.io/ericyuegu/hal:cuda13')
+       .add_local_dir(BASE,'/opt/hal',copy=True,ignore=modal.FilePatternMatcher.from_file(BASE/'.dockerignore'))
+       .add_local_file(CANDIDATE,'/opt/hal/experiments/064_candidate.py',copy=True)
+       .add_local_file(HELPER,'/opt/hal/o64_execution_candidates.py',copy=True)
+       .workdir('/opt/hal').env({'PYTHONPATH':'/opt/hal','UV_NO_SYNC':'1'}))
+app=modal.App('hal-o64-execution-candidates-20261017')
+
+@app.function(image=image,gpu='B200',cpu=(32,48),memory=(131072,393216),ephemeral_disk=524288,timeout=3600,retries=0,serialized=True,include_source=False)
+def benchmark(case_source,identity):
+    import os
+    env=os.environ.copy()
+    for name,suffix in [('TORCHINDUCTOR_CACHE_DIR','torchinductor'),('TRITON_CACHE_DIR','triton'),('CUDA_CACHE_PATH','cuda'),('TMPDIR','tmp')]:
+        path=Path('/opt/hal-local-cache')/suffix;path.mkdir(parents=True,exist_ok=True);env[name]=str(path)
+    result={'schema_version':1,'identity':identity,'dataset_downloads':False,'cases':[],'failures':[],
+            'selection_rule':'Exact sampling/RNG; objective, parameter, gradient and optimizer parity at updates4096,4097. All three candidate speed windows must exceed all baseline and repeat windows. FP32 parameters atol2e-6 rtol2e-5; gradients atol2e-4 rtol.01.'}
+    for variant in ('baseline','cache','rope','flash','repeat'):
+        print('CANDIDATE_START',variant,flush=True)
+        child=subprocess.run(['/opt/venv/bin/python','-c',case_source,variant,'reduce-overhead','yes' if variant=='rope' else 'no'],cwd='/opt/hal',env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        print(child.stdout,flush=True)
+        if child.returncode:
+            result['failures'].append({'variant':variant,'exit_code':child.returncode,'output':child.stdout})
+            if variant=='baseline':break
+            continue
+        lines=[line.removeprefix('MATCHED_RESULT ') for line in child.stdout.splitlines() if line.startswith('MATCHED_RESULT ')]
+        if len(lines)!=1:raise RuntimeError('missing result '+variant)
+        result['cases'].append(json.loads(lines[0]))
+    result['status']='passed' if not result['failures'] and len(result['cases'])==5 else 'failed'
+    return result
+
+with app.run(detach=True):
+    call=benchmark.spawn(CASE.read_text(),identity)
+    output=ROOT/'experiments/o64/performance/candidate_launch.json'
+    output.write_text(json.dumps({'app_id':app.app_id,'function_call_id':call.object_id,'identity':identity,
+                                 'controller_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},indent=2)+'\n')
+    print('SUBMITTED',app.app_id,call.object_id,flush=True)

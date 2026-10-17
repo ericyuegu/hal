@@ -200,6 +200,85 @@ def test_u95_is_the_default_for_all_gameplay_entry_points():
     assert exp.desired_return_for_target("unconditioned") is None
 
 
+def test_validation_batch_size_preserves_teacher_forced_scores():
+    cfg = replace(_cfg(), batch_size=2)
+    torch.manual_seed(31)
+    model = exp.make_model(cfg)
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    batch.context.features["ego_position_x"][1].fill_(0.25)
+    batch.target[1, :, 0] = torch.arange(cfg.arch.sample_chunk_length) % 2
+
+    def row(index):
+        selected = slice(index, index + 1)
+        context = replace(
+            batch.context,
+            features={name: value[selected] for name, value in batch.context.features.items()},
+            ctx_pad=batch.context.ctx_pad[selected],
+        )
+        return replace(
+            batch,
+            batch=replace(batch.batch, context=context, target=batch.target[selected]),
+            returns=batch.returns[selected],
+            eligible=batch.eligible[selected],
+            future_return=batch.future_return[selected],
+            available=batch.available[selected],
+            condition_present=batch.condition_present[selected],
+        )
+
+    combined = exp.val_metrics(model, [batch], cfg)
+    separate = exp.val_metrics(model, [row(0), row(1)], cfg)
+    keys = {name for name in combined if name.startswith("nll_o")}
+    keys |= {"loss_unweighted", "temporal_loss_near_unweighted", "temporal_loss_far_unweighted"}
+    for name in keys:
+        assert combined[name] == pytest.approx(separate[name], rel=1e-6, abs=1e-5), name
+
+
+@pytest.mark.parametrize("arm", ["return60", "bootstrap30", "match"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_validation_scores_match_all_prefix_reference(arm, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    cfg = replace(_cfg(), arm=arm, batch_size=2, amp_dtype="bfloat16" if device == "cuda" else "float32")
+    torch.manual_seed(43)
+    model = exp.make_model(cfg).to(device)
+    batch = exp.synthetic_awr_batch(cfg, torch.device("cpu"))
+    batch.context.ctx_pad[1] = 16
+    batch.context.features["ego_position_x"][1] = torch.linspace(-1, 1, cfg.arch.L_ctx)
+    batch.target[1, :, 0] = torch.arange(cfg.arch.sample_chunk_length) % 2
+    batch.returns.copy_(torch.linspace(-100, 100, cfg.arch.L_ctx)[None, :])
+    batch.future_return.copy_(batch.returns / 2)
+    batch.eligible[1, -1] = False
+    batch.available[1, -1] = False
+    model.eval()
+    with torch.no_grad():
+        for projection in model.temporal.return_conditioner.projections:
+            projection.weight.normal_(std=0.01)
+            projection.bias.normal_(std=0.01)
+        device_batch = batch.to(device)
+        history, targets, _valid = exp.prepared_targets(model, device_batch)
+        with exp.amp_context(cfg, torch.device(device)):
+            hidden = model.forward_dense(device_batch.context.features, device_batch.context.ctx_pad, None)
+        features = exp.decoder_rmsnorm(hidden[:, cfg.arch.direct_loss_start :]).float()
+        value = model.value_head(features).squeeze(-1)
+        target, available = exp.percentile_target(arm, device_batch, value)
+        labeler = exp.PercentileLabeler(cfg.seed, device)
+        conditions = exp.condition_value(labeler(model.percentile_head(features), torch.where(available, target, 0.0)))
+        positions = torch.arange(cfg.arch.direct_loss_start, cfg.arch.L_ctx, device=device).expand(cfg.batch_size, -1)
+        with exp.amp_context(cfg, torch.device(device)):
+            logits = model.temporal.teacher_forced_logits_by_group(
+                hidden, device_batch.context.ctx_pad, positions, history, targets, conditions, available
+            )
+            all_nll = model.temporal.nll_from_logits(logits, targets)
+        expected = exp.nll_mean_metrics(all_nll[:, -1].double().mean(0).cpu(), cfg.arch.head_offsets)
+    actual = exp.val_metrics(model, [batch], cfg)
+    keys = {name for name in expected if name.startswith("nll_o")}
+    keys |= {"loss_unweighted", "temporal_loss_near_unweighted", "temporal_loss_far_unweighted"}
+    for name in keys:
+        assert actual[name] == pytest.approx(
+            expected[name], abs=0.01 if device == "cuda" else 1e-5, rel=0.002 if device == "cuda" else 1e-6
+        ), name
+
+
 @pytest.mark.parametrize("device,compiled", [("cpu", False), ("cuda", False), ("cuda", True)])
 def test_next_update_is_exact_after_resume_with_26_offsets(tmp_path, monkeypatch, request, device, compiled):
     if device == "cuda" and not torch.cuda.is_available():
