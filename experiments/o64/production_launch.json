@@ -1,0 +1,69 @@
+{
+  "app_id": "ap-oZUCPd5fmLIZxrNmE7vq72",
+  "app_url": "https://modal.com/apps/ap-oZUCPd5fmLIZxrNmE7vq72",
+  "argv": [
+    "uv",
+    "run",
+    "experiments/064_production_percentile.py",
+    "train",
+    "--cfg.arm",
+    "bootstrap30",
+    "--cfg.train-compile-mode",
+    "reduce-overhead",
+    "--stop-after-update",
+    "98304",
+    "--comment",
+    "bootstrap30-u95-dense30"
+  ],
+  "base_image": "ghcr.io/ericyuegu/hal:cuda13",
+  "checkpoint_every": 2048,
+  "container_id": "ta-01M55JQ8H2FC15TH1177GW72AR",
+  "function_call_id": "fc-01M55JQ83T7QC37HDBZXDRB5T1",
+  "git_sha": "7955ec17e945ff0269f715056cdf5fe5c6bf53a7",
+  "image_id": "im-BJtDChmqo3vvxfAWMtByq2",
+  "initial_submission_issue": "The clean checkout had an empty local virtualenv. Submission stopped on missing loguru before creating an App. Reused the validated workspace environment via UV_PROJECT_ENVIRONMENT; the second submission succeeded.",
+  "last_durable_checkpoint": null,
+  "last_global_step": null,
+  "launch_id": "a45c8bd5526d45b98da6d02f79841336",
+  "observed_at_utc": "2026-10-17T19:08:18.900123+00:00",
+  "phase": "stable",
+  "primary_eval_target": "u95",
+  "real_validation_cache": {
+    "samples": 2048,
+    "seconds": 69.2
+  },
+  "resources": {
+    "auto_resume": true,
+    "closed_loop_gpu": "L40S",
+    "cpu": [
+      32,
+      48
+    ],
+    "disk_gib": 2048,
+    "gpu": "B200",
+    "max_retries": 10,
+    "memory_gib": [
+      128,
+      384
+    ],
+    "timeout_hours": 24
+  },
+  "schema_version": 1,
+  "separate_decay_phase": {
+    "duration_updates": 32768,
+    "status": "awaiting immutable stable checkpoint"
+  },
+  "source_branch": "codex/o64-production-20261017",
+  "startup_diagnosis": "Main thread is active in PyTorch AOTAutograd backward graph tracing. Background raw-shard materialization threads consume CPU concurrently. GPU was idle at the sampled point; steady full-corpus MFU is not available.",
+  "state_volume": "hal-modal-state",
+  "status_at_observation": "compiling_and_materializing",
+  "stop_after_update": 98304,
+  "wandb": {
+    "entity": "ericyuegu",
+    "forge_url": "https://forge.coreweave.com/wandb/ericyuegu/hal/runs/z2s5pt0z",
+    "project": "hal",
+    "run_id": "z2s5pt0z",
+    "run_name": "261017-184242_064_production_percentile_o64v1-bootstrap30-d1024-L12-h16-c256-t1024x6-ff4096-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__bootstrap30-u95-dense30",
+    "url": "https://wandb.ai/ericyuegu/hal/runs/z2s5pt0z"
+  }
+}

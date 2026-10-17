@@ -1,7 +1,9 @@
 # O64: production percentile conditioning
 
-Status: implementation, local validation, corpus audit and full-batch B200
-qualification passed. Production launch is pending the clean source commit.
+Status: production stable phase launched from `7955ec17`. Its recorded startup
+is compiling and materializing the training cache. See [launch.md](launch.md).
+Implementation, local validation, corpus audit and full-batch B200 qualification
+passed. Gameplay and steady full-corpus training results are pending.
 
 Train the O59 production architecture with the O63 bootstrap30 treatment.
 This scales the strongest observed proxy setting, bootstrap30/u95, and changes

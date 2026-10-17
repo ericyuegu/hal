@@ -44,7 +44,7 @@ Validation previously decoded all 128 suffix prefixes while scoring only the
 last. The final implementation decodes only that prefix and restores the
 original batch 128. It preserves full-suffix value/percentile computation,
 labeler draw shape/order, the full context memory, cohort and training path.
-The final B200 qualification passed ten training updates, all 2,048 validation
+The final B200 qualification passed ten training updates, all 2,048 synthetic validation
 samples in 7.623 seconds, and eight subsequent training updates. It used
 production learning rates, compilation/CUDA graphs, and real prefetch/dropout.
 All losses and gradient norms were finite. Peak allocated/reserved memory was

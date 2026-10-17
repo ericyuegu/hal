@@ -1,0 +1,104 @@
+bytes 310980
+y", line 1082 in _bootstrap_inner
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00002ba0ffba76c0 [ThreadPoolExecu] (most recent call first):
+  File "/opt/venv/lib/python3.14/site-packages/streaming/base/dataset.py", line 1350 in _prepare_thread
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 119 in _worker
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00002ba0ff2a36c0 [IntMsgThr] (most recent call first):
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/opt/venv/lib/python3.14/site-packages/wandb/sdk/wandb_run.py", line 264 in _loop_check_status
+  File "/opt/venv/lib/python3.14/site-packages/wandb/sdk/wandb_run.py", line 347 in check_internal_messages
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00002ba0feea16c0 [ChkStopThr] (most recent call first):
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/opt/venv/lib/python3.14/site-packages/wandb/sdk/wandb_run.py", line 264 in _loop_check_status
+  File "/opt/venv/lib/python3.14/site-packages/wandb/sdk/wandb_run.py", line 320 in check_stop_status
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00002ba0fdfa06c0 [wandb-AsyncioMa] (most recent call first):
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/selectors.py", line 452 in select
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 2008 in _run_once
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 677 in run_forever
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 706 in run_until_complete
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py", line 127 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py", line 204 in run
+  File "/opt/venv/lib/python3.14/site-packages/wandb/sdk/lib/asyncio_compat.py", line 76 in run
+  File "/opt/venv/lib/python3.14/site-packages/wandb/sdk/lib/asyncio_manager.py", line 237 in _main
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x00002ba0fdd9f6c0 [r2-upload-26101] (most recent call first):
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 369 in wait
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/queue.py", line 199 in get
+  File "/opt/hal/hal/training/checkpoints.py", line 153 in _drain
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/.uv/python_install/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Current thread 0x00002b9fd995a740 [python3] (most recent call first):
+  File "<string>", line 3 in <module>
+  File "/opt/venv/lib/python3.14/site-packages/torch/_ops.py", line 865 in __call__
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1212 in proxy_call
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1785 in __torch_dispatch__
+  File "/opt/venv/lib/python3.14/site-packages/torch/utils/_stats.py", line 29 in wrapper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py", line 1263 in _fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_compile.py", line 54 in inner
+  File "/opt/venv/lib/python3.14/site-packages/torch/_ops.py", line 865 in __call__
+  File "/opt/venv/lib/python3.14/site-packages/torch/_decomp/decompositions.py", line 2346 in _to_copy
+  File "/opt/venv/lib/python3.14/site-packages/torch/_prims_common/wrappers.py", line 314 in _fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 2896 in maybe_handle_decomp
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1106 in proxy_call
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1785 in __torch_dispatch__
+  File "/opt/venv/lib/python3.14/site-packages/torch/utils/_stats.py", line 29 in wrapper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py", line 1263 in _fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_compile.py", line 54 in inner
+  File "/opt/venv/lib/python3.14/site-packages/torch/_ops.py", line 910 in decompose
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1123 in proxy_call
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1785 in __torch_dispatch__
+  File "/opt/venv/lib/python3.14/site-packages/torch/utils/_stats.py", line 29 in wrapper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py", line 1263 in _fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_compile.py", line 54 in inner
+  File "/opt/venv/lib/python3.14/site-packages/torch/_decomp/decompositions.py", line 81 in increase_prec
+  File "/opt/venv/lib/python3.14/site-packages/torch/utils/_pytree.py", line 1280 in unflatten
+  File "/opt/venv/lib/python3.14/site-packages/torch/utils/_pytree.py", line 1539 in tree_map
+  File "/opt/venv/lib/python3.14/site-packages/torch/_decomp/decompositions.py", line 91 in inner
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 2896 in maybe_handle_decomp
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1106 in proxy_call
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1785 in __torch_dispatch__
+  File "/opt/venv/lib/python3.14/site-packages/torch/utils/_stats.py", line 29 in wrapper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py", line 1263 in _fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_compile.py", line 54 in inner
+  File "/opt/venv/lib/python3.14/site-packages/torch/_subclasses/functional_tensor.py", line 625 in __torch_dispatch__
+  File "/opt/venv/lib/python3.14/site-packages/torch/_dynamo/eval_frame.py", line 1263 in _fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_compile.py", line 54 in inner
+  File "/opt/venv/lib/python3.14/site-packages/torch/autograd/graph.py", line 869 in _engine_run_backward
+  File "/opt/venv/lib/python3.14/site-packages/torch/autograd/__init__.py", line 532 in grad
+  File "/opt/venv/lib/python3.14/site-packages/torch/fx/experimental/proxy_tensor.py", line 1654 in __torch_function__
+  File "/opt/venv/lib/python3.14/site-packages/torch/overrides.py", line 1741 in handle_torch_function
+  File "/opt/venv/lib/python3.14/site-packages/torch/autograd/__init__.py", line 481 in grad
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 451 in inner_fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 487 in inner_fn_with_anomaly
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 495 in joint_helper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/utils.py", line 785 in call_and_expect_output_descs
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 892 in _functionalized_f_helper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 1157 in joint_helper
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/utils.py", line 785 in call_and_expect_output_descs
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 1215 in inner_fn
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/utils.py", line 785 in call_and_expect_output_descs
+  File "/opt/venv/lib/python3.14/site-packages/torch/_functorch/_aot_autograd/graph_capture.py", line 79 in inner_f
+

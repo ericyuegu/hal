@@ -20,6 +20,10 @@
       "bytes": 5225,
       "sha256": "c22c5b47a4a8a2f9368df1908d1c16e5a265528ede6d2967e8e5d7890ceedc0f"
     },
+    "experiments/o64/launch.md": {
+      "bytes": 3269,
+      "sha256": "1c812a738c71e6c3781061413c2f55c4f14c493c002582976af92b592bca3565"
+    },
     "experiments/o64/performance/059_reference_run.json": {
       "bytes": 130422,
       "sha256": "6becd5ee9aac4028d3612d975c8fdf5899ffd785266f414fe6fe3ab4851c9018"
@@ -73,8 +77,8 @@
       "sha256": "45bf53e71220a1e1d0a320185c068f6d2a3ca683cd6e13005fe080274067c42b"
     },
     "experiments/o64/performance/report.md": {
-      "bytes": 8044,
-      "sha256": "257a2f01d547b90857ed80300975beaeb8a4d9535400a08d147752bb1ddc3b53"
+      "bytes": 8054,
+      "sha256": "964a48c2e1be31e26e9380dca9aaefa02624fefe7f77c782e878954885dd180b"
     },
     "experiments/o64/performance/superseded_profile_launch.json": {
       "bytes": 538,
@@ -87,6 +91,30 @@
     "experiments/o64/preflight_launch.json": {
       "bytes": 247,
       "sha256": "306dc0c6fad0c56e18de63feb707b559bb0e52a4102f1c313e662bef4d91fda4"
+    },
+    "experiments/o64/production_launch.json": {
+      "bytes": 2462,
+      "sha256": "2fada3c3ad85bf9f01745b63d58f3582b4bcc0aace00d7aa61db9284f7691116"
+    },
+    "experiments/o64/production_pyspy_failure.txt": {
+      "bytes": 140,
+      "sha256": "0bb9a78da38de5f53d690b62951a96d0658d5f7153e876b8a4d0236fe460f238"
+    },
+    "experiments/o64/production_retry_state.json": {
+      "bytes": 262,
+      "sha256": "cd8485b217182ecdaaf7713de1539115f9e4cbc7a25990398765b28a4f07c482"
+    },
+    "experiments/o64/production_startup_stack_tail.txt": {
+      "bytes": 10014,
+      "sha256": "a5fee02bfd5b82420efacc5db4e15640087e4db1800d7440a9e9f7fead092c4f"
+    },
+    "experiments/o64/production_startup_thread_cpu.json": {
+      "bytes": 1891,
+      "sha256": "b38f074abd273a57395169f2b15fe4f06f486d161daec7d10524f899b07e01d5"
+    },
+    "experiments/o64/production_wandb_snapshot.json": {
+      "bytes": 5924,
+      "sha256": "a1af5b59df85225362e8c6ad21cf0911e8b610327ebd9b1ea78937ed522217c4"
     },
     "experiments/o64/resolved_config.json": {
       "bytes": 15058,
@@ -109,12 +137,12 @@
       "sha256": "3dcc34e9315aef7959d76c4d6ac9e3d1931e015f0bf7c1a86d58670d47941189"
     },
     "experiments/o64/treatment.md": {
-      "bytes": 5612,
-      "sha256": "355beacfe3168e4b14c74636d9dc74874f4a80d7ba87bcd94c0fa33ec332cb21"
+      "bytes": 5770,
+      "sha256": "ff8c5acfdfb0e1230726c835e0192a865df74e9ee9efb2e7cb691dedfa6081f4"
     },
     "experiments/o64/validation.md": {
-      "bytes": 4690,
-      "sha256": "0db5c4a56de6a8ac30dccce8cd16a05eb05b8ead05e4b073a04a7ad89b70a333"
+      "bytes": 4700,
+      "sha256": "4e336e4e1242bfa2ae6caf1cd7b15db5e64692d4e83cff43c2577d8900b37d0a"
     },
     "experiments/o64/validation32_cohort_launch.json": {
       "bytes": 343,

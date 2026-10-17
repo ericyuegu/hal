@@ -125,7 +125,7 @@ Seven focused tests passed. They compare the new path with the original
 full-prefix NLL calculation across all three arms on CPU and CUDA, with nonzero
 conditioning, padding and unavailable labels; they also check batch aggregation.
 The complete B200 qualification passed: ten training updates, all 2,048
-validation samples at batch 128 in 7.623 seconds, and eight further training
+synthetic validation samples at batch 128 in 7.623 seconds, and eight further training
 updates. It used production learning rates and real prefetch/dropout. All
 losses and gradient norms remained finite. Peak allocated/reserved memory was
 166.60/175.86 GiB, within the training peak. No dataset was downloaded. The

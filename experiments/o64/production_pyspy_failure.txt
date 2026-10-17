@@ -1,0 +1,4 @@
+Downloading py-spy (2.8MiB)
+ Downloaded py-spy
+Installed 1 package in 113ms
+Error: Failed to find a python interpreter in the .data section
