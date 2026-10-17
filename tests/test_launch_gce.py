@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -36,12 +37,35 @@ def test_startup_script_contains_no_secret_values() -> None:
         image="example/image:tag",
         keep_alive=False,
     )
-    assert base64.b64encode(b"WANDB_API_KEY=wandb-key").decode() in script
+    assert base64.b64encode(b"WANDB_API_KEY=wandb-key\n").decode() in script
     assert "secret-value" not in script
     assert base64.b64encode(b"python train.py --name 'two words'").decode() in script
     assert "export HAL_KEEP_ALIVE=0" in script
     assert "apt-get install --yes --no-install-recommends docker.io" in script
     assert "nvidia-ctk runtime configure --runtime=docker" in script
+
+
+def test_startup_secret_records_include_the_final_credential() -> None:
+    secrets = parse_secrets(_MODULE.DEFAULT_SECRETS)
+    script = startup_script(
+        sha="a" * 40,
+        train_cmd="true",
+        project="project",
+        secrets=secrets,
+        image="example/image:tag",
+        keep_alive=False,
+    )
+    line = next(line for line in script.splitlines() if line.startswith("export HAL_SECRET_SPECS_B64="))
+    records = base64.b64decode(line.split("=", 1)[1]).decode()
+    result = subprocess.run(
+        ["bash", "-c", 'while IFS="=" read -r env_name secret_id; do printf "%s\\n" "$env_name"; done'],
+        input=records,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == [name for name, _ in secrets]
+    assert result.stdout.splitlines()[-1] == "WANDB_API_KEY"
 
 
 def test_create_command_spot_keyless_service_account() -> None:
