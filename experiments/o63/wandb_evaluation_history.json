@@ -1,0 +1,164 @@
+{
+  "observed_at": "2026-10-17T11:13:12.558693+00:00",
+  "runs": [
+    {
+      "arm": "control",
+      "points": [
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.1171272156465084,
+          "eval/net_stock_per_min": 0.010643959552953719,
+          "global_step": 8192,
+          "wandb_step": 328
+        },
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": 0.2550997812165071,
+          "eval/net_stock_per_min": 0.37208807856374015,
+          "global_step": 16384,
+          "wandb_step": 661
+        },
+        {
+          "eval_unconditioned/boots": 96,
+          "eval_unconditioned/net_stock_lcb": -0.19125345990925594,
+          "eval_unconditioned/net_stock_per_min": -0.08500113629991235,
+          "global_step": 16384,
+          "wandb_step": 662
+        }
+      ],
+      "state": "finished",
+      "wandb_id": "0385dn13",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/0385dn13"
+    },
+    {
+      "arm": "return60",
+      "points": [
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.48913238519636915,
+          "eval/net_stock_per_min": -0.3718432061147551,
+          "global_step": 8192,
+          "wandb_step": 328
+        },
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.04772512479183392,
+          "eval/net_stock_per_min": 0.07433200745089885,
+          "global_step": 16384,
+          "wandb_step": 661
+        },
+        {
+          "eval_u50/boots": 96,
+          "eval_u50/net_stock_lcb": -0.24947252484772894,
+          "eval_u50/net_stock_per_min": -0.12733896926178778,
+          "global_step": 16384,
+          "wandb_step": 662
+        },
+        {
+          "eval_u90/boots": 96,
+          "eval_u90/net_stock_lcb": 0.03196484819089454,
+          "eval_u90/net_stock_per_min": 0.17590436014789002,
+          "global_step": 16384,
+          "wandb_step": 663
+        },
+        {
+          "eval_unconditioned/boots": 96,
+          "eval_unconditioned/net_stock_lcb": -0.11682969368842648,
+          "eval_unconditioned/net_stock_per_min": -0.005309429103635743,
+          "global_step": 16384,
+          "wandb_step": 664
+        }
+      ],
+      "state": "finished",
+      "wandb_id": "1c2ru27l",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/1c2ru27l"
+    },
+    {
+      "arm": "bootstrap30",
+      "points": [
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.4945225863032319,
+          "eval/net_stock_per_min": -0.36661230453616334,
+          "global_step": 8192,
+          "wandb_step": 328
+        },
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.021244456029182825,
+          "eval/net_stock_per_min": 0.10095181026963285,
+          "global_step": 16384,
+          "wandb_step": 661
+        },
+        {
+          "eval_u50/boots": 96,
+          "eval_u50/net_stock_lcb": -0.1485831535005484,
+          "eval_u50/net_stock_per_min": -0.04775021332849938,
+          "global_step": 16384,
+          "wandb_step": 662
+        },
+        {
+          "eval_u90/boots": 96,
+          "eval_u90/net_stock_lcb": 0.1329474313162273,
+          "eval_u90/net_stock_per_min": 0.24460061859141935,
+          "global_step": 16384,
+          "wandb_step": 663
+        },
+        {
+          "eval_unconditioned/boots": 96,
+          "eval_unconditioned/net_stock_lcb": -0.11133936186881223,
+          "eval_unconditioned/net_stock_per_min": -0.010611127240679474,
+          "global_step": 16384,
+          "wandb_step": 664
+        }
+      ],
+      "state": "finished",
+      "wandb_id": "15qi0hke",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/15qi0hke"
+    },
+    {
+      "arm": "match",
+      "points": [
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.3772466271224659,
+          "eval/net_stock_per_min": -0.26030368763557477,
+          "global_step": 8192,
+          "wandb_step": 328
+        },
+        {
+          "eval/boots": 96,
+          "eval/net_stock_lcb": -0.010620977647785029,
+          "eval/net_stock_per_min": 0.09555239013687,
+          "global_step": 16384,
+          "wandb_step": 661
+        },
+        {
+          "eval_u50/boots": 96,
+          "eval_u50/net_stock_lcb": -0.21247731736803033,
+          "eval_u50/net_stock_per_min": -0.09554506394736773,
+          "global_step": 16384,
+          "wandb_step": 662
+        },
+        {
+          "eval_u90/boots": 96,
+          "eval_u90/net_stock_lcb": -0.18576492299344174,
+          "eval_u90/net_stock_per_min": -0.06371737802989408,
+          "global_step": 16384,
+          "wandb_step": 663
+        },
+        {
+          "eval_unconditioned/boots": 96,
+          "eval_unconditioned/net_stock_lcb": -0.05304628222214522,
+          "eval_unconditioned/net_stock_per_min": 0.042431814431531545,
+          "global_step": 16384,
+          "wandb_step": 664
+        }
+      ],
+      "state": "finished",
+      "wandb_id": "56myl0sj",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/56myl0sj"
+    }
+  ],
+  "schema_version": 1
+}

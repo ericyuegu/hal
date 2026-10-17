@@ -1,0 +1,24 @@
+{
+  "comparisons": [
+    {
+      "arm": "return60",
+      "mean_net_stock_per_min_difference": 0.07969170719627673,
+      "paired_bootstrap_95_ci_high": 0.27074697689964333,
+      "paired_bootstrap_95_ci_low": -0.10096619135122886
+    },
+    {
+      "arm": "bootstrap30",
+      "mean_net_stock_per_min_difference": 0.07439000905923283,
+      "paired_bootstrap_95_ci_high": 0.2494106858375299,
+      "paired_bootstrap_95_ci_low": -0.10105059711799409
+    },
+    {
+      "arm": "match",
+      "mean_net_stock_per_min_difference": 0.12743295073144392,
+      "paired_bootstrap_95_ci_high": 0.2919882442357308,
+      "paired_bootstrap_95_ci_low": -0.037111074181565104
+    }
+  ],
+  "schema_version": 1,
+  "scope": "Secondary descriptive comparison of unconditioned play; paired resampling of the same 96 boot indices, 2000 draws, seed 0. Conditions on the trained seed-0 checkpoints and this matchup schedule; does not measure training-seed uncertainty or adjust for multiple comparisons."
+}

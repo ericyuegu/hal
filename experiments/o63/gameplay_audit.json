@@ -1,0 +1,188 @@
+{
+  "bootstrap_resamples": 2000,
+  "lower_percentile": 5,
+  "results": [
+    {
+      "active_boots": 96,
+      "arm": "control",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.9081958235744878e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.1171272156465084,
+      "reconstructed_net_stock_per_min": 0.0106439595529537,
+      "target": "p90",
+      "update": 8192
+    },
+    {
+      "active_boots": 96,
+      "arm": "control",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 0.0,
+      "reconstructed_cluster_bootstrap_lcb": 0.2550997812165071,
+      "reconstructed_net_stock_per_min": 0.37208807856374015,
+      "target": "p90",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "control",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.3877787807814457e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.19125345990925594,
+      "reconstructed_net_stock_per_min": -0.08500113629991236,
+      "target": "unconditioned",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "return60",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.1102230246251565e-16,
+      "reconstructed_cluster_bootstrap_lcb": -0.48913238519636915,
+      "reconstructed_net_stock_per_min": -0.37184320611475496,
+      "target": "u75",
+      "update": 8192
+    },
+    {
+      "active_boots": 96,
+      "arm": "return60",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.3877787807814457e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.04772512479183392,
+      "reconstructed_net_stock_per_min": 0.07433200745089887,
+      "target": "u75",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "return60",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 5.551115123125783e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.24947252484772894,
+      "reconstructed_net_stock_per_min": -0.12733896926178773,
+      "target": "u50",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "return60",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 0.0,
+      "reconstructed_cluster_bootstrap_lcb": 0.03196484819089454,
+      "reconstructed_net_stock_per_min": 0.17590436014789002,
+      "target": "u90",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "return60",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.1015494072452725e-16,
+      "reconstructed_cluster_bootstrap_lcb": -0.11682969368842648,
+      "reconstructed_net_stock_per_min": -0.005309429103635633,
+      "target": "unconditioned",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "bootstrap30",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.6653345369377348e-16,
+      "reconstructed_cluster_bootstrap_lcb": -0.4945225863032319,
+      "reconstructed_net_stock_per_min": -0.36661230453616317,
+      "target": "u75",
+      "update": 8192
+    },
+    {
+      "active_boots": 96,
+      "arm": "bootstrap30",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 2.7755575615628914e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.021244456029182825,
+      "reconstructed_net_stock_per_min": 0.10095181026963287,
+      "target": "u75",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "bootstrap30",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 6.938893903907228e-18,
+      "reconstructed_cluster_bootstrap_lcb": -0.1485831535005484,
+      "reconstructed_net_stock_per_min": -0.04775021332849937,
+      "target": "u50",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "bootstrap30",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.6653345369377348e-16,
+      "reconstructed_cluster_bootstrap_lcb": 0.1329474313162273,
+      "reconstructed_net_stock_per_min": 0.24460061859141952,
+      "target": "u90",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "bootstrap30",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 5.377642775528102e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.11133936186881223,
+      "reconstructed_net_stock_per_min": -0.010611127240679528,
+      "target": "unconditioned",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "match",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.6653345369377348e-16,
+      "reconstructed_cluster_bootstrap_lcb": -0.3772466271224659,
+      "reconstructed_net_stock_per_min": -0.26030368763557493,
+      "target": "u75",
+      "update": 8192
+    },
+    {
+      "active_boots": 96,
+      "arm": "match",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.3877787807814457e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.010620977647785029,
+      "reconstructed_net_stock_per_min": 0.09555239013686999,
+      "target": "u75",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "match",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 5.551115123125783e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.21247731736803033,
+      "reconstructed_net_stock_per_min": -0.09554506394736767,
+      "target": "u50",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "match",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 1.3877787807814457e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.18576492299344174,
+      "reconstructed_net_stock_per_min": -0.06371737802989409,
+      "target": "u90",
+      "update": 16384
+    },
+    {
+      "active_boots": 96,
+      "arm": "match",
+      "lcb_absolute_error": 0.0,
+      "point_absolute_error": 2.0816681711721685e-17,
+      "reconstructed_cluster_bootstrap_lcb": -0.05304628222214522,
+      "reconstructed_net_stock_per_min": 0.042431814431531566,
+      "target": "unconditioned",
+      "update": 16384
+    }
+  ],
+  "schema_version": 1,
+  "seed": 0
+}

@@ -1,7 +1,7 @@
 # O63: return percentile conditioning
 
-Status: all four runs completed 16,384 training updates. Final gameplay
-evaluations are in progress; completed scores are recorded below.
+Status: all four runs completed 16,384 training updates and all 18 planned
+gameplay cohorts. The control warmup interpretation awaits user confirmation.
 
 ## Fixed comparison
 
@@ -113,6 +113,10 @@ LCBs use the user-confirmed dashboard cluster-bootstrap metric, in net stocks
 per active gameplay minute. These are differences of LCBs, not confidence
 intervals for paired treatment effects.
 
+Every percentile arm at the fixed u75 target scores below the original control.
+The comparison includes the conditioning warmup difference described below;
+it does not isolate percentile conditioning alone.
+
 ## Secondary results
 
 The u sweep is secondary. All scores use the same final checkpoint within each
@@ -121,24 +125,30 @@ arm. Values are net stocks per active gameplay minute.
 | Arm | Target | Mean net stocks | Dashboard LCB |
 | --- | --- | ---: | ---: |
 | control | unconditioned | -0.08500 | -0.19125 |
-| return60 | u50 | Pending | Pending |
+| return60 | u50 | -0.12734 | -0.24947 |
 | return60 | u75 | 0.07433 | -0.04773 |
-| return60 | u90 | Pending | Pending |
-| return60 | unconditioned | Pending | Pending |
+| return60 | u90 | 0.17590 | 0.03196 |
+| return60 | unconditioned | -0.00531 | -0.11683 |
 | bootstrap30 | u50 | -0.04775 | -0.14858 |
 | bootstrap30 | u75 | 0.10095 | -0.02124 |
-| bootstrap30 | u90 | Pending | Pending |
-| bootstrap30 | unconditioned | Pending | Pending |
-| match | u50 | Pending | Pending |
+| bootstrap30 | u90 | 0.24460 | 0.13295 |
+| bootstrap30 | unconditioned | -0.01061 | -0.11134 |
+| match | u50 | -0.09555 | -0.21248 |
 | match | u75 | 0.09555 | -0.01062 |
-| match | u90 | Pending | Pending |
-| match | unconditioned | Pending | Pending |
+| match | u90 | -0.06372 | -0.18576 |
+| match | unconditioned | 0.04243 | -0.05305 |
 
-| Arm | u90 minus u50, mean net stocks / min | Unconditioned gap from original 059 |
-| --- | ---: | ---: |
-| return60 | Pending | Pending |
-| bootstrap30 | Pending | Pending |
-| match | Pending | Pending |
+| Arm | u90 minus u50, mean net stocks / min | Unconditioned gap from original 059 | Gap: descriptive 95% CI |
+| --- | ---: | ---: | ---: |
+| return60 | +0.30324 | +0.07969 | [-0.10097, +0.27075] |
+| bootstrap30 | +0.29235 | +0.07439 | [-0.10105, +0.24941] |
+| match | +0.03183 | +0.12743 | [-0.03711, +0.29199] |
+
+Unconditioned gap intervals are secondary diagnostics from paired bootstrap
+resampling of the same 96 boots (2,000 draws, seed 0). They condition on these
+trained checkpoints and this matchup schedule; they do not measure training-seed
+uncertainty or establish equivalence. See
+[unconditioned_comparison.json](unconditioned_comparison.json).
 
 Final training diagnostics below average the logged windows ending in the last
 1,024 updates. The CDF gap is the mean absolute gap at nine decile cutpoints;
@@ -153,6 +163,12 @@ Heads remained trainable as agreed. Validation NLL is diagnostic only;
 | bootstrap30 | 0.76165 | 0.60927 | 0.04360 | 0.06392 | 1.18025 |
 | match | 0.99481 | 0.79579 | 0.01506 | 0.02655 | 1.18622 |
 
+In the final logged windows, `bootstrap30` clipped gradients in about 5.4%
+of updates (19.1% across post-warmup logged windows); the other arms reported
+zero. All heads share the global clip, so this can rescale shared gradients. The incidence does not measure the
+magnitude of that rescaling or establish that the new head caused each clip.
+
+Gameplay figure: [gameplay_results.svg](gameplay_results.svg).
 Training curves: [training_diagnostics.svg](training_diagnostics.svg).
 Full training history: [training_diagnostics.json](training_diagnostics.json).
 Full gameplay evidence and artifact hashes: [gameplay_results.json](gameplay_results.json).
@@ -223,6 +239,19 @@ The FunctionCall and launcher identities are recorded in [launches.json](launche
 
 ## Review limits
 
+All 18 gameplay cohorts completed their 96 boots: 1,728 boots and 12,441,600
+captured emulator frames in total, with zero crashes, failed workers, or
+timeouts. Reconstructed rates and cluster-bootstrap bounds agree with every
+raw metric within 1e-12. Every score also matches W&B chart history. See
+[gameplay_audit.json](gameplay_audit.json),
+[wandb_evaluation_history.json](wandb_evaluation_history.json), and
+[completion_evidence.json](completion_evidence.json). Artifact hashes are in
+[evidence_manifest.json](evidence_manifest.json).
+
+The experiment, both launchers, dependency lock, and project configuration
+match the training commit byte for byte. Later experiment changes are tests
+and evidence. See [source_identities.json](source_identities.json).
+
 All four final checkpoints were downloaded and hashed. Their loader state,
 identity dropout RNG, condition dropout RNG, and prefix sampler state are
 exactly equal across arms. All three percentile labeler RNG states are also
@@ -242,7 +271,11 @@ All heads share the existing global gradient clip. Detaching head features
 prevents direct trunk gradients, but the new head can change the shared clip
 factor. In the focused fixture, the pre-clip norm changed from 90.85994 to
 90.87599, a shared-gradient scale change of about 0.018%. This is part of the
-specified added-loss treatment; the optimizer rule is unchanged.
+specified added-loss treatment; the optimizer rule is unchanged. The fixture
+is not a bound on the actual training effect: in the final logged windows,
+`bootstrap30` clipped in about 5.4% of updates (19.1% across post-warmup
+logged windows), versus zero for the other arms.
+This incidence does not quantify the shared-gradient rescaling magnitude.
 
 Offline validation uses the last context prefix. That position cannot have a
 30-frame bootstrap target, so `bootstrap30` validation policy NLL is
