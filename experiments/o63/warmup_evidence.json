@@ -1,0 +1,721 @@
+{
+  "bootstrap30": {
+    "metrics": {
+      "global_step": 5150,
+      "optimizer/clip_fraction": 0.36000001430511475,
+      "optimizer/grad_norm": 0.9166659712791444,
+      "percentile/available_fraction": 0.7625744342803955,
+      "percentile/calibration_error": 0.047701071947813034,
+      "percentile/conditioned_fraction": 0.6100049018859863,
+      "percentile/loss": 3.0031092166900635,
+      "percentile/max_decile_drift": 0.06828127056360245,
+      "system/memory_gb": 118.87893295288086,
+      "throughput/update_s": 0.198194366159978,
+      "train/objective": 4.037234306335449
+    },
+    "warmup_history": [
+      {
+        "global_step": 4000,
+        "percentile/available_fraction": 0.7615576386451721,
+        "percentile/calibration_error": 0.03589693084359169,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.05375637859106064
+      },
+      {
+        "global_step": 4025,
+        "percentile/available_fraction": 0.7616174221038818,
+        "percentile/calibration_error": 0.023710550740361214,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.038051001727581024
+      },
+      {
+        "global_step": 4050,
+        "percentile/available_fraction": 0.7622155547142029,
+        "percentile/calibration_error": 0.03032231144607067,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.04790244996547699
+      },
+      {
+        "global_step": 4075,
+        "percentile/available_fraction": 0.761737048625946,
+        "percentile/calibration_error": 0.03794214874505997,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.05575443431735039
+      },
+      {
+        "global_step": 4100,
+        "percentile/available_fraction": 0.7608398199081421,
+        "percentile/calibration_error": 0.02866150625050068,
+        "percentile/conditioned_fraction": 0.09708557277917862,
+        "percentile/max_decile_drift": 0.0447067990899086
+      },
+      {
+        "global_step": 4125,
+        "percentile/available_fraction": 0.7618566751480103,
+        "percentile/calibration_error": 0.08432004600763321,
+        "percentile/conditioned_fraction": 0.6095068454742432,
+        "percentile/max_decile_drift": 0.11703532934188843
+      },
+      {
+        "global_step": 4150,
+        "percentile/available_fraction": 0.761138916015625,
+        "percentile/calibration_error": 0.09294445067644119,
+        "percentile/conditioned_fraction": 0.6092504858970642,
+        "percentile/max_decile_drift": 0.13064929842948914
+      },
+      {
+        "global_step": 4175,
+        "percentile/available_fraction": 0.7612585425376892,
+        "percentile/calibration_error": 0.10891925543546677,
+        "percentile/conditioned_fraction": 0.6092236042022705,
+        "percentile/max_decile_drift": 0.15497227013111115
+      },
+      {
+        "global_step": 4200,
+        "percentile/available_fraction": 0.7623351812362671,
+        "percentile/calibration_error": 0.0760979875922203,
+        "percentile/conditioned_fraction": 0.6096600294113159,
+        "percentile/max_decile_drift": 0.10920027643442154
+      },
+      {
+        "global_step": 4225,
+        "percentile/available_fraction": 0.7613183856010437,
+        "percentile/calibration_error": 0.07110179215669632,
+        "percentile/conditioned_fraction": 0.6089330911636353,
+        "percentile/max_decile_drift": 0.10270597785711288
+      },
+      {
+        "global_step": 4250,
+        "percentile/available_fraction": 0.7620959281921387,
+        "percentile/calibration_error": 0.025371268391609192,
+        "percentile/conditioned_fraction": 0.6098278760910034,
+        "percentile/max_decile_drift": 0.039282895624637604
+      },
+      {
+        "global_step": 4275,
+        "percentile/available_fraction": 0.7622753977775574,
+        "percentile/calibration_error": 0.0704713985323906,
+        "percentile/conditioned_fraction": 0.6094720363616943,
+        "percentile/max_decile_drift": 0.09651530534029007
+      },
+      {
+        "global_step": 4300,
+        "percentile/available_fraction": 0.7610192894935608,
+        "percentile/calibration_error": 0.04264421388506889,
+        "percentile/conditioned_fraction": 0.6084436178207397,
+        "percentile/max_decile_drift": 0.06328929215669632
+      },
+      {
+        "global_step": 4325,
+        "percentile/available_fraction": 0.7615576386451721,
+        "percentile/calibration_error": 0.022786259651184082,
+        "percentile/conditioned_fraction": 0.6085516214370728,
+        "percentile/max_decile_drift": 0.037312060594558716
+      },
+      {
+        "global_step": 4350,
+        "percentile/available_fraction": 0.7613183856010437,
+        "percentile/calibration_error": 0.02982788346707821,
+        "percentile/conditioned_fraction": 0.6092559695243835,
+        "percentile/max_decile_drift": 0.04647025093436241
+      },
+      {
+        "global_step": 4375,
+        "percentile/available_fraction": 0.7613183856010437,
+        "percentile/calibration_error": 0.048112738877534866,
+        "percentile/conditioned_fraction": 0.6090387105941772,
+        "percentile/max_decile_drift": 0.06890815496444702
+      },
+      {
+        "global_step": 4400,
+        "percentile/available_fraction": 0.7617968916893005,
+        "percentile/calibration_error": 0.028113868087530136,
+        "percentile/conditioned_fraction": 0.6093047857284546,
+        "percentile/max_decile_drift": 0.04431525617837906
+      },
+      {
+        "global_step": 4425,
+        "percentile/available_fraction": 0.762036144733429,
+        "percentile/calibration_error": 0.04522447660565376,
+        "percentile/conditioned_fraction": 0.6095837354660034,
+        "percentile/max_decile_drift": 0.06464944034814835
+      },
+      {
+        "global_step": 4450,
+        "percentile/available_fraction": 0.7610192894935608,
+        "percentile/calibration_error": 0.08181274682283401,
+        "percentile/conditioned_fraction": 0.6085296869277954,
+        "percentile/max_decile_drift": 0.11352521181106567
+      },
+      {
+        "global_step": 4475,
+        "percentile/available_fraction": 0.7622155547142029,
+        "percentile/calibration_error": 0.06712120026350021,
+        "percentile/conditioned_fraction": 0.6098687648773193,
+        "percentile/max_decile_drift": 0.09814346581697464
+      },
+      {
+        "global_step": 4500,
+        "percentile/available_fraction": 0.7625744342803955,
+        "percentile/calibration_error": 0.1123461127281189,
+        "percentile/conditioned_fraction": 0.6102643013000488,
+        "percentile/max_decile_drift": 0.1546003818511963
+      },
+      {
+        "global_step": 4525,
+        "percentile/available_fraction": 0.7609594464302063,
+        "percentile/calibration_error": 0.10160209983587265,
+        "percentile/conditioned_fraction": 0.609027087688446,
+        "percentile/max_decile_drift": 0.14196202158927917
+      },
+      {
+        "global_step": 4550,
+        "percentile/available_fraction": 0.761138916015625,
+        "percentile/calibration_error": 0.14022645354270935,
+        "percentile/conditioned_fraction": 0.6095532178878784,
+        "percentile/max_decile_drift": 0.19561421871185303
+      },
+      {
+        "global_step": 4575,
+        "percentile/available_fraction": 0.7616772651672363,
+        "percentile/calibration_error": 0.12413369119167328,
+        "percentile/conditioned_fraction": 0.6089062690734863,
+        "percentile/max_decile_drift": 0.1779181808233261
+      },
+      {
+        "global_step": 4600,
+        "percentile/available_fraction": 0.7606604099273682,
+        "percentile/calibration_error": 0.14768537878990173,
+        "percentile/conditioned_fraction": 0.6086742877960205,
+        "percentile/max_decile_drift": 0.20717456936836243
+      },
+      {
+        "global_step": 4625,
+        "percentile/available_fraction": 0.7625146508216858,
+        "percentile/calibration_error": 0.08228370547294617,
+        "percentile/conditioned_fraction": 0.6097283959388733,
+        "percentile/max_decile_drift": 0.12432923913002014
+      },
+      {
+        "global_step": 4650,
+        "percentile/available_fraction": 0.7623351812362671,
+        "percentile/calibration_error": 0.05853426456451416,
+        "percentile/conditioned_fraction": 0.6098663210868835,
+        "percentile/max_decile_drift": 0.08664195984601974
+      },
+      {
+        "global_step": 4675,
+        "percentile/available_fraction": 0.7608996629714966,
+        "percentile/calibration_error": 0.04042121395468712,
+        "percentile/conditioned_fraction": 0.6084283590316772,
+        "percentile/max_decile_drift": 0.05830682814121246
+      },
+      {
+        "global_step": 4700,
+        "percentile/available_fraction": 0.7624548077583313,
+        "percentile/calibration_error": 0.03404242545366287,
+        "percentile/conditioned_fraction": 0.6100720167160034,
+        "percentile/max_decile_drift": 0.053196731954813004
+      },
+      {
+        "global_step": 4725,
+        "percentile/available_fraction": 0.7616772651672363,
+        "percentile/calibration_error": 0.03910815715789795,
+        "percentile/conditioned_fraction": 0.608567476272583,
+        "percentile/max_decile_drift": 0.056999314576387405
+      },
+      {
+        "global_step": 4750,
+        "percentile/available_fraction": 0.7612585425376892,
+        "percentile/calibration_error": 0.021605318412184715,
+        "percentile/conditioned_fraction": 0.6097472906112671,
+        "percentile/max_decile_drift": 0.03479452058672905
+      },
+      {
+        "global_step": 4775,
+        "percentile/available_fraction": 0.7611987590789795,
+        "percentile/calibration_error": 0.024213004857301712,
+        "percentile/conditioned_fraction": 0.6087652444839478,
+        "percentile/max_decile_drift": 0.04047485813498497
+      },
+      {
+        "global_step": 4800,
+        "percentile/available_fraction": 0.7613183856010437,
+        "percentile/calibration_error": 0.06425635516643524,
+        "percentile/conditioned_fraction": 0.6092657446861267,
+        "percentile/max_decile_drift": 0.09039273858070374
+      },
+      {
+        "global_step": 4825,
+        "percentile/available_fraction": 0.7613183856010437,
+        "percentile/calibration_error": 0.10363460332155228,
+        "percentile/conditioned_fraction": 0.6092584133148193,
+        "percentile/max_decile_drift": 0.14323978126049042
+      },
+      {
+        "global_step": 4850,
+        "percentile/available_fraction": 0.7623351812362671,
+        "percentile/calibration_error": 0.03810951113700867,
+        "percentile/conditioned_fraction": 0.6101537942886353,
+        "percentile/max_decile_drift": 0.05873186141252518
+      },
+      {
+        "global_step": 4875,
+        "percentile/available_fraction": 0.7614977955818176,
+        "percentile/calibration_error": 0.05238579213619232,
+        "percentile/conditioned_fraction": 0.6087896823883057,
+        "percentile/max_decile_drift": 0.07459621131420135
+      },
+      {
+        "global_step": 4900,
+        "percentile/available_fraction": 0.7613781690597534,
+        "percentile/calibration_error": 0.07927553355693817,
+        "percentile/conditioned_fraction": 0.609027087688446,
+        "percentile/max_decile_drift": 0.10984649509191513
+      },
+      {
+        "global_step": 4925,
+        "percentile/available_fraction": 0.7627539038658142,
+        "percentile/calibration_error": 0.04535567760467529,
+        "percentile/conditioned_fraction": 0.6102258563041687,
+        "percentile/max_decile_drift": 0.0686924010515213
+      },
+      {
+        "global_step": 4950,
+        "percentile/available_fraction": 0.7614380121231079,
+        "percentile/calibration_error": 0.05873924866318703,
+        "percentile/conditioned_fraction": 0.609147310256958,
+        "percentile/max_decile_drift": 0.08461195230484009
+      },
+      {
+        "global_step": 4975,
+        "percentile/available_fraction": 0.7610790729522705,
+        "percentile/calibration_error": 0.1075093001127243,
+        "percentile/conditioned_fraction": 0.6082068085670471,
+        "percentile/max_decile_drift": 0.14947374165058136
+      },
+      {
+        "global_step": 5000,
+        "percentile/available_fraction": 0.761737048625946,
+        "percentile/calibration_error": 0.046878017485141754,
+        "percentile/conditioned_fraction": 0.609251081943512,
+        "percentile/max_decile_drift": 0.07181499898433685
+      },
+      {
+        "global_step": 5025,
+        "percentile/available_fraction": 0.761138916015625,
+        "percentile/calibration_error": 0.05367648974061012,
+        "percentile/conditioned_fraction": 0.6087738275527954,
+        "percentile/max_decile_drift": 0.07844574004411697
+      },
+      {
+        "global_step": 5050,
+        "percentile/available_fraction": 0.7612585425376892,
+        "percentile/calibration_error": 0.08075471222400665,
+        "percentile/conditioned_fraction": 0.6095452904701233,
+        "percentile/max_decile_drift": 0.11406537145376205
+      },
+      {
+        "global_step": 5075,
+        "percentile/available_fraction": 0.76263427734375,
+        "percentile/calibration_error": 0.044092610478401184,
+        "percentile/conditioned_fraction": 0.6100671291351318,
+        "percentile/max_decile_drift": 0.06576135009527206
+      },
+      {
+        "global_step": 5100,
+        "percentile/available_fraction": 0.7607201933860779,
+        "percentile/calibration_error": 0.028767086565494537,
+        "percentile/conditioned_fraction": 0.6087817549705505,
+        "percentile/max_decile_drift": 0.04607018455862999
+      },
+      {
+        "global_step": 5125,
+        "percentile/available_fraction": 0.7620959281921387,
+        "percentile/calibration_error": 0.03183531388640404,
+        "percentile/conditioned_fraction": 0.6093615889549255,
+        "percentile/max_decile_drift": 0.0475846529006958
+      },
+      {
+        "global_step": 5150,
+        "percentile/available_fraction": 0.7625744342803955,
+        "percentile/calibration_error": 0.047701071947813034,
+        "percentile/conditioned_fraction": 0.6100049018859863,
+        "percentile/max_decile_drift": 0.06828127056360245
+      }
+    ]
+  },
+  "control": {
+    "metrics": {
+      "global_step": 5725,
+      "optimizer/clip_fraction": 0,
+      "optimizer/grad_norm": 0.27615177631378174,
+      "system/memory_gb": 118.71204376220705,
+      "throughput/update_s": 0.18217049476001193,
+      "train/objective": 1.0230976343154907
+    }
+  },
+  "match": {
+    "metrics": {
+      "global_step": 4750,
+      "optimizer/clip_fraction": 0,
+      "optimizer/grad_norm": 0.45754727721214294,
+      "percentile/available_fraction": 0.9942968487739564,
+      "percentile/calibration_error": 0.016820261254906654,
+      "percentile/conditioned_fraction": 0.7961938381195068,
+      "percentile/loss": 3.439347743988037,
+      "percentile/max_decile_drift": 0.030268175527453423,
+      "system/memory_gb": 119.57220077514648,
+      "throughput/update_s": 0.23571155671999805,
+      "train/objective": 4.478487014770508
+    },
+    "warmup_history": [
+      {
+        "global_step": 4000,
+        "percentile/available_fraction": 0.9946874976158142,
+        "percentile/calibration_error": 0.013944999314844608,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.02356087602674961
+      },
+      {
+        "global_step": 4025,
+        "percentile/available_fraction": 0.9947656393051147,
+        "percentile/calibration_error": 0.015786297619342804,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.027974624186754227
+      },
+      {
+        "global_step": 4050,
+        "percentile/available_fraction": 0.9955468773841858,
+        "percentile/calibration_error": 0.01809084601700306,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.0316338837146759
+      },
+      {
+        "global_step": 4075,
+        "percentile/available_fraction": 0.994921863079071,
+        "percentile/calibration_error": 0.013503768481314182,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.025697100907564163
+      },
+      {
+        "global_step": 4100,
+        "percentile/available_fraction": 0.9937499761581421,
+        "percentile/calibration_error": 0.014266767539083958,
+        "percentile/conditioned_fraction": 0.12670959532260895,
+        "percentile/max_decile_drift": 0.025572171434760094
+      },
+      {
+        "global_step": 4125,
+        "percentile/available_fraction": 0.9950781464576721,
+        "percentile/calibration_error": 0.014508180320262909,
+        "percentile/conditioned_fraction": 0.7960406541824341,
+        "percentile/max_decile_drift": 0.026854343712329865
+      },
+      {
+        "global_step": 4150,
+        "percentile/available_fraction": 0.994140625,
+        "percentile/calibration_error": 0.01690238155424595,
+        "percentile/conditioned_fraction": 0.7957189679145813,
+        "percentile/max_decile_drift": 0.027997389435768127
+      },
+      {
+        "global_step": 4175,
+        "percentile/available_fraction": 0.9942968487739563,
+        "percentile/calibration_error": 0.016845975071191788,
+        "percentile/conditioned_fraction": 0.7954449653625488,
+        "percentile/max_decile_drift": 0.029498465359210968
+      },
+      {
+        "global_step": 4200,
+        "percentile/available_fraction": 0.9957031011581421,
+        "percentile/calibration_error": 0.013789054937660694,
+        "percentile/conditioned_fraction": 0.796429455280304,
+        "percentile/max_decile_drift": 0.02508784830570221
+      },
+      {
+        "global_step": 4225,
+        "percentile/available_fraction": 0.9943749904632568,
+        "percentile/calibration_error": 0.015504289418458939,
+        "percentile/conditioned_fraction": 0.7954772710800171,
+        "percentile/max_decile_drift": 0.02738001197576523
+      },
+      {
+        "global_step": 4250,
+        "percentile/available_fraction": 0.9953906536102295,
+        "percentile/calibration_error": 0.011623254977166653,
+        "percentile/conditioned_fraction": 0.7963232398033142,
+        "percentile/max_decile_drift": 0.02153611183166504
+      },
+      {
+        "global_step": 4275,
+        "percentile/available_fraction": 0.9956250190734863,
+        "percentile/calibration_error": 0.01230677217245102,
+        "percentile/conditioned_fraction": 0.7960076928138733,
+        "percentile/max_decile_drift": 0.023721270263195038
+      },
+      {
+        "global_step": 4300,
+        "percentile/available_fraction": 0.9939844012260437,
+        "percentile/calibration_error": 0.012700852937996387,
+        "percentile/conditioned_fraction": 0.7948949933052063,
+        "percentile/max_decile_drift": 0.023053200915455818
+      },
+      {
+        "global_step": 4325,
+        "percentile/available_fraction": 0.9946874976158142,
+        "percentile/calibration_error": 0.013608247973024845,
+        "percentile/conditioned_fraction": 0.7949743866920471,
+        "percentile/max_decile_drift": 0.02504114806652069
+      },
+      {
+        "global_step": 4350,
+        "percentile/available_fraction": 0.9943749904632568,
+        "percentile/calibration_error": 0.014723844826221466,
+        "percentile/conditioned_fraction": 0.7957763671875,
+        "percentile/max_decile_drift": 0.02661653608083725
+      },
+      {
+        "global_step": 4375,
+        "percentile/available_fraction": 0.9943749904632568,
+        "percentile/calibration_error": 0.013108380138874054,
+        "percentile/conditioned_fraction": 0.795621931552887,
+        "percentile/max_decile_drift": 0.023427674546837807
+      },
+      {
+        "global_step": 4400,
+        "percentile/available_fraction": 0.9950000047683716,
+        "percentile/calibration_error": 0.018938036635518074,
+        "percentile/conditioned_fraction": 0.7959417700767517,
+        "percentile/max_decile_drift": 0.030691247433423996
+      },
+      {
+        "global_step": 4425,
+        "percentile/available_fraction": 0.995312511920929,
+        "percentile/calibration_error": 0.017657853662967682,
+        "percentile/conditioned_fraction": 0.7963598370552063,
+        "percentile/max_decile_drift": 0.0318903811275959
+      },
+      {
+        "global_step": 4450,
+        "percentile/available_fraction": 0.9939844012260437,
+        "percentile/calibration_error": 0.014273771084845066,
+        "percentile/conditioned_fraction": 0.7948260307312012,
+        "percentile/max_decile_drift": 0.025415323674678802
+      },
+      {
+        "global_step": 4475,
+        "percentile/available_fraction": 0.9955468773841858,
+        "percentile/calibration_error": 0.019680077210068703,
+        "percentile/conditioned_fraction": 0.7965014576911926,
+        "percentile/max_decile_drift": 0.033420003950595856
+      },
+      {
+        "global_step": 4500,
+        "percentile/available_fraction": 0.9960156083106995,
+        "percentile/calibration_error": 0.018529105931520462,
+        "percentile/conditioned_fraction": 0.7969354391098022,
+        "percentile/max_decile_drift": 0.032430101186037064
+      },
+      {
+        "global_step": 4525,
+        "percentile/available_fraction": 0.9939062595367432,
+        "percentile/calibration_error": 0.015232621692121029,
+        "percentile/conditioned_fraction": 0.7954186797142029,
+        "percentile/max_decile_drift": 0.027918031439185143
+      },
+      {
+        "global_step": 4550,
+        "percentile/available_fraction": 0.994140625,
+        "percentile/calibration_error": 0.015500661917030811,
+        "percentile/conditioned_fraction": 0.7960821390151978,
+        "percentile/max_decile_drift": 0.027852652594447136
+      },
+      {
+        "global_step": 4575,
+        "percentile/available_fraction": 0.9948437213897705,
+        "percentile/calibration_error": 0.01540546678006649,
+        "percentile/conditioned_fraction": 0.7955542206764221,
+        "percentile/max_decile_drift": 0.027583030983805656
+      },
+      {
+        "global_step": 4600,
+        "percentile/available_fraction": 0.9935156106948853,
+        "percentile/calibration_error": 0.015870463103055954,
+        "percentile/conditioned_fraction": 0.794828474521637,
+        "percentile/max_decile_drift": 0.028924396261572838
+      },
+      {
+        "global_step": 4625,
+        "percentile/available_fraction": 0.9959375262260437,
+        "percentile/calibration_error": 0.01634432189166546,
+        "percentile/conditioned_fraction": 0.7964562773704529,
+        "percentile/max_decile_drift": 0.028398068621754646
+      },
+      {
+        "global_step": 4650,
+        "percentile/available_fraction": 0.9957031011581421,
+        "percentile/calibration_error": 0.016056977212429047,
+        "percentile/conditioned_fraction": 0.796583890914917,
+        "percentile/max_decile_drift": 0.030033083632588387
+      },
+      {
+        "global_step": 4675,
+        "percentile/available_fraction": 0.9938281178474426,
+        "percentile/calibration_error": 0.015384029597043991,
+        "percentile/conditioned_fraction": 0.7946606278419495,
+        "percentile/max_decile_drift": 0.028926976025104523
+      },
+      {
+        "global_step": 4700,
+        "percentile/available_fraction": 0.9958593845367432,
+        "percentile/calibration_error": 0.014150774106383324,
+        "percentile/conditioned_fraction": 0.7968164086341858,
+        "percentile/max_decile_drift": 0.02566749043762684
+      },
+      {
+        "global_step": 4725,
+        "percentile/available_fraction": 0.9948437213897705,
+        "percentile/calibration_error": 0.01608644239604473,
+        "percentile/conditioned_fraction": 0.7949535846710205,
+        "percentile/max_decile_drift": 0.026728477329015732
+      },
+      {
+        "global_step": 4750,
+        "percentile/available_fraction": 0.9942968487739563,
+        "percentile/calibration_error": 0.016820261254906654,
+        "percentile/conditioned_fraction": 0.7961938381195068,
+        "percentile/max_decile_drift": 0.030268175527453423
+      }
+    ]
+  },
+  "return60": {
+    "metrics": {
+      "global_step": 4375,
+      "optimizer/clip_fraction": 0,
+      "optimizer/grad_norm": 0.46979519724845886,
+      "percentile/available_fraction": 1,
+      "percentile/calibration_error": 0.03952072933316231,
+      "percentile/conditioned_fraction": 0.800126314163208,
+      "percentile/loss": 2.4952781200408936,
+      "percentile/max_decile_drift": 0.06927704066038132,
+      "system/memory_gb": 119.77275466918944,
+      "throughput/update_s": 0.22526055736000672,
+      "train/objective": 3.5486865043640137
+    },
+    "warmup_history": [
+      {
+        "global_step": 4000,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.04111902788281441,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.07417228817939758
+      },
+      {
+        "global_step": 4025,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.04031398892402649,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.07118604332208633
+      },
+      {
+        "global_step": 4050,
+        "percentile/available_fraction": 0.9999963641166687,
+        "percentile/calibration_error": 0.04063871502876282,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.07207295298576355
+      },
+      {
+        "global_step": 4075,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.040444325655698776,
+        "percentile/conditioned_fraction": 0,
+        "percentile/max_decile_drift": 0.07140489667654037
+      },
+      {
+        "global_step": 4100,
+        "percentile/available_fraction": 0.9999957084655762,
+        "percentile/calibration_error": 0.04058632254600525,
+        "percentile/conditioned_fraction": 0.12782226502895355,
+        "percentile/max_decile_drift": 0.0732518881559372
+      },
+      {
+        "global_step": 4125,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.04033106192946434,
+        "percentile/conditioned_fraction": 0.7999652028083801,
+        "percentile/max_decile_drift": 0.07222864031791687
+      },
+      {
+        "global_step": 4150,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.03985017165541649,
+        "percentile/conditioned_fraction": 0.8004180788993835,
+        "percentile/max_decile_drift": 0.07175705581903458
+      },
+      {
+        "global_step": 4175,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.0403844453394413,
+        "percentile/conditioned_fraction": 0.7999621629714966,
+        "percentile/max_decile_drift": 0.071731798350811
+      },
+      {
+        "global_step": 4200,
+        "percentile/available_fraction": 0.9999871850013733,
+        "percentile/calibration_error": 0.03989463299512863,
+        "percentile/conditioned_fraction": 0.7998437285423279,
+        "percentile/max_decile_drift": 0.07146774977445602
+      },
+      {
+        "global_step": 4225,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.040654197335243225,
+        "percentile/conditioned_fraction": 0.7999749779701233,
+        "percentile/max_decile_drift": 0.07309629023075104
+      },
+      {
+        "global_step": 4250,
+        "percentile/available_fraction": 0.9999822974205017,
+        "percentile/calibration_error": 0.03980693221092224,
+        "percentile/conditioned_fraction": 0.7999866008758545,
+        "percentile/max_decile_drift": 0.06842906028032303
+      },
+      {
+        "global_step": 4275,
+        "percentile/available_fraction": 0.9999890327453613,
+        "percentile/calibration_error": 0.04054664447903633,
+        "percentile/conditioned_fraction": 0.7994683980941772,
+        "percentile/max_decile_drift": 0.07198746502399445
+      },
+      {
+        "global_step": 4300,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.04133666679263115,
+        "percentile/conditioned_fraction": 0.7997100949287415,
+        "percentile/max_decile_drift": 0.07338760048151016
+      },
+      {
+        "global_step": 4325,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.0406331829726696,
+        "percentile/conditioned_fraction": 0.7992284893989563,
+        "percentile/max_decile_drift": 0.0728570818901062
+      },
+      {
+        "global_step": 4350,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.04134229198098183,
+        "percentile/conditioned_fraction": 0.8002917766571045,
+        "percentile/max_decile_drift": 0.07119479030370712
+      },
+      {
+        "global_step": 4375,
+        "percentile/available_fraction": 1,
+        "percentile/calibration_error": 0.03952072933316231,
+        "percentile/conditioned_fraction": 0.800126314163208,
+        "percentile/max_decile_drift": 0.06927704066038132
+      }
+    ]
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "completed_updates_per_run": 16384,
+  "evaluation_cohorts": 18,
+  "matchups_per_cohort": 96,
+  "recorded_at": "2026-10-17T11:14:01.548214+00:00",
+  "runs": [
+    {
+      "app_id": "ap-U1nRBL1qw3JuznZjWQyYLK",
+      "arm": "control",
+      "artifacts": [
+        {
+          "bytes": 155797857,
+          "key": "runs/261017-081103_059_muon_action_sequence_o59v5-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-control/final.pt",
+          "modified": "2026-10-17T09:24:56.546000+00:00"
+        },
+        {
+          "bytes": 155797857,
+          "key": "runs/261017-081103_059_muon_action_sequence_o59v5-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-control/latest.pt",
+          "modified": "2026-10-17T09:24:47.832000+00:00"
+        }
+      ],
+      "function_call_id": "fc-01M54EKHFC91Z8QYRK09VTKB4T",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": "261017-081103_059_muon_action_sequence_o59v5-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-control",
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "timestamp": "2026-10-17T11:12:58.669905+00:00",
+      "wandb_state": "finished"
+    },
+    {
+      "app_id": "ap-UgHGiyYh5I47RF6qDnH4Q1",
+      "arm": "return60",
+      "artifacts": [
+        {
+          "bytes": 156426408,
+          "key": "runs/261017-081207_063_percentile_conditioning_o63v1-return60-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-return60/final.pt",
+          "modified": "2026-10-17T09:40:44.886000+00:00"
+        },
+        {
+          "bytes": 156426408,
+          "key": "runs/261017-081207_063_percentile_conditioning_o63v1-return60-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-return60/latest.pt",
+          "modified": "2026-10-17T09:40:37.074000+00:00"
+        }
+      ],
+      "function_call_id": "fc-01M54EKM4JC712DZ0CSQ0F707C",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": "261017-081207_063_percentile_conditioning_o63v1-return60-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-return60",
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "timestamp": "2026-10-17T11:12:58.670162+00:00",
+      "wandb_state": "finished"
+    },
+    {
+      "app_id": "ap-d23X70N3YPljHuPNb7LUik",
+      "arm": "bootstrap30",
+      "artifacts": [
+        {
+          "bytes": 156426408,
+          "key": "runs/261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30/final.pt",
+          "modified": "2026-10-17T09:30:35.856000+00:00"
+        },
+        {
+          "bytes": 156426408,
+          "key": "runs/261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30/latest.pt",
+          "modified": "2026-10-17T09:30:28.879000+00:00"
+        }
+      ],
+      "function_call_id": "fc-01M54EKQ1EK46DJBPN40XD9V6C",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": "261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30",
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "timestamp": "2026-10-17T11:12:58.670394+00:00",
+      "wandb_state": "finished"
+    },
+    {
+      "app_id": "ap-RfQekINTahPBkfASCORMFJ",
+      "arm": "match",
+      "artifacts": [
+        {
+          "bytes": 156426344,
+          "key": "runs/261017-081119_063_percentile_conditioning_o63v1-match-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-match/final.pt",
+          "modified": "2026-10-17T09:37:49.687000+00:00"
+        },
+        {
+          "bytes": 156426344,
+          "key": "runs/261017-081119_063_percentile_conditioning_o63v1-match-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-match/latest.pt",
+          "modified": "2026-10-17T09:37:39.719000+00:00"
+        }
+      ],
+      "function_call_id": "fc-01M54EKSPTF587PA1S2BWBVPGQ",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": "261017-081119_063_percentile_conditioning_o63v1-match-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-match",
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "timestamp": "2026-10-17T11:12:58.670637+00:00",
+      "wandb_state": "finished"
+    }
+  ],
+  "schema_version": 1,
+  "total_evaluation_boots": 1728,
+  "total_evaluation_frames": 12441600,
+  "training_git_sha": "292b09dc4b77680704e272de63976db46ab00190"
+}

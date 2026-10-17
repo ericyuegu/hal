@@ -1,0 +1,76 @@
+{
+  "evaluation_image_fixture_names": [
+    "ssbm.ciso",
+    "dolphin-exiai"
+  ],
+  "runtime_evaluations": [
+    {
+      "app_id": "ap-q2ojTXNgRMg2lhxnaBlrzq",
+      "arm": "return60",
+      "build_log_sha256": "86153676f7de1f5d23a0caf6f86959a22e320dafbab67ed2f75e265bb62df75a",
+      "development_dataset_fetch_observed": false,
+      "runtime_fetch_log": [
+        "2026-10-17 08:11:27-07:00 2026-10-17 15:11:27.645 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name ssbm.ciso",
+        "2026-10-17 08:11:30-07:00 2026-10-17 15:11:30.254 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name dolphin-exiai"
+      ],
+      "target": "u95"
+    },
+    {
+      "app_id": "ap-0yE8fAdKVaq2cTAOI0dldI",
+      "arm": "return60",
+      "build_log_sha256": "530876fafe31d8115ac2ff7d9bf4c3566956149e92902f5dc1f6f8184ab9cf09",
+      "development_dataset_fetch_observed": false,
+      "runtime_fetch_log": [
+        "2026-10-17 08:11:28-07:00 2026-10-17 15:11:28.582 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name ssbm.ciso",
+        "2026-10-17 08:11:30-07:00 2026-10-17 15:11:30.023 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name dolphin-exiai"
+      ],
+      "target": "u98"
+    },
+    {
+      "app_id": "ap-xDNglFnLpzyqv8E1ugG9IY",
+      "arm": "return60",
+      "build_log_sha256": "159df55a32db9dfb49a71e66fc245051f7eb9aa74b456e914976c6a6dff2df6c",
+      "development_dataset_fetch_observed": false,
+      "runtime_fetch_log": [
+        "2026-10-17 08:11:29-07:00 2026-10-17 15:11:29.447 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name ssbm.ciso",
+        "2026-10-17 08:11:32-07:00 2026-10-17 15:11:32.184 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name dolphin-exiai"
+      ],
+      "target": "u99"
+    },
+    {
+      "app_id": "ap-ykXoVFNNNsZt5gwTtTsYPW",
+      "arm": "bootstrap30",
+      "build_log_sha256": "5ea9066cf020bd116584eb2ca1fd0ad3897414a74336e0071c2931303510e013",
+      "development_dataset_fetch_observed": false,
+      "runtime_fetch_log": [
+        "2026-10-17 08:11:29-07:00 2026-10-17 15:11:29.460 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name ssbm.ciso",
+        "2026-10-17 08:11:32-07:00 2026-10-17 15:11:32.120 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name dolphin-exiai"
+      ],
+      "target": "u95"
+    },
+    {
+      "app_id": "ap-ZzoJPcxXzua9b126WAVxbW",
+      "arm": "bootstrap30",
+      "build_log_sha256": "c7ed2a0b5dfbbfecccc14712ff4180ec0f1d0c26127966bba20c6b8b614b566e",
+      "development_dataset_fetch_observed": false,
+      "runtime_fetch_log": [
+        "2026-10-17 08:11:27-07:00 2026-10-17 15:11:27.683 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name ssbm.ciso",
+        "2026-10-17 08:11:30-07:00 2026-10-17 15:11:30.089 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name dolphin-exiai"
+      ],
+      "target": "u98"
+    },
+    {
+      "app_id": "ap-mfdMMCaMk8Ia2y9McwyvQT",
+      "arm": "bootstrap30",
+      "build_log_sha256": "dbe40beb698081da3a293a01b472cd4c9bd550c8b7bc690794eacd8dc2829dad",
+      "development_dataset_fetch_observed": false,
+      "runtime_fetch_log": [
+        "2026-10-17 08:11:27-07:00 2026-10-17 15:11:27.728 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name ssbm.ciso",
+        "2026-10-17 08:11:30-07:00 2026-10-17 15:11:30.059 | INFO     | __main__:_run_checked:468 - running: uv run fetch --name dolphin-exiai"
+      ],
+      "target": "u99"
+    }
+  ],
+  "schema_version": 1,
+  "scope": "Source and regression tests exclude dataset shards and development fixtures. Live worker fetch commands are restricted to these two emulator fixtures; checkpoint and normalization statistics are evaluation assets."
+}

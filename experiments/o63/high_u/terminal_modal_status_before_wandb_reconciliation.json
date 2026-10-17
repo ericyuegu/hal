@@ -1,0 +1,140 @@
+{
+  "evaluations": [
+    {
+      "app_id": "ap-q2ojTXNgRMg2lhxnaBlrzq",
+      "arm": "return60",
+      "function_call_id": "fc-01M556NK9WJBWZ0K56T4YDP694",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": null,
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "net_stock_lcb": 0.17539323036772966,
+      "net_stock_per_min": 0.29793396979280584,
+      "observed_at": "2026-10-17T15:29:03.289671+00:00",
+      "target": "u95"
+    },
+    {
+      "app_id": "ap-0yE8fAdKVaq2cTAOI0dldI",
+      "arm": "return60",
+      "function_call_id": "fc-01M556NK9B22SN13MEMZFG24J0",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": null,
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "net_stock_lcb": 0.3353942572079561,
+      "net_stock_per_min": 0.4475471485889093,
+      "observed_at": "2026-10-17T15:29:03.290028+00:00",
+      "target": "u98"
+    },
+    {
+      "app_id": "ap-xDNglFnLpzyqv8E1ugG9IY",
+      "arm": "return60",
+      "function_call_id": "fc-01M556NKFQZAXPHJJKCD3YT7YP",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": null,
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "net_stock_lcb": 0.24454260977589062,
+      "net_stock_per_min": 0.37243617596722567,
+      "observed_at": "2026-10-17T15:29:03.290603+00:00",
+      "target": "u99"
+    },
+    {
+      "app_id": "ap-ykXoVFNNNsZt5gwTtTsYPW",
+      "arm": "bootstrap30",
+      "function_call_id": "fc-01M556NKDHWYP9JD4M95HAFTNM",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": null,
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "net_stock_lcb": 0.4515405501121474,
+      "net_stock_per_min": 0.5636232586168188,
+      "observed_at": "2026-10-17T15:29:03.290785+00:00",
+      "target": "u95"
+    },
+    {
+      "app_id": "ap-ZzoJPcxXzua9b126WAVxbW",
+      "arm": "bootstrap30",
+      "function_call_id": "fc-01M556NK9YZMBAQERA8GN4R0V9",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": null,
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "net_stock_lcb": 0.23430422406605866,
+      "net_stock_per_min": 0.37290076844194076,
+      "observed_at": "2026-10-17T15:29:03.291048+00:00",
+      "target": "u98"
+    },
+    {
+      "app_id": "ap-mfdMMCaMk8Ia2y9McwyvQT",
+      "arm": "bootstrap30",
+      "function_call_id": "fc-01M556NKATWMSRP1VQ0N339GBG",
+      "function_result": 0,
+      "function_state": "returned",
+      "launcher_state": {
+        "exit_code": null,
+        "run_name": null,
+        "schema": 1,
+        "status": "succeeded"
+      },
+      "net_stock_lcb": 0.3086428198125399,
+      "net_stock_per_min": 0.44216489139731796,
+      "observed_at": "2026-10-17T15:29:03.291476+00:00",
+      "target": "u99"
+    }
+  ],
+  "observed_at": "2026-10-17T15:29:04.889605+00:00",
+  "schema_version": 1,
+  "wandb": {
+    "bootstrap30": {
+      "metrics": {},
+      "state": "running"
+    },
+    "return60": {
+      "metrics": {
+        "eval_u99/boots": 96,
+        "eval_u99/broker_inference_latency_p50_ms": 34.41321,
+        "eval_u99/broker_inference_latency_p95_ms": 41.4890115,
+        "eval_u99/captured_emulator_frames": 691200,
+        "eval_u99/crashed": 0,
+        "eval_u99/damage_dealt_per_min": 207.35704665703227,
+        "eval_u99/damage_taken_per_min": 109.39428626874188,
+        "eval_u99/dead_frame_fraction": 0.021000086813091415,
+        "eval_u99/decode_p95_ms": 19.881845499998008,
+        "eval_u99/decode_predicted_actions_per_s": 4813.460951357596,
+        "eval_u99/delay_frames": 2,
+        "eval_u99/emulator_fps": 777.6076821171241,
+        "eval_u99/net_dmg_lcb": 89.54045411933026,
+        "eval_u99/net_dmg_per_min": 97.9627603882904,
+        "eval_u99/net_stock_lcb": 0.24454260977589065,
+        "eval_u99/net_stock_per_min": 0.37243617596722567,
+        "eval_u99/prediction_frames": 4,
+        "eval_u99/replan_interval_frames": 2,
+        "eval_u99/stocks_lost_per_min": 1.0587828431068274,
+        "eval_u99/stocks_taken_per_min": 1.431219019074053,
+        "eval_u99/wall_s": 952.327220239
+      },
+      "state": "running"
+    }
+  }
+}

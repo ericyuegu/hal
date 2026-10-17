@@ -1,0 +1,22 @@
+{
+  "sigma_bin_widths": 0.75,
+  "central_bin_mass": 0.4950149249061541,
+  "label_support": [
+    0.2524925375469229,
+    0.7475074624530771
+  ],
+  "expected_label_deciles": [
+    0.30199403003753833,
+    0.35149552252815375,
+    0.40099701501876917,
+    0.4504985075093846,
+    0.5,
+    0.5495014924906154,
+    0.5990029849812308,
+    0.6485044774718463,
+    0.6980059699624617
+  ],
+  "mean_cdf_gap_at_decile_cutpoints": 0.13467607401798132,
+  "maximum_decile_quantile_drift": 0.20199403003753835,
+  "scope": "Theoretical deterministic zero-return example; not a trained-arm measurement."
+}

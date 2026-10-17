@@ -1,0 +1,165 @@
+{
+  "files": [
+    {
+      "bytes": 1119,
+      "path": "completion_evidence.json",
+      "sha256": "d562a05d2aa516e3962563c2755fb6b694e1e0bd75fc5f0fdfaab05d82acd7d8"
+    },
+    {
+      "bytes": 547,
+      "path": "control_target_calibration.json",
+      "sha256": "3336f127c8a24511701737904072e8533bf0565e6405460524a124864145bb25"
+    },
+    {
+      "bytes": 3812,
+      "path": "download_scope_audit.json",
+      "sha256": "ebad8f6cd855a0328d4f8b90666e600934e4a4e8eec432170bd18f41e185d6bc"
+    },
+    {
+      "bytes": 2773,
+      "path": "failed_launches.json",
+      "sha256": "7a1066d40db051708469f132221897917f5439e07dbbe1ec4ed8ec186ea9aed4"
+    },
+    {
+      "bytes": 29518,
+      "path": "gameplay/bootstrap30/u95/match_rows.json",
+      "sha256": "9429e04e5fd7749f284052e946d487e27413a65eac0f057fb4ce7700fa89a595"
+    },
+    {
+      "bytes": 2569,
+      "path": "gameplay/bootstrap30/u95/metrics.json",
+      "sha256": "3fe1a70b5949ec439d3212bde5c6f980a3cf4728ec1f204f8fdc2934abb5e6d4"
+    },
+    {
+      "bytes": 32182,
+      "path": "gameplay/bootstrap30/u98/match_rows.json",
+      "sha256": "09557c48386dbd546ece836ce74aeb13693b58097c052eb521413b8929d19772"
+    },
+    {
+      "bytes": 2593,
+      "path": "gameplay/bootstrap30/u98/metrics.json",
+      "sha256": "39e20f7ede30dfe3cd8b3097558fe1efee378d9229601564238cfabb4f7cd9b8"
+    },
+    {
+      "bytes": 31981,
+      "path": "gameplay/bootstrap30/u99/match_rows.json",
+      "sha256": "2ca4029281bc8901159c84c7d717550b0571779e4620d742d864a1d1bce15144"
+    },
+    {
+      "bytes": 2547,
+      "path": "gameplay/bootstrap30/u99/metrics.json",
+      "sha256": "b1afc7845bf3dad83fc7a39bfa078171992296c9a79a892ffa1e9aaa5f7b1510"
+    },
+    {
+      "bytes": 30467,
+      "path": "gameplay/return60/u95/match_rows.json",
+      "sha256": "abde56a96eb737f6b1b3894de9480ef93c73dfc207166a6692b211d1b76a193b"
+    },
+    {
+      "bytes": 2572,
+      "path": "gameplay/return60/u95/metrics.json",
+      "sha256": "e55e637b8912e7029b66e64f11f585798baf092cba6a25c47ad570dbc9e33d37"
+    },
+    {
+      "bytes": 32280,
+      "path": "gameplay/return60/u98/match_rows.json",
+      "sha256": "1f3185082fca9da3b19536bb13ced7e399a04649eca7bbfddf5137f2161bf3aa"
+    },
+    {
+      "bytes": 2555,
+      "path": "gameplay/return60/u98/metrics.json",
+      "sha256": "a843b716285f18b8e29bed2d5dcedb430a62c8901084779596a13aa2b8b57081"
+    },
+    {
+      "bytes": 30488,
+      "path": "gameplay/return60/u99/match_rows.json",
+      "sha256": "deeb7bee0d5c4101967690b6df001c1fc1fb9d45e5698d56cea9a37e8cebabe5"
+    },
+    {
+      "bytes": 2562,
+      "path": "gameplay/return60/u99/metrics.json",
+      "sha256": "5fa14f6c946b822bfd16eeeae9ffd997d055d3583a7d4a612cc69e04456fe152"
+    },
+    {
+      "bytes": 1389,
+      "path": "gameplay_audit.json",
+      "sha256": "e394420eb45bc7323a06e15e5a210fcf52bf540b5952ae6dba7c6f115a9575f4"
+    },
+    {
+      "bytes": 220605,
+      "path": "gameplay_sweep.png",
+      "sha256": "678fefbe9352495f4517d5b569e2f234cecb1255583684e47e43d10d5c43759b"
+    },
+    {
+      "bytes": 29878,
+      "path": "gameplay_sweep.svg",
+      "sha256": "937dcf53da0761665d06c3989af71011ee448e0f25024ba78ea78038ba3613ed"
+    },
+    {
+      "bytes": 10533,
+      "path": "launches.json",
+      "sha256": "05889f4e4b195f108d5a62b8c647d952b58f601c5967c14691e4db74006ba621"
+    },
+    {
+      "bytes": 7936,
+      "path": "planned_evaluations.json",
+      "sha256": "dae045bf0b24e86c455e324997520d5736a4e3f6c490ffbfc3409fc44346a9e2"
+    },
+    {
+      "bytes": 616,
+      "path": "progress.json",
+      "sha256": "4bf8190416382a87b6885106c0906c419a0e79b0fe046df2e49a13cfe29a53f6"
+    },
+    {
+      "bytes": 5511,
+      "path": "recovery_audit.json",
+      "sha256": "798b83ea1b085e33d57238e7dd3d2a031c5047336398bc73630f627a3c7549cb"
+    },
+    {
+      "bytes": 30728,
+      "path": "results.json",
+      "sha256": "c152bfd17cb5e6adcb12632c9133ed24a18357782fd628a37adcbd06aa0811f9"
+    },
+    {
+      "bytes": 2716,
+      "path": "runtime_asset_audit.json",
+      "sha256": "5937ea6cc30342ac97f7ffb4731ef0219d99074f61afd08ae10ae62e88a40f9b"
+    },
+    {
+      "bytes": 4299,
+      "path": "status.json",
+      "sha256": "fe60e5834796b614580fb480685335c449540eeafdbd95e866308d78cdfed386"
+    },
+    {
+      "bytes": 4474,
+      "path": "terminal_modal_status_before_wandb_reconciliation.json",
+      "sha256": "ce4795f96ba4fb20d0f055dfeaae9faad54c107bbe84f562c0195ea4903fd948"
+    },
+    {
+      "bytes": 6162,
+      "path": "treatment.md",
+      "sha256": "efc4c6d20435cec495b2231f64f1199adb1d6f515db4ab0d6adda04e11ba9319"
+    },
+    {
+      "bytes": 2868,
+      "path": "validation.md",
+      "sha256": "f027036c8917ac049cb63122eef78b30ac50f74f544ee45cb85f551998cd4a2b"
+    },
+    {
+      "bytes": 1444,
+      "path": "wandb_before_reconciliation.json",
+      "sha256": "c99f573df7aab9fca0f65f5ba068c637e61cfb2626c63ee6a20455f7d7158101"
+    },
+    {
+      "bytes": 1395,
+      "path": "wandb_evaluation_history.json",
+      "sha256": "ab896ff548fbf1757150cafb846bfcc2e4573b971b4b7b6c18a7894c63e4f922"
+    },
+    {
+      "bytes": 5064,
+      "path": "wandb_reconciliation.json",
+      "sha256": "eec2b81f8ab44bfb4449ce0afd7f9a52a88817d06d45a51c73bb02f247fc6482"
+    }
+  ],
+  "schema_version": 1
+}

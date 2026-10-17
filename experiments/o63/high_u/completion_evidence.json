@@ -1,0 +1,36 @@
+{
+  "captured_emulator_frames": 4147200,
+  "checkpoint_updates": 16384,
+  "completed_boots": 576,
+  "completed_evaluation_cohorts": 6,
+  "dataset_downloads": false,
+  "evaluation_git_sha": "7c7f45f83ee5a47fe8a90d8d27aec5ee8fa6ef83",
+  "failed_worker_attempts": 5,
+  "final_crashed_boots": 0,
+  "recorded_at": "2026-10-17T15:34:32.036258+00:00",
+  "schema_version": 1,
+  "sources": [
+    {
+      "bytes": 204341,
+      "path": "experiments/063_percentile_conditioning.py",
+      "sha256": "4a6e406585ca715cd58d7f18fe3e39e669fed409a7399b798e13aaf831e7e559"
+    },
+    {
+      "bytes": 45118,
+      "path": "scripts/launch_modal.py",
+      "sha256": "66c634dfc0da554053690517c0b48af0e568bfedf10065a33af5d5f46311c5d4"
+    },
+    {
+      "bytes": 2809,
+      "path": "pyproject.toml",
+      "sha256": "ed2b4e8e043fd96f07edc5d446eaa7fcc529489281508eb9e012ed255f4033fc"
+    },
+    {
+      "bytes": 524058,
+      "path": "uv.lock",
+      "sha256": "c0ea21cc2e65e83c16e65aa733664e7bdb2db82ecec8707e7114aaaa95720ccf"
+    }
+  ],
+  "timed_out_worker_attempts": 0,
+  "training_git_sha": "292b09dc4b77680704e272de63976db46ab00190"
+}

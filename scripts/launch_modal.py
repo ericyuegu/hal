@@ -87,6 +87,7 @@ INTERRUPT_GRACE_S: Final[int] = 20
 CLOSED_LOOP_EXPERIMENTS: Final[tuple[str, ...]] = (
     "experiments/059_muon_action_sequence.py",
     "experiments/060_compute_optimal_action_sequence.py",
+    "experiments/063_percentile_conditioning.py",
 )
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
@@ -512,7 +513,7 @@ def _configure_tracking_context(
             env["WANDB_NOTES"] = f"{existing_notes}\n\n{modal_note}" if existing_notes else modal_note
 
 
-def _prepare_remote(*, require_cuda: bool = True) -> dict[str, str]:
+def _prepare_remote(*, require_cuda: bool = True, evaluation_only: bool = False) -> dict[str, str]:
     """Prepare one remote job and check CUDA resources when it requested a GPU."""
     compute_capability: str | None = None
     if require_cuda:
@@ -570,7 +571,11 @@ def _prepare_remote(*, require_cuda: bool = True) -> dict[str, str]:
         ],
         env=env,
     )
-    _run_checked(["uv", "run", "fetch"], env=env)
+    if evaluation_only:
+        for name in ("ssbm.ciso", "dolphin-exiai"):
+            _run_checked(["uv", "run", "fetch", "--name", name], env=env)
+    else:
+        _run_checked(["uv", "run", "fetch"], env=env)
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     loguru.logger.info(f"open-file limit {soft} -> {hard}")
@@ -628,6 +633,19 @@ def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
     return found[0] if found else None
 
 
+def _evaluation_only_command(argv: list[str] | tuple[str, ...]) -> bool:
+    return any(
+        script in CLOSED_LOOP_EXPERIMENTS and subcommand == "eval"
+        for script, subcommand in zip(argv, argv[1:], strict=False)
+    )
+
+
+def evaluation_return_targets(experiment: str) -> tuple[str, ...]:
+    if experiment == "experiments/063_percentile_conditioning.py":
+        return ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned")
+    return ("p90", "unconditioned")
+
+
 def _valid_evaluation_update(experiment: str, update: int) -> bool:
     return experiment in CLOSED_LOOP_EXPERIMENTS and update > 0 and update % CLOSED_LOOP_EVERY == 0
 
@@ -654,7 +672,7 @@ def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) ->
         error = f"unsupported closed-loop update {update!r} for {experiment}"
     elif not isinstance(checkpoint_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha):
         error = "expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters"
-    elif return_target not in ("p90", "unconditioned"):
+    elif return_target not in evaluation_return_targets(experiment):
         error = "unsupported return target"
     elif n_matchups != CLOSED_LOOP_MATCHUPS:
         error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
@@ -841,7 +859,7 @@ def _run_training(
 
 
 def _remote_environment(spec: LaunchSpec) -> dict[str, str]:
-    env = _prepare_remote(require_cuda=spec.require_cuda)
+    env = _prepare_remote(require_cuda=spec.require_cuda, evaluation_only=_evaluation_only_command(spec.argv))
     env["HAL_GIT_SHA"] = spec.git_sha
     _configure_tracking_context(env, spec.modal_app_url)
     return env
@@ -898,9 +916,10 @@ def _run_closed_loop_eval(
         raise ValueError("expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
     if n_matchups != CLOSED_LOOP_MATCHUPS:
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
-    if return_target not in ("p90", "unconditioned"):
+    if return_target not in evaluation_return_targets(experiment):
         raise ValueError("unsupported return target")
-    env = _prepare_remote()
+    primary_target = "u75" if experiment == "experiments/063_percentile_conditioning.py" else "p90"
+    env = _prepare_remote(evaluation_only=True)
     checkpoint = f"checkpoints/step-{update:07d}.pt"
     command = [
         "uv",
@@ -916,14 +935,14 @@ def _run_closed_loop_eval(
         "--max-parallel",
         str(CLOSED_LOOP_MAX_PARALLEL),
         "--output-name",
-        f"eval96-step-{update:07d}" + ("-unconditioned" if return_target == "unconditioned" else ""),
+        f"eval96-step-{update:07d}" + (f"-{return_target}" if return_target != "p90" else ""),
         "--shared-wandb",
         "--expected-checkpoint-sha256",
         expected_checkpoint_sha256,
     ]
     command.extend(["--return-target", return_target])
-    if return_target == "unconditioned":
-        command.extend(["--wandb-namespace", "eval_unconditioned"])
+    if return_target != primary_target:
+        command.extend(["--wandb-namespace", f"eval_{return_target}"])
     subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
 
 
@@ -944,10 +963,13 @@ def _ignored_python_commands(
     return tuple(selected.items())
 
 
-def _fixture_manifest_json() -> str:
-    """Serialize the canonical fixture manifest without coupling its image layer to source."""
+def _fixture_manifest_json(argv: list[str] | tuple[str, ...]) -> str:
+    """Evaluation images need emulator fixtures, not replay datasets."""
     from hal.fixtures import ALL
+    from hal.fixtures import DOLPHIN_EXIAI
+    from hal.fixtures import ISO
 
+    fixtures = (ISO, DOLPHIN_EXIAI) if _evaluation_only_command(argv) else ALL
     return json.dumps(
         [
             {
@@ -959,7 +981,7 @@ def _fixture_manifest_json() -> str:
                 "url": fixture.url,
                 "extract": fixture.extract,
             }
-            for fixture in ALL
+            for fixture in fixtures
         ],
         sort_keys=True,
     )
@@ -994,7 +1016,7 @@ def _image(
     ).run_commands(
         "/opt/venv/bin/python /opt/cache_modal_fixtures.py",
         env={
-            "HAL_FIXTURE_MANIFEST": _fixture_manifest_json(),
+            "HAL_FIXTURE_MANIFEST": _fixture_manifest_json(argv),
             "HAL_FIXTURE_ROOT": str(REMOTE_ROOT),
         },
         secrets=[secret],

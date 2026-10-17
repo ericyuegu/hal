@@ -1,0 +1,88 @@
+{
+  "evaluations": [
+    {
+      "accepted_boots": 96,
+      "app_id": "ap-q2ojTXNgRMg2lhxnaBlrzq",
+      "arm": "return60",
+      "failed_worker_attempts": 0,
+      "retry_messages": [],
+      "target": "u95",
+      "timed_out_worker_attempts": 0,
+      "worker_failure_messages": []
+    },
+    {
+      "accepted_boots": 96,
+      "app_id": "ap-0yE8fAdKVaq2cTAOI0dldI",
+      "arm": "return60",
+      "failed_worker_attempts": 0,
+      "retry_messages": [],
+      "target": "u98",
+      "timed_out_worker_attempts": 0,
+      "worker_failure_messages": []
+    },
+    {
+      "accepted_boots": 96,
+      "app_id": "ap-xDNglFnLpzyqv8E1ugG9IY",
+      "arm": "return60",
+      "failed_worker_attempts": 2,
+      "retry_messages": [
+        "2026-10-17 08:17:05-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:17:05.210 | WARNING  | hal.eval.harness:run_matches_vec:270 - run_matches_vec: 1 boot(s) produced no complete trajectory; retrying on fresh Sessions (attempt 2/3)",
+        "2026-10-17 08:17:05-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:17:05.211 | INFO     | hal.sim.process_vec:drive_process_vec:432 - drive_process_vec: starting 1 worker(s), at most 1 in cold startup; startup timeout 120.0s",
+        "2026-10-17 08:26:09-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:26:09.836 | WARNING  | hal.sim.process_vec:drive_process_vec:774 - drive_process_vec: 1 worker(s) failed: {18: 'reported error status 1 during startup'}",
+        "2026-10-17 08:26:09-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:26:09.841 | WARNING  | hal.eval.harness:run_matches_vec:270 - run_matches_vec: 1 boot(s) produced no complete trajectory; retrying on fresh Sessions (attempt 2/3)",
+        "2026-10-17 08:26:09-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:26:09.842 | INFO     | hal.sim.process_vec:drive_process_vec:432 - drive_process_vec: starting 1 worker(s), at most 1 in cold startup; startup timeout 120.0s"
+      ],
+      "target": "u99",
+      "timed_out_worker_attempts": 0,
+      "worker_failure_messages": [
+        "2026-10-17 08:16:48-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:16:48.599 | WARNING  | hal.sim.worker:session_worker:290 - Session worker 27 failed: FrameTimeout: Dolphin produced no frame in 30.0s; emulator hung or slippstream disconnected",
+        "2026-10-17 08:23:23-07:00 ta-01M556NKRZ7ZF2Y14X2JBD43MR 2026-10-17 15:23:23.098 | WARNING  | hal.sim.worker:session_worker:290 - Session worker 18 failed: RuntimeError: failed to connect to Dolphin Slippi server"
+      ]
+    },
+    {
+      "accepted_boots": 96,
+      "app_id": "ap-ykXoVFNNNsZt5gwTtTsYPW",
+      "arm": "bootstrap30",
+      "failed_worker_attempts": 0,
+      "retry_messages": [],
+      "target": "u95",
+      "timed_out_worker_attempts": 0,
+      "worker_failure_messages": []
+    },
+    {
+      "accepted_boots": 96,
+      "app_id": "ap-ZzoJPcxXzua9b126WAVxbW",
+      "arm": "bootstrap30",
+      "failed_worker_attempts": 1,
+      "retry_messages": [
+        "2026-10-17 08:17:10-07:00 ta-01M556NKNC9ZHES6PTRJD7ADHR 2026-10-17 15:17:10.458 | WARNING  | hal.eval.harness:run_matches_vec:270 - run_matches_vec: 1 boot(s) produced no complete trajectory; retrying on fresh Sessions (attempt 2/3)",
+        "2026-10-17 08:17:10-07:00 ta-01M556NKNC9ZHES6PTRJD7ADHR 2026-10-17 15:17:10.459 | INFO     | hal.sim.process_vec:drive_process_vec:432 - drive_process_vec: starting 1 worker(s), at most 1 in cold startup; startup timeout 120.0s"
+      ],
+      "target": "u98",
+      "timed_out_worker_attempts": 0,
+      "worker_failure_messages": [
+        "2026-10-17 08:16:54-07:00 ta-01M556NKNC9ZHES6PTRJD7ADHR 2026-10-17 15:16:54.388 | WARNING  | hal.sim.worker:session_worker:290 - Session worker 27 failed: FrameTimeout: Dolphin produced no frame in 30.0s; emulator hung or slippstream disconnected"
+      ]
+    },
+    {
+      "accepted_boots": 96,
+      "app_id": "ap-mfdMMCaMk8Ia2y9McwyvQT",
+      "arm": "bootstrap30",
+      "failed_worker_attempts": 2,
+      "retry_messages": [
+        "2026-10-17 08:17:16-07:00 ta-01M556NKNCTTH9YZQVADASER5R 2026-10-17 15:17:16.774 | WARNING  | hal.sim.process_vec:drive_process_vec:774 - drive_process_vec: 2 worker(s) failed: {7: 'reported error status 1 during startup', 9: 'reported error status 1 during startup'}",
+        "2026-10-17 08:17:16-07:00 ta-01M556NKNCTTH9YZQVADASER5R 2026-10-17 15:17:16.779 | WARNING  | hal.eval.harness:run_matches_vec:270 - run_matches_vec: 2 boot(s) produced no complete trajectory; retrying on fresh Sessions (attempt 2/3)",
+        "2026-10-17 08:17:16-07:00 ta-01M556NKNCTTH9YZQVADASER5R 2026-10-17 15:17:16.779 | INFO     | hal.sim.process_vec:drive_process_vec:432 - drive_process_vec: starting 2 worker(s), at most 2 in cold startup; startup timeout 120.0s"
+      ],
+      "target": "u99",
+      "timed_out_worker_attempts": 0,
+      "worker_failure_messages": [
+        "2026-10-17 08:13:15-07:00 ta-01M556NKNCTTH9YZQVADASER5R 2026-10-17 15:13:15.259 | WARNING  | hal.sim.worker:session_worker:290 - Session worker 7 failed: EnetDisconnected: ",
+        "2026-10-17 08:13:36-07:00 ta-01M556NKNCTTH9YZQVADASER5R 2026-10-17 15:13:36.694 | WARNING  | hal.sim.worker:session_worker:290 - Session worker 9 failed: EnetDisconnected: "
+      ]
+    }
+  ],
+  "note": "Counts retain recovered worker attempts. All accepted boots have full 7200-frame evidence. Retry-dependent policy factory calls can change random sampling relative to an attempt without failures.",
+  "protocol_start_retries": 2,
+  "schema_version": 1
+}

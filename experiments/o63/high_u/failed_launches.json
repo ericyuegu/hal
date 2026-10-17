@@ -1,0 +1,65 @@
+{
+  "attempts": [
+    {
+      "app_id": "ap-suLwpQDWO78iPdB4NSdglx",
+      "arm": "return60",
+      "completed_evaluation_boots": 0,
+      "error": "Modal requires at least 512 GiB ephemeral disk; Function creation failed before worker execution.",
+      "evaluation_git_sha": "7b7d3994ef738b90a91ec66d4b6d5aa87d588cbd",
+      "log_sha256": "74a53596584f866b5da6e617b893146501a579ca115e0cc2cec76ffc30859c7a",
+      "requested_disk_gib": 128,
+      "target": "u95"
+    },
+    {
+      "app_id": "ap-8flGaDCuRD75GfMO09ejJG",
+      "arm": "return60",
+      "completed_evaluation_boots": 0,
+      "error": "Modal requires at least 512 GiB ephemeral disk; Function creation failed before worker execution.",
+      "evaluation_git_sha": "7b7d3994ef738b90a91ec66d4b6d5aa87d588cbd",
+      "log_sha256": "9fb05863229d4dc4ea903eb78d9c98202db669a16b5f0bd46ace75a990973f5c",
+      "requested_disk_gib": 128,
+      "target": "u98"
+    },
+    {
+      "app_id": "ap-5SnojMwnQ2fIIIfGNaIJsG",
+      "arm": "return60",
+      "completed_evaluation_boots": 0,
+      "error": "Modal requires at least 512 GiB ephemeral disk; Function creation failed before worker execution.",
+      "evaluation_git_sha": "7b7d3994ef738b90a91ec66d4b6d5aa87d588cbd",
+      "log_sha256": "7c0e135336c4e6aec3de659c2d528f41466a04a527615ebbe314c9e1a05acff9",
+      "requested_disk_gib": 128,
+      "target": "u99"
+    },
+    {
+      "app_id": "ap-8ku1oiWzyYWjHlu4gTXvex",
+      "arm": "bootstrap30",
+      "completed_evaluation_boots": 0,
+      "error": "Modal requires at least 512 GiB ephemeral disk; Function creation failed before worker execution.",
+      "evaluation_git_sha": "7b7d3994ef738b90a91ec66d4b6d5aa87d588cbd",
+      "log_sha256": "9863f5586016eabc41cf54e0ebbd22d1aa64322bba082deeab75fb0ea14b2099",
+      "requested_disk_gib": 128,
+      "target": "u95"
+    },
+    {
+      "app_id": "ap-y7380vG9jLF4eobRmS6H3d",
+      "arm": "bootstrap30",
+      "completed_evaluation_boots": 0,
+      "error": "Modal requires at least 512 GiB ephemeral disk; Function creation failed before worker execution.",
+      "evaluation_git_sha": "7b7d3994ef738b90a91ec66d4b6d5aa87d588cbd",
+      "log_sha256": "1967f51129543b97aeaa3739d9f046dfe94df4120a6ac2aa4719442598ea89b6",
+      "requested_disk_gib": 128,
+      "target": "u98"
+    },
+    {
+      "app_id": "ap-yQeYUYDaiUZeHOA5Ph27az",
+      "arm": "bootstrap30",
+      "completed_evaluation_boots": 0,
+      "error": "Modal requires at least 512 GiB ephemeral disk; Function creation failed before worker execution.",
+      "evaluation_git_sha": "7b7d3994ef738b90a91ec66d4b6d5aa87d588cbd",
+      "log_sha256": "4adbadbe1b16f0aed734fd9292771effc58fe5156e8c68a436018d288e78b552",
+      "requested_disk_gib": 128,
+      "target": "u99"
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,101 @@
+{
+  "comparisons": [
+    {
+      "arm": "control",
+      "equal_to_control": true,
+      "field": "loader"
+    },
+    {
+      "arm": "control",
+      "equal_to_control": true,
+      "field": "identity_masker"
+    },
+    {
+      "arm": "control",
+      "equal_to_control": true,
+      "field": "return_masker"
+    },
+    {
+      "arm": "control",
+      "equal_to_control": true,
+      "field": "prefix_sampler"
+    },
+    {
+      "arm": "return60",
+      "equal_to_control": true,
+      "field": "loader"
+    },
+    {
+      "arm": "return60",
+      "equal_to_control": true,
+      "field": "identity_masker"
+    },
+    {
+      "arm": "return60",
+      "equal_to_control": true,
+      "field": "return_masker"
+    },
+    {
+      "arm": "return60",
+      "equal_to_control": true,
+      "field": "prefix_sampler"
+    },
+    {
+      "arm": "return60",
+      "equal_to_return60": true,
+      "field": "percentile_labeler"
+    },
+    {
+      "arm": "bootstrap30",
+      "equal_to_control": true,
+      "field": "loader"
+    },
+    {
+      "arm": "bootstrap30",
+      "equal_to_control": true,
+      "field": "identity_masker"
+    },
+    {
+      "arm": "bootstrap30",
+      "equal_to_control": true,
+      "field": "return_masker"
+    },
+    {
+      "arm": "bootstrap30",
+      "equal_to_control": true,
+      "field": "prefix_sampler"
+    },
+    {
+      "arm": "bootstrap30",
+      "equal_to_return60": true,
+      "field": "percentile_labeler"
+    },
+    {
+      "arm": "match",
+      "equal_to_control": true,
+      "field": "loader"
+    },
+    {
+      "arm": "match",
+      "equal_to_control": true,
+      "field": "identity_masker"
+    },
+    {
+      "arm": "match",
+      "equal_to_control": true,
+      "field": "return_masker"
+    },
+    {
+      "arm": "match",
+      "equal_to_control": true,
+      "field": "prefix_sampler"
+    },
+    {
+      "arm": "match",
+      "equal_to_return60": true,
+      "field": "percentile_labeler"
+    }
+  ],
+  "completed_updates": 16384,
+  "schema_version": 1
+}

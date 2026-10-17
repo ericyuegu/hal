@@ -1,0 +1,43 @@
+{
+  "files": [
+    {
+      "bytes": 196096,
+      "current_workspace_matches": true,
+      "path": "experiments/059_muon_action_sequence.py",
+      "sha256": "4f69fe97abb9ec4bdb3b1b1853ae00d0cc247d189edae02423322ee001daa8bf"
+    },
+    {
+      "bytes": 204239,
+      "current_workspace_matches": true,
+      "path": "experiments/063_percentile_conditioning.py",
+      "sha256": "69d1c71502b4a977bb3020463d792804ee3587a33d9e2bdb07bbd1285e574427"
+    },
+    {
+      "bytes": 44422,
+      "current_workspace_matches": true,
+      "path": "scripts/launch_modal.py",
+      "sha256": "c39fcede71dd507a793650f834a0210cecf927791666bfd19dc797ead35c29d9"
+    },
+    {
+      "bytes": 12127,
+      "current_workspace_matches": true,
+      "path": "scripts/launch_gce.py",
+      "sha256": "f3257863345aba05426a2a6da60a80dcdc1400ecf176945ab17d031c340cca4f"
+    },
+    {
+      "bytes": 2809,
+      "current_workspace_matches": true,
+      "path": "pyproject.toml",
+      "sha256": "ed2b4e8e043fd96f07edc5d446eaa7fcc529489281508eb9e012ed255f4033fc"
+    },
+    {
+      "bytes": 524058,
+      "current_workspace_matches": true,
+      "path": "uv.lock",
+      "sha256": "c0ea21cc2e65e83c16e65aa733664e7bdb2db82ecec8707e7114aaaa95720ccf"
+    }
+  ],
+  "observed_at": "2026-10-17T10:49:56.914028+00:00",
+  "schema_version": 1,
+  "training_git_sha": "292b09dc4b77680704e272de63976db46ab00190"
+}

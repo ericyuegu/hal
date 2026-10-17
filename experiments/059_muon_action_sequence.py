@@ -470,12 +470,9 @@ class TrainConfig:
     raw_shard_materialization_threads: ClassVar[int] = 64
     materialization_threads_env: ClassVar[str] = "HAL_O59_MATERIALIZATION_THREADS"
     data_protocol: ClassVar[str] = "o59-replay-ring-v2"
-    selection_sha256: ClassVar[str] = "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
     mds_index_version: ClassVar[int] = 2
     mds_manifest_schema_sha256: ClassVar[str] = "405199de9494fe01350506734f0b2ec392fe79b0122d69cbcb5cae2afabc0d49"
-    replay_slots: ClassVar[int] = 131_072
     windows_per_generation: ClassVar[int] = 8
-    replay_phase_block_batches: ClassVar[int] = 25
     minimum_replay_gap_batches: ClassVar[int] = 200
     reserved_disk_bytes: ClassVar[int] = 256 * 2**30
     player_sidecar_remote: ClassVar[str] = "s3://hal/processed/player-identity-v1/professional-code-v1.jsonl.gz"
@@ -575,6 +572,25 @@ class TrainConfig:
     @property
     def minimum_replay_frames(self) -> int:
         return self.arch.L_ctx + self.arch.sample_chunk_length + self.windows_per_generation - 1
+
+    @property
+    def replay_slots(self) -> int:
+        if self.source_names == ("ranked-anonymized-1-policy-world-v8",):
+            return 112_128
+        return 131_072
+
+    @property
+    def replay_phase_block_batches(self) -> int:
+        if self.source_names == ("ranked-anonymized-1-policy-world-v8",):
+            # 219 ring periods minus 20 phase batches preserves the 200-batch gap.
+            return 20
+        return 25
+
+    @property
+    def selection_sha256(self) -> str:
+        if self.source_names == ("ranked-anonymized-1-policy-world-v8",):
+            return "ad28edec1ad37565707d1bb0fb2262d94f05617fc957d4d8c8b234979cf3a381"
+        return "2593361352b92e705be3fbeae1b4e9bb1a3c9f1787cd713014a7a95b7df62477"
 
     @property
     def source_list_sha256(self) -> str:
@@ -728,8 +744,11 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError(
             f"policy_world_schema_version {cfg.policy_world_schema_version} != {POLICY_WORLD_SCHEMA_VERSION}"
         )
-    if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
-        raise ValueError("O59 requires all 44 policy-world-v8 sources")
+    if tuple(cfg.source_names) not in (
+        tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES),
+        ("ranked-anonymized-1-policy-world-v8",),
+    ):
+        raise ValueError("O59 requires all 44 policy-world-v8 sources or ranked-anonymized-1 alone")
     if cfg.depth_alpha != 0.5 or cfg.hidden_std_multiplier != 0.5 or cfg.readout_init != "mup-normal":
         raise ValueError("O59 uses O50's selected depth and initialization parameterization")
     if (cfg.adam_beta1, cfg.adam_beta2, cfg.adam_eps) != (*cfg.base_adam_betas, cfg.base_adam_eps):
@@ -2573,8 +2592,11 @@ def log_wandb_code(run: wandb.Run) -> None:
 
 def data_selection(cfg: TrainConfig) -> PhysicalShardSelection:
     """Return all policy-world-v8 train rows with their pinned identity."""
-    if tuple(cfg.source_names) != tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES):
-        raise ValueError("O59 selection requires all policy-world-v8 sources in registry order")
+    if tuple(cfg.source_names) not in (
+        tuple(source.name for source in streams.POLICY_WORLD_V8_SOURCES),
+        ("ranked-anonymized-1-policy-world-v8",),
+    ):
+        raise ValueError("O59 selection requires the full corpus in registry order or ranked-anonymized-1 alone")
     sources = tuple(SourceRowSelection(name, streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name]) for name in cfg.source_names)
     selection = PhysicalShardSelection.from_sources(sources)
     if selection.sha256 != cfg.selection_sha256:
@@ -2889,10 +2911,10 @@ def _make_train_loader(
     selection = data_selection(cfg)
     adapter = MDSStorageAdapter(selection, sources=corpus.sources, download_retry=cfg.download_retry)
     adapter.validate_manifests(
-        expected_sha256=streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256,
+        expected_sha256={name: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[name] for name in cfg.source_names},
         expected_index_version=cfg.mds_index_version,
         expected_schema_sha256=cfg.mds_manifest_schema_sha256,
-        expected_rows=streams.POLICY_WORLD_V8_TRAIN_REPLAYS,
+        expected_rows={name: streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name] for name in cfg.source_names},
     )
     projection = FeatureProjection(
         columns=ITEM_PLAYER_PROJECTION.columns
@@ -2903,7 +2925,9 @@ def _make_train_loader(
         adapter=adapter,
         tasks=build_shard_plan(selection, adapter.manifests),
         data_protocol=cfg.data_protocol,
-        source_manifest_sha256=streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256,
+        source_manifest_sha256={
+            name: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[name] for name in cfg.source_names
+        },
         batch_transform=functools.partial(
             _collate_o59_batch,
             stats=stats,
@@ -3091,7 +3115,9 @@ def _init_wandb(cfg: TrainConfig, run_name: str, resume_state: dict | None, *, s
             "warmup_steps": cfg.warmup_steps,
             "data_protocol": cfg.data_protocol,
             "source_selection_sha256": selection.sha256,
-            "source_manifest_sha256": streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256,
+            "source_manifest_sha256": {
+                name: streams.POLICY_WORLD_V8_TRAIN_MANIFEST_SHA256[name] for name in cfg.source_names
+            },
             "mds_manifest_schema_sha256": cfg.mds_manifest_schema_sha256,
         },
         settings=settings,

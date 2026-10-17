@@ -564,7 +564,8 @@ def test_dry_run_does_not_create_a_volume_or_app(monkeypatch: pytest.MonkeyPatch
     _MODULE.main(Args(cmd=["uv", "run", EXPERIMENT], dry_run=True))
 
 
-def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("subcommand", ("train", "eval"))
+def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.MonkeyPatch, subcommand: str) -> None:
     events: list[tuple] = []
 
     class FakeIgnore:
@@ -604,7 +605,13 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
     assert (
         _MODULE._image(
             "example/image:tag",
-            ("uv", "run", str(ignored_command.relative_to(_MODULE.ROOT))),
+            (
+                "uv",
+                "run",
+                "experiments/063_percentile_conditioning.py",
+                subcommand,
+                str(ignored_command.relative_to(_MODULE.ROOT)),
+            ),
             secret,
         )
         is fake
@@ -647,7 +654,12 @@ def test_image_separates_dependency_and_source_layers(monkeypatch: pytest.Monkey
     assert dependency_run < helper_copy < fixture_run < source_copy < ignored_command_copy < project_run
     fixture_event = events[fixture_run]
     assert fixture_event[2]["HAL_FIXTURE_ROOT"] == str(_MODULE.REMOTE_ROOT)
-    assert json.loads(fixture_event[2]["HAL_FIXTURE_MANIFEST"])
+    fixtures = json.loads(fixture_event[2]["HAL_FIXTURE_MANIFEST"])
+    names = {entry["name"] for entry in fixtures}
+    if subcommand == "eval":
+        assert names == {"ssbm.ciso", "dolphin-exiai"}
+    else:
+        assert {"dev.7z", "dev-mds"} <= names
     assert fixture_event[3] == [secret]
 
 
@@ -789,3 +801,79 @@ def test_o59_broker_and_evaluator_separate_unconditioned_evidence(monkeypatch: p
     assert command[command.index("--return-target") + 1] == "unconditioned"
     bad = {**request, "return_target": "median"}
     assert "error" in json.loads(_MODULE._broker_response(json.dumps(bad).encode(), Evaluator(), experiment))
+
+
+@pytest.mark.parametrize("target", ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned"))
+def test_o63_broker_and_evaluator_preserve_percentile_target(monkeypatch, target):
+    experiment = "experiments/063_percentile_conditioning.py"
+    calls = []
+
+    class Call:
+        object_id = "fc-percentile"
+
+    class Evaluator:
+        def spawn(self, *args):
+            calls.append(args)
+            return Call()
+
+    request = {
+        "run_name": "run-percentile",
+        "update": 16384,
+        "expected_checkpoint_sha256": "a" * 64,
+        "n_matchups": 96,
+        "return_target": target,
+    }
+    response = _MODULE._broker_response(json.dumps(request).encode(), Evaluator(), experiment)
+    assert json.loads(response) == {"function_call_id": "fc-percentile"}
+    commands = []
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **kwargs: {})
+    monkeypatch.setattr(_MODULE.subprocess, "run", lambda command, **kwargs: commands.append(command))
+    _MODULE._run_closed_loop_eval(*calls[0])
+    command = commands[0]
+    assert command[command.index("--return-target") + 1] == target
+    assert command[command.index("--output-name") + 1] == f"eval96-step-0016384-{target}"
+    if target != "u75":
+        assert command[command.index("--wandb-namespace") + 1] == f"eval_{target}"
+    else:
+        assert "--wandb-namespace" not in command
+    for bad_target in ("p90", "median"):
+        request["return_target"] = bad_target
+        assert "error" in json.loads(_MODULE._broker_response(json.dumps(request).encode(), Evaluator(), experiment))
+
+
+@pytest.mark.parametrize("evaluation_only", (False, True))
+def test_remote_preparation_fetches_no_dataset_for_evaluation(monkeypatch, evaluation_only):
+    from types import SimpleNamespace
+
+    commands = []
+    monkeypatch.setattr(_MODULE, "_configure_compiler_cache", lambda _env: None)
+    monkeypatch.setattr(_MODULE, "_run_checked", lambda command, **kwargs: commands.append(command) or "")
+    monkeypatch.setattr(_MODULE.shutil, "disk_usage", lambda _path: SimpleNamespace(free=20 * 2**30))
+    monkeypatch.setattr(_MODULE.resource, "getrlimit", lambda _resource: (1024, 4096))
+    monkeypatch.setattr(_MODULE.resource, "setrlimit", lambda *_args: None)
+
+    _MODULE._prepare_remote(require_cuda=False, evaluation_only=evaluation_only)
+
+    fetches = [command for command in commands if command[:3] == ["uv", "run", "fetch"]]
+    assert fetches == (
+        [["uv", "run", "fetch", "--name", "ssbm.ciso"], ["uv", "run", "fetch", "--name", "dolphin-exiai"]]
+        if evaluation_only
+        else [["uv", "run", "fetch"]]
+    )
+
+
+@pytest.mark.parametrize("subcommand", ("train", "eval"))
+def test_remote_environment_passes_evaluation_fixture_scope(monkeypatch, subcommand):
+    prepared = []
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **kwargs: prepared.append(kwargs) or {})
+    monkeypatch.setattr(_MODULE, "_configure_tracking_context", lambda *_args: None)
+    spec = _MODULE.LaunchSpec(
+        argv=("uv", "run", "experiments/063_percentile_conditioning.py", subcommand),
+        launch_id="a" * 32,
+        git_sha="b" * 40,
+        state_volume="test-state",
+        auto_resume=False,
+        stall_s=60,
+    )
+    _MODULE._remote_environment(spec)
+    assert prepared == [{"require_cuda": True, "evaluation_only": subcommand == "eval"}]
