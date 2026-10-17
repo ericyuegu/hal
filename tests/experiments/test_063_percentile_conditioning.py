@@ -1,6 +1,7 @@
 """Scientific contracts for the three percentile treatments."""
 
 import copy
+import functools
 import importlib.util
 import json
 import sys
@@ -428,27 +429,45 @@ def test_eval_targets_and_evidence_directory(name, value, tmp_path):
     assert json.loads((tmp_path / "match_rows.json").read_text())["protocol"]["return_target"] == name
 
 
-def _equal(left, right):
+def _equal(left, right, path=""):
     if isinstance(left, torch.Tensor):
-        assert torch.equal(left, right)
+        assert torch.equal(left, right), (
+            f"{path}: max absolute difference {float((left.float() - right.float()).abs().max())}"
+        )
     elif isinstance(left, Mapping):
         assert left.keys() == right.keys()
         for key in left:
-            _equal(left[key], right[key])
+            _equal(left[key], right[key], f"{path}/{key}")
     elif isinstance(left, (tuple, list)):
         assert len(left) == len(right)
         for a, b in zip(left, right, strict=True):
-            _equal(a, b)
+            _equal(a, b, path)
     else:
         assert left == right
 
 
 @pytest.mark.parametrize("arm", ARMS)
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_training_change_and_next_update_resume(tmp_path, arm, device):
+@pytest.mark.parametrize("device,compiled", [("cpu", False), ("cuda", False), ("cuda", True)])
+def test_training_change_and_next_update_resume(tmp_path, monkeypatch, request, arm, device, compiled):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    cfg = replace(_cfg(arm, batch_size=1), amp_dtype="bfloat16" if device == "cuda" else "float32")
+    if compiled:
+        # Isolate state restoration from Inductor's nondeterministic embedding reductions.
+        monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        request.addfinalizer(
+            functools.partial(
+                torch.use_deterministic_algorithms,
+                torch.are_deterministic_algorithms_enabled(),
+                warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+            )
+        )
+        torch.use_deterministic_algorithms(True)
+    cfg = replace(
+        _cfg(arm, batch_size=1),
+        amp_dtype="bfloat16" if device == "cuda" else "float32",
+        compile_trunk=compiled,
+        compile_temporal=compiled,
+    )
 
     def setup(saved=None):
         model = exp.make_model(cfg).to(device)
@@ -463,10 +482,13 @@ def test_training_change_and_next_update_resume(tmp_path, arm, device):
             sampler.load_state_dict(saved["prefix"])
             labeler.load_state_dict(saved["percentile_labeler"])
             exp.restore_rng(saved["rng"])
-        return model, optimizer, scheduler, sampler, labeler
+        trunk_fn, temporal_fn = exp._training_functions(model, cfg)
+        if compiled:
+            exp._compile_synthetic_forward_backward(model, cfg, step=4095, trunk_fn=trunk_fn, temporal_fn=temporal_fn)
+        return model, optimizer, scheduler, sampler, labeler, trunk_fn, temporal_fn
 
     def update(state, batch, step):
-        model, optimizer, scheduler, sampler, labeler = state
+        model, optimizer, scheduler, sampler, labeler, trunk_fn, temporal_fn = state
         result = exp.train_step(
             model,
             batch,
@@ -474,8 +496,8 @@ def test_training_change_and_next_update_resume(tmp_path, arm, device):
             step=step,
             update=step + 1,
             valid_prefixes=32,
-            trunk_fn=model.forward,
-            temporal_fn=model.temporal.teacher_forced_nll_with_diagnostics,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
             optimizer=optimizer,
             scheduler=scheduler,
             prefix_sampler=sampler,
@@ -487,14 +509,14 @@ def test_training_change_and_next_update_resume(tmp_path, arm, device):
             "scheduler": scheduler.state_dict(),
             "prefix": sampler.state_dict(),
             "percentile_labeler": labeler.state_dict(),
-            "metrics": result.metrics,
-            "gradient_norm": result.gradient_norm,
+            "metrics": {name: value.detach().cpu().clone() for name, value in result.metrics.items()},
+            "gradient_norm": result.gradient_norm.detach().cpu().clone(),
         }
 
     original = setup()
     batch = _batch(cfg, device)
     update(original, batch, 4095)
-    model, optimizer, scheduler, sampler, labeler = original
+    model, optimizer, scheduler, sampler, labeler, *_ = original
     saved = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),

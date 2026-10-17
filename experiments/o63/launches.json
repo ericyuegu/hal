@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "git_sha": "292b09dc4b77680704e272de63976db46ab00190",
+  "launcher": "scripts/launch_modal.py",
+  "state_volume": "hal-modal-state",
+  "gpu": "RTX-PRO-6000",
+  "seed": 0,
+  "stop_after_update": 16384,
+  "source_names": [
+    "ranked-anonymized-1-policy-world-v8"
+  ],
+  "selection_sha256": "ad28edec1ad37565707d1bb0fb2262d94f05617fc957d4d8c8b234979cf3a381",
+  "primary_targets": {
+    "control": "p90",
+    "return60": "u75",
+    "bootstrap30": "u75",
+    "match": "u75"
+  },
+  "head_freeze": false,
+  "head_freeze_decision": "User chose trainable heads and reporting drift after discussion of HL-Gauss smoothing.",
+  "runs": [
+    {
+      "arm": "control",
+      "app_id": "ap-U1nRBL1qw3JuznZjWQyYLK",
+      "function_call_id": "fc-01M54EKHFC91Z8QYRK09VTKB4T",
+      "launch_id": "8aa3c5d7695b4bd89db86b16eacd0b0a",
+      "dashboard_url": "https://modal.com/apps/ap-U1nRBL1qw3JuznZjWQyYLK",
+      "wandb_id": "0385dn13",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/0385dn13",
+      "run_name": "261017-081103_059_muon_action_sequence_o59v5-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-control"
+    },
+    {
+      "arm": "return60",
+      "app_id": "ap-UgHGiyYh5I47RF6qDnH4Q1",
+      "function_call_id": "fc-01M54EKM4JC712DZ0CSQ0F707C",
+      "launch_id": "01444dd6736f4ea08a8992dc7a131aa5",
+      "dashboard_url": "https://modal.com/apps/ap-UgHGiyYh5I47RF6qDnH4Q1",
+      "wandb_id": "1c2ru27l",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/1c2ru27l",
+      "run_name": "261017-081207_063_percentile_conditioning_o63v1-return60-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-return60"
+    },
+    {
+      "arm": "bootstrap30",
+      "app_id": "ap-d23X70N3YPljHuPNb7LUik",
+      "function_call_id": "fc-01M54EKQ1EK46DJBPN40XD9V6C",
+      "launch_id": "72be731b4dc84294a5da18d2bd805541",
+      "dashboard_url": "https://modal.com/apps/ap-d23X70N3YPljHuPNb7LUik",
+      "wandb_id": "15qi0hke",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/15qi0hke",
+      "run_name": "261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30"
+    },
+    {
+      "arm": "match",
+      "app_id": "ap-RfQekINTahPBkfASCORMFJ",
+      "function_call_id": "fc-01M54EKSPTF587PA1S2BWBVPGQ",
+      "launch_id": "561cd553e3fd4a79a16d99a375a63aab",
+      "dashboard_url": "https://modal.com/apps/ap-RfQekINTahPBkfASCORMFJ",
+      "wandb_id": "56myl0sj",
+      "wandb_url": "https://wandb.ai/ericyuegu/hal/runs/56myl0sj",
+      "run_name": "261017-081119_063_percentile_conditioning_o63v1-match-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-match"
+    }
+  ],
+  "failed_attempts": [
+    {
+      "arm": "control",
+      "app_id": "ap-PeAQhiNhfmuo4WJRYV3S0N",
+      "function_call_id": "fc-01M54EATWKTC6KCSC7874249VY",
+      "launch_id": "214ecb5535a24478ba87a4ba2cf56e36",
+      "dashboard_url": "https://modal.com/apps/ap-PeAQhiNhfmuo4WJRYV3S0N"
+    },
+    {
+      "arm": "return60",
+      "app_id": "ap-bEiJoUv5ljb2IjSdduVJXI",
+      "function_call_id": "fc-01M54EATQ83GYZ0FPHG6AM51RQ",
+      "launch_id": "34ef4d36b0a64d5ab3dd33394425e8c8",
+      "dashboard_url": "https://modal.com/apps/ap-bEiJoUv5ljb2IjSdduVJXI"
+    },
+    {
+      "arm": "bootstrap30",
+      "app_id": "ap-NhxQamkZwiGhvMMqR6P5fM",
+      "function_call_id": "fc-01M54EATZ1NA9M4YJJVAKE7RBN",
+      "launch_id": "49f99a3f50804925a9252246f26a1a9a",
+      "dashboard_url": "https://modal.com/apps/ap-NhxQamkZwiGhvMMqR6P5fM"
+    },
+    {
+      "arm": "match",
+      "app_id": "ap-FeNQAfCweKf0NN15W7Gxrl",
+      "function_call_id": "fc-01M54EATWHRYP4JT49VB1HFGP6",
+      "launch_id": "3ff07a5f73ae4a30a885469748f2ec53",
+      "dashboard_url": "https://modal.com/apps/ap-FeNQAfCweKf0NN15W7Gxrl"
+    }
+  ],
+  "val_n_samples": 1024
+}

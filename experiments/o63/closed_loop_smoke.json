@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "experiment": "063_percentile_conditioning_v1",
+  "arm": "return60",
+  "checkpoint": "untrained proxy initialization",
+  "target": "u75",
+  "device": "NVIDIA RTX 3060",
+  "path": "eval_checkpoint with compiled CUDA actor and Dolphin",
+  "scope": "Execution smoke only; not gameplay quality evidence or the 96-matchup cohort",
+  "evidence_directory": "outputs/o63-eval-smoke/u75",
+  "metrics": {
+    "scheduled_boots": 1.0,
+    "completed_boots": 1.0,
+    "frames": 180.0,
+    "decode_calls": 90.0,
+    "crashed": 0.0,
+    "broker_failed_workers": 0.0,
+    "broker_timed_out_workers": 0.0,
+    "prediction_frames": 4.0,
+    "delay_frames": 2.0,
+    "replan_interval_frames": 2.0,
+    "inference_compile_seconds": 33.6746776229993,
+    "eval_wall_seconds": 16.313599279004848,
+    "decode_p95_ms": 22.186392145522404
+  }
+}
