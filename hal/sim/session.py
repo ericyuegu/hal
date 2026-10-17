@@ -845,7 +845,7 @@ class Session:
     def _validate_live_characters(self, gamestate: melee.GameState) -> None:
         """Fail loudly if menu automation launched the wrong character.
 
-        CPU Sheik is selected through Zelda + an A hold on stage select, so this
+        Local Sheik is selected through Zelda + an A hold on stage select, so this
         check protects the evaluation labels if Dolphin/libmelee behavior changes.
         """
         assert self._matchup is not None
@@ -950,6 +950,7 @@ class Session:
         if in_sss:
             helper = self._menu_helpers[autostart_port]
             controller = self._controllers[autostart_port]
+            autostart_player = next(p for p in self._matchup.players if p.port == autostart_port)
             cursor = getattr(gamestate.players.get(autostart_port), "cursor", None)
             target = {
                 melee.Stage.BATTLEFIELD: (1.0, -9.0),
@@ -962,7 +963,7 @@ class Session:
             }.get(self._matchup.stage)
             # menuhelper latches stage_selected after its first A press. If that
             # single frame is eaten under concurrent FFW load it subsequently
-            # releases forever. Pulse A until Dolphin actually leaves SSS. Also
+            # releases forever. Retry A until Dolphin actually leaves SSS. Also
             # recover from the observed Battlefield cursor limit-cycle once it is
             # inside the icon's practical hitbox.
             near_target = (
@@ -973,7 +974,9 @@ class Session:
             )
             if helper.stage_selected or (self._stage_select_steps >= 120 and near_target):
                 controller.tilt_analog(melee.Button.BUTTON_MAIN, 0.5, 0.5)
-                if self._stage_select_steps % 2:
+                # libmelee 0.47.0 selects Sheik by holding A through loading;
+                # pulsing it here can override the helper's hold and start Zelda.
+                if autostart_player.character is melee.Character.SHEIK or self._stage_select_steps % 2:
                     controller.press_button(melee.Button.BUTTON_A)
                 else:
                     controller.release_button(melee.Button.BUTTON_A)

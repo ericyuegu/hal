@@ -49,6 +49,46 @@ def prerequisites() -> None:
         pytest.skip(f"missing integration fixture: {missing}")
 
 
+@pytest.mark.parametrize(
+    "characters",
+    [
+        (melee.Character.SHEIK, melee.Character.NESS),
+        (melee.Character.NESS, melee.Character.SHEIK),
+        (melee.Character.SHEIK, melee.Character.SHEIK),
+        (melee.Character.ZELDA, melee.Character.ZELDA),
+    ],
+)
+def test_local_selection_preserves_sheik_and_zelda_identity(
+    prerequisites, tmp_path: Path, characters: tuple[melee.Character, ...]
+) -> None:
+    cancel = threading.Event()
+    with Session(
+        ISO_PATH,
+        dolphin_path=NETPLAY_EMULATOR_PATH,
+        slippi_port=51841,
+        replay_dir=tmp_path,
+        blocking_input=True,
+        polling_mode=True,
+        canceled=cancel.is_set,
+        disable_audio=True,
+        gfx_backend="OGL",
+        emulation_speed=0,
+        dolphin_version=dolphin_version(str(NETPLAY_EMULATOR_PATH)),
+        dolphin_batch=True,
+    ) as session:
+        frame = session.start_match(
+            Matchup(
+                melee.Stage.FOUNTAIN_OF_DREAMS,
+                tuple(PlayerSetup(port, character) for port, character in enumerate(characters, 1)),
+            )
+        )
+        for _ in range(120):
+            for port, character in enumerate(characters, 1):
+                assert frame["ports"][port]["leader"]["post"]["character"] == character.value
+            frame, playing = session.step({1: NEUTRAL_CONTROLLER_ACTION, 2: NEUTRAL_CONTROLLER_ACTION})
+            assert playing
+
+
 @pytest.mark.parametrize("phase", ["startup", "menus", "play"])
 def test_local_session_cancellation_releases_dolphin_within_one_second(
     prerequisites, tmp_path: Path, phase: str

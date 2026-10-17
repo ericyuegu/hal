@@ -24,6 +24,7 @@ import hal.sim.session as session_module
 from hal.controller import ControllerAction
 from hal.sim.session import DolphinGraphicsBackend
 from hal.sim.session import Matchup
+from hal.sim.session import PlayerSetup
 from hal.sim.session import Session
 from hal.sim.session import set_dolphin_stream_output
 
@@ -175,6 +176,39 @@ def test_navigate_to_live_returns_on_live_menu() -> None:
 
     # _navigate_to_live returns the canonical dict augmented with the live stage.
     assert s._navigate_to_live() == {"menu": melee.Menu.IN_GAME, "stage": int(melee.Stage.FINAL_DESTINATION.value)}
+
+
+@pytest.mark.parametrize(
+    "characters",
+    [
+        (melee.Character.SHEIK, melee.Character.NESS),
+        (melee.Character.NESS, melee.Character.SHEIK),
+        (melee.Character.SHEIK, melee.Character.SHEIK),
+        (melee.Character.ZELDA, melee.Character.ZELDA),
+    ],
+)
+def test_stage_retries_keep_sheik_held_on_either_port(characters: tuple[melee.Character, ...]) -> None:
+    session = _session(5)
+    session._matchup = Matchup(
+        melee.Stage.FOUNTAIN_OF_DREAMS,
+        tuple(PlayerSetup(port, character) for port, character in enumerate(characters, 1)),
+    )
+    session._controllers = {port: Mock(port=port) for port in (1, 2)}
+    session._menu_helpers = {port: melee.MenuHelper() for port in (1, 2)}
+    for helper in session._menu_helpers.values():
+        helper.stage_selected = True
+    state = melee.GameState()
+    state.menu_state = melee.Menu.STAGE_SELECT
+    state.frame = 50
+    state.players = {port: melee.PlayerState() for port in (1, 2)}
+    for _ in range(6):
+        session._drive_menus(state)
+        for port, character in enumerate(characters, 1):
+            controller = session._controllers[port]
+            if character == melee.Character.SHEIK:
+                assert controller.method_calls[-1] == call.press_button(melee.Button.BUTTON_A)
+    if characters[0] != melee.Character.SHEIK:
+        assert call.release_button(melee.Button.BUTTON_A) in session._controllers[1].method_calls
 
 
 def test_step_reports_latency_only_after_controller_pipe_flush(monkeypatch: pytest.MonkeyPatch) -> None:
