@@ -1,13 +1,14 @@
 # Live overlay and idle self-play implementation
 
 October 16, 2026 (rollout on October 17 UTC). **Activated.**
-Production runs runtime `106cc6613a1e57f437c7689fe22eaafe0fc538f8` and compatible
-independent overlay `63378a6a4d5558cafa5f9b87d86dd3ddb8187990`, with eight healthy
+Production runs matching runtime and independent overlay
+`37e7ec0d2b2f3188197b219babd585435997a5ef`, with eight healthy
 slots and admissions open. Earlier candidates were rolled back while the cleanup
 failures below were corrected. Final acceptance passed. The owner authorized a
 bounded, date-specific queue-budget allowance. No training or evaluation VM was
 started. The existing public human queue and stream lease remain in Cloudflare;
-self-play creates no public queue jobs.
+self-play creates no public queue jobs. A later Sheik selection failure was
+corrected and requalified as recorded at the end of this file.
 
 ## Behavior
 
@@ -356,3 +357,73 @@ queue remains in Cloudflare; local demo games do not enter it.
 Evidence remains under ignored `runs/netplay/release-20261016-live-overlay/`.
 Rollback images, independent overlay releases, and original host unit backups
 were retained. No credentials were committed.
+
+## Sheik selection failure and correction (October 17)
+
+At 08:01:47 UTC, production demo game 14 exited because port 1 was Zelda
+instead of requested Sheik. The recorded seed was 0; the selection was
+Sheik/Ness on Fountain of Dreams. The character identity check rejected it,
+all demo resources were released, and the supervisor disabled further demos.
+Eight human slots stayed healthy, with no queued or active reservation. This
+case was missing from the earlier acceptance coverage.
+
+The stage retry in `Session._drive_menus` released A on alternate frames,
+overriding libmelee's hold required for local Sheik selection. Runtime source
+`37e7ec0d2b2f3188197b219babd585435997a5ef` keeps A held for Sheik while preserving
+normal retries for other characters. The character check and failure policy
+remain in place. New unit tests and real-Dolphin tests cover Sheik on either
+port, two Sheiks, and two Zeldas. Before the fix, two of four cases failed in
+both groups with the same port-1 mismatch; after it, all four emulator cases
+and all 26 Session unit tests passed.
+
+Formatting (340 files), lint, and zero-diagnostic typing passed. The full unit
+suite passed **1,958 tests**, eight unchanged skips, 39 deselected, and 26 warnings
+in 215.37 seconds. The combined emulator run passed all 14 self-play tests and
+seven other tests, but its instant-restart parity fixture diverged at frame 185.
+That fixture still used nonblocking input, unlike the already corrected fresh
+recording test. Both record and replay now use blocking input; no game logic or
+comparison tolerance changed. The final required replay/cleanup command passed
+**eight tests**, six deselected, zero skips, seven warnings, in 58.01 seconds.
+The isolated prior Session also passed that timing-sensitive test on one rerun;
+this is not evidence of a Sheik-related physics change.
+
+The first isolated prior-code check lacked its relocated fixture paths; linking
+the same existing fixtures corrected that setup. An initial unit attempt lacked
+build-network access after concurrent packaging edits; the approved run passed.
+A temporary image staging tag was corrected and checked against the image's
+source label before publication. No mismatched image was published or activated.
+
+The matching runner and overlay image is
+`sha256:9a2c7c0b1b68703f65dbabebb1ef55e6f3f2e7df83e15d402179aa5d2a0411f9`.
+Installed-image and mounted-bundle preflights passed. The release retains the
+same 059 model artifacts, dependencies, eight slots, Docker init, overlay layout,
+and private/public protocols. Startup metadata was updated. Admissions were
+paused with no human reservations, then the matched services were restarted.
+The prior units and overlay link were retained under
+`/var/lib/hal-release-backups/sheik-20261017/`.
+
+The corrected release qualified both delays at capacity eight with 200 samples:
+p50 **10.690 ms**, p95 **15.304 ms**, p99 **15.924 ms** (the qualification's
+nearest-rank p99). Both budgets passed, including delay 3's 16.667 ms limit.
+Cold-start fixture preparation and compiled inference preparation completed;
+self-play started again at 08:19 UTC.
+
+The final public canary released all demo resources within **403 ms** from
+POST start and reached the human connection menu in **3.431 seconds**. It was
+canceled without a peer, and self-play resumed as game 2. The 80-second monitor
+observed at most one Dolphin, no retained zombie, and one unchanged OBS PID.
+All 79 OBS samples had active output, zero output skips, zero congestion, and
+no reconnect. The same one GPU model process remained loaded across the handoff.
+There were 61 measured self-play samples: **59.940 median FPS**, range
+59.916–60.119. The final sample had frame-interval p95 **18.021 ms** and complete
+client round-trip p95 **7.247 ms**. No connected human match was played.
+
+Admissions reopened with eight healthy slots, zero active or queued human
+reservations, and **36,088 / 37,000** internal credits used. The temporary budget
+expiry is unchanged. Training and evaluation VMs remain stopped. Unrelated user
+research and website edits remain uncommitted and were excluded from deployment.
+The screenshot is `production-sheik-fixed.png` in the ignored evidence directory.
+
+Existing pending replay sidecars still produce ownership-rejection warnings on
+retry. They were retained for separate investigation; no ownership check was
+weakened and no pending replay was deleted or relabeled as a demo/human game.
