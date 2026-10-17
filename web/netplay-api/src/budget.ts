@@ -21,8 +21,8 @@ export class WriteBudget {
   }
 
   private limit(): number {
-    // A maintenance canary can use at most 1,000 extra credits on one UTC day.
-    return COMMAND_WRITE_BUDGET + (Math.floor(this.now() / 86_400) === this.acceptanceDay ? 1_000 : 0);
+    // A maintenance canary can use at most 2,000 extra credits on one UTC day.
+    return COMMAND_WRITE_BUDGET + (Math.floor(this.now() / 86_400) === this.acceptanceDay ? 2_000 : 0);
   }
 
   private current(): { day: number; spent: number } {

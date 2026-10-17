@@ -108,7 +108,7 @@ Mutating admin commands require the relevant deployment authorization.
 The queue normally permits 35,000 command-write credits per UTC day and reserves
 200 credits before each admission. For an authorized maintenance check, the API
 can be deployed with `--var ACCEPTANCE_WRITE_BUDGET_DAY:YYYY-MM-DD`. This permits
-at most 1,000 extra credits on that date, retains the recorded usage, and expires
+at most 2,000 extra credits on that date, retains the recorded usage, and expires
 at midnight UTC. Omit the variable on the next deployment to remove it. Check
 Cloudflare's measured account usage before enabling this allowance; queue credits
 are conservative internal accounting, not provider usage totals.
