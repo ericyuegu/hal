@@ -1,7 +1,7 @@
 # O63: return percentile conditioning
 
-Status: all four runs passed their full 96-boot evaluations at update 8,192
-and resumed training. The primary 16,384-update results remain pending.
+Status: all four runs completed 16,384 training updates. Final gameplay
+evaluations are in progress; completed scores are recorded below.
 
 ## Fixed comparison
 
@@ -98,19 +98,64 @@ inherit the 60-frame availability mask.
 
 ## Primary results
 
-Pending. No arm has been selected.
+These scores compare against the original 059 control, which conditions from
+update 1. The user has been asked to resolve the control warmup ambiguity;
+no final method is selected while that clarification is pending.
 
-| Arm at update 16,384 | Target | net_stock_lcb | Difference from control |
-| --- | --- | --- | --- |
-| 059 control | p90 | Pending | — |
-| 063 return60 | u75 | Pending | Pending |
-| 063 bootstrap30 | u75 | Pending | Pending |
-| 063 match | u75 | Pending | Pending |
+| Arm at update 16,384 | Target | net_stock_lcb | Difference from original control |
+| --- | --- | ---: | ---: |
+| 059 control | p90 | 0.25510 | — |
+| 063 return60 | u75 | -0.04773 | -0.30282 |
+| 063 bootstrap30 | u75 | -0.02124 | -0.27634 |
+| 063 match | u75 | -0.01062 | -0.26572 |
+
+LCBs use the user-confirmed dashboard cluster-bootstrap metric, in net stocks
+per active gameplay minute. These are differences of LCBs, not confidence
+intervals for paired treatment effects.
 
 ## Secondary results
 
-Pending: u50, u90, and unconditioned gameplay for each O63 arm; unconditioned
-059; conditioned fractions; percentile calibration; validation diagnostics.
+The u sweep is secondary. All scores use the same final checkpoint within each
+arm. Values are net stocks per active gameplay minute.
+
+| Arm | Target | Mean net stocks | Dashboard LCB |
+| --- | --- | ---: | ---: |
+| control | unconditioned | -0.08500 | -0.19125 |
+| return60 | u50 | Pending | Pending |
+| return60 | u75 | 0.07433 | -0.04773 |
+| return60 | u90 | Pending | Pending |
+| return60 | unconditioned | Pending | Pending |
+| bootstrap30 | u50 | -0.04775 | -0.14858 |
+| bootstrap30 | u75 | 0.10095 | -0.02124 |
+| bootstrap30 | u90 | Pending | Pending |
+| bootstrap30 | unconditioned | Pending | Pending |
+| match | u50 | Pending | Pending |
+| match | u75 | 0.09555 | -0.01062 |
+| match | u90 | Pending | Pending |
+| match | unconditioned | Pending | Pending |
+
+| Arm | u90 minus u50, mean net stocks / min | Unconditioned gap from original 059 |
+| --- | ---: | ---: |
+| return60 | Pending | Pending |
+| bootstrap30 | Pending | Pending |
+| match | Pending | Pending |
+
+Final training diagnostics below average the logged windows ending in the last
+1,024 updates. The CDF gap is the mean absolute gap at nine decile cutpoints;
+the decile drift is the window mean of the per-batch maximum quantile gap.
+Heads remained trainable as agreed. Validation NLL is diagnostic only;
+`bootstrap30` validation uses an unconditioned final prefix.
+
+| Arm | Available fraction | Conditioned fraction | CDF gap | Decile drift | Reported val/nll |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| control | — | — | — | — | 1.17369 |
+| return60 | 1.00000 | 0.79994 | 0.04295 | 0.07501 | 1.17884 |
+| bootstrap30 | 0.76165 | 0.60927 | 0.04360 | 0.06392 | 1.18025 |
+| match | 0.99481 | 0.79579 | 0.01506 | 0.02655 | 1.18622 |
+
+Training curves: [training_diagnostics.svg](training_diagnostics.svg).
+Full training history: [training_diagnostics.json](training_diagnostics.json).
+Full gameplay evidence and artifact hashes: [gameplay_results.json](gameplay_results.json).
 
 ## Launch record
 
@@ -159,6 +204,9 @@ Every Modal arm uses the latter commit.
 
 ### Calibration limitation found before training
 
+[Theoretical zero-return illustration](calibration_zero_return.svg);
+[numerical values](calibration_zero_return.json).
+
 HL-Gauss smoothing prevents randomized bin labels from being exactly uniform
 in every calibrated state. If the true return is always zero, a perfectly fitted
 head puts approximately 0.495 of its mass in the central bin. Its randomized
@@ -174,6 +222,21 @@ CDF setting; exact percentile calibration is not assumed.
 The FunctionCall and launcher identities are recorded in [launches.json](launches.json).
 
 ## Review limits
+
+All four final checkpoints were downloaded and hashed. Their loader state,
+identity dropout RNG, condition dropout RNG, and prefix sampler state are
+exactly equal across arms. All three percentile labeler RNG states are also
+exactly equal. Learned weight and bias tensors are finite. See
+[final_state_audit.json](final_state_audit.json) and
+[checkpoint_identities.json](checkpoint_identities.json).
+
+The plan calls the control “059 proxy as it stands” but also says conditioning
+is absent before update 4,097 “in every arm.” The implemented and pre-launch
+recorded interpretation preserves 059 conditioning from update 1, while all
+063 arms begin at update 4,097. This changes 25% of the training budget. The
+reviewer identified this as a material ambiguity. User clarification is pending
+on keeping that primary control versus adding a matched-warmup 059 control.
+Do not treat a treatment ranking as resolved until the control is confirmed.
 
 All heads share the existing global gradient clip. Detaching head features
 prevents direct trunk gradients, but the new head can change the shared clip

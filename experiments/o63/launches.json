@@ -127,5 +127,8 @@
   "primary_metric_raw_field": "net_stock_cluster_bootstrap_lcb",
   "secondary_legacy_lcb_raw_field": "net_stock_lcb",
   "metric_naming_decided_before_gameplay_results": true,
-  "primary_metric_user_confirmed": true
+  "primary_metric_user_confirmed": true,
+  "control_conditioning_start_update": 1,
+  "treatment_conditioning_start_update": 4097,
+  "control_warmup_confirmation": "pending user clarification of conflicting plan wording"
 }
