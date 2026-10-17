@@ -87,6 +87,7 @@ INTERRUPT_GRACE_S: Final[int] = 20
 CLOSED_LOOP_EXPERIMENTS: Final[tuple[str, ...]] = (
     "experiments/059_muon_action_sequence.py",
     "experiments/060_compute_optimal_action_sequence.py",
+    "experiments/063_percentile_conditioning.py",
 )
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
@@ -628,6 +629,12 @@ def _evaluation_experiment(argv: tuple[str, ...]) -> str | None:
     return found[0] if found else None
 
 
+def evaluation_return_targets(experiment: str) -> tuple[str, ...]:
+    if experiment == "experiments/063_percentile_conditioning.py":
+        return ("u50", "u75", "u90", "unconditioned")
+    return ("p90", "unconditioned")
+
+
 def _valid_evaluation_update(experiment: str, update: int) -> bool:
     return experiment in CLOSED_LOOP_EXPERIMENTS and update > 0 and update % CLOSED_LOOP_EVERY == 0
 
@@ -654,7 +661,7 @@ def _broker_response(line: bytes, evaluator: modal.Function, experiment: str) ->
         error = f"unsupported closed-loop update {update!r} for {experiment}"
     elif not isinstance(checkpoint_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha):
         error = "expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters"
-    elif return_target not in ("p90", "unconditioned"):
+    elif return_target not in evaluation_return_targets(experiment):
         error = "unsupported return target"
     elif n_matchups != CLOSED_LOOP_MATCHUPS:
         error = f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups"
@@ -898,8 +905,9 @@ def _run_closed_loop_eval(
         raise ValueError("expected checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
     if n_matchups != CLOSED_LOOP_MATCHUPS:
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
-    if return_target not in ("p90", "unconditioned"):
+    if return_target not in evaluation_return_targets(experiment):
         raise ValueError("unsupported return target")
+    primary_target = "u75" if experiment == "experiments/063_percentile_conditioning.py" else "p90"
     env = _prepare_remote()
     checkpoint = f"checkpoints/step-{update:07d}.pt"
     command = [
@@ -916,14 +924,14 @@ def _run_closed_loop_eval(
         "--max-parallel",
         str(CLOSED_LOOP_MAX_PARALLEL),
         "--output-name",
-        f"eval96-step-{update:07d}" + ("-unconditioned" if return_target == "unconditioned" else ""),
+        f"eval96-step-{update:07d}" + (f"-{return_target}" if return_target != "p90" else ""),
         "--shared-wandb",
         "--expected-checkpoint-sha256",
         expected_checkpoint_sha256,
     ]
     command.extend(["--return-target", return_target])
-    if return_target == "unconditioned":
-        command.extend(["--wandb-namespace", "eval_unconditioned"])
+    if return_target != primary_target:
+        command.extend(["--wandb-namespace", f"eval_{return_target}"])
     subprocess.run(command, cwd=REMOTE_ROOT, env=env, check=True)
 
 

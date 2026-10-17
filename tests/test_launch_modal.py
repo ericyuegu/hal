@@ -789,3 +789,41 @@ def test_o59_broker_and_evaluator_separate_unconditioned_evidence(monkeypatch: p
     assert command[command.index("--return-target") + 1] == "unconditioned"
     bad = {**request, "return_target": "median"}
     assert "error" in json.loads(_MODULE._broker_response(json.dumps(bad).encode(), Evaluator(), experiment))
+
+
+@pytest.mark.parametrize("target", ("u50", "u75", "u90", "unconditioned"))
+def test_o63_broker_and_evaluator_preserve_percentile_target(monkeypatch, target):
+    experiment = "experiments/063_percentile_conditioning.py"
+    calls = []
+
+    class Call:
+        object_id = "fc-percentile"
+
+    class Evaluator:
+        def spawn(self, *args):
+            calls.append(args)
+            return Call()
+
+    request = {
+        "run_name": "run-percentile",
+        "update": 16384,
+        "expected_checkpoint_sha256": "a" * 64,
+        "n_matchups": 96,
+        "return_target": target,
+    }
+    response = _MODULE._broker_response(json.dumps(request).encode(), Evaluator(), experiment)
+    assert json.loads(response) == {"function_call_id": "fc-percentile"}
+    commands = []
+    monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **kwargs: {})
+    monkeypatch.setattr(_MODULE.subprocess, "run", lambda command, **kwargs: commands.append(command))
+    _MODULE._run_closed_loop_eval(*calls[0])
+    command = commands[0]
+    assert command[command.index("--return-target") + 1] == target
+    assert command[command.index("--output-name") + 1] == f"eval96-step-0016384-{target}"
+    if target != "u75":
+        assert command[command.index("--wandb-namespace") + 1] == f"eval_{target}"
+    else:
+        assert "--wandb-namespace" not in command
+    for bad_target in ("p90", "median"):
+        request["return_target"] = bad_target
+        assert "error" in json.loads(_MODULE._broker_response(json.dumps(request).encode(), Evaluator(), experiment))
