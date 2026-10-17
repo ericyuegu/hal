@@ -12,19 +12,19 @@ from loguru import logger
 
 from hal.netplay_service.queue_client import QueueProtocolError
 from hal.netplay_service.stream import StreamSupervisor
+from hal.netplay_service.stream import playing_player_count
 from hal.netplay_service.stream_lease import read_stream_lease
 
 
 def run(status_path: Path, display: str, stop: threading.Event, *, bandwidth_test: bool = False) -> None:
     release_file = os.environ.get("HAL_OVERLAY_RELEASE_FILE")
     git_sha = Path(release_file).read_text().strip() if release_file else None
-    depth = 0
     pulse = status_path.parent / "pulse" / "native"
     with StreamSupervisor(
         display,
         status_path.with_suffix(".stream.json"),
         status_path.with_suffix(".overlay.txt"),
-        lambda: depth,
+        lambda: playing_player_count(status_path, now=time.time()),
         {"PULSE_SERVER": f"unix:{pulse}", "PULSE_SINK": "hal_stream"},
         bandwidth_test=bandwidth_test,
         slot_status_path=status_path.with_name(f"{status_path.name}.slot-0.json"),
@@ -34,11 +34,9 @@ def run(status_path: Path, display: str, stop: threading.Event, *, bandwidth_tes
             try:
                 lease = read_stream_lease(status_path.with_suffix(".stream-lease.json"))
                 grant = lease.current_grant(time.time())
-                depth = lease.queue_depth
                 previous_error = None
             except (OSError, ValueError, QueueProtocolError) as error:
                 grant = None
-                depth = 0
                 # Lease data contains the stream key; log only the error class.
                 if type(error).__name__ != previous_error:
                     previous_error = type(error).__name__

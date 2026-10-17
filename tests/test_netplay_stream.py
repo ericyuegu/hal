@@ -14,6 +14,7 @@ from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import PulseAudio
 from hal.netplay_service.stream import StreamSupervisor
 from hal.netplay_service.stream import overlay_text
+from hal.netplay_service.stream import playing_player_count
 from hal.netplay_service.stream import write_stream_state
 
 
@@ -107,7 +108,7 @@ def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
     idle = overlay_text(IdleStreamState(), 3)
 
     assert game == "Playing · Falco · Master rank · Game 12 · Difficulty: Custom"
-    assert idle == "Waiting for a challenger · 3 players in queue"
+    assert idle == "Waiting for a challenger · 3 playing right now"
     assert player_code not in path.read_text()
     assert player_code not in game
     assert set(json.loads(path.read_text())) == {
@@ -123,6 +124,32 @@ def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
         "mode",
         "port",
     }
+
+
+def test_playing_count_uses_fresh_human_games_instead_of_waiting_players(tmp_path: Path) -> None:
+    from hal.netplay_service.health import SlotState
+    from hal.netplay_service.health import SlotStatus
+    from hal.netplay_service.health import write_slot_status
+
+    path = tmp_path / "status.json"
+    for slot, state, updated in (
+        (0, SlotState.PLAYING, 100),
+        (1, SlotState.DEGRADED, 100),
+        (2, SlotState.CONNECTING, 100),
+        (3, SlotState.IDLE, 100),
+        (4, SlotState.PLAYING, 90),
+        (5, SlotState.PLAYING, 110),
+    ):
+        write_slot_status(
+            path.with_name(f"{path.name}.slot-{slot}.json"),
+            SlotStatus(slot, state, None, None, None, None, None, 0, updated),
+        )
+    write_slot_status(
+        path.with_suffix(".stream.self-play.json"),
+        SlotStatus(0, SlotState.PLAYING, None, None, None, None, None, 0, 100),
+    )
+    assert playing_player_count(path, now=100) == 2
+    assert playing_player_count(path, now=105) == 0
 
 
 def test_stream_display_rejects_software_renderer() -> None:

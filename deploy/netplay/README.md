@@ -45,6 +45,9 @@ Pillow composes packaged controller layers and website sprites. Two PNG buffers
 in the overlay container's `/dev/shm` feed one OBS image source at up to 60 Hz.
 The private stream-state schema is version 2; public queue APIs are unchanged.
 A schema change requires a matched runner and overlay release.
+The idle panel shows how many human games are playing right now. It counts fresh
+local slot health and excludes waiting connections and self-play. No extra queue
+requests are needed for this count.
 
 Production enables `--idle-self-play` and requires at least two slots. One local
 Dolphin uses two dedicated connections to the existing qualified inference engine.

@@ -98,6 +98,7 @@ from hal.netplay_service.stream import DisplayGroup
 from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import PulseAudio
 from hal.netplay_service.stream import StreamSupervisor
+from hal.netplay_service.stream import playing_player_count
 from hal.netplay_service.stream import write_stream_state
 from hal.sim.session import DolphinGraphicsBackend
 
@@ -1594,7 +1595,7 @@ def run(
                             displays[0],
                             state_path,
                             config.status_path.with_suffix(".overlay.txt"),
-                            session_client.queue_depth,
+                            lambda: playing_player_count(config.status_path, now=time.time()),
                             pulse.environment,
                             bandwidth_test=config.twitch_bandwidth_test,
                             slot_status_path=_slot_status_path(config.status_path, 0),

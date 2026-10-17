@@ -11,7 +11,6 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import closing
-from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +29,6 @@ from hal.netplay_service.health import SLOT_HEARTBEAT_MAX_AGE_SECONDS
 from hal.netplay_service.health import SlotState
 from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.queue_client import StreamGrant
-from hal.netplay_service.queue_contract import QueueError
 
 if TYPE_CHECKING:
     from hal.netplay_service.graphics import PanelRenderer
@@ -161,12 +159,27 @@ def difficulty_label(desired_return: float | None) -> str:
     return {20.0: "Easy", 120.0: "Medium"}.get(desired_return, "Custom")
 
 
-def overlay_text(state: StreamState, queue_depth: int, activity: str = "Playing") -> str:
-    if queue_depth < 0:
-        raise ValueError("queue depth must be non-negative")
+def playing_player_count(status_path: Path, *, now: float) -> int:
+    """Count fresh human slots in play; demo health uses a separate file."""
+    count = 0
+    for path in status_path.parent.glob(f"{status_path.name}.slot-*.json"):
+        try:
+            status = read_slot_status(path)
+        except ValueError:
+            continue
+        if (
+            status.state in (SlotState.PLAYING, SlotState.DEGRADED)
+            and 0 <= now - status.updated_at <= SLOT_HEARTBEAT_MAX_AGE_SECONDS
+        ):
+            count += 1
+    return count
+
+
+def overlay_text(state: StreamState, playing_count: int, activity: str = "Playing") -> str:
+    if playing_count < 0:
+        raise ValueError("playing count must be non-negative")
     if isinstance(state, IdleStreamState):
-        noun = "player" if queue_depth == 1 else "players"
-        return f"Waiting for a challenger · {queue_depth} {noun} in queue"
+        return f"Waiting for a challenger · {playing_count} playing right now"
     character = _CHARACTER_LABELS[state.character]
     imitation = _IMITATION_LABELS[state.imitation]
     activity = "Self-play" if state.mode == "self-play" else activity
@@ -350,7 +363,7 @@ class StreamSupervisor:
         display: str,
         state_path: Path,
         overlay_path: Path,
-        queue_depth: Callable[[], int],
+        playing_count: Callable[[], int],
         pulse_environment: dict[str, str],
         *,
         bandwidth_test: bool,
@@ -360,7 +373,7 @@ class StreamSupervisor:
         self._display = display
         self._state_path = state_path
         self._overlay_path = overlay_path
-        self._queue_depth = queue_depth
+        self._playing_count = playing_count
         self._environment = os.environ | pulse_environment
         self._bandwidth_test = bandwidth_test
         self._slot_status_path = slot_status_path
@@ -400,13 +413,7 @@ class StreamSupervisor:
         self._wake.wait(seconds)
         self._wake.clear()
 
-    def _read_queue_depth(self, previous_depth: int) -> int:
-        depth = previous_depth
-        with suppress(QueueError):
-            depth = self._queue_depth()
-        return depth
-
-    def _refresh_overlay(self, depth: int) -> str:
+    def _refresh_overlay(self, playing_count: int) -> str:
         try:
             state = read_stream_state(self._state_path)
         except ValueError:
@@ -432,7 +439,7 @@ class StreamSupervisor:
         except OSError, ValueError:
             pass
         self._shown_state = state if active else IdleStreamState()
-        text = overlay_text(self._shown_state, depth, activity)
+        text = overlay_text(self._shown_state, playing_count, activity)
         if not self._overlay_path.exists() or self._overlay_path.read_text() != text + "\n":
             write_overlay(self._overlay_path, text)
         return text
@@ -453,8 +460,8 @@ class StreamSupervisor:
         studio: obs.ObsStudio | None = None
         running_key: str | None = None
         backoff = 1.0
-        depth = 0
-        next_depth = 0.0
+        playing_count = 0
+        next_count = 0.0
         next_stats = 0.0
         next_text = 0.0
         buffer = 0
@@ -478,11 +485,11 @@ class StreamSupervisor:
                         running_key = grant.key
                         healthy_since = time.monotonic()
                     now = time.monotonic()
-                    if now >= next_depth:
-                        depth = self._read_queue_depth(depth)
-                        next_depth = now + 5.0
+                    if now >= next_count:
+                        playing_count = self._playing_count()
+                        next_count = now + 1.0
                     if now >= next_text:
-                        text = self._refresh_overlay(depth)
+                        text = self._refresh_overlay(playing_count)
                         studio.update(text)
                         next_text = now + 0.25
                     inputs, value = receiver.poll(self._shown_state, now)
