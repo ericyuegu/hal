@@ -1,11 +1,13 @@
 # Live overlay and idle self-play implementation
 
-October 16, 2026 (rollout on October 17 UTC). **Candidate rolled back.**
-The matched runner and overlay were deployed during the authorized maintenance
-window. A demo frame timeout failed acceptance. Production now runs the prior
-matched releases, with eight healthy slots and its admission flag restored.
-The existing daily queue budget still blocks new reservations. No training or
-evaluation VM was started. The corrections below have not been activated.
+October 16, 2026 (rollout on October 17 UTC). **Activated.**
+Production runs runtime `106cc6613a1e57f437c7689fe22eaafe0fc538f8` and compatible
+independent overlay `63378a6a4d5558cafa5f9b87d86dd3ddb8187990`, with eight healthy
+slots and admissions open. Earlier candidates were rolled back while the cleanup
+failures below were corrected. Final acceptance passed. The owner authorized a
+bounded, date-specific queue-budget allowance. No training or evaluation VM was
+started. The existing public human queue and stream lease remain in Cloudflare;
+self-play creates no public queue jobs.
 
 ## Behavior
 
@@ -225,3 +227,132 @@ Evidence: ignored `runs/netplay/release-20261016-live-overlay/`, including every
 validation log, original and restored VM metadata, source archives and hashes,
 image build/push logs, budget results, demo failure record, and an actual OBS
 scene screenshot. Unrelated website changes remain outside the release.
+
+## Final cleanup corrections
+
+Runtime `106cc6613a1e57f437c7689fe22eaafe0fc538f8` exits its dedicated demo worker
+only after explicit Dolphin/inference cleanup and its final record write. Python
+interpreter finalizers had otherwise kept a cleaned-up worker alive beyond the
+600 ms watchdog. A spawned-worker regression installs a three-second exit
+handler and checks cancellation during startup, menus, and play. Unexpected
+exceptions still produce a nonzero exit.
+
+The production process monitor then found six defunct AppImage descendants,
+not six live games. Docker's Python PID 1 did not reap adopted children. Launch
+source `bd17c48143b562506e54827aa3d4deacc5c7ab30` enables Docker init in production
+and Compose. A CPU-only probe on the actual host reproduced the zombie without
+init and confirmed reaping with init. The runner was restarted with init and
+both delay budgets were requalified. Its systemd dependency also stopped OBS;
+the overlay service was restarted. Stream continuity below refers to human
+handoffs after maintenance, not this service restart.
+
+The final image digest is
+`sha256:8bdd72300be77ea7af14e709904f381aeed1be1d756ac7e6f8644bd78231bfcb`.
+Installed image imports/assets and the independent bundle preflight passed.
+The overlay uses private stream-state version 2 with this runtime. Updating the
+final overlay did not restart the runner, model, or active demo.
+
+## Final presentation
+
+Overlay `63378a6a4d5558cafa5f9b87d86dd3ddb8187990` removes only the pinned
+Dolphin window's 304-pixel pillarboxes, preserving the entire native Melee image
+and proportional scaling. The live screenshot confirms the game starts at row
+43 with the HAL/SSBM header and ends after row 1068 with the 20xx.xyz footer,
+including antialiased text edges. It retains the website sprites and controller
+readback, and labels the bar **State value**. The idle text says **playing right
+now**, counting fresh local human game health and excluding waiting connections
+and self-play. It makes no additional public queue calls.
+
+The requested README count addendum was removed. Unrelated website and research
+changes were excluded from the overlay bundle and commits.
+
+## Final validation
+
+| Command or check | Result |
+| --- | --- |
+| `uv run ruff format --check .` | Passed: 340 files. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed: zero diagnostics. |
+| `uv run pytest -q -m "not integration"` | 1,953 passed, eight unchanged skips, 35 deselected, 26 existing warnings; 175.60 seconds. Includes concurrent unrelated research tests without releasing those changes. |
+| `HAL_REQUIRE_INTEGRATION=1 xvfb-run -a uv run pytest -q -rP tests/test_idle_self_play_integration.py tests/test_roundtrip.py tests/test_session_cleanup.py -m integration` | 18 passed, six deselected, zero skips, 12 warnings; 242.11 seconds. |
+| Final capture/value regressions | 38 passed; the final one-pixel footer correction then passed 28 focused tests. |
+| Worker tests and TypeScript | All 112 tests passed; type checking passed. |
+| Installed bundle activation | Imports, assets, stream schema, fresh heartbeat, and active output passed. |
+
+The full unit command was interrupted during user steering before the completed
+run above. An attempted detached launch also exited before executing tests; it
+is not counted as validation. A temporary screenshot helper first used a missing
+`python` executable; rerunning with `python3` produced the actual after image.
+The final monitor analysis excluded playing samples whose FPS window had not
+filled, after an initial aggregate rejected null values. This did not alter any
+recorded measurements. Earlier failed checks and the eight skip reasons remain
+listed above. No required emulator fixture was missing.
+
+The new spawned-worker test initially supplied an integer state value, which
+the inference boundary rejected; a float fixed the fixture. Ruff initially
+rejected an empty test-cleanup exception handler and, later, an unused import;
+both final checks pass. The first public canary helper read the obsolete flat
+phase field. It canceled its reservation safely; the corrected helper reads
+`observed.phase` without changing the public API.
+
+## Final production acceptance
+
+With Docker init enabled, both declared delays qualified at eight-stream load
+with 200 samples: p50 **10.443 ms**, p95 **15.379 ms**, p99 **16.000 ms**.
+Delay 2 allows 33.333 ms; delay 3 allows 16.667 ms. Both use prefix 4, replan 4,
+and horizon 8. The prior release's p99 was 15.637 ms; no speedup is claimed.
+
+Two earlier public canaries reached the human connection menu in 8.347 and
+6.051 seconds and confirmed demo release within 0.396 and 0.374 seconds from
+POST start. A control-disconnect check released the demo in **114 ms**, recovered
+control, and resumed self-play without disabling demos. The command that closed
+the sockets also printed an RTNETLINK error; the runner's actual control-close
+and release timestamps establish the result.
+
+A further canary with Docker init reached the menu in 6.708 seconds. After the
+final overlay update, the last canary reached `waiting_for_player` in
+**6.428 seconds**. Its old Dolphin was absent within **336 ms** of POST start,
+and the supervisor confirmed full demo release within **406 ms**. It then
+claimed the human reservation. The test canceled at the menu without connecting
+a peer or playing a human match, and self-play resumed as game 10.
+
+The final 80-second monitor recorded at most one Dolphin, no retained zombie,
+and one unchanged OBS PID. All 79 OBS output samples were active, with monotonic
+output duration, zero output skips, zero congestion, and no reconnect. The same
+single GPU model process remained loaded. A prior 360-second monitor with init
+also observed at most one Dolphin through repeated handoffs and match changes.
+A transient defunct child was reaped before the next Dolphin started.
+
+With the final controller and state-value display active, 58 measured playing
+samples ranged from **59.854 to 59.972 FPS**, median **59.941 FPS**. The final
+sample had frame-interval p95 **18.005 ms** and complete client round-trip p95
+**7.044 ms**. These are two-stream self-play measurements. Eight simultaneous
+human games and a connected human rematch were not tested. Reboot and managed
+replacement remain unverified. Training and evaluation VMs remain stopped.
+
+Admissions were reopened after these checks. Public capacity reported ready,
+eight healthy slots, zero active and zero queued human reservations. The admin
+flag was `paused=false`; recorded command spending was **35,920 / 37,000**.
+
+## Temporary budget allowance
+
+The owner authorized clearing the internal daily block for acceptance. API source
+`2fb3b2e7` introduced a date-bound 1,000-credit allowance; source `aa50ad03` raised
+that bounded allowance to 2,000 credits to cover the cleanup retest. Active API
+version is `b150c6c2-dc9e-42d1-a0ad-b304c9a71b92`, with
+`ACCEPTANCE_WRITE_BUDGET_DAY=2026-10-17`. Its limit is 37,000 command credits on
+that UTC day and automatically returns to the normal 35,000 at **October 18,
+00:00 UTC** (October 17, 5 pm Pacific). Existing spending is retained. The
+200-credit admission reserve, database-size guard, protocol 4, schema 7,
+`global-v7` identity, and public APIs remain unchanged. No provider plan changed.
+
+Account analytics at the final check reported **13,644 Durable Object requests**,
+**13,504 SQLite row writes**, **226,862 row reads**, and **6,054 Worker requests**,
+with **zero Worker errors** for October 17 UTC. Command credits are conservative
+internal accounting, not those provider totals. The measured request/write
+counts are each well below their separate 100,000/day free limits. The public
+queue remains in Cloudflare; local demo games do not enter it.
+
+Evidence remains under ignored `runs/netplay/release-20261016-live-overlay/`.
+Rollback images, independent overlay releases, and original host unit backups
+were retained. No credentials were committed.
