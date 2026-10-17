@@ -804,8 +804,11 @@ def test_o59_broker_and_evaluator_separate_unconditioned_evidence(monkeypatch: p
 
 
 @pytest.mark.parametrize("target", ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned"))
-def test_o63_broker_and_evaluator_preserve_percentile_target(monkeypatch, target):
-    experiment = "experiments/063_percentile_conditioning.py"
+@pytest.mark.parametrize(
+    ("experiment", "primary"),
+    [("experiments/063_percentile_conditioning.py", "u75"), ("experiments/064_production_percentile.py", "u95")],
+)
+def test_percentile_broker_and_evaluator_preserve_target(monkeypatch, target, experiment, primary):
     calls = []
 
     class Call:
@@ -832,7 +835,7 @@ def test_o63_broker_and_evaluator_preserve_percentile_target(monkeypatch, target
     command = commands[0]
     assert command[command.index("--return-target") + 1] == target
     assert command[command.index("--output-name") + 1] == f"eval96-step-0016384-{target}"
-    if target != "u75":
+    if target != primary:
         assert command[command.index("--wandb-namespace") + 1] == f"eval_{target}"
     else:
         assert "--wandb-namespace" not in command
@@ -863,12 +866,15 @@ def test_remote_preparation_fetches_no_dataset_for_evaluation(monkeypatch, evalu
 
 
 @pytest.mark.parametrize("subcommand", ("train", "eval"))
-def test_remote_environment_passes_evaluation_fixture_scope(monkeypatch, subcommand):
+@pytest.mark.parametrize(
+    "experiment", ["experiments/063_percentile_conditioning.py", "experiments/064_production_percentile.py"]
+)
+def test_remote_environment_passes_evaluation_fixture_scope(monkeypatch, subcommand, experiment):
     prepared = []
     monkeypatch.setattr(_MODULE, "_prepare_remote", lambda **kwargs: prepared.append(kwargs) or {})
     monkeypatch.setattr(_MODULE, "_configure_tracking_context", lambda *_args: None)
     spec = _MODULE.LaunchSpec(
-        argv=("uv", "run", "experiments/063_percentile_conditioning.py", subcommand),
+        argv=("uv", "run", experiment, subcommand),
         launch_id="a" * 32,
         git_sha="b" * 40,
         state_volume="test-state",

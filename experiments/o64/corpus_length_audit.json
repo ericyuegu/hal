@@ -1,0 +1,2097 @@
+{
+  "all_passed": true,
+  "audited_sources": 44,
+  "expected_sources": 44,
+  "failures": [],
+  "observed_at": "2026-10-17T17:27:38.858112+00:00",
+  "required_actual_frames": 293,
+  "schema_version": 1,
+  "scope": "Read-only streaming of retained policy-world-v8 JSONL manifests and train/val indexes; no MDS shards downloaded.",
+  "sources": [
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 2153473,
+          "key": "processed/ranked-anonymized-1/mds-policy-world-v8/train/index.json",
+          "rows": 112188,
+          "sha256": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8",
+          "version": 2
+        },
+        "val": {
+          "bytes": 23217,
+          "key": "processed/ranked-anonymized-1/mds-policy-world-v8/val/index.json",
+          "rows": 1189,
+          "sha256": "95738bf46604a7e7b67320095efbcc2dbe1a8ae748aa6a269e19f0cee52da389",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 133488493,
+        "key": "processed/ranked-anonymized-1/mds-policy-world-v8/manifest.jsonl",
+        "rows": 114541,
+        "sha256": "95b432d7d6c93d53dfe82617ea3ca7347da3c253f159895553b1e4d9d5718552"
+      },
+      "passed": true,
+      "source": "ranked-anonymized-1-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3280,
+          "rows": 1164
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 1668,
+          "rows": 112188
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2566,
+          "rows": 1189
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 2809446,
+          "key": "processed/ranked-anonymized-2/mds-policy-world-v8/train/index.json",
+          "rows": 146455,
+          "sha256": "f629a8a01eada6904ad16be2ddebe3037c9564e0af812794b75c2a826a8a204c",
+          "version": 2
+        },
+        "val": {
+          "bytes": 29843,
+          "key": "processed/ranked-anonymized-2/mds-policy-world-v8/val/index.json",
+          "rows": 1526,
+          "sha256": "5e5737b9af3b0556eb53a63ed9dc36cd3cfdb31c588321fcf88b8ec559655b86",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 171498570,
+        "key": "processed/ranked-anonymized-2/mds-policy-world-v8/manifest.jsonl",
+        "rows": 149468,
+        "sha256": "d32608b6714bd5aac6ee497d232bda5eeb07d9cca53af1bda69f1b066fd18e90"
+      },
+      "passed": true,
+      "source": "ranked-anonymized-2-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3312,
+          "rows": 1487
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2067,
+          "rows": 146455
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2869,
+          "rows": 1526
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 2322439,
+          "key": "processed/ranked-anonymized-3/mds-policy-world-v8/train/index.json",
+          "rows": 124398,
+          "sha256": "8acb765a597f965bc59bf6c982a2a784f051ac2f5366906f180a04b909943c57",
+          "version": 2
+        },
+        "val": {
+          "bytes": 26527,
+          "key": "processed/ranked-anonymized-3/mds-policy-world-v8/val/index.json",
+          "rows": 1280,
+          "sha256": "c632fdef9a56a586c5e60e32a8a756e70cbc578f4d7ee17ccfc7c0f7bde80cf3",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 141232955,
+        "key": "processed/ranked-anonymized-3/mds-policy-world-v8/manifest.jsonl",
+        "rows": 126869,
+        "sha256": "ce9bfb6caf67434aede1a1f180b5a06469515b98bb9d1184414dd03c04eec1d8"
+      },
+      "passed": true,
+      "source": "ranked-anonymized-3-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3193,
+          "rows": 1191
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2080,
+          "rows": 124398
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3412,
+          "rows": 1280
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 2713373,
+          "key": "processed/ranked-anonymized-4/mds-policy-world-v8/train/index.json",
+          "rows": 143465,
+          "sha256": "b4424eebc9724e4fb94e3b16f21d2f357cd178212915604ec675f782daea17b5",
+          "version": 2
+        },
+        "val": {
+          "bytes": 29840,
+          "key": "processed/ranked-anonymized-4/mds-policy-world-v8/val/index.json",
+          "rows": 1439,
+          "sha256": "5ad4d7feda06b14afe5ea8dd01760821a667881be4ef7237281ad3da0eedd578",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 165989333,
+        "key": "processed/ranked-anonymized-4/mds-policy-world-v8/manifest.jsonl",
+        "rows": 146380,
+        "sha256": "faa79e2364938a9275d88b34a469043eee6e38f544b9ab26562e0c8add61c967"
+      },
+      "passed": true,
+      "source": "ranked-anonymized-4-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3400,
+          "rows": 1476
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 1964,
+          "rows": 143465
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2686,
+          "rows": 1439
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 2445018,
+          "key": "processed/ranked-anonymized-5/mds-policy-world-v8/train/index.json",
+          "rows": 128830,
+          "sha256": "94b56ea16d6549564b39342a8c882f214d8b3d747b99a28e291d12bfa4a5c7cc",
+          "version": 2
+        },
+        "val": {
+          "bytes": 26527,
+          "key": "processed/ranked-anonymized-5/mds-policy-world-v8/val/index.json",
+          "rows": 1263,
+          "sha256": "48347a6a65b631f98751d5ae0be0b0b3b28e9a3eb74045fc14aa5bb223615ce7",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 151114892,
+        "key": "processed/ranked-anonymized-5/mds-policy-world-v8/manifest.jsonl",
+        "rows": 131337,
+        "sha256": "5542546cf3979d04b13894a6e5228b5e9b79e2989553f3d1ee1ca004935a6022"
+      },
+      "passed": true,
+      "source": "ranked-anonymized-5-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3514,
+          "rows": 1244
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 1894,
+          "rows": 128830
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3404,
+          "rows": 1263
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 3167254,
+          "key": "processed/ranked-anonymized-6/mds-policy-world-v8/train/index.json",
+          "rows": 166189,
+          "sha256": "ee58ce5241a510c609e15e9283903163ff941187ccf9a4bff0716b45e157a083",
+          "version": 2
+        },
+        "val": {
+          "bytes": 33153,
+          "key": "processed/ranked-anonymized-6/mds-policy-world-v8/val/index.json",
+          "rows": 1584,
+          "sha256": "a1a3010dde5e277ab8699dcaa6527ed5f39fb6142a8352cf41980d3ed1090157",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 195019427,
+        "key": "processed/ranked-anonymized-6/mds-policy-world-v8/manifest.jsonl",
+        "rows": 169422,
+        "sha256": "6374070e35f66ad060e813764c62080740f891a2b434407159f033263010e7cd"
+      },
+      "passed": true,
+      "source": "ranked-anonymized-6-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3374,
+          "rows": 1649
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 1807,
+          "rows": 166189
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2935,
+          "rows": 1584
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 304819,
+          "key": "processed/professional/aklo/mds-policy-world-v8/train/index.json",
+          "rows": 18820,
+          "sha256": "1ae04b2ffd57fe0bb1bac86933f61b4fbad151bfe7956f607f6ff19521895f64",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/aklo/mds-policy-world-v8/val/index.json",
+          "rows": 168,
+          "sha256": "04e1c9ef924baddebf8f5b930c95e839acae4ea596cbafcc4be7545fbb8f651c",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 22157907,
+        "key": "processed/professional/aklo/mds-policy-world-v8/manifest.jsonl",
+        "rows": 19177,
+        "sha256": "3b982beee5712c5bda604aa949c1f120279f9af534032bc9cf0df7d1431a75ef"
+      },
+      "passed": true,
+      "source": "professional-aklo-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3785,
+          "rows": 189
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2302,
+          "rows": 18820
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4150,
+          "rows": 168
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 354517,
+          "key": "processed/professional/amsa/mds-policy-world-v8/train/index.json",
+          "rows": 23641,
+          "sha256": "11945989cd7a99fb38a0e52fc6306fa2b9e72eb6c7094d656f069b02878ac17f",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6649,
+          "key": "processed/professional/amsa/mds-policy-world-v8/val/index.json",
+          "rows": 259,
+          "sha256": "e906cbb04a770542eb74977cc1f2c9faa356e01aefb41b40fa185710209ad623",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 27407650,
+        "key": "processed/professional/amsa/mds-policy-world-v8/manifest.jsonl",
+        "rows": 24131,
+        "sha256": "499d32bd4a8f4ed20f465892dd34411f699cc199abbb47d98bff3333d06d59bb"
+      },
+      "passed": true,
+      "source": "professional-amsa-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3734,
+          "rows": 231
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2105,
+          "rows": 23641
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3433,
+          "rows": 259
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 29842,
+          "key": "processed/professional/axe/mds-policy-world-v8/train/index.json",
+          "rows": 1604,
+          "sha256": "263f972bb6e629c7e87106d1e2f57d6477ab32d291515dc7fe38f6f316e6e270",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/axe/mds-policy-world-v8/val/index.json",
+          "rows": 16,
+          "sha256": "d45013535ee73912f5b4a71b381751a4c0ed0a9c22e7d76bf75fc062115c1970",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 1871389,
+        "key": "processed/professional/axe/mds-policy-world-v8/manifest.jsonl",
+        "rows": 1635,
+        "sha256": "99be1a0b0de3dd9b309c93fe53d8898fff17b945f0b967c1d955722b6df9c896"
+      },
+      "passed": true,
+      "source": "professional-axe-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4490,
+          "rows": 15
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3321,
+          "rows": 1604
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4931,
+          "rows": 16
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 13278,
+          "key": "processed/professional/billybopeep/mds-policy-world-v8/train/index.json",
+          "rows": 749,
+          "sha256": "7da1a1c4157937ff28c28af4da8ba1103ee81fedb93e4fe820789ca29e2709c7",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/billybopeep/mds-policy-world-v8/val/index.json",
+          "rows": 12,
+          "sha256": "513a7e3d5ae2bad5b378926f884d4f503ed9a84a72e0afced30e06e521db9597",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 904574,
+        "key": "processed/professional/billybopeep/mds-policy-world-v8/manifest.jsonl",
+        "rows": 773,
+        "sha256": "6bf8c157217a2632dd9d8e2ca7fe989bead04759c10fdebe4bc6c1cd21fcd085"
+      },
+      "passed": true,
+      "source": "professional-billybopeep-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5166,
+          "rows": 12
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3831,
+          "rows": 749
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4512,
+          "rows": 12
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 43094,
+          "key": "processed/professional/bobbybigballz/mds-policy-world-v8/train/index.json",
+          "rows": 2521,
+          "sha256": "53cae8c1df6a2c13e0e3ab32bf8595be4b9c6438ee54ac0e54bbaa5669f0dcbe",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/bobbybigballz/mds-policy-world-v8/val/index.json",
+          "rows": 23,
+          "sha256": "cdca45fea8e74708b68ac7b1217cdda5d6a00d5522f633b228ec6a29bf09e6fd",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 3058574,
+        "key": "processed/professional/bobbybigballz/mds-policy-world-v8/manifest.jsonl",
+        "rows": 2573,
+        "sha256": "6217f8437f29160fe728627a428d4a1f53fbbb567e0b94ee15fa0e929de95687"
+      },
+      "passed": true,
+      "source": "professional-bobbybigballz-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5490,
+          "rows": 29
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2401,
+          "rows": 2521
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4396,
+          "rows": 23
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 964109,
+          "key": "processed/professional/cody/mds-policy-world-v8/train/index.json",
+          "rows": 62189,
+          "sha256": "abb6d3e1f790302096270edb6a82c69a646dbd99b544e3ed35507bef293dfb8b",
+          "version": 2
+        },
+        "val": {
+          "bytes": 13275,
+          "key": "processed/professional/cody/mds-policy-world-v8/val/index.json",
+          "rows": 684,
+          "sha256": "d8b1f743b3c4a96722d79f20cfeb34666f00a4f11cb598c08d537cfbeaf252b1",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 72436996,
+        "key": "processed/professional/cody/mds-policy-world-v8/manifest.jsonl",
+        "rows": 63488,
+        "sha256": "586e888b8937b632dbd8412562116efc9d5eacfff43330c176b660a0601e7e33"
+      },
+      "passed": true,
+      "source": "professional-cody-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3270,
+          "rows": 615
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2210,
+          "rows": 62189
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3536,
+          "rows": 684
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 420774,
+          "key": "processed/professional/cookbook/mds-policy-world-v8/train/index.json",
+          "rows": 20103,
+          "sha256": "e855d5c4e871259092bd2f7772a5f80f1ea7c732d223eeb729e1760dadd1c585",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6649,
+          "key": "processed/professional/cookbook/mds-policy-world-v8/val/index.json",
+          "rows": 185,
+          "sha256": "d431ef78558a0cef66430980e3aa63c23cd179a251894a890a956b841eaf1cec",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 23816026,
+        "key": "processed/professional/cookbook/mds-policy-world-v8/manifest.jsonl",
+        "rows": 20510,
+        "sha256": "63f28058e2350a8cee84e93dd40fc9eddf4eecfbe8aa6107ed13d6664631a2a1"
+      },
+      "passed": true,
+      "source": "professional-cookbook-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4815,
+          "rows": 222
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2285,
+          "rows": 20103
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4439,
+          "rows": 185
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 155737,
+          "key": "processed/professional/daniel/mds-policy-world-v8/train/index.json",
+          "rows": 7984,
+          "sha256": "f2683e42e5a3e2dd2525c5643af7ed9b4536b398aa295a0ffec56b6493144d42",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/daniel/mds-policy-world-v8/val/index.json",
+          "rows": 86,
+          "sha256": "ae26fe313373f43c92d997ab2808a9106f325d7000595c087c06242de97c32f8",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 9583167,
+        "key": "processed/professional/daniel/mds-policy-world-v8/manifest.jsonl",
+        "rows": 8150,
+        "sha256": "5b33b00217f73bf1ea2489feef4e052b1229e2127a055e21df62a8dc67ee0065"
+      },
+      "passed": true,
+      "source": "professional-daniel-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5513,
+          "rows": 80
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2717,
+          "rows": 7984
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4536,
+          "rows": 86
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 467157,
+          "key": "processed/professional/desertsnoopy/mds-policy-world-v8/train/index.json",
+          "rows": 26728,
+          "sha256": "23b0af01ab6102edc6be234bfa6055f0c22e7591d5965763524a3ecd4f9b9099",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6649,
+          "key": "processed/professional/desertsnoopy/mds-policy-world-v8/val/index.json",
+          "rows": 258,
+          "sha256": "99294d206642ebe52a13a69f58ceb3d672f8f8aae7bf94ebcec57af8e01c5e3d",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 32090430,
+        "key": "processed/professional/desertsnoopy/mds-policy-world-v8/manifest.jsonl",
+        "rows": 27271,
+        "sha256": "9e5f5f2564e593c6fa08812de0fdbb607df0909522159cf73d4f55b83216ff37"
+      },
+      "passed": true,
+      "source": "professional-desertsnoopy-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2846,
+          "rows": 285
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2752,
+          "rows": 26728
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4296,
+          "rows": 258
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 9959,
+          "key": "processed/professional/druggedfox/mds-policy-world-v8/train/index.json",
+          "rows": 436,
+          "sha256": "8e4c425e9a62b317df3c11d85d8d172f2be16d2270a8f6279180f2bb79a48687",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/druggedfox/mds-policy-world-v8/val/index.json",
+          "rows": 10,
+          "sha256": "2cb56e102800d59743d72223e8f4919243f1e0b2254dca7308c752a23018d968",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 528155,
+        "key": "processed/professional/druggedfox/mds-policy-world-v8/manifest.jsonl",
+        "rows": 451,
+        "sha256": "3c6191b55e0d99a5b55c27b67a4d0ed8127a1dae7bfc354500ae9892e6c9ae3f"
+      },
+      "passed": true,
+      "source": "professional-druggedfox-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5238,
+          "rows": 5
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2786,
+          "rows": 436
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 7182,
+          "rows": 10
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 119290,
+          "key": "processed/professional/fknsilver/mds-policy-world-v8/train/index.json",
+          "rows": 5503,
+          "sha256": "5ff82418f1a3be4d8c9ea0822b204f88cbea0165c93cb5ba5f19fbadb2692966",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/fknsilver/mds-policy-world-v8/val/index.json",
+          "rows": 56,
+          "sha256": "c370de32aecc6ab0d3984728fa6106dfa7f9ce7c5c19dc786682bd434a9af0c7",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 6596109,
+        "key": "processed/professional/fknsilver/mds-policy-world-v8/manifest.jsonl",
+        "rows": 5603,
+        "sha256": "0e398357507604731bbd53e8825a2772ed02de910309b84895f6e6d97f7da92f"
+      },
+      "passed": true,
+      "source": "professional-fknsilver-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4563,
+          "rows": 44
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2740,
+          "rows": 5503
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4399,
+          "rows": 56
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 261750,
+          "key": "processed/professional/franz/mds-policy-world-v8/train/index.json",
+          "rows": 15159,
+          "sha256": "5e5720294243254007952fb8f2289b81485fc98ac1df3db304c286286ef80cd7",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/franz/mds-policy-world-v8/val/index.json",
+          "rows": 147,
+          "sha256": "0185f15ef77afc2be2c36058268dd1d068978ec0dbef696528a05817d9201b39",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 17611311,
+        "key": "processed/professional/franz/mds-policy-world-v8/manifest.jsonl",
+        "rows": 15458,
+        "sha256": "3e09b5caf5e1f665d95719bf6f575da78db6ab134d2cdde73b28770a4d70901a"
+      },
+      "passed": true,
+      "source": "professional-franz-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4248,
+          "rows": 152
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2481,
+          "rows": 15159
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3243,
+          "rows": 147
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 331326,
+          "key": "processed/professional/frenzy/mds-policy-world-v8/train/index.json",
+          "rows": 19640,
+          "sha256": "46a9cce7517bc03fde2b3cf70efedade5092bc3841c23711bafc1fac30da18e5",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6646,
+          "key": "processed/professional/frenzy/mds-policy-world-v8/val/index.json",
+          "rows": 197,
+          "sha256": "2cd2eaf7abfc0e0c846d5c51f739f76a0f9bba3ad39bdde26c9105844e24eedb",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 22926920,
+        "key": "processed/professional/frenzy/mds-policy-world-v8/manifest.jsonl",
+        "rows": 20035,
+        "sha256": "fa37f304f5f6297c6b1c83f855494136053ab4d539a7b707b3af80e423b8dcb6"
+      },
+      "passed": true,
+      "source": "professional-frenzy-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2716,
+          "rows": 198
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2616,
+          "rows": 19640
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3035,
+          "rows": 197
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 198806,
+          "key": "processed/professional/friend/mds-policy-world-v8/train/index.json",
+          "rows": 8433,
+          "sha256": "05c6821f857d21c20ae1582cdd7362ad230f8f72c933e44aecf9f0cb351bcd67",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/friend/mds-policy-world-v8/val/index.json",
+          "rows": 91,
+          "sha256": "e4d4f46c35b9d22debbe47e4d379a4c19f194d630cd5a0ec0414af2fa7a6cec2",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 10098459,
+        "key": "processed/professional/friend/mds-policy-world-v8/manifest.jsonl",
+        "rows": 8619,
+        "sha256": "d86b1e50834811834d89c3f72be6161850014dd583d3f50baa4f87de00b19896"
+      },
+      "passed": true,
+      "source": "professional-friend-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5504,
+          "rows": 95
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3324,
+          "rows": 8433
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5494,
+          "rows": 91
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 304822,
+          "key": "processed/professional/ginger/mds-policy-world-v8/train/index.json",
+          "rows": 20062,
+          "sha256": "b494bee53cb3c48b2ac673d1aae0ee82926e6cdf8f940d35a20ef6cbfaab1203",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/ginger/mds-policy-world-v8/val/index.json",
+          "rows": 174,
+          "sha256": "ebc2855ea334a1dc3e473c9e98042a16350e63648d1172eed7a93febc1bcf6d9",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 23732379,
+        "key": "processed/professional/ginger/mds-policy-world-v8/manifest.jsonl",
+        "rows": 20451,
+        "sha256": "6d600e7c1fea2dafd539a5326058cbf829e56db360fafa935885151171190897"
+      },
+      "passed": true,
+      "source": "professional-ginger-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3079,
+          "rows": 215
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2051,
+          "rows": 20062
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3414,
+          "rows": 174
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 304822,
+          "key": "processed/professional/gosu/mds-policy-world-v8/train/index.json",
+          "rows": 20314,
+          "sha256": "08e743b829bcb7c46abdae6d31386f2eb384f90998ded32967b4287a9bb3043d",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6646,
+          "key": "processed/professional/gosu/mds-policy-world-v8/val/index.json",
+          "rows": 240,
+          "sha256": "f869bc16276b021a05ce1c540011a372233950c3e8049923ba70fec908b3adef",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 24023857,
+        "key": "processed/professional/gosu/mds-policy-world-v8/manifest.jsonl",
+        "rows": 20768,
+        "sha256": "d8723b849568b91269482d28d8d12447e44c8dfaa3cf4cfe54e5e184c51b4266"
+      },
+      "passed": true,
+      "source": "professional-gosu-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3453,
+          "rows": 214
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2383,
+          "rows": 20314
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3954,
+          "rows": 240
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 122604,
+          "key": "processed/professional/grab2win/mds-policy-world-v8/train/index.json",
+          "rows": 5624,
+          "sha256": "acafaf1e3406166a35f42d5fafb269009218ec6f43237834338236aed875d1e6",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3337,
+          "key": "processed/professional/grab2win/mds-policy-world-v8/val/index.json",
+          "rows": 59,
+          "sha256": "3bf55b29128e21b29d083cd972158a9d6bf522fb71669ccd0eaaf9200aadd7bc",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 6693723,
+        "key": "processed/professional/grab2win/mds-policy-world-v8/manifest.jsonl",
+        "rows": 5734,
+        "sha256": "f4943f91480b3c3c4b631955a5cc4416594873c5b1fa8f8d3948d650ce4313ee"
+      },
+      "passed": true,
+      "source": "professional-grab2win-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5273,
+          "rows": 51
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2682,
+          "rows": 5624
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5065,
+          "rows": 59
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 245185,
+          "key": "processed/professional/iliketurtles/mds-policy-world-v8/train/index.json",
+          "rows": 14667,
+          "sha256": "7690dc9b46de6b2ff7a8f0e99f3f01a21f91388c8a0ab2d4f593a080bf6ae70e",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/iliketurtles/mds-policy-world-v8/val/index.json",
+          "rows": 151,
+          "sha256": "048401e8aaab8af7c8ec521cbb1e95aef509def93eeef6437e03284cc5b29dc6",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 17543712,
+        "key": "processed/professional/iliketurtles/mds-policy-world-v8/manifest.jsonl",
+        "rows": 14963,
+        "sha256": "3b54c2c32a88852340ed64467bdb7cd236cfbb9d51baba00d82dc2e239a5b0e2"
+      },
+      "passed": true,
+      "source": "professional-iliketurtles-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3510,
+          "rows": 145
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2156,
+          "rows": 14667
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3596,
+          "rows": 151
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 86164,
+          "key": "processed/professional/isdsar/mds-policy-world-v8/train/index.json",
+          "rows": 5528,
+          "sha256": "6ce04e9378f414f6cfc5dc27bd2ff3e5a58db798aa38abc37a659408f0da4ecf",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/isdsar/mds-policy-world-v8/val/index.json",
+          "rows": 62,
+          "sha256": "d72cdc57a079cd1394825e5e132669e073f40ef7dcb85291e8be2bed290343bc",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 6522065,
+        "key": "processed/professional/isdsar/mds-policy-world-v8/manifest.jsonl",
+        "rows": 5643,
+        "sha256": "c6a6d561c53dba0d8667006e3b96bedaef9731a58b55755fd6c831f30affdd57"
+      },
+      "passed": true,
+      "source": "professional-isdsar-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5011,
+          "rows": 53
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2607,
+          "rows": 5528
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5149,
+          "rows": 62
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 66284,
+          "key": "processed/professional/jchu/mds-policy-world-v8/train/index.json",
+          "rows": 3235,
+          "sha256": "403f4f38ab482976c61d76748ff0400f1d502e51ab022347ace87feb9fa9fc35",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/jchu/mds-policy-world-v8/val/index.json",
+          "rows": 36,
+          "sha256": "a708a635fa5fe5d9ea5a1539767e3c56574ba129851fcb28c143e233c18d8507",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 3834447,
+        "key": "processed/professional/jchu/mds-policy-world-v8/manifest.jsonl",
+        "rows": 3297,
+        "sha256": "78954d93ce3c0f67a008e57836881871bacf1db4b06c7eda4633569827a7302c"
+      },
+      "passed": true,
+      "source": "professional-jchu-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 7322,
+          "rows": 26
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3144,
+          "rows": 3235
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4045,
+          "rows": 36
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 450594,
+          "key": "processed/professional/jahridin/mds-policy-world-v8/train/index.json",
+          "rows": 25987,
+          "sha256": "899064901131096198ed9855bd606ff887a20fdb996bfeffacbb72b4a5802a38",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6649,
+          "key": "processed/professional/jahridin/mds-policy-world-v8/val/index.json",
+          "rows": 262,
+          "sha256": "cc78f9e3c40a453217d0c7c4933af5c00f3a4a0fd5b533e76782dc6940bf88f0",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 31362756,
+        "key": "processed/professional/jahridin/mds-policy-world-v8/manifest.jsonl",
+        "rows": 26493,
+        "sha256": "e173aae76e58eac72be590feca6f8cfa199130c136f880540c4f42bef8c43fc3"
+      },
+      "passed": true,
+      "source": "professional-jahridin-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4539,
+          "rows": 244
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2780,
+          "rows": 25987
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3996,
+          "rows": 262
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 39779,
+          "key": "processed/professional/kjh/mds-policy-world-v8/train/index.json",
+          "rows": 2172,
+          "sha256": "32deb8672642e653f89de565e58c3737abf4b7d03110286cb05d8d355ddb2b4b",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/kjh/mds-policy-world-v8/val/index.json",
+          "rows": 22,
+          "sha256": "741b5ea01df7b4053f44b8905cb03b5f8836935314bfa5be6edf6f74acdb7937",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 2541434,
+        "key": "processed/professional/kjh/mds-policy-world-v8/manifest.jsonl",
+        "rows": 2224,
+        "sha256": "3ba808024316f35e420ffc983f152901d59e7b694a7b943cd64c252dfc3d1877"
+      },
+      "passed": true,
+      "source": "professional-kjh-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5633,
+          "rows": 30
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3203,
+          "rows": 2172
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5708,
+          "rows": 22
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 149109,
+          "key": "processed/professional/kodorin/mds-policy-world-v8/train/index.json",
+          "rows": 8677,
+          "sha256": "24d36b73c2f5d06b4fffc1aa014f369cf93c99cdc0097ff1f98c87649b18a41b",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/kodorin/mds-policy-world-v8/val/index.json",
+          "rows": 90,
+          "sha256": "8136c774c438db53052ae7ed4d28373e1871d09c80ae13bc3e4ca7318b54fae9",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 10109027,
+        "key": "processed/professional/kodorin/mds-policy-world-v8/manifest.jsonl",
+        "rows": 8851,
+        "sha256": "0a3ca67543dd318496ca6fe61c2354f3263dec3e25b2af42402f25cb621cce51"
+      },
+      "passed": true,
+      "source": "professional-kodorin-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4895,
+          "rows": 84
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2946,
+          "rows": 8677
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3546,
+          "rows": 90
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 165676,
+          "key": "processed/professional/krudo/mds-policy-world-v8/train/index.json",
+          "rows": 9577,
+          "sha256": "a595bec356530f73a898d6fd0c7fa98eab3efecc05072f0536c87ecc29265f2c",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3337,
+          "key": "processed/professional/krudo/mds-policy-world-v8/val/index.json",
+          "rows": 90,
+          "sha256": "c54553250af56039cbc41626f15ab4005f6e38b75a7ec636a564cb953691043a",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 11290500,
+        "key": "processed/professional/krudo/mds-policy-world-v8/manifest.jsonl",
+        "rows": 9764,
+        "sha256": "5dc512be9bc0e6bc4f59b02c875c31ace44d1083256dbd2bbffd11964ee0a530"
+      },
+      "passed": true,
+      "source": "professional-krudo-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5045,
+          "rows": 97
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3232,
+          "rows": 9577
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3870,
+          "rows": 90
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 132546,
+          "key": "processed/professional/m2k/mds-policy-world-v8/train/index.json",
+          "rows": 7892,
+          "sha256": "da529b454a8a84860c328572f9c2a31694e5983ed46c5ab6579c9ac2c674fbca",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/m2k/mds-policy-world-v8/val/index.json",
+          "rows": 85,
+          "sha256": "49718bfd117914e1509b8cba0dbdea4730f4d65e1a1cf3eed7ad5a2eb6859b57",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 9263501,
+        "key": "processed/professional/m2k/mds-policy-world-v8/manifest.jsonl",
+        "rows": 8055,
+        "sha256": "761b2d495ae7ca1936ad96682f362d47a1a74fccf27ae2bd6e2cb92b1aac59a8"
+      },
+      "passed": true,
+      "source": "professional-m2k-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3445,
+          "rows": 78
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2558,
+          "rows": 7892
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5441,
+          "rows": 85
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 487034,
+          "key": "processed/professional/mang0/mds-policy-world-v8/train/index.json",
+          "rows": 30157,
+          "sha256": "cb1a23eebefc78e98dcf36f3bf6d32e66e1f1c4b00ee908e78e5988536445340",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6649,
+          "key": "processed/professional/mang0/mds-policy-world-v8/val/index.json",
+          "rows": 274,
+          "sha256": "da9737e2f19cc84954c3f6e61579e5a4c71945a0cea3ed6d601e0edaf6260c2b",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 35357112,
+        "key": "processed/professional/mang0/mds-policy-world-v8/manifest.jsonl",
+        "rows": 30713,
+        "sha256": "e0c54cadd31d014d7eeb50819ce95f061f5114aaf960ba157ee98739b8f783a3"
+      },
+      "passed": true,
+      "source": "professional-mang0-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3898,
+          "rows": 282
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2240,
+          "rows": 30157
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3420,
+          "rows": 274
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 26528,
+          "key": "processed/professional/mof/mds-policy-world-v8/train/index.json",
+          "rows": 1225,
+          "sha256": "eeebeb685c3be5e77cedb8446ea8cc358f5d16286c8d7fdce469b2a9b51bc174",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/mof/mds-policy-world-v8/val/index.json",
+          "rows": 11,
+          "sha256": "5a2d3b105464c78098cafcd85743d8e1b9644a202ce538e0a1f9b1761d696891",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 1510701,
+        "key": "processed/professional/mof/mds-policy-world-v8/manifest.jsonl",
+        "rows": 1248,
+        "sha256": "2976396d5693c0f7066ff789a172784f693dee59982f268d7053198bc529b966"
+      },
+      "passed": true,
+      "source": "professional-mof-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 6273,
+          "rows": 12
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3125,
+          "rows": 1225
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5896,
+          "rows": 11
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 294882,
+          "key": "processed/professional/monotheon/mds-policy-world-v8/train/index.json",
+          "rows": 16301,
+          "sha256": "8d1e2f996b6aae3fd17f971f8310b1b4beb5b2d97d7faed402dab42714da4492",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/monotheon/mds-policy-world-v8/val/index.json",
+          "rows": 167,
+          "sha256": "558a214fa14cc391d4e1d980eb3c25194676a3ed0b5226e44998c2658ea6f7c6",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 19426568,
+        "key": "processed/professional/monotheon/mds-policy-world-v8/manifest.jsonl",
+        "rows": 16630,
+        "sha256": "8154ed91189279dc82318195d65f5c16da5fcd30f037f65685302ef8003d7882"
+      },
+      "passed": true,
+      "source": "professional-monotheon-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4719,
+          "rows": 162
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2354,
+          "rows": 16301
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2719,
+          "rows": 167
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 46408,
+          "key": "processed/professional/nicki/mds-policy-world-v8/train/index.json",
+          "rows": 2482,
+          "sha256": "ac07fe70c0e0a2ea31a3f3a764b53d1216248d3689d5b4558781bf843b5c0e6c",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/nicki/mds-policy-world-v8/val/index.json",
+          "rows": 24,
+          "sha256": "97a611e2a3a3a666125737396f3063fcaac1f1e9c68ba3ddd7b14b642f5d0bf6",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 2920994,
+        "key": "processed/professional/nicki/mds-policy-world-v8/manifest.jsonl",
+        "rows": 2532,
+        "sha256": "2937bc5da51f361ccbe07e3c339b5d47c3016506526c300c1e046d35cf3751b1"
+      },
+      "passed": true,
+      "source": "professional-nicki-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 6272,
+          "rows": 26
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2980,
+          "rows": 2482
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3701,
+          "rows": 24
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 13275,
+          "key": "processed/professional/rapm/mds-policy-world-v8/train/index.json",
+          "rows": 604,
+          "sha256": "58bf73d0868f5e51ef06c1f9f0eb64c5f8153cc77f4053d60c7568d5f20852d1",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3333,
+          "key": "processed/professional/rapm/mds-policy-world-v8/val/index.json",
+          "rows": 3,
+          "sha256": "4fc165d7265818b73f29d039afb1b45070bdd0a4e9b03ac694713e90acbd9fd7",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 704415,
+        "key": "processed/professional/rapm/mds-policy-world-v8/manifest.jsonl",
+        "rows": 615,
+        "sha256": "9deb8a285a6db26cc149ad807b6d9693c1816e7e45d4df908f9411823b68839c"
+      },
+      "passed": true,
+      "source": "professional-rapm-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 6652,
+          "rows": 8
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3190,
+          "rows": 604
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 8758,
+          "rows": 3
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 33156,
+          "key": "processed/professional/redx/mds-policy-world-v8/train/index.json",
+          "rows": 1424,
+          "sha256": "d54d66e26e97327452da4762eeddf8e2700ec9ef88cff9960a039eda97e766f5",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/redx/mds-policy-world-v8/val/index.json",
+          "rows": 17,
+          "sha256": "613aa230496fbab930f7ef77f6d2ec017d2f10928e5e01b92f894fd28f04d37f",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 1741453,
+        "key": "processed/professional/redx/mds-policy-world-v8/manifest.jsonl",
+        "rows": 1453,
+        "sha256": "b8994fc33d6c820a3d88fa41c4357ee2fb015049225063d8e91344bfcc2fc155"
+      },
+      "passed": true,
+      "source": "professional-redx-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 9448,
+          "rows": 12
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3752,
+          "rows": 1424
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 6697,
+          "rows": 17
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 281631,
+          "key": "processed/professional/siddward/mds-policy-world-v8/train/index.json",
+          "rows": 16208,
+          "sha256": "69b182eda72df5700505cf52c9f7302fcf9acb4771f42bf3f4fb6d2a0538b895",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/siddward/mds-policy-world-v8/val/index.json",
+          "rows": 174,
+          "sha256": "7ca7d45c1f6b5e49844564bc27b0618429a9fef2729f66ead70d8a5d7dc12ba8",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 19092763,
+        "key": "processed/professional/siddward/mds-policy-world-v8/manifest.jsonl",
+        "rows": 16551,
+        "sha256": "900f73b8162e6ec3bbe3ef493101513d4d2f7b40bd70d1f26bf73ba3d70aade0"
+      },
+      "passed": true,
+      "source": "professional-siddward-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4086,
+          "rows": 169
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 1928,
+          "rows": 16208
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3760,
+          "rows": 174
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 457220,
+          "key": "processed/professional/solobattle/mds-policy-world-v8/train/index.json",
+          "rows": 26915,
+          "sha256": "eb5084e6340490b9f312f9b0a8ca194d5755a8e83c63043d65668fc482c94bb7",
+          "version": 2
+        },
+        "val": {
+          "bytes": 6651,
+          "key": "processed/professional/solobattle/mds-policy-world-v8/val/index.json",
+          "rows": 287,
+          "sha256": "55fde6a702977b651c7be64f1d13482376b3989939d93338b5f4e3492e30f6ee",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 31979607,
+        "key": "processed/professional/solobattle/mds-policy-world-v8/manifest.jsonl",
+        "rows": 27487,
+        "sha256": "81282e0dbe5091fbbaa5ecae06475d4430ce80213965a116b7c2f64f89f1372a"
+      },
+      "passed": true,
+      "source": "professional-solobattle-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3262,
+          "rows": 285
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 1771,
+          "rows": 26915
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3164,
+          "rows": 287
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 92790,
+          "key": "processed/professional/technospider/mds-policy-world-v8/train/index.json",
+          "rows": 4442,
+          "sha256": "1558eadd94b43150e6ab0bd2edb15c036a2136b5aa2766a675df83ee8474cb52",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3336,
+          "key": "processed/professional/technospider/mds-policy-world-v8/val/index.json",
+          "rows": 45,
+          "sha256": "06c751ba17ceff0572a4a1eb815d7f8385fda108fb88c25ff584d305193eed30",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 5386525,
+        "key": "processed/professional/technospider/mds-policy-world-v8/manifest.jsonl",
+        "rows": 4538,
+        "sha256": "ba6de4255a81f6817dc2d4b2cf1d49ade1572611336e9eb43573141106f1bcd5"
+      },
+      "passed": true,
+      "source": "professional-technospider-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4680,
+          "rows": 51
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2325,
+          "rows": 4442
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5609,
+          "rows": 45
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 261750,
+          "key": "processed/professional/trif/mds-policy-world-v8/train/index.json",
+          "rows": 13872,
+          "sha256": "16f2905d2894807f2f950063bb8387ce69b5a918523f42556b997385f3c5f462",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3339,
+          "key": "processed/professional/trif/mds-policy-world-v8/val/index.json",
+          "rows": 153,
+          "sha256": "00adb6f52345c778032280d2b2078cfb4c6be2b5d33c96015dfd1a982b839b76",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 16286978,
+        "key": "processed/professional/trif/mds-policy-world-v8/manifest.jsonl",
+        "rows": 14174,
+        "sha256": "2b0423c1c0fe73280a5ceeae5e05ba4ca479f620ce463763b879ba3a6268dfbc"
+      },
+      "passed": true,
+      "source": "professional-trif-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4069,
+          "rows": 149
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2540,
+          "rows": 13872
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4348,
+          "rows": 153
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 149111,
+          "key": "processed/professional/uhhei/mds-policy-world-v8/train/index.json",
+          "rows": 6888,
+          "sha256": "f5414ac89182f6a2af547149cac3d52ce38cfad5549db45e6e1e9979fa6b6101",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/uhhei/mds-policy-world-v8/val/index.json",
+          "rows": 89,
+          "sha256": "60c0e4d8c9adb9736f7a15d98f03d91f23fa17bcb471f7fd362da06f8f696485",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 8293113,
+        "key": "processed/professional/uhhei/mds-policy-world-v8/manifest.jsonl",
+        "rows": 7057,
+        "sha256": "dcbc954c30f8ec2b875c845aee938a3be589c4684f71f06cdf93a408f049174a"
+      },
+      "passed": true,
+      "source": "professional-uhhei-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 6593,
+          "rows": 80
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2713,
+          "rows": 6888
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5645,
+          "rows": 89
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 145795,
+          "key": "processed/professional/ycz/mds-policy-world-v8/train/index.json",
+          "rows": 7358,
+          "sha256": "597c813dd86e341848d0436d3dac80316fc76ee9d29683a699c114df832c5897",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/ycz/mds-policy-world-v8/val/index.json",
+          "rows": 86,
+          "sha256": "e3cea85bbfbbfc86251a4cf5df9821524c3aa42de9eac85b81e2bacfed29d82c",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 8575572,
+        "key": "processed/professional/ycz/mds-policy-world-v8/manifest.jsonl",
+        "rows": 7503,
+        "sha256": "15ae8b56d744d869b295e19da74818fe3fccb6b345e0ab6544a6cf370774d9b9"
+      },
+      "passed": true,
+      "source": "professional-ycz-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 5065,
+          "rows": 59
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2798,
+          "rows": 7358
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 3845,
+          "rows": 86
+        }
+      }
+    },
+    {
+      "errors": [],
+      "indexes": {
+        "train": {
+          "bytes": 182238,
+          "key": "processed/professional/zain/mds-policy-world-v8/train/index.json",
+          "rows": 8724,
+          "sha256": "6f35dfbb1f5353138b73866a99e3599034f93d859f70cfb421adc484cedf6549",
+          "version": 2
+        },
+        "val": {
+          "bytes": 3338,
+          "key": "processed/professional/zain/mds-policy-world-v8/val/index.json",
+          "rows": 85,
+          "sha256": "bda1a2973fb66f6a0e6372989c33a5c769100bfb7d8314dc99cc69ed8c891631",
+          "version": 2
+        }
+      },
+      "manifest": {
+        "bytes": 10250549,
+        "key": "processed/professional/zain/mds-policy-world-v8/manifest.jsonl",
+        "rows": 8889,
+        "sha256": "ca954a99ff0797cd2b38587de70ecedb2a135f7c78e78874e6871322a4b741f5"
+      },
+      "passed": true,
+      "source": "professional-zain-policy-world-v8",
+      "splits": {
+        "test": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4618,
+          "rows": 80
+        },
+        "train": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 2758,
+          "rows": 8724
+        },
+        "val": {
+          "below_required_frames": 0,
+          "examples_below_required": [],
+          "minimum_actual_frames": 4389,
+          "rows": 85
+        }
+      }
+    }
+  ],
+  "totals": {
+    "test": {
+      "below_required_frames": 0,
+      "minimum_actual_frames": 2716,
+      "rows": 12995
+    },
+    "train": {
+      "below_required_frames": 0,
+      "minimum_actual_frames": 1668,
+      "rows": 1295370
+    },
+    "val": {
+      "below_required_frames": 0,
+      "minimum_actual_frames": 2566,
+      "rows": 13159
+    }
+  }
+}

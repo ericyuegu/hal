@@ -88,6 +88,7 @@ CLOSED_LOOP_EXPERIMENTS: Final[tuple[str, ...]] = (
     "experiments/059_muon_action_sequence.py",
     "experiments/060_compute_optimal_action_sequence.py",
     "experiments/063_percentile_conditioning.py",
+    "experiments/064_production_percentile.py",
 )
 CLOSED_LOOP_MATCHUPS: Final[int] = 96
 CLOSED_LOOP_MAX_PARALLEL: Final[int] = 32
@@ -641,7 +642,7 @@ def _evaluation_only_command(argv: list[str] | tuple[str, ...]) -> bool:
 
 
 def evaluation_return_targets(experiment: str) -> tuple[str, ...]:
-    if experiment == "experiments/063_percentile_conditioning.py":
+    if experiment in ("experiments/063_percentile_conditioning.py", "experiments/064_production_percentile.py"):
         return ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned")
     return ("p90", "unconditioned")
 
@@ -918,7 +919,10 @@ def _run_closed_loop_eval(
         raise ValueError(f"production closed-loop evaluation requires {CLOSED_LOOP_MATCHUPS} matchups")
     if return_target not in evaluation_return_targets(experiment):
         raise ValueError("unsupported return target")
-    primary_target = "u75" if experiment == "experiments/063_percentile_conditioning.py" else "p90"
+    primary_target = {
+        "experiments/063_percentile_conditioning.py": "u75",
+        "experiments/064_production_percentile.py": "u95",
+    }.get(experiment, "p90")
     env = _prepare_remote(evaluation_only=True)
     checkpoint = f"checkpoints/step-{update:07d}.pt"
     command = [

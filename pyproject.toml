@@ -94,6 +94,7 @@ ignore = ["E501"]
 "experiments/060_compute_optimal_action_sequence.py" = ["F722"]
 "experiments/061_pruned81_action_sequence.py" = ["F722"]
 "experiments/063_percentile_conditioning.py" = ["F722"]
+"experiments/064_production_percentile.py" = ["F722"]
 "hal/models/attention.py" = ["F722"]
 
 [tool.pytest.ini_options]
