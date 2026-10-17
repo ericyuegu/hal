@@ -6,6 +6,7 @@ import signal
 import threading
 import time
 from contextlib import closing
+from contextlib import suppress
 from multiprocessing import Pipe
 from pathlib import Path
 from unittest.mock import Mock
@@ -297,6 +298,114 @@ def _hung_dolphin_worker(pid, ready) -> None:
         )
         ready.set()
         signal.pause()
+
+
+def _demo_with_slow_interpreter_shutdown(*args) -> None:
+    import atexit
+
+    from hal.netplay_service.self_play import worker
+
+    atexit.register(time.sleep, 3)
+    worker(*args)
+
+
+@pytest.mark.parametrize("phase", ["startup", "menus", "play"])
+def test_spawned_demo_releases_resources_before_interpreter_finalizers(
+    prerequisites, tmp_path: Path, phase: str
+) -> None:
+    import multiprocessing as mp
+
+    from hal.netplay_service.self_play import DemoConfig
+
+    context = mp.get_context("spawn")
+    pairs = (context.Pipe(), context.Pipe())
+    profile = PreparedInferenceProfile("local-test", "a" * 64, "window", 8, 4, (1, 2, 4), 2)
+    policy = Mock()
+    policy.predict.side_effect = lambda batch: tuple(
+        action_plan(request, (NEUTRAL_CONTROLLER_ACTION,) * 4, state_value=0.0) for request in batch
+    )
+    engine = InferenceEngine({profile: policy}, {4: pairs[0][0], 5: pairs[1][0]}, batch_wait_seconds=0)
+    engine_stop = context.Event()
+    engine_thread = threading.Thread(target=engine.serve, args=(engine_stop,), daemon=True)
+    engine_thread.start()
+    cancel = context.Event()
+    dolphin_pid = context.RawValue("i", 0)
+    state_path = tmp_path / "status.stream.json"
+    config = DemoConfig(
+        Path(ISO_PATH),
+        Path(NETPLAY_EMULATOR_PATH),
+        os.environ["DISPLAY"],
+        state_path,
+        51841,
+        0,
+        1,
+        "shutdown-test",
+        (4, 5),
+        54_000,
+        (),
+        "a" * 40,
+        "a" * 64,
+        "b" * 64,
+        (1,),
+    )
+    if phase == "startup":
+        cancel.set()
+    process = context.Process(
+        target=_demo_with_slow_interpreter_shutdown,
+        args=(
+            config,
+            PolicySpec("test", "test", (), (2,)),
+            128,
+            (profile,),
+            (pairs[0][1], pairs[1][1]),
+            cancel,
+            engine_stop,
+            dolphin_pid,
+        ),
+    )
+    try:
+        process.start()
+        deadline = time.monotonic() + 30
+        record_path = tmp_path / "self-play-shutdown-test.json"
+        while time.monotonic() < deadline:
+            if phase == "startup" and record_path.exists():
+                break
+            if phase == "menus" and dolphin_pid.value:
+                break
+            health_path = state_path.with_suffix(".self-play.json")
+            if phase == "play" and health_path.exists():
+                health = json.loads(health_path.read_text())
+                if health["game_fps"] is not None:
+                    break
+            if not process.is_alive():
+                pytest.fail(f"demo exited before {phase}: {process.exitcode}")
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"demo did not reach {phase}")
+        started = time.monotonic()
+        cancel.set()
+        process.join(timeout=0.6)
+        assert not process.is_alive(), "resource release waited for interpreter finalizers"
+        assert time.monotonic() - started < 0.6
+        assert process.exitcode == 0
+        assert not engine._routes
+        record = json.loads(record_path.read_text())
+        assert record["canceled_at"] <= record["worker_finished_at"]
+        if dolphin_pid.value:
+            with pytest.raises(ProcessLookupError):
+                os.killpg(dolphin_pid.value, 0)
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=2)
+        if dolphin_pid.value:
+            with suppress(ProcessLookupError):
+                os.killpg(dolphin_pid.value, signal.SIGKILL)
+        engine_stop.set()
+        engine_thread.join(timeout=2)
+        for pair in pairs:
+            for connection in pair:
+                connection.close()
 
 
 def test_hung_demo_watchdog_reaps_separate_dolphin_group(prerequisites, tmp_path: Path, monkeypatch) -> None:

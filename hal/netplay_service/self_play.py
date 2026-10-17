@@ -118,7 +118,7 @@ def worker(
     record_path.write_text(json.dumps(record))
     try:
         if cancel.is_set():
-            return
+            raise SessionCanceled
         with ExitStack() as resources:
             directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="hal-self-play-"))
             clients = tuple(
@@ -202,3 +202,6 @@ def worker(
         config.state_path.with_suffix(".self-play.json").unlink(missing_ok=True)
         record["worker_finished_at"] = time.time()
         record_path.write_text(json.dumps(record))
+    # All owned resources are closed. Imported runtime finalizers can delay
+    # interpreter exit beyond the watchdog even after successful cancellation.
+    os._exit(0)
