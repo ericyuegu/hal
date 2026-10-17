@@ -67,6 +67,7 @@ peppi-py = { git = "https://github.com/ericyuegu/peppi-py", rev = "6fca8045d8919
 
 [tool.setuptools.package-data]
 "hal.sim" = ["native_adapter.c"]
+"hal.netplay_service" = ["overlay_assets/**/*"]
 
 [tool.setuptools.packages.find]
 include = ["hal*"]

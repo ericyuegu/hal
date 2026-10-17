@@ -340,6 +340,14 @@ class RemoteQueue:
         self._game_numbers[job.id] = max((game.number for game in job.games), default=0)
         return job
 
+    def wait_for_work(self, after: int) -> int:
+        payload = _object(
+            _json(self._api.request("POST", f"/v1/runner/sessions/{self.session_id}/wait", body={"after": after})),
+            frozenset(("epoch",)),
+            "work notification",
+        )
+        return _integer(payload["epoch"])
+
     def finish_pairing(self, job_id: str, worker_id: str, attempt: int) -> None:
         slot = self._slot(worker_id)
         self._api.request(

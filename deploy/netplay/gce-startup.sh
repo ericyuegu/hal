@@ -16,7 +16,7 @@ slots=$(metadata hal-netplay-slots)
 drain_timeout=$(metadata hal-netplay-drain-timeout)
 
 [[ $git_sha =~ ^[0-9a-f]{40}$ ]] || { log "invalid Git SHA"; exit 2; }
-[[ $slots =~ ^([1-9]|1[0-6])$ ]] || { log "invalid slot count"; exit 2; }
+[[ $slots =~ ^([2-9]|1[0-6])$ ]] || { log "idle self-play requires 2-16 slots"; exit 2; }
 [[ $drain_timeout =~ ^[1-9][0-9]*$ ]] || { log "invalid drain timeout"; exit 2; }
 
 # Apply new metadata only after existing runner processes have drained.
@@ -158,7 +158,7 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=${unit_timeout}
 ExecStartPre=-/usr/bin/docker rm -f hal-netplay-runner
-ExecStart=/usr/bin/docker run --rm --name hal-netplay-runner --gpus all --ipc=host --env-file /run/hal-netplay/runner.env -e APPIMAGE_EXTRACT_AND_RUN=1 -e NVIDIA_VISIBLE_DEVICES=all -e VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video,display -e HAL_NETPLAY_STREAM_DISPLAY=:90 -e XAUTHORITY=/run/hal-netplay/Xauthority -v /usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json:ro -v /tmp/.X11-unix/X90:/tmp/.X11-unix/X90:ro -v /run/hal-netplay/Xauthority:/run/hal-netplay/Xauthority:ro -v /var/cache/hal-netplay:/root/.cache/hal-netplay -v /var/lib/hal-netplay:/var/lib/hal-netplay ${image} hal-netplay-runner --slots ${slots} --compiled --external-stream --graphics-backend OGL --drain-timeout ${drain_timeout} --replay-dir /var/lib/hal-netplay/replays --status-path /var/lib/hal-netplay/runner-status.json --git-sha ${git_sha}
+ExecStart=/usr/bin/docker run --rm --name hal-netplay-runner --gpus all --ipc=host --env-file /run/hal-netplay/runner.env -e APPIMAGE_EXTRACT_AND_RUN=1 -e NVIDIA_VISIBLE_DEVICES=all -e VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json -e NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video,display -e HAL_NETPLAY_STREAM_DISPLAY=:90 -e XAUTHORITY=/run/hal-netplay/Xauthority -v /usr/share/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json:ro -v /tmp/.X11-unix/X90:/tmp/.X11-unix/X90:ro -v /run/hal-netplay/Xauthority:/run/hal-netplay/Xauthority:ro -v /var/cache/hal-netplay:/root/.cache/hal-netplay -v /var/lib/hal-netplay:/var/lib/hal-netplay ${image} hal-netplay-runner --slots ${slots} --compiled --idle-self-play --external-stream --graphics-backend OGL --drain-timeout ${drain_timeout} --replay-dir /var/lib/hal-netplay/replays --status-path /var/lib/hal-netplay/runner-status.json --git-sha ${git_sha}
 ExecStop=/usr/bin/docker stop --time=${stop_seconds} hal-netplay-runner
 
 [Install]

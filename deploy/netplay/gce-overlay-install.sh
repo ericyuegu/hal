@@ -15,8 +15,8 @@ tar -xf "$archive" -C "$staging"
 ln -s deploy/netplay/fonts "$staging/fonts"
 printf '%s\n' "$sha" > "$staging/git-sha"
 image=$(docker inspect --format '{{.Config.Image}}' hal-netplay-overlay)
-docker run --rm --entrypoint python --workdir /tmp -e PYTHONPATH=/release -v "$staging:/release:ro" \
-  "$image" -c 'from hal.netplay_service import overlay; from hal.netplay_service import obs; print("overlay imports passed")'
+docker run --rm --entrypoint python --workdir /tmp -e PYTHONPATH=/release -v "$staging:/release:ro" -v /var/lib/hal-netplay:/state:ro \
+  "$image" -c 'from hal.netplay_service import overlay; from hal.netplay_service import obs; from pathlib import Path; from hal.netplay_service.graphics import PanelRenderer; from hal.netplay_service.stream import read_stream_state; PanelRenderer(); read_stream_state(Path("/state/runner-status.stream.json")); print("overlay imports, assets, and stream schema passed")'
 if [[ -d $release ]]; then
   diff -qr "$staging" "$release" >/dev/null || { echo "release revision already has different content" >&2; exit 1; }
 else

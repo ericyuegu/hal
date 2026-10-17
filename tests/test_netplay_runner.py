@@ -797,7 +797,7 @@ def test_frame_observations_do_not_write_status_synchronously(
 ) -> None:
     writes = Mock()
     monkeypatch.setattr(runner, "write_slot_status", writes)
-    health = runner._SlotHealthReporter(0, tmp_path / "slot.json")
+    health = runner.SlotHealthReporter(0, tmp_path / "slot.json")
 
     with health:
         health.connecting(2)
@@ -817,7 +817,7 @@ def test_health_publisher_failure_terminates_the_slot(
     writes = Mock(side_effect=[None, OSError("disk failed")])
     monkeypatch.setattr(runner, "write_slot_status", writes)
 
-    with runner._SlotHealthReporter(0, tmp_path / "slot.json") as health:
+    with runner.SlotHealthReporter(0, tmp_path / "slot.json") as health:
         deadline = time.monotonic() + 1.0
         while True:
             try:
@@ -1077,18 +1077,18 @@ def test_idle_slot_limits_claims_and_observes_shutdown(
     health = MagicMock()
     handle = Mock(side_effect=lambda *_args: stop.set())
 
-    def wait(seconds: float) -> bool:
-        waits.append(seconds)
+    def wait(after: int) -> int:
+        waits.append(after)
         if after_wait == "stop":
             stop.set()
         elif after_wait == "drain":
             draining.set()
-        return stop.is_set()
+        return after + 1
 
-    monkeypatch.setattr(stop, "wait", wait)
+    store.wait_for_work.side_effect = wait
     monkeypatch.setattr(runner.signal, "signal", Mock())
     monkeypatch.setattr(runner, "RemoteQueue", Mock(return_value=store))
-    monkeypatch.setattr(runner, "_SlotHealthReporter", Mock(return_value=health))
+    monkeypatch.setattr(runner, "SlotHealthReporter", Mock(return_value=health))
     monkeypatch.setattr(runner, "InferenceClient", Mock(return_value=Mock()))
     monkeypatch.setattr(runner, "_handle_reservation", handle)
     config = replace(_slot_config(tmp_path), publish_replays=False)
@@ -1104,7 +1104,7 @@ def test_idle_slot_limits_claims_and_observes_shutdown(
         (),
     )
 
-    assert waits == [5.0]
+    assert waits == [-1]
     assert store.claim_next.call_count == (2 if after_wait == "job" else 1)
     assert handle.call_count == (1 if after_wait == "job" else 0)
     if after_wait == "job":

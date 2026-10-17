@@ -1,6 +1,7 @@
 """Long-running netplay reservation workers and inference engine."""
 
 import argparse
+import ctypes
 import hashlib
 import json
 import math
@@ -56,6 +57,7 @@ from hal.inference.engine import InferenceEngine
 from hal.inference.engine import ModelRegistry
 from hal.inference.engine import configure_inference_process
 from hal.inference.engine import freeze_inference_runtime
+from hal.netplay_service import self_play
 from hal.netplay_service.assets import AssetCache
 from hal.netplay_service.assets import LocalSource
 from hal.netplay_service.assets import PinnedAsset
@@ -194,6 +196,8 @@ class RunnerConfig:
     stream_display: str | None = None
     twitch_bandwidth_test: bool = False
     external_stream: bool = False
+    idle_self_play: bool = False
+    self_play_seed: int = 0
 
     def __post_init__(self) -> None:
         if self.graphics_backend not in ("Vulkan", "OGL"):
@@ -239,6 +243,12 @@ class RunnerConfig:
             raise ValueError("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
         if type(self.external_stream) is not bool or (self.external_stream and not self.wants_stream):
             raise ValueError("external streaming requires streaming to be enabled")
+        if type(self.idle_self_play) is not bool or (
+            self.idle_self_play and (not self.wants_stream or len(self.user_jsons) < 2)
+        ):
+            raise ValueError("idle self-play requires streaming and at least two inference slots")
+        if type(self.self_play_seed) is not int:
+            raise ValueError("self-play seed must be an integer")
 
 
 _NETPLAY_TIMINGS = (FrameTiming(2, 2, 4, 4, 8), FrameTiming(3, 1, 4, 4, 8))
@@ -489,7 +499,7 @@ def _gpu_inference_process(
             connection.close()
 
 
-class _SlotHealthReporter:
+class SlotHealthReporter:
     """Publish one slot heartbeat without file I/O in the frame loop."""
 
     def __init__(self, slot: int, path: Path) -> None:
@@ -510,7 +520,7 @@ class _SlotHealthReporter:
             daemon=True,
         )
 
-    def __enter__(self) -> _SlotHealthReporter:
+    def __enter__(self) -> SlotHealthReporter:
         self._publish()
         self._publisher.start()
         return self
@@ -764,10 +774,11 @@ def _slot_worker(
         os.environ.pop("PULSE_SERVER", None)
         os.environ.pop("PULSE_SINK", None)
     next_upload_attempt = 0.0
+    work_epoch = -1
     with (
         connection,
         closing(RemoteQueue(config.queue_endpoint, config.session_id)) as store,
-        _SlotHealthReporter(config.slot, config.status_path) as health,
+        SlotHealthReporter(config.slot, config.status_path) as health,
         closing(
             InferenceClient(spec, context_frames, connection, stop, {p.fixed_prefix_frames: p for p in profiles})
         ) as policy,
@@ -790,8 +801,11 @@ def _slot_worker(
                 logger.bind(slot=config.slot, event="claim").error("slot stopped claiming: {}", error)
                 return
             if job is None:
-                # Empty claims still use the edge request budget. Stop remains interruptible.
-                stop.wait(5.0)
+                while not stop.is_set() and not draining.is_set():
+                    next_epoch = store.wait_for_work(work_epoch)
+                    if next_epoch != work_epoch:
+                        work_epoch = next_epoch
+                        break
                 continue
             logger.info("slot {} claimed reservation {}", config.slot, job.id)
             timing = next(s for s in schedules if s.physical_delay_frames == job.online_delay)
@@ -814,7 +828,7 @@ def _handle_reservation(
     runtime: RuntimeConfig,
     job: Job,
     stop: _StopEvent,
-    health: _SlotHealthReporter,
+    health: SlotHealthReporter,
     timing: FrameTiming,
 ) -> None:
     try:
@@ -859,10 +873,10 @@ def _start_slot_process(process: BaseProcess, child_connection: Connection) -> N
         signal.signal(signal.SIGINT, previous)
 
 
-def _invalidate_slot_connection(connection: Connection, stream_id: int) -> bool:
+def _invalidate_slot_connection(connection: Connection, stream_id: int, *, timeout: float | None = None) -> bool:
     """Wait for the standby pipe's reset barrier before admitting a replacement."""
     token = secrets.token_hex(8)
-    deadline = time.monotonic() + _SLOT_RESET_TIMEOUT_SECONDS
+    deadline = time.monotonic() + (_SLOT_RESET_TIMEOUT_SECONDS if timeout is None else timeout)
     fd: int | None = None
     was_blocking: bool | None = None
     success = False
@@ -1062,6 +1076,176 @@ def _open_generation_pipes(
     return status_receive, status_send, parents, children
 
 
+class _IdleDemo:
+    """Keep the local claim gate closed until all demo resources are gone."""
+
+    def __init__(
+        self,
+        context: SpawnContext,
+        config: RunnerConfig,
+        ready: _EngineReady,
+        control: QueueControl,
+        connections: dict[int, Connection],
+        capacity: int,
+        pulse_environment: tuple[tuple[str, str], ...],
+        policy_sha256: str,
+    ) -> None:
+        self.context = context
+        self.config = config
+        self.ready = ready
+        self.control = control
+        self.connections = connections
+        self.stream_ids = (2 * capacity, 2 * capacity + 1)
+        self.standby_ids = (2 * capacity + 2, 2 * capacity + 3)
+        self.pulse_environment = pulse_environment
+        self.policy_sha256 = policy_sha256
+        self.cancel = context.Event()
+        self.dolphin_pid = context.RawValue(ctypes.c_int, 0)
+        self.process: BaseProcess | None = None
+        self.cancel_started: float | None = None
+        self.disabled = False
+        self.game_number = 0
+        self._groups: set[int] = set()
+
+    @staticmethod
+    def _group_alive(pid: int) -> bool:
+        # Ignore zombies: they own neither Dolphin nor an inference connection.
+        for path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = path.read_text().rsplit(")", 1)[1].split()
+                if fields[0] != "Z" and int(fields[2]) == pid:
+                    return True
+            except OSError, ValueError, IndexError:
+                continue
+        return False
+
+    def tick(self, stop: _StopEvent, draining: bool) -> None:
+        self.control.refresh_demo()
+        process = self.process
+        if process is not None:
+            if draining or stop.is_set():
+                self.cancel.set()
+            if self.cancel.is_set() and self.cancel_started is None:
+                self.cancel_started = time.monotonic()
+            hung = (
+                process.is_alive()
+                and self.cancel_started is not None
+                and time.monotonic() - self.cancel_started >= 0.6
+            )
+            if hung:
+                self.disabled = True
+                assert process.pid is not None
+                self._kill_groups(process.pid)
+                process.join(timeout=0.05)
+            if process.is_alive():
+                return
+            process.join(timeout=0)
+            assert process.pid is not None
+            self._groups.update((process.pid, self.dolphin_pid.value))
+            groups = self._groups
+            if any(pid > 0 and self._group_alive(pid) for pid in groups):
+                self.disabled = True
+                self._kill_groups(process.pid)
+                if any(pid > 0 and self._group_alive(pid) for pid in groups):
+                    # Claims stay closed until the operating system confirms cleanup.
+                    return
+            if process.exitcode != 0 or self.disabled:
+                self.disabled = True
+                for stream_id, standby in zip(self.stream_ids, self.standby_ids, strict=True):
+                    if not _invalidate_slot_connection(self.connections[standby], stream_id, timeout=0.1):
+                        raise _EngineLost("demo inference cleanup could not be confirmed")
+            self.process = None
+            self.cancel_started = None
+            write_stream_state(self.config.status_path.with_suffix(".stream.json"), IdleStreamState())
+            self.control.release_demo()
+            logger.info("self-play released; demos_disabled={}", self.disabled)
+            return
+        if self.disabled or draining or stop.is_set():
+            return
+        self.cancel.clear()
+        if not self.control.acquire_demo(self.cancel):
+            return
+        self.game_number += 1
+        self.dolphin_pid.value = 0
+        self._groups.clear()
+        demo = self_play.DemoConfig(
+            self.config.iso_path,
+            self.config.dolphin_path,
+            str(self.config.stream_display),
+            self.config.status_path.with_suffix(".stream.json"),
+            self.config.slippi_ports[0],
+            self.config.self_play_seed,
+            self.game_number,
+            secrets.token_hex(16),
+            self.stream_ids,
+            self.config.max_frames,
+            self.pulse_environment,
+            self.config.git_sha,
+            self.policy_sha256,
+            self.ready.checkpoint_sha256,
+            self.ready.sampling_seeds,
+        )
+        process = self.context.Process(
+            target=self_play.worker,
+            args=(
+                demo,
+                self.ready.spec,
+                self.ready.context_frames,
+                self.ready.profiles,
+                (self.connections[self.stream_ids[0]], self.connections[self.stream_ids[1]]),
+                self.cancel,
+                stop,
+                self.dolphin_pid,
+            ),
+            name="hal-idle-self-play",
+        )
+        self.process = process
+        try:
+            process.start()
+        except (OSError, RuntimeError) as error:
+            self.disabled = True
+            if process.pid is None:
+                self.process = None
+                self.control.release_demo()
+            else:
+                self.cancel.set()
+            logger.warning("self-play could not start: {}", error)
+
+    def _kill_groups(self, worker_pid: int) -> None:
+        with suppress(ProcessLookupError):
+            os.kill(worker_pid, signal.SIGSTOP)
+        # Dolphin starts its own session. Retain every descendant group before
+        # killing the worker, including a launch that has not sent its PID yet.
+        descendants = {worker_pid}
+        rows: list[tuple[int, int, int]] = []
+        for path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = path.read_text().rsplit(")", 1)[1].split()
+                rows.append((int(path.parent.name), int(fields[1]), int(fields[2])))
+            except OSError, ValueError, IndexError:
+                continue
+        while True:
+            children = {pid for pid, parent, _ in rows if parent in descendants}
+            if children <= descendants:
+                break
+            descendants.update(children)
+        self._groups.update(group for pid, _, group in rows if pid in descendants)
+        self._groups.update((worker_pid, self.dolphin_pid.value))
+        for pid in self._groups:
+            if pid > 0:
+                with suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+
+    def close(self, stop: _StopEvent) -> None:
+        self.cancel.set()
+        deadline = time.monotonic() + 1
+        while self.process is not None and time.monotonic() < deadline:
+            self.tick(stop, True)
+            time.sleep(0.005)
+        if self.process is not None:
+            raise RuntimeError("demo resources did not release within one second")
+
+
 def _run_generation(
     config: RunnerConfig,
     bot_connect_codes: tuple[str, ...],
@@ -1082,7 +1266,9 @@ def _run_generation(
     capacity = len(config.user_jsons)
     stop = context.Event()
     draining = context.Event()
-    status_receive, status_send, parent_connections, child_connections = _open_generation_pipes(context, 2 * capacity)
+    status_receive, status_send, parent_connections, child_connections = _open_generation_pipes(
+        context, 2 * capacity + (4 if config.idle_self_play else 0)
+    )
     processes: list[BaseProcess] = []
     slot_processes: dict[int, BaseProcess | None] = {}
     slot_configs: dict[int, SlotConfig] = {}
@@ -1090,6 +1276,7 @@ def _run_generation(
     replacement_not_before: dict[int, float] = {}
     restart_counts: dict[int, int] = {}
     slot_status_paths = tuple(_slot_status_path(config.status_path, slot) for slot in range(len(config.user_jsons)))
+    demo_supervisor: _IdleDemo | None = None
     try:
         if config.measurement_dir is not None:
             _write_engine_audit_record(
@@ -1118,7 +1305,12 @@ def _run_generation(
             config.git_sha,
             policy_sha256,
             config.measurement_dir,
-            tuple((slot + capacity, slot) for slot in range(capacity)),
+            tuple((slot + capacity, slot) for slot in range(capacity))
+            + (
+                ((2 * capacity + 2, 2 * capacity), (2 * capacity + 3, 2 * capacity + 1))
+                if config.idle_self_play
+                else ()
+            ),
         )
         gpu_process = context.Process(
             target=_gpu_inference_process,
@@ -1196,6 +1388,12 @@ def _run_generation(
             ready.checkpoint_sha256,
             len(config.user_jsons),
         )
+        if config.idle_self_play:
+            if not isinstance(reporter, QueueControl):
+                raise ValueError("idle self-play requires the live queue control")
+            demo_supervisor = _IdleDemo(
+                context, config, ready, reporter, child_connections, capacity, pulse_environment, policy_sha256
+            )
         last_pulse = time.monotonic()
         next_status = 0.0
         model_p95_ms: float | None = None
@@ -1221,7 +1419,9 @@ def _run_generation(
                 process is None or not process.is_alive() for process in slot_processes.values()
             ):
                 return
-            if status_receive.poll(0.25):
+            if demo_supervisor is not None:
+                demo_supervisor.tick(stop, draining.is_set())
+            if status_receive.poll(0.01 if demo_supervisor is not None else 0.25):
                 try:
                     message = status_receive.recv()
                 except EOFError as error:
@@ -1315,7 +1515,19 @@ def _run_generation(
                 next_status = time.monotonic() + 0.5
     finally:
         try:
-            _terminate_processes(processes, stop)
+            try:
+                if demo_supervisor is not None:
+                    demo_supervisor.close(stop)
+            finally:
+                _terminate_processes(processes, stop)
+                if (
+                    demo_supervisor is not None
+                    and (demo_supervisor.process is None or not demo_supervisor.process.is_alive())
+                    and not any(pid > 0 and demo_supervisor._group_alive(pid) for pid in demo_supervisor._groups)
+                ):
+                    # Stopping the engine is also a release barrier if a demo
+                    # invalidation failed and the whole generation must recover.
+                    demo_supervisor.control.release_demo()
         finally:
             for connection in (
                 *parent_connections.values(),
@@ -1409,6 +1621,7 @@ def run(
                             # Generation cleanup has closed every Dolphin before a new search.
                             session_client.finish_pairing(config.session_id, pairing)
                     recovery_deadline = time.monotonic() + _ENGINE_RECOVERY_TIMEOUT_SECONDS
+                    config = replace(config, idle_self_play=False)
                     logger.error("netplay inference lost: {}; preparing one replacement process", error)
     finally:
         signal.signal(signal.SIGINT, previous_int)
@@ -1454,6 +1667,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--display-base", type=int, default=100)
     parser.add_argument("--stream-display", default=os.environ.get("HAL_NETPLAY_STREAM_DISPLAY"))
     parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--idle-self-play", action="store_true")
+    parser.add_argument("--self-play-seed", type=int, default=0)
     parser.add_argument("--external-stream", action="store_true", help="delegate OBS to the overlay service")
     parser.add_argument("--twitch-bandwidth-test", action="store_true")
     parser.add_argument("--graphics-backend", choices=("Vulkan", "OGL"), default="Vulkan")
@@ -1483,6 +1698,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("streaming requires --stream-display with a dedicated NVIDIA Xorg display")
     if args.external_stream and (not args.stream or args.twitch_bandwidth_test):
         parser.error("--external-stream requires --stream and uses the overlay service's bandwidth-test setting")
+
+    if args.idle_self_play and (not args.stream or args.slots < 2):
+        parser.error("--idle-self-play requires streaming and at least two slots")
 
     start_http_server(args.metrics_port, addr="127.0.0.1")
     iso_path = ensure(ISO)
@@ -1553,6 +1771,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     stream_display=args.stream_display,
                     twitch_bandwidth_test=args.twitch_bandwidth_test,
                     external_stream=args.external_stream,
+                    idle_self_play=args.idle_self_play,
+                    self_play_seed=args.self_play_seed,
                 )
                 run(
                     config,

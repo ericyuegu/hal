@@ -106,7 +106,7 @@ def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
     game = overlay_text(state, 3)
     idle = overlay_text(IdleStreamState(), 3)
 
-    assert game == "Playing · Falco · Master rank · Game 12"
+    assert game == "Playing · Falco · Master rank · Game 12 · Difficulty: Custom"
     assert idle == "Waiting for a challenger · 3 players in queue"
     assert player_code not in path.read_text()
     assert player_code not in game
@@ -117,6 +117,11 @@ def test_overlay_state_has_no_connect_code(tmp_path: Path) -> None:
         "imitation",
         "desired_return",
         "game_number",
+        "game_id",
+        "stream_id",
+        "generation",
+        "mode",
+        "port",
     }
 
 
@@ -158,6 +163,11 @@ def test_stream_supervisor_starts_once_and_stops_on_lease_loss(tmp_path: Path) -
         supervisor.set_grant(grant)
         time.sleep(0.05)
         assert studio.start.call_count == 1
+        _wait_for(lambda: studio.update_panel.call_count >= 3)
+        buffers = [call.args[0] for call in studio.update_panel.call_args_list[:3]]
+        assert [path.name for path in buffers] == ["panel-0.png", "panel-1.png", "panel-0.png"]
+        assert buffers[0].parent == buffers[1].parent
+        assert all(path.is_file() for path in buffers)
         supervisor.set_grant(None)
         _wait_for(lambda: studio.close.call_count == 1)
     studio.start.assert_called_once_with("live_secret", bandwidth_test=True)
@@ -224,7 +234,9 @@ def test_overlay_shows_connecting_and_hides_stale_game_labels(tmp_path: Path) ->
             assert text.startswith("Connecting to opponent")
 
 
-@pytest.mark.parametrize("desired_return", [20, 120])
-def test_overlay_omits_difficulty(desired_return: int) -> None:
+@pytest.mark.parametrize(
+    "desired_return,label", [(20, "Easy"), (120, "Medium"), (None, "Unconditioned"), (25, "Custom")]
+)
+def test_overlay_reports_actual_difficulty(desired_return: float | None, label: str) -> None:
     text = overlay_text(GameStreamState("FOX", "MASTER", desired_return, 1), 0)
-    assert text == "Playing · Fox · Master rank · Game 1"
+    assert text == f"Playing · Fox · Master rank · Game 1 · Difficulty: {label}"

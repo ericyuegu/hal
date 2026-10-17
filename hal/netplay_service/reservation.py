@@ -1,6 +1,7 @@
 """One reservation on one runner slot: the reporting link and the Slippi loop."""
 
 import json
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -61,6 +62,7 @@ from hal.netplay_service.replays import upload_replay
 from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import write_stream_state
+from hal.netplay_service.telemetry import TelemetryPublisher
 from hal.sim.netplay import ConnectAbandoned
 from hal.sim.netplay import DirectMenuDriver
 from hal.sim.netplay import DirectSelection
@@ -576,15 +578,20 @@ def run_reservation(
                     health.connecting(job.online_delay)
                     current = link.settings()
                     game_number = games_played + 1
+                    telemetry: TelemetryPublisher | None = None
                     if config.stream_output:
                         assert config.stream_state_path is not None
-                        write_stream_state(
+                        telemetry = TelemetryPublisher(
+                            config.stream_state_path.with_name("telemetry.sock"),
                             config.stream_state_path,
                             GameStreamState(
                                 current.character,
                                 current.imitation,
                                 current.desired_return,
                                 game_number,
+                                secrets.token_hex(16),
+                                config.stream_id,
+                                policy.generation + 1,
                             ),
                         )
                     previous = frozenset(replay_dir.rglob("*.slp"))
@@ -608,9 +615,11 @@ def run_reservation(
                         link.set_phase(Phase.IN_GAME, None)
                         health.playing()
 
-                    def player_identity() -> str | None:
-                        identity = locked_settings().imitation
-                        return None if identity == "MASKED" else identity
+                    def player_identity(telemetry: TelemetryPublisher | None = telemetry) -> str | None:
+                        settings = locked_settings()
+                        if telemetry is not None:
+                            telemetry.select_character(settings.character)
+                        return None if settings.imitation == "MASKED" else settings.imitation
 
                     def on_failure(
                         progress: NetplayProgress,
@@ -630,34 +639,41 @@ def run_reservation(
                             error,
                         )
 
-                    result = run_netplay_match(
-                        session,
-                        NetplaySetup(
-                            melee.Character[current.character],
-                            job.player_code,
-                            local_code=config.bot_connect_code,
-                        ),
-                        policy,
-                        runtime,
-                        timing,
-                        player_identity=player_identity,
-                        policy_settings=lambda: (
-                            link.settings().desired_return,
-                            link.settings().temperature,
-                        ),
-                        max_frames=config.max_frames,
-                        rematch=games_played > len(job.games),
-                        on_live=on_live,
-                        on_failure=on_failure,
-                        pause_seconds=PAUSE_TIMEOUT_SECONDS,
-                        on_pause=lambda paused: link.set_phase(
-                            Phase.PAUSED if paused else Phase.IN_GAME,
-                            time.monotonic() + PAUSE_TIMEOUT_SECONDS if paused else None,
-                        ),
-                        observer=health,
-                        schedule_observer=health,
-                        stream_id=config.stream_id,
-                    )
+                    try:
+                        result = run_netplay_match(
+                            session,
+                            NetplaySetup(
+                                melee.Character[current.character],
+                                job.player_code,
+                                local_code=config.bot_connect_code,
+                            ),
+                            policy,
+                            runtime,
+                            timing,
+                            player_identity=player_identity,
+                            policy_settings=lambda: (
+                                link.settings().desired_return,
+                                link.settings().temperature,
+                            ),
+                            max_frames=config.max_frames,
+                            rematch=games_played > len(job.games),
+                            on_live=on_live,
+                            on_observation=None if telemetry is None else telemetry.observe,
+                            on_request=None if telemetry is None else telemetry.requested,
+                            on_prediction=None if telemetry is None else telemetry.predicted,
+                            on_failure=on_failure,
+                            pause_seconds=PAUSE_TIMEOUT_SECONDS,
+                            on_pause=lambda paused: link.set_phase(
+                                Phase.PAUSED if paused else Phase.IN_GAME,
+                                time.monotonic() + PAUSE_TIMEOUT_SECONDS if paused else None,
+                            ),
+                            observer=health,
+                            schedule_observer=health,
+                            stream_id=config.stream_id,
+                        )
+                    finally:
+                        if telemetry is not None:
+                            telemetry.close()
                     ended_at = datetime.now(UTC)
                     replay_end = read_new_replay_end(replay_dir, previous)
                     actual_stage = _stage_name(result.stage)

@@ -340,7 +340,8 @@ def _fill_slippstream_pipe(sender: Connection, ready: Event, ignore_term: bool) 
 
 
 @pytest.mark.parametrize("ignore_term", [False, True])
-def test_teardown_reaps_slippstream_receiver_with_full_pipe(ignore_term: bool) -> None:
+@pytest.mark.parametrize("receiver_join_seconds", [1.25, 0.05])
+def test_teardown_reaps_slippstream_receiver_with_full_pipe(ignore_term: bool, receiver_join_seconds: float) -> None:
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
     ready = context.Event()
@@ -359,9 +360,9 @@ def test_teardown_reaps_slippstream_receiver_with_full_pipe(ignore_term: bool) -
         assert worker.is_alive()
 
         started = time.monotonic()
-        session_module.teardown_console(console, None)
+        session_module.teardown_console(console, None, receiver_join_seconds=receiver_join_seconds)
 
-        assert time.monotonic() - started < 5
+        assert time.monotonic() - started < (1 if receiver_join_seconds == 0.05 else 5)
         assert client._worker is None
         assert receiver.closed
         assert not client.running

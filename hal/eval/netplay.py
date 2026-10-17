@@ -18,9 +18,11 @@ from hal.eval.scheduling import FrameTiming
 from hal.eval.scheduling import PlanDecision
 from hal.eval.scheduling import PlanProtocolError
 from hal.inference.api import ActionPlan
+from hal.inference.api import PredictionRequest
 from hal.inference.api import RuntimeConfig
 from hal.inference.client import InferenceClient
 from hal.inference.client import InferenceUnavailable
+from hal.sim.inputs import canonical_pre_to_action
 from hal.sim.netplay import NetplaySession
 from hal.sim.netplay import NetplaySetup
 from hal.sim.session import FrameTimeout
@@ -64,6 +66,8 @@ class _NetplayLifecycle:
         pause_seconds: float | None = None,
         on_pause: Callable[[bool], None] | None = None,
         on_prediction: Callable[[ActionPlan], None] | None = None,
+        on_observation: Callable[[int, ControllerAction], None] | None = None,
+        on_request: Callable[[PredictionRequest], None] | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -78,6 +82,8 @@ class _NetplayLifecycle:
         self.pause_seconds = pause_seconds
         self.on_pause = on_pause
         self.on_prediction = on_prediction
+        self.on_observation = on_observation
+        self.on_request = on_request
         self.inference_seconds: list[float] = []
         self.inference_source_frames: list[int] = []
         self.plan_decisions: list[PlanDecision] = []
@@ -121,6 +127,10 @@ class _NetplayLifecycle:
         )
         if self.schedule.observe(item):
             self.observed_frame_ids.append(frame_id)
+            if self.on_observation is not None:
+                self.on_observation(
+                    frame_id, canonical_pre_to_action(frame["ports"][self.session.ego_port]["leader"]["pre"])
+                )
 
     def choose(self, frame_id: int) -> ControllerAction:
         if not self.schedule.inference_failed:
@@ -142,6 +152,8 @@ class _NetplayLifecycle:
                     request = self.schedule.request_plan()
                     if request is not None:
                         self.client.submit(request)
+                        if self.on_request is not None:
+                            self.on_request(request)
             except (InferenceUnavailable, PlanProtocolError) as error:
                 logger.error("netplay inference lost; draining current plan: {}", error)
                 self.schedule.fail_inference()
@@ -331,6 +343,8 @@ def run_netplay_match(
     rematch: bool = False,
     on_live: Callable[[], None] | None = None,
     on_prediction: Callable[[ActionPlan], None] | None = None,
+    on_observation: Callable[[int, ControllerAction], None] | None = None,
+    on_request: Callable[[PredictionRequest], None] | None = None,
     on_failure: Callable[[results.NetplayProgress, BaseException], None] | None = None,
     pause_seconds: float | None = None,
     on_pause: Callable[[bool], None] | None = None,
@@ -358,6 +372,8 @@ def run_netplay_match(
             pause_seconds=pause_seconds,
             on_pause=on_pause,
             on_prediction=on_prediction,
+            on_observation=on_observation,
+            on_request=on_request,
         )
         result = lifecycle.run(setup, max_frames=max_frames, rematch=rematch, on_live=on_live)
     except BaseException as error:

@@ -219,6 +219,7 @@ def test_fresh_recording_roundtrip_bit_exact(tmp_path: Path) -> None:
     Records a fresh .slp with neutral inputs, extracts MDS columns from it,
     replays those bytes through a second Session, and asserts the live
     trajectory diffs bit-exact against ``Trajectory.from_slp(fresh_slp)``.
+    Both pipes block so host scheduling cannot move controller inputs.
     """
     _check_prereqs()
     n_frames = 200
@@ -239,6 +240,7 @@ def test_fresh_recording_roundtrip_bit_exact(tmp_path: Path) -> None:
         iso_path=ISO_PATH,
         dolphin_path=DOLPHIN_PATH,
         slippi_port=51449,
+        blocking_input=True,
         tmp_home_directory=False,
         replay_dir=str(tmp_path),
     ) as s:
@@ -259,6 +261,7 @@ def test_fresh_recording_roundtrip_bit_exact(tmp_path: Path) -> None:
         iso_path=ISO_PATH,
         dolphin_path=DOLPHIN_PATH,
         slippi_port=51449,
+        blocking_input=True,
         tmp_home_directory=False,
         replay_dir=str(tmp_path),
     ) as s:

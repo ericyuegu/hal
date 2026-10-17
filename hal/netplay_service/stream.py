@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Callable
+from contextlib import closing
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Final
+from typing import Literal
+from typing import cast
 
 from loguru import logger
 from websockets.exceptions import WebSocketException
@@ -27,7 +32,12 @@ from hal.netplay_service.health import read_slot_status
 from hal.netplay_service.queue_client import StreamGrant
 from hal.netplay_service.queue_contract import QueueError
 
-_STATE_VERSION: Final[int] = 1
+if TYPE_CHECKING:
+    from hal.netplay_service.graphics import PanelRenderer
+    from hal.netplay_service.telemetry import TelemetryReceiver
+
+
+_STATE_VERSION: Final[int] = 2
 _CHARACTER_LABELS: Final[dict[str, str]] = {choice.value: choice.label for choice in CHARACTERS}
 _IMITATION_LABELS: Final[dict[str, str]] = {choice.value: choice.label for choice in IMITATIONS}
 
@@ -44,6 +54,11 @@ class GameStreamState:
     imitation: str
     desired_return: float | None
     game_number: int
+    game_id: str = "unpublished"
+    stream_id: int = 0
+    generation: int = 1
+    mode: Literal["human", "self-play"] = "human"
+    port: int = 1
     state: str = "game"
     schema_version: int = _STATE_VERSION
 
@@ -54,6 +69,18 @@ class GameStreamState:
             raise ValueError(f"unsupported stream imitation {self.imitation!r}")
         if self.game_number < 1:
             raise ValueError("stream game number must be positive")
+        if self.desired_return is not None and (
+            type(self.desired_return) not in (int, float)
+            or not math.isfinite(self.desired_return)
+            or not -20 <= self.desired_return <= 140
+        ):
+            raise ValueError("stream desired return must be in [-20, 140] or null")
+        if not self.game_id or self.mode not in ("human", "self-play"):
+            raise ValueError("invalid stream game identity or mode")
+        if type(self.stream_id) is not int or type(self.generation) is not int or self.generation < 1:
+            raise ValueError("invalid stream generation")
+        if type(self.port) is not int or self.port not in (1, 2, 3, 4):
+            raise ValueError("invalid stream controller port")
 
 
 StreamState = IdleStreamState | GameStreamState
@@ -71,11 +98,30 @@ def read_stream_state(path: Path) -> StreamState:
         raw = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read stream state {path}") from error
-    if not isinstance(raw, dict) or raw.get("schema_version") != _STATE_VERSION:
+    return parse_stream_state(raw)
+
+
+def parse_stream_state(payload: object) -> StreamState:
+    if not isinstance(payload, dict):
+        raise ValueError("stream state must be an object")
+    raw = cast(dict[str, object], payload)
+    if raw.get("schema_version") != _STATE_VERSION:
         raise ValueError("stream state has an unsupported schema")
     if raw.get("state") == "idle" and set(raw) == {"schema_version", "state"}:
         return IdleStreamState()
-    expected = {"schema_version", "state", "character", "imitation", "desired_return", "game_number"}
+    expected = {
+        "schema_version",
+        "state",
+        "character",
+        "imitation",
+        "desired_return",
+        "game_number",
+        "game_id",
+        "stream_id",
+        "generation",
+        "mode",
+        "port",
+    }
     if raw.get("state") != "game" or set(raw) != expected:
         raise ValueError("stream state fields changed")
     character = raw["character"]
@@ -90,9 +136,29 @@ def read_stream_state(path: Path) -> StreamState:
         raise ValueError("stream desired return must be numeric or null")
     if isinstance(game_number, bool) or not isinstance(game_number, int):
         raise ValueError("stream game number must be an integer")
+    game_id, mode = raw["game_id"], raw["mode"]
+    stream_id, generation, port = raw["stream_id"], raw["generation"], raw["port"]
+    if not isinstance(game_id, str) or mode not in ("human", "self-play"):
+        raise ValueError("invalid stream game identity or mode")
+    if type(stream_id) is not int or type(generation) is not int or type(port) is not int:
+        raise ValueError("invalid stream generation or port")
     return GameStreamState(
-        character, imitation, None if desired_return is None else float(desired_return), game_number
+        character,
+        imitation,
+        desired_return,
+        game_number,
+        game_id,
+        stream_id,
+        generation,
+        cast(Literal["human", "self-play"], mode),
+        port,
     )
+
+
+def difficulty_label(desired_return: float | None) -> str:
+    if desired_return is None:
+        return "Unconditioned"
+    return {20.0: "Easy", 120.0: "Medium"}.get(desired_return, "Custom")
 
 
 def overlay_text(state: StreamState, queue_depth: int, activity: str = "Playing") -> str:
@@ -103,7 +169,8 @@ def overlay_text(state: StreamState, queue_depth: int, activity: str = "Playing"
         return f"Waiting for a challenger · {queue_depth} {noun} in queue"
     character = _CHARACTER_LABELS[state.character]
     imitation = _IMITATION_LABELS[state.imitation]
-    return f"{activity} · {character} · {imitation} · Game {state.game_number}"
+    activity = "Self-play" if state.mode == "self-play" else activity
+    return f"{activity} · {character} · {imitation} · Game {state.game_number} · Difficulty: {difficulty_label(state.desired_return)}"
 
 
 def write_overlay(path: Path, text: str) -> None:
@@ -302,6 +369,7 @@ class StreamSupervisor:
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self._grant: StreamGrant | None = None
+        self._shown_state: StreamState = IdleStreamState()
         self._thread = threading.Thread(target=self._run, name="hal-netplay-stream", daemon=True)
 
     def __enter__(self) -> StreamSupervisor:
@@ -346,7 +414,12 @@ class StreamSupervisor:
         active = False
         activity = "Playing"
         try:
-            status = read_slot_status(self._slot_status_path)
+            path = (
+                self._state_path.with_suffix(".self-play.json")
+                if isinstance(state, GameStreamState) and state.mode == "self-play"
+                else self._slot_status_path
+            )
+            status = read_slot_status(path)
             active = (
                 isinstance(state, GameStreamState)
                 and status.state in (SlotState.CONNECTING, SlotState.PLAYING, SlotState.DEGRADED)
@@ -358,18 +431,34 @@ class StreamSupervisor:
                 activity = "Connection slow"
         except OSError, ValueError:
             pass
-        text = overlay_text(state if active else IdleStreamState(), depth, activity)
+        self._shown_state = state if active else IdleStreamState()
+        text = overlay_text(self._shown_state, depth, activity)
         if not self._overlay_path.exists() or self._overlay_path.read_text() != text + "\n":
             write_overlay(self._overlay_path, text)
         return text
 
     def _run(self) -> None:
+        from hal.netplay_service.graphics import PanelRenderer
+        from hal.netplay_service.telemetry import TelemetryReceiver
+
+        with (
+            tempfile.TemporaryDirectory(
+                prefix="hal-overlay-", dir=os.environ.get("HAL_OVERLAY_BUFFER_DIR", "/dev/shm")
+            ) as directory,
+            closing(TelemetryReceiver(self._state_path.with_name("telemetry.sock"))) as receiver,
+        ):
+            self._render_loop(PanelRenderer(), receiver, Path(directory))
+
+    def _render_loop(self, renderer: PanelRenderer, receiver: TelemetryReceiver, directory: Path) -> None:
         studio: obs.ObsStudio | None = None
         running_key: str | None = None
         backoff = 1.0
         depth = 0
         next_depth = 0.0
         next_stats = 0.0
+        next_text = 0.0
+        buffer = 0
+        text = ""
         healthy_since = time.monotonic()
         try:
             while not self._stop.is_set():
@@ -392,7 +481,17 @@ class StreamSupervisor:
                     if now >= next_depth:
                         depth = self._read_queue_depth(depth)
                         next_depth = now + 5.0
-                    studio.update(self._refresh_overlay(depth))
+                    if now >= next_text:
+                        text = self._refresh_overlay(depth)
+                        studio.update(text)
+                        next_text = now + 0.25
+                    inputs, value = receiver.poll(self._shown_state, now)
+                    self._shown_state = receiver.state_for(self._shown_state)
+                    panel = renderer.render(self._shown_state, inputs, value, text.split(" · ")[-1])
+                    path = directory / f"panel-{buffer}.png"
+                    panel.save(path, compress_level=1)
+                    studio.update_panel(path)
+                    buffer = 1 - buffer
                     if now >= next_stats:
                         stats = studio.stats() | {"updated_at": time.time()}
                         stream_stats = stats.get("stream")
@@ -418,7 +517,7 @@ class StreamSupervisor:
                     self._wait(backoff)
                     backoff = min(backoff * 2, 30.0)
                     continue
-                self._wait(0.25)
+                self._wait(max(0, 1 / 60 - (time.monotonic() - now)))
         finally:
             if studio is not None:
                 studio.close()

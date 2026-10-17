@@ -392,10 +392,18 @@ class ObsStudio(ObsConnection):
             )
             self._text_panel("Overlay detail", "", x + 32, card_y + 140, 24, _INK_SOFT, width=_SIDE_W - 60)
 
-            self._color_panel("Join rule", _RULE, _SIDE_W, 1, x, 862)
-            self._text_panel("Join label", "PLAY HAL YOURSELF", x, 890, 17, _ACCENT, face=_MONO, style="Medium")
-            self._text_panel("Join", "20xx.xyz", x - 3, 916, 64, _INK, style="Bold")
-            self._text_panel("Footer", "Free · Slippi direct connect", x, 1012, 20, _INK_SOFT)
+            panel = self._create_input("Live panel", "image_source", {"file": ""})
+            self.request(
+                "SetSceneItemTransform",
+                {
+                    "sceneName": "HAL",
+                    "sceneItemId": panel,
+                    "sceneItemTransform": {"positionX": x, "positionY": 326},
+                },
+            )
+            self._color_panel("Join rule", _RULE, _SIDE_W, 1, x, 950)
+            self._text_panel("Join label", "PLAY HAL YOURSELF", x, 974, 17, _ACCENT, face=_MONO, style="Medium")
+            self._text_panel("Join", "20xx.xyz", x - 3, 992, 64, _INK, style="Bold")
         self._capture_id = self._create_input(
             "Dolphin",
             "xcomposite_input",
@@ -534,3 +542,6 @@ class ObsStudio(ObsConnection):
         if self._temporary is not None:
             self._temporary.cleanup()
             self._temporary = None
+
+    def update_panel(self, path: Path) -> None:
+        self.request("SetInputSettings", {"inputName": "Live panel", "inputSettings": {"file": str(path)}})

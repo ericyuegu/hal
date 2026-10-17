@@ -612,3 +612,47 @@ def test_pause_past_the_limit_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeRealtimeSession(stalls_after_frame=3, stall_reads=100)
     with pytest.raises(netplay.PausedTooLong):
         _run_paused(session, pause_seconds=60, on_pause=lambda _paused: None)
+
+
+def test_live_telemetry_reports_physical_readback_actual_request_and_existing_value() -> None:
+    from hal.eval.netplay import _NetplayLifecycle
+    from hal.wire import BUTTON_BITS
+
+    observed, requested, predicted = Mock(), Mock(), Mock()
+    client = Mock()
+    client.spec = PolicySpec("test", "test", (), (2,))
+    client.busy = False
+    client.poll.return_value = None
+    client.last_latency = 0.01
+    schedule = ActionScheduler(FrameTiming(2, 2, 4, 4, 8), 8, 1)
+    lifecycle = _NetplayLifecycle(
+        Mock(ego_port=1),
+        client,
+        schedule,
+        player_identity="MASTER",
+        policy_settings=lambda: (120.0, 1.0),
+        observer=None,
+        schedule_observer=None,
+        stream_id=0,
+        on_observation=observed,
+        on_request=requested,
+        on_prediction=predicted,
+    )
+    frame = _pause_frame(0)
+    frame["ports"][1]["leader"]["pre"]["buttons_physical"] = BUTTON_BITS["z"]
+    frame["ports"][1]["leader"]["pre"]["buttons_logical"] = BUTTON_BITS["z"] | BUTTON_BITS["a"]
+    lifecycle.advance(frame)
+    lifecycle.choose(0)
+    assert observed.call_args.args[0] == 0
+    assert observed.call_args.args[1].buttons == BUTTON_BITS["z"]
+    request = client.submit.call_args.args[0]
+    assert request.observations[-1].desired_return == 120
+    assert request.observations[-1].player_identity == "MASTER"
+    requested.assert_called_once_with(request)
+    plan = action_plan(request, (NEUTRAL,) * 4, state_value=42.6)
+    client.busy = True
+    client.poll.return_value = plan
+    lifecycle.choose(1)
+    predicted.assert_called_once_with(plan)
+    assert client.poll.call_count == 2
+    client.submit.assert_called_once()

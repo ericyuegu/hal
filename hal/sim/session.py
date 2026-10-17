@@ -202,10 +202,45 @@ _DOLPHIN_INI_KEYS: dict[str, str] = {
 }
 
 
-def step_blocking(console: melee.Console, timeout_seconds: float) -> melee.GameState:
+class SessionCanceled(RuntimeError):
+    """The session owner requested cancellation."""
+
+
+def connect_cancellable(client: SlippstreamClient, canceled: Callable[[], bool], timeout_seconds: float) -> bool:
+    """Bound the pinned libmelee 0.47.0+hal.realtime.1 connection handshake.
+
+    Its connect() blocks in recv() without checking shutdown. Remove this
+    wrapper when upstream supports a cancellable, bounded handshake.
+    """
+    if melee.version.__version__ != "0.47.0+hal.realtime.1":
+        raise RuntimeError("untested libmelee Slippstream connect version")
+    if canceled():
+        raise SessionCanceled("local session canceled before connection")
+    worker = client._worker
+    if worker is None:
+        raise RuntimeError("Slippstream receiver is not initialized")
+    worker.start()
+    deadline = time.monotonic() + timeout_seconds
+    while not client._buffer.poll(0.005):
+        if canceled():
+            raise SessionCanceled("local session canceled during connection")
+        if time.monotonic() >= deadline:
+            raise FrameTimeout("Dolphin connection handshake timed out")
+    connected = client._buffer.recv()
+    if type(connected) is not bool:
+        raise RuntimeError("invalid Dolphin connection handshake")
+    client.running = connected
+    return connected
+
+
+def step_blocking(
+    console: melee.Console, timeout_seconds: float, canceled: Callable[[], bool] | None = None
+) -> melee.GameState:
     """Poll until Dolphin produces a frame or the connection times out."""
     deadline = time.monotonic() + timeout_seconds
     while True:
+        if canceled is not None and canceled():
+            raise SessionCanceled("local session canceled")
         gamestate = console.step()
         if gamestate is not None:
             return gamestate
@@ -344,7 +379,7 @@ def kill_dolphin(console: melee.Console | None) -> None:
         logger.warning(f"Dolphin SIGKILL failed: {error}")
 
 
-def _stop_slippstream(client: SlippstreamClient) -> None:
+def _stop_slippstream(client: SlippstreamClient, join_seconds: float = 1.25) -> None:
     # Pinned libmelee 0.47.0+hal.realtime.1 joins its receiver without a
     # deadline. A full frame pipe blocks that receiver after Dolphin exits.
     # Remove this workaround when upstream shutdown passes the full-pipe test.
@@ -354,10 +389,10 @@ def _stop_slippstream(client: SlippstreamClient) -> None:
     if worker is not None:
         if worker.pid is not None:
             client._shutdown.set()
-            worker.join(timeout=1.25)
+            worker.join(timeout=join_seconds)
             if worker.is_alive():
                 worker.terminate()
-                worker.join(timeout=1.0)
+                worker.join(timeout=min(1.0, join_seconds))
             if worker.is_alive():
                 worker.kill()
                 worker.join(timeout=1.0)
@@ -369,7 +404,9 @@ def _stop_slippstream(client: SlippstreamClient) -> None:
     client.running = False
 
 
-def teardown_console(console: melee.Console | None, replay_dir: str | None) -> None:
+def teardown_console(
+    console: melee.Console | None, replay_dir: str | None, *, receiver_join_seconds: float = 1.25
+) -> None:
     """Stop Dolphin, release libmelee state, and finalize recorded replays."""
     if console is None:
         return
@@ -392,7 +429,7 @@ def teardown_console(console: melee.Console | None, replay_dir: str | None) -> N
         controllers.clear()
     slippstream = getattr(console, "_slippstream", None)
     if isinstance(slippstream, SlippstreamClient):
-        _stop_slippstream(slippstream)
+        _stop_slippstream(slippstream, receiver_join_seconds)
     try:
         console.stop()
     except (OSError, subprocess.TimeoutExpired, RuntimeError, AssertionError) as error:
@@ -508,6 +545,9 @@ class Session:
         internal_resolution_scale: int | None = None,
         dolphin_version: melee.console.DolphinVersion | None = None,
         dolphin_batch: bool = False,
+        canceled: Callable[[], bool] | None = None,
+        on_dolphin_started: Callable[[int], None] | None = None,
+        stream_output: bool = False,
     ) -> None:
         self.iso_path = str(iso_path)
         self.dolphin_path = str(dolphin_path)
@@ -578,6 +618,11 @@ class Session:
         self.dolphin_version = dolphin_version
         # Batch mode hides the launcher window of GUI Dolphin builds.
         self.dolphin_batch = dolphin_batch
+        if canceled is not None and not polling_mode:
+            raise ValueError("cancellable sessions require polling mode")
+        self.canceled = canceled
+        self.on_dolphin_started = on_dolphin_started
+        self.stream_output = stream_output
         self._console: melee.Console | None = None
         self._controllers: dict[int, melee.Controller] = {}
         self._pending_flush_ports: set[int] = set()
@@ -605,7 +650,11 @@ class Session:
             # Console.step() flushes every controller before polling. With a
             # zero timeout, _step_blocking can flush several commands before
             # one frame arrives and the newest command overwrites the others.
-            polling_timeout=self.step_timeout_seconds if self.polling_mode else 0,
+            polling_timeout=min(self.step_timeout_seconds, 0.005)
+            if self.canceled is not None
+            else self.step_timeout_seconds
+            if self.polling_mode
+            else 0,
             setup_gecko_codes=self.setup_gecko_codes,
             tmp_home_directory=self.tmp_home_directory,
             replay_dir=self.replay_dir,
@@ -629,6 +678,8 @@ class Session:
         fix_dolphin_ini_case(self._console)
         if self.internal_resolution_scale is not None:
             set_dolphin_internal_resolution(self._console, self.internal_resolution_scale)
+        if self.stream_output:
+            set_dolphin_stream_output(self._console, True)
         # Belt-and-suspenders cleanup: if Python exits between __enter__ and
         # __exit__ (e.g. unhandled exception in __enter__ caller, sys.exit
         # mid-test, hard interpreter shutdown), still SIGKILL Dolphin.
@@ -650,7 +701,12 @@ class Session:
         with suppress(Exception):
             atexit.unregister(self._atexit_kill)
         try:
-            teardown_console(self._console, self.replay_dir)
+            if self.canceled is None:
+                teardown_console(self._console, self.replay_dir)
+            else:
+                # A full receiver pipe cannot drain after cancellation. Bound its
+                # grace so demo shutdown leaves time for the human claim barrier.
+                teardown_console(self._console, self.replay_dir, receiver_join_seconds=0.05)
         finally:
             self._console = None
             self._controllers.clear()
@@ -667,6 +723,8 @@ class Session:
         """
         if self._console is None:
             raise RuntimeError("Session must be used as a context manager")
+        if self.canceled is not None and self.canceled():
+            raise SessionCanceled("local session canceled before launch")
         self._matchup = matchup
 
         for player in matchup.players:
@@ -688,7 +746,19 @@ class Session:
         fix_dolphin_ini_case(self._console)
         with popen_with_pdeathsig(dolphin_batch=self.dolphin_batch):
             self._console.run(iso_path=self.iso_path)
-        if not self._console.connect():
+        if self.on_dolphin_started is not None:
+            process = self._console._process
+            if process is None:
+                raise RuntimeError("Dolphin launch did not create a process")
+            self.on_dolphin_started(process.pid)
+        if self.canceled is None:
+            connected = self._console.connect()
+        else:
+            client = self._console._slippstream
+            if not isinstance(client, SlippstreamClient):
+                raise ValueError("cancellable sessions require a live Slippstream client")
+            connected = connect_cancellable(client, self.canceled, self.start_timeout_seconds)
+        if not connected:
             raise RuntimeError("failed to connect to Dolphin Slippi server")
 
         for port, controller in self._controllers.items():
@@ -813,7 +883,7 @@ class Session:
         otherwise spin forever.
         """
         assert self._console is not None
-        return step_blocking(self._console, self.step_timeout_seconds)
+        return step_blocking(self._console, self.step_timeout_seconds, self.canceled)
 
     def _autostart_port(self) -> int:
         """Return the lowest port with a libmelee controller.

@@ -120,6 +120,8 @@ def test_obs_scene_keeps_a_styled_background_below_live_capture(tmp_path: Path) 
     }
     assert inputs["Background"]["inputSettings"]["color"] == 0xFFFFFFFF
     assert inputs["Dolphin"]["inputKind"] == "xcomposite_input"
+    assert inputs["Live panel"]["inputKind"] == "image_source"
+    assert "Footer" not in inputs
     assert inputs["Overlay"]["sceneItemEnabled"]
     transforms = [call.args[1] for call in request.call_args_list if call.args[0] == "SetSceneItemTransform"]
     assert transforms[-1]["sceneItemTransform"] == {

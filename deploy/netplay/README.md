@@ -36,8 +36,34 @@ searches paired HAL with itself. Connected games run concurrently. The initial
 connection deadline is 60 seconds. Reservations have no game cap; after 15 minutes
 with someone waiting, the current game finishes and the reservation yields.
 
-The timing profile is delay 2, inference allowance 2, prefix 4, replan 4, horizon 8.
-Inference batches ready streams; idle slots do not run continuous model inference.
+The live evaluator reuses returned values and sends physical input readback through
+`telemetry.sock`, a lossy, nonblocking Unix datagram socket in the shared state
+directory. The overlay checks the game and inference generation, releases stale
+inputs after 250 ms, and hides stale values after one second. It uses the six-frame
+value EMA and a zero-centered ±120 bar; the signed number is not clipped.
+Pillow composes packaged controller layers and website sprites. Two PNG buffers
+in the overlay container's `/dev/shm` feed one OBS image source at up to 60 Hz.
+The private stream-state schema is version 2; public queue APIs are unchanged.
+A schema change requires a matched runner and overlay release.
+
+Production enables `--idle-self-play` and requires at least two slots. One local
+Dolphin uses two dedicated connections to the existing qualified inference engine.
+It runs only after one second with no global human reservations, fresh queue
+control, and the stream lease. Queue push events cancel it on human arrival,
+drain, disconnect, or lease loss. Local human claims wait until Dolphin and both
+inference streams have released. A 600 ms watchdog kills a hung worker and all
+Dolphin process groups, invalidates both streams, and disables demos until restart.
+OBS keeps running during handoffs. Human games use event notifications for work.
+
+Both demo ports use return 120 (Medium), temperature 1, and physical delay 2.
+`--self-play-seed` (default 0) controls published character, imitation, and legal
+stage rotation. Per-game records include that seed, model sampling seeds, Git
+revision, artifact hashes, selections, and the resolved settings. Demo replays are
+temporary and are never uploaded as human games. The overlay identifies self-play
+and shows port 1. Easy is return 20; other returns show Custom or Unconditioned.
+
+Both live timing profiles use prefix 4, replan 4, and horizon 8. Delay 2 allows two
+inference frames; delay 3 allows one. Idle slots do not run model inference.
 Dolphin starts when a reservation is assigned. Ranked uses a separate process;
 see [ranked play](ranked.md).
 
@@ -169,7 +195,7 @@ deploy/netplay/gce-overlay.sh hal-netplay-g4-1015-us-west4-a \
   --project centering-star-502613-k3 --zone us-west4-a
 ```
 
-This uploads a small release, checks its imports against the installed runtime,
+This uploads a small release, checks its imports, packaged assets, and stream schema against the installed runtime,
 switches the mounted release atomically, and restarts only the overlay service.
 It checks the new service heartbeat and, when a live lease exists, active OBS
 output. Failed activation restores the previous overlay release. Twitch briefly

@@ -31,6 +31,7 @@ from hal.netplay_service.queue_client import SessionState
 from hal.netplay_service.queue_client import parse_job
 from hal.netplay_service.queue_client import parse_session_state
 from hal.netplay_service.queue_contract import SessionEndedError
+from hal.netplay_service.self_play import CancelSignal
 from hal.netplay_service.stream_lease import StreamLease
 from hal.netplay_service.stream_lease import write_stream_lease
 
@@ -84,6 +85,10 @@ class QueueControl:
         self._stream_lease_path = stream_lease_path
         self._http = client or httpx.Client(base_url=endpoint.url, headers=endpoint.headers(), timeout=10)
         self._lock = threading.RLock()
+        self._changed = threading.Condition(self._lock)
+        self._demo_cancel: CancelSignal | None = None
+        self._demo_held = False
+        self._idle_since: float | None = None
         self._commands = threading.Lock()
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -118,6 +123,9 @@ class QueueControl:
 
     def close(self) -> None:
         self._stop.set()
+        with self._changed:
+            self._connected = False
+            self._notify_work()
         if self._socket is not None:
             self._socket.close()
         if self._server_thread.is_alive():
@@ -155,6 +163,64 @@ class QueueControl:
             if self._state is None:
                 raise QueueProtocolError("queue control is not ready")
             return parse_session_state(self._state)
+
+    def _idle_allowed(self) -> bool:
+        state = None if self._state is None else parse_session_state(self._state)
+        return (
+            self._connected
+            and self._failure is None
+            and time.monotonic() - self._last_health < 20
+            and self._state is not None
+            and self._state.get("draining") is False
+            and self._state.get("stream") is not None
+            and state is not None
+            and state.stream is not None
+            and state.stream.slot == 0
+            and self._capacity.get("queued") == 0
+            and self._capacity.get("active") == 0
+            and not self._assignments
+            and self._pairing is None
+        )
+
+    def _notify_work(self) -> None:
+        if not self._idle_allowed():
+            self._idle_since = None
+            if self._demo_cancel is not None:
+                self._demo_cancel.set()
+        self._changed.notify_all()
+
+    def acquire_demo(self, cancel: CancelSignal) -> bool:
+        """Atomically close the human claim gate after one idle second."""
+        if not self._commands.acquire(blocking=False):
+            return False
+        try:
+            with self._changed:
+                if self._demo_held or not self._idle_allowed():
+                    self._idle_since = None
+                    return False
+                now = time.monotonic()
+                if self._idle_since is None:
+                    self._idle_since = now
+                if now - self._idle_since < 1:
+                    return False
+                self._demo_held = True
+                self._demo_cancel = cancel
+                return True
+        finally:
+            self._commands.release()
+
+    def refresh_demo(self) -> None:
+        with self._changed:
+            self._notify_work()
+
+    def release_demo(self) -> None:
+        """Call only after Dolphin and both inference streams are released."""
+        with self._changed:
+            self._demo_held = False
+            self._demo_cancel = None
+            self._idle_since = None
+            self._work_epoch += 1
+            self._notify_work()
 
     def _progress(self) -> list[dict[str, object]]:
         with self._lock:
@@ -195,6 +261,7 @@ class QueueControl:
                 logger.warning("queue control disconnected: {}", type(error).__name__)
                 with self._lock:
                     self._connected = False
+                    self._notify_work()
                 if isinstance(error, QueueProtocolError):
                     self._failure = str(error)
                     self._ready.set()
@@ -259,7 +326,9 @@ class QueueControl:
                         self._ready.set()
                 elif kind == "capacity":
                     capacity = _object(value["capacity"])
-                    if capacity.get("healthy_slots") != self._capacity.get("healthy_slots"):
+                    if any(
+                        capacity.get(key) != self._capacity.get(key) for key in ("healthy_slots", "queued", "active")
+                    ):
                         self._work_epoch += 1
                     self._capacity = capacity
                 elif kind == "work":
@@ -290,6 +359,7 @@ class QueueControl:
                     raise QueueProtocolError(str(value.get("detail", "queue rejected control message")))
                 if kind in ("health", "state", "capacity"):
                     self._publish_stream_lease()
+                self._notify_work()
             if isinstance(ack, int) and ack % 32 == 0:
                 ws.send(json.dumps({"type": "ack", "ack": ack}))
 
@@ -318,6 +388,13 @@ class QueueControl:
         self, method: str, path: str, body: object, slot: int | None, attempt: int | None = None
     ) -> tuple[int, object]:
         prefix = f"/v1/runner/sessions/{self.session_id}"
+        if path == f"{prefix}/wait" and method == "POST":
+            after = _object(body).get("after")
+            if type(after) is not int:
+                return 422, {"detail": "invalid work cursor"}
+            with self._changed:
+                self._changed.wait_for(lambda: self._stop.is_set() or self._work_epoch != after, timeout=1)
+                return 200, {"epoch": self._work_epoch}
         with self._lock:
             if path == "/v1/capacity" and method == "GET":
                 return 200, self._capacity
@@ -360,6 +437,10 @@ class QueueControl:
             with self._lock:
                 if not self._connected:
                     return 503, {"detail": "control connection unavailable"}
+                if self._demo_held:
+                    if self._demo_cancel is not None and not self._idle_allowed():
+                        self._demo_cancel.set()
+                    return 204, None
                 held_id = self._assignments.get(slot)
                 held = None if held_id is None else self._jobs.get(held_id)
                 if held is not None and held.job.status is JobStatus.ASSIGNED and held.job.phase is None:
