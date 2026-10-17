@@ -25,7 +25,7 @@
   "last_durable_checkpoint": null,
   "last_global_step": null,
   "launch_id": "a45c8bd5526d45b98da6d02f79841336",
-  "observed_at_utc": "2026-10-17T19:08:18.900123+00:00",
+  "observed_at_utc": "2026-10-17T19:35:35.965910+00:00",
   "phase": "stable",
   "primary_eval_target": "u95",
   "real_validation_cache": {
@@ -54,9 +54,18 @@
     "status": "awaiting immutable stable checkpoint"
   },
   "source_branch": "codex/o64-production-20261017",
-  "startup_diagnosis": "Main thread is active in PyTorch AOTAutograd backward graph tracing. Background raw-shard materialization threads consume CPU concurrently. GPU was idle at the sampled point; steady full-corpus MFU is not available.",
+  "startup_diagnosis": "Production compilation completed in 2540.3 seconds, shortly after corpus materialization. The same exact helper compiled in 99.5 seconds on an isolated B200 without dataset loading. Startup CPU contention is the leading explanation. No real update or durable checkpoint was observed; first replay batch became ready after 2842.0 seconds.",
+  "startup_status": "compiled_first_replay_batch_ready_awaiting_first_update",
+  "startup_timing": {
+    "corpus_materialization_seconds": 2601.8,
+    "first_replay_batch_fill_seconds": 2842.0,
+    "isolated_contiguous_compile_seconds": 95.64613805600001,
+    "isolated_exact_compile_seconds": 99.51094185,
+    "production_compile_seconds": 2540.3,
+    "worker_start_seconds": 186.2
+  },
   "state_volume": "hal-modal-state",
-  "status_at_observation": "compiling_and_materializing",
+  "status_at_observation": "compiled_first_replay_batch_ready_awaiting_first_update",
   "stop_after_update": 98304,
   "wandb": {
     "entity": "ericyuegu",

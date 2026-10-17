@@ -1,0 +1,50 @@
+import json
+import subprocess
+from pathlib import Path
+
+import modal
+
+CASE = r'''
+import importlib.util, json, sys, time
+import torch
+path='/opt/hal/experiments/064_production_percentile.py'
+spec=importlib.util.spec_from_file_location('startup_probe',path)
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+torch.set_num_threads(32);torch.manual_seed(0);torch.set_float32_matmul_precision('high')
+cfg=m.TrainConfig(arm='bootstrap30',train_compile_mode='reduce-overhead')
+model=m.make_model(cfg).cuda().train()
+trunk,temporal=m._training_functions(model,cfg)
+if sys.argv[1]=='contiguous':
+    original=temporal
+    def temporal(hidden,pad,positions,*args):
+        return original(hidden,pad,positions.contiguous(),*args)
+start=time.monotonic()
+print('PROBE_START',sys.argv[1],flush=True)
+m._compile_synthetic_forward_backward(model,cfg,step=0,trunk_fn=trunk,temporal_fn=temporal)
+print('PROBE_RESULT',json.dumps({'variant':sys.argv[1],'seconds':time.monotonic()-start,'gpu':torch.cuda.get_device_name(),'torch':torch.__version__}),flush=True)
+'''
+
+app = modal.App('hal-o64-startup-diagnosis-20261017')
+image = modal.Image.from_id('im-BJtDChmqo3vvxfAWMtByq2')
+
+@app.function(image=image, gpu='B200', cpu=(32,48), memory=(131072,393216), timeout=850, retries=0, serialized=True, include_source=False)
+def probe(source):
+    import os
+    results=[]
+    for variant in ('exact','contiguous'):
+        env=os.environ.copy()
+        for key in ('TORCHINDUCTOR_CACHE_DIR','TRITON_CACHE_DIR','CUDA_CACHE_PATH'):
+            path=Path('/tmp/startup-probe')/variant/key;path.mkdir(parents=True,exist_ok=True);env[key]=str(path)
+        try:
+            result=subprocess.run(['/opt/venv/bin/python','-u','-c',source,variant],cwd='/opt/hal',env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=390)
+            item={'variant':variant,'exit_code':result.returncode,'output':result.stdout}
+        except subprocess.TimeoutExpired as exc:
+            item={'variant':variant,'timeout_seconds':390,'output':str(exc.stdout)}
+        print(json.dumps(item),flush=True);results.append(item)
+    return {'schema_version':1,'image_id':'im-BJtDChmqo3vvxfAWMtByq2','dataset_downloads':False,'cases':results}
+
+with app.run(detach=True):
+    call=probe.spawn(CASE)
+    identity={'app_id':app.app_id,'function_call_id':call.object_id}
+    Path('/tmp/o64-startup-probe-launch.json').write_text(json.dumps(identity,indent=2)+'\n')
+    print(json.dumps(identity),flush=True)

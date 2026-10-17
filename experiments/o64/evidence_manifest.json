@@ -21,8 +21,8 @@
       "sha256": "c22c5b47a4a8a2f9368df1908d1c16e5a265528ede6d2967e8e5d7890ceedc0f"
     },
     "experiments/o64/launch.md": {
-      "bytes": 3269,
-      "sha256": "1c812a738c71e6c3781061413c2f55c4f14c493c002582976af92b592bca3565"
+      "bytes": 5012,
+      "sha256": "856940741a73364838f6c5e011f2523678002aa9bcbf50ce8e28e31323811ed4"
     },
     "experiments/o64/performance/059_reference_run.json": {
       "bytes": 130422,
@@ -93,8 +93,8 @@
       "sha256": "306dc0c6fad0c56e18de63feb707b559bb0e52a4102f1c313e662bef4d91fda4"
     },
     "experiments/o64/production_launch.json": {
-      "bytes": 2462,
-      "sha256": "2fada3c3ad85bf9f01745b63d58f3582b4bcc0aace00d7aa61db9284f7691116"
+      "bytes": 3000,
+      "sha256": "cc2daf5d933c712c014084544fc7b88b2336f3330e4d89261f524db9b4088248"
     },
     "experiments/o64/production_pyspy_failure.txt": {
       "bytes": 140,
@@ -103,6 +103,10 @@
     "experiments/o64/production_retry_state.json": {
       "bytes": 262,
       "sha256": "cd8485b217182ecdaaf7713de1539115f9e4cbc7a25990398765b28a4f07c482"
+    },
+    "experiments/o64/production_startup_45min_diagnostic.json": {
+      "bytes": 13033,
+      "sha256": "aa3658db393a932456dcd5404e7ab0967b619c3ac15793a35f3d87f0d864486a"
     },
     "experiments/o64/production_startup_stack_tail.txt": {
       "bytes": 10014,
@@ -113,12 +117,24 @@
       "sha256": "b38f074abd273a57395169f2b15fe4f06f486d161daec7d10524f899b07e01d5"
     },
     "experiments/o64/production_wandb_snapshot.json": {
-      "bytes": 5924,
-      "sha256": "a1af5b59df85225362e8c6ad21cf0911e8b610327ebd9b1ea78937ed522217c4"
+      "bytes": 11356,
+      "sha256": "4b8095be20daeecfc8adf627a23ad09013c145afef2d374bf7363664b900bd5b"
     },
     "experiments/o64/resolved_config.json": {
       "bytes": 15058,
       "sha256": "216783da07e528d1e7979c2a259e1143fa27d6c49a131cac91799b75e6948ced"
+    },
+    "experiments/o64/startup_probe_launch.json": {
+      "bytes": 99,
+      "sha256": "9cc489c5109896fe32fe65730839dea4612f502716f29cc29ae3ba50837e50ce"
+    },
+    "experiments/o64/startup_probe_result.json": {
+      "bytes": 1584,
+      "sha256": "df449122676736f0cc231f88b8c31a3655a725b45c451b79b4ed009871df977a"
+    },
+    "experiments/o64/startup_probe_source.txt": {
+      "bytes": 2513,
+      "sha256": "4804c614b0f9645206a7e6d695eda040ceba364c709e4295f44bf8b3058ae2dc"
     },
     "experiments/o64/synthetic_prefetch_preflight.json": {
       "bytes": 17828,

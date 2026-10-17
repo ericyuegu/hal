@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "image_id": "im-BJtDChmqo3vvxfAWMtByq2",
+  "dataset_downloads": false,
+  "cases": [
+    {
+      "variant": "exact",
+      "exit_code": 0,
+      "output": "2026-10-17 19:29:47.723 | INFO     | hal.models.attention:resolve_attention:302 - trunk attention: varlen_flash path, window=0\n[compile] calling torch.compile for trunk (mode=reduce-overhead)\n[compile] calling torch.compile for temporal model (mode=reduce-overhead)\nPROBE_START exact\n[compile] starting synthetic forward/backward to trigger lazy compilation for trunk and temporal model\n[compile] lazy compilation still running for trunk and temporal model; 60.0s elapsed\n[compile] lazy compilation complete in 99.5s\nPROBE_RESULT {\"variant\": \"exact\", \"seconds\": 99.51094185, \"gpu\": \"NVIDIA B200\", \"torch\": \"2.11.0+cu130\"}\n"
+    },
+    {
+      "variant": "contiguous",
+      "exit_code": 0,
+      "output": "2026-10-17 19:31:40.307 | INFO     | hal.models.attention:resolve_attention:302 - trunk attention: varlen_flash path, window=0\n[compile] calling torch.compile for trunk (mode=reduce-overhead)\n[compile] calling torch.compile for temporal model (mode=reduce-overhead)\nPROBE_START contiguous\n[compile] starting synthetic forward/backward to trigger lazy compilation for trunk and temporal model\n[compile] lazy compilation still running for trunk and temporal model; 60.0s elapsed\n[compile] lazy compilation complete in 95.6s\nPROBE_RESULT {\"variant\": \"contiguous\", \"seconds\": 95.64613805600001, \"gpu\": \"NVIDIA B200\", \"torch\": \"2.11.0+cu130\"}\n"
+    }
+  ]
+}

@@ -53,3 +53,33 @@ The first local submission stopped before creating an App because the clean
 checkout's virtualenv lacked loguru. Reusing the validated workspace environment
 through `UV_PROJECT_ENVIRONMENT` resolved it. The successful launch identity
 above is the only production training launch.
+
+## Startup delay investigation
+
+The initial production compilation took 2,540.3 seconds (42.3 minutes).
+The concurrent 64-thread corpus materialization took 2,601.8 seconds
+(43.4 minutes) for 1,786.7 GiB. Compilation finished shortly after
+materialization. The process then waited for its first replay batch; no real
+optimizer update or durable checkpoint was observed at this follow-up.
+
+A separate B200 probe used the same immutable image and the exact production
+warmup helper, with no corpus loading or dataset downloads. It compiled in
+99.5 seconds. Making the expanded prefix positions contiguous compiled in
+95.6 seconds. Both cases completed forward and backward. These results strongly
+suggest startup CPU contention; they do not establish a controlled same-host
+causal measurement. Prefix layout does not explain the 42-minute delay.
+
+The earlier preflights did not exercise the complete production startup path.
+Future startup qualification must include that path and the first real update.
+The review also found an unnecessary prefix-stride difference between warmup
+and sampled training, and a cleanup gap if compilation raises after loader
+startup. Neither has been changed in the active immutable job.
+
+Probe identity, source and output are in [startup_probe_launch.json](startup_probe_launch.json),
+[startup_probe_source.txt](startup_probe_source.txt), and
+[startup_probe_result.json](startup_probe_result.json). The live diagnostic is
+[production_startup_45min_diagnostic.json](production_startup_45min_diagnostic.json).
+
+The first replay batch subsequently became ready after 2,842.0 seconds
+(47.4 minutes) of cold fill. Worker startup took 186.2 seconds. The first
+optimizer update remains unconfirmed at this observation.
