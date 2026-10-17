@@ -185,7 +185,7 @@ EDGES: Final[Tensor] = torch.linspace(
     -math.log1p(PERCENTILE_RANGE), math.log1p(PERCENTILE_RANGE), N_PERCENTILE_BINS + 1
 )
 type PercentileArm = Literal["return60", "bootstrap30", "match"]
-type ReturnTarget = Literal["u50", "u75", "u90", "unconditioned"]
+type ReturnTarget = Literal["u50", "u75", "u90", "u95", "u98", "u99", "unconditioned"]
 
 
 def _nats_to_bits(values: Tensor) -> Tensor:
@@ -927,7 +927,7 @@ def condition_value(u: Tensor | float) -> Tensor | float:
 def desired_return_for_target(target: ReturnTarget) -> float | None:
     if target == "unconditioned":
         return None
-    values = {"u50": 0.5, "u75": 0.75, "u90": 0.9}
+    values = {"u50": 0.5, "u75": 0.75, "u90": 0.9, "u95": 0.95, "u98": 0.98, "u99": 0.99}
     if target not in values:
         raise ValueError("unknown percentile evaluation target")
     return float(condition_value(values[target]))
@@ -2232,7 +2232,7 @@ def _eval_protocol(
         checkpoint_sha256=checkpoint_sha256,
         return_target=next(
             target
-            for target in ("u50", "u75", "u90", "unconditioned")
+            for target in ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned")
             if desired_return_for_target(target) == desired_return
         ),
         desired_return=desired_return,
@@ -4351,7 +4351,7 @@ def eval_checkpoint(
         )
     model, cfg, stats, state = load_checkpoint(path, corpus=corpus)
     validate_config(cfg)
-    if return_target not in ("u50", "u75", "u90", "unconditioned"):
+    if return_target not in ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned"):
         raise ValueError("unknown return target")
     calibration = ReturnCalibration(window_count=CALIBRATION_WINDOWS)
     calibration.load_state_dict(state["return_calibration"])

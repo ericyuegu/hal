@@ -406,7 +406,18 @@ def test_experiment_checkpoints_reject_each_other(tmp_path):
             reader.load_checkpoint(str(path), device="cpu")
 
 
-@pytest.mark.parametrize("name,value", [("u50", 0.0), ("u75", 60.0), ("u90", 96.0), ("unconditioned", None)])
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("u50", 0.0),
+        ("u75", 60.0),
+        ("u90", 96.0),
+        ("u95", 108.0),
+        ("u98", 115.2),
+        ("u99", 117.6),
+        ("unconditioned", None),
+    ],
+)
 def test_eval_targets_and_evidence_directory(name, value, tmp_path):
     assert (
         exp.desired_return_for_target(name) == pytest.approx(value)
@@ -421,7 +432,7 @@ def test_eval_targets_and_evidence_directory(name, value, tmp_path):
     assert protocol.return_target == name
     exp._write_eval_evidence(tmp_path, [], {}, protocol)
     exp._validate_eval_directory(tmp_path, protocol)
-    for other in {"u50", "u75", "u90", "unconditioned"} - {name}:
+    for other in {"u50", "u75", "u90", "u95", "u98", "u99", "unconditioned"} - {name}:
         with pytest.raises(ValueError, match="different protocol"):
             exp._validate_eval_directory(
                 tmp_path, replace(protocol, return_target=other, desired_return=exp.desired_return_for_target(other))
@@ -777,7 +788,7 @@ def test_drained_prefetch_restores_loader_masks_and_optimizer_update(tmp_path: P
         assert restored[-1].drained
 
 
-@pytest.mark.parametrize("target", ("u50", "u75", "u90", "unconditioned"))
+@pytest.mark.parametrize("target", ("u50", "u75", "u90", "u95", "u98", "u99", "unconditioned"))
 def test_checkpoint_evaluation_uses_percentile_instead_of_raw_calibration(tmp_path, monkeypatch, target):
     cfg = exp.proxy_config("return60")
     with torch.device("meta"):
