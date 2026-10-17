@@ -129,7 +129,7 @@ def test_obs_scene_keeps_a_styled_background_below_live_capture(tmp_path: Path) 
         "cropRight": 304,
         "boundsType": "OBS_BOUNDS_SCALE_INNER",
         "boundsWidth": 1344,
-        "boundsHeight": 1025,
+        "boundsHeight": 1026,
         "positionX": 36,
         "positionY": 43,
     }
@@ -154,7 +154,7 @@ def test_capture_removes_only_the_netplay_pillarboxes(tmp_path: Path, ranked: bo
     assert transform["boundsType"] == "OBS_BOUNDS_SCALE_INNER"
     if not ranked:
         assert transform["positionY"] == 43
-        assert transform["positionY"] + transform["boundsHeight"] == 1068
+        assert transform["positionY"] + transform["boundsHeight"] == 1069
         assert visible_width * transform["boundsHeight"] / 1080 <= transform["boundsWidth"]
 
 

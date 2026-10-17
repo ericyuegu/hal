@@ -37,9 +37,9 @@ _INK_SOFT = _rgb("#5C646C")
 _RULE = _rgb("#E4E7EA")
 _ASIDE = _rgb("#FAFBFB")
 _ACCENT = _rgb("#0E6E63")
-# Match the visible header top (43) and footer bottom (1068) with the pinned
+# Match the visible header top (43) and footer bottom (1069) with the pinned
 # fonts and OBS release. Scale Melee's native image without stretching it.
-_VIDEO_X, _VIDEO_Y, _VIDEO_W, _VIDEO_H = 36, 43, 1344, 1025
+_VIDEO_X, _VIDEO_Y, _VIDEO_W, _VIDEO_H = 36, 43, 1344, 1026
 _SIDE_X = _VIDEO_X + _VIDEO_W + 48
 _SIDE_W = 1920 - 36 - _SIDE_X
 # Slippi 3.6.4 rounds its 73:60 viewport to 1312x1080 in our 1920x1080
