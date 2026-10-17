@@ -2,6 +2,7 @@ name: hal-netplay
 
 services:
   runner:
+    init: true
     image: hal-netplay-runner:${HAL_GIT_SHA:?set HAL_GIT_SHA}
     build:
       context: ../..

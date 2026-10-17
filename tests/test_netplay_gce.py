@@ -160,6 +160,7 @@ def test_runner_keeps_managed_display_sockets_private() -> None:
         line for line in source.splitlines() if line.startswith("ExecStart=") and "--name hal-netplay-runner " in line
     )
     arguments = shlex.split(command)
+    assert "--init" in arguments
     mounts = [arguments[index + 1] for index, argument in enumerate(arguments) if argument == "-v"]
     display_mounts = [mount for mount in mounts if "/tmp/.X11-unix" in mount]
     assert display_mounts == ["/tmp/.X11-unix/X90:/tmp/.X11-unix/X90:ro"]

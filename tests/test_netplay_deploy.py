@@ -109,6 +109,7 @@ def test_page_uses_same_origin_api_and_local_proxy() -> None:
 def test_compose_has_only_a_runner() -> None:
     compose = (_DEPLOY / "compose.yaml").read_text()
     assert "  runner:" in compose
+    assert "    init: true" in compose
     assert "  api:" not in compose
     assert "  tunnel:" not in compose
     assert "NVIDIA_DRIVER_CAPABILITIES: compute,graphics,utility,video" in compose

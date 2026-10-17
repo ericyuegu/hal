@@ -54,6 +54,7 @@ drain, disconnect, or lease loss. Local human claims wait until Dolphin and both
 inference streams have released. A 600 ms watchdog kills a hung worker and all
 Dolphin process groups, invalidates both streams, and disables demos until restart.
 OBS keeps running during handoffs. Human games use event notifications for work.
+Container launches enable Docker's init process to reap orphaned AppImage children.
 
 Both demo ports use return 120 (Medium), temperature 1, and physical delay 2.
 `--self-play-seed` (default 0) controls published character, imitation, and legal
