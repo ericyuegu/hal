@@ -1,4 +1,7 @@
 import ctypes
+import multiprocessing
+import os
+import signal
 import threading
 import time
 from contextlib import closing
@@ -172,6 +175,38 @@ def test_failed_inference_cleanup_keeps_human_gate_closed(tmp_path: Path, monkey
         with pytest.raises(runner._EngineLost, match="cleanup"):
             demo.tick(threading.Event(), False)
         assert control._demo_held and demo.disabled
+
+
+def test_startup_watchdog_preserves_the_supervisor_process_group(tmp_path: Path, monkeypatch) -> None:
+    with closing(_control(tmp_path / "status")) as control:
+        demo, _ = _demo(tmp_path, control, monkeypatch)
+        process = multiprocessing.get_context("spawn").Process(target=signal.pause)
+        process.start()
+        demo.process = process
+        invalidate = Mock(return_value=True)
+        monkeypatch.setattr(runner, "_invalidate_slot_connection", invalidate)
+        killpg = os.killpg
+        groups = []
+
+        def kill_group(group: int, number: int) -> None:
+            assert group != os.getpgrp()
+            groups.append(group)
+            killpg(group, number)
+
+        monkeypatch.setattr(runner.os, "killpg", kill_group)
+        try:
+            assert os.getpgid(process.pid) == os.getpgrp()
+            control._capacity["queued"] = 1
+            demo.cancel_started = time.monotonic() - 0.61
+            demo.tick(threading.Event(), False)
+            assert not process.is_alive()
+            assert demo.process is None and not control._demo_held
+            assert demo.disabled and invalidate.call_count == 2
+            assert os.getpgrp() not in groups
+        finally:
+            if process.is_alive():
+                process.kill()
+            process.join(timeout=1)
 
 
 def test_repeated_handoffs_restart_only_after_a_new_idle_second(tmp_path: Path, monkeypatch) -> None:

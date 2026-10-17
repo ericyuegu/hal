@@ -176,8 +176,10 @@ are distinct: maintenance blocks all API/DO access, including admin calls.
 OBS captures only Dolphin, including menus, at 1080p60 with NVENC. The queue
 selects one stream slot; other emulators are not captured. Direct play offers Easy (desired return 20) and Medium (desired return 120)
 on the 059 policy. The stream shows its player, character, game number, and connection
-status beside the live game. Difficulty appears only on the play page. OBS continues to show menus between games and
-rematches. A light waiting screen stays visible when Dolphin has no render window. Ranked displays the smoothed value head on the right.
+status beside the live game. The live panel also shows actual policy difficulty,
+physical controller inputs, and the smoothed model value. OBS continues through
+self-play and human handoffs. A light waiting screen stays visible when Dolphin
+has no render window. Ranked displays the smoothed value head on the right.
 Neither overlay may contain a connect code. Stream failure must not stop gameplay.
 
 ### Deploy the overlay without stopping games

@@ -20,7 +20,9 @@ from hal.inference.api import PreparedInferenceProfile
 from hal.inference.api import action_plan
 from hal.inference.client import InferenceClient
 from hal.inference.engine import InferenceEngine
+from hal.netplay_service.control import QueueControl
 from hal.netplay_service.graphics import PanelRenderer
+from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.telemetry import TelemetryPublisher
 from hal.netplay_service.telemetry import TelemetryReceiver
@@ -106,7 +108,10 @@ def test_local_session_cancellation_releases_dolphin_within_one_second(
             timer.cancel()
 
 
-def test_two_inference_connections_and_live_overlay_release_on_cancellation(prerequisites, tmp_path: Path) -> None:
+@pytest.mark.parametrize("cancel_frame", [90, 5400])
+def test_two_inference_connections_and_live_overlay_release_on_cancellation(
+    prerequisites, tmp_path: Path, cancel_frame: int
+) -> None:
     profile = PreparedInferenceProfile("local-test", "a" * 64, "window", 8, 4, (1, 2, 4), 2)
     policy = Mock()
     requests = []
@@ -122,6 +127,13 @@ def test_two_inference_connections_and_live_overlay_release_on_cancellation(prer
     engine_thread = threading.Thread(target=engine.serve, args=(engine_stop,), daemon=True)
     engine_thread.start()
     cancel = threading.Event()
+    control = QueueControl(QueueEndpoint("http://127.0.0.1:1", "local"), "session", Mock(), tmp_path / "status")
+    control._connected = True
+    control._state = {"draining": False, "stream": {"slot": 0, "key": "private"}}
+    control._capacity = {"queued": 0, "active": 0}
+    control._idle_since = time.monotonic() - 2
+    assert control.acquire_demo(cancel)
+    dolphin_pids: list[int] = []
     clients = tuple(
         InferenceClient(PolicySpec("test", "test", (), (2,)), 128, pair[1], engine_stop, {4: profile})
         for pair in pairs
@@ -146,8 +158,11 @@ def test_two_inference_connections_and_live_overlay_release_on_cancellation(prer
     def frame(frame_id: int, _step: float) -> None:
         if frame_id >= 0:
             times.append(time.monotonic())
-        if frame_id >= 90:
-            cancel.set()
+        if frame_id >= cancel_frame:
+            control._capacity["queued"] = 1
+            control.refresh_demo()
+            assert control._claim("/claim", {"slot": 0}) == (204, None)
+            assert cancel.is_set() and control._demo_held
 
     try:
         with (
@@ -161,6 +176,7 @@ def test_two_inference_connections_and_live_overlay_release_on_cancellation(prer
                 blocking_input=True,
                 polling_mode=True,
                 canceled=cancel.is_set,
+                on_dolphin_started=dolphin_pids.append,
                 disable_audio=True,
                 gfx_backend="OGL",
                 dolphin_version=dolphin_version(str(NETPLAY_EMULATOR_PATH)),
@@ -179,10 +195,19 @@ def test_two_inference_connections_and_live_overlay_release_on_cancellation(prer
                 publisher,
                 frame,
                 lambda: None,
-                max_frames=1000,
+                max_frames=cancel_frame + 256,
                 observe_policy=latencies.append,
             )
         assert not engine._routes
+        assert dolphin_pids
+        with pytest.raises(ProcessLookupError):
+            os.killpg(dolphin_pids[0], 0)
+        assert control._demo_held
+        control.release_demo()
+        forward = Mock(return_value=(204, None))
+        control._forward = forward
+        control._claim("/claim", {"slot": 0})
+        forward.assert_called_once()
         assert set(request.stream_id for request in requests) == {4, 5}
         assert all(
             item.desired_return == 120 and item.temperature == 1
@@ -202,6 +227,7 @@ def test_two_inference_connections_and_live_overlay_release_on_cancellation(prer
         (tmp_path / "metrics.json").write_text(json.dumps(metrics))
         print(json.dumps(metrics))
     finally:
+        control.close()
         renderer_stop.set()
         render_thread.join(timeout=2)
         receiver.close()
@@ -212,6 +238,40 @@ def test_two_inference_connections_and_live_overlay_release_on_cancellation(prer
         for pair in pairs:
             for connection in pair:
                 connection.close()
+
+
+def test_cancellable_local_session_reaches_the_next_match_menu(prerequisites, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    cancel = threading.Event()
+    with Session(
+        ISO_PATH,
+        dolphin_path=NETPLAY_EMULATOR_PATH,
+        slippi_port=51841,
+        replay_dir=tmp_path,
+        blocking_input=True,
+        polling_mode=True,
+        canceled=cancel.is_set,
+        disable_audio=True,
+        gfx_backend="OGL",
+        emulation_speed=0,
+        step_timeout_seconds=5,
+        dolphin_version=dolphin_version(str(NETPLAY_EMULATOR_PATH)),
+        dolphin_batch=True,
+    ) as session:
+        session.start_match(
+            Matchup(
+                melee.Stage.BATTLEFIELD,
+                (PlayerSetup(1, melee.Character.FOX), PlayerSetup(2, melee.Character.FALCO)),
+            )
+        )
+        walk_offstage = replace(NEUTRAL_CONTROLLER_ACTION, main_x=1)
+        for _ in range(6000):
+            _, playing = session.step({1: walk_offstage, 2: NEUTRAL_CONTROLLER_ACTION})
+            if not playing:
+                break
+        else:
+            pytest.fail("local match did not end after four self-destructs")
 
 
 def _hung_dolphin_worker(pid, ready) -> None:

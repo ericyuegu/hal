@@ -64,6 +64,31 @@ def test_polling_waits_for_one_frame_before_flushing_again(monkeypatch: pytest.M
     assert kwargs["polling_timeout"] == 7.5
 
 
+def test_cancellation_polls_submit_controller_inputs_once_per_frame() -> None:
+    console = Mock()
+    frame = {"type": "frame"}
+    dispatch = Mock(side_effect=(None, None, frame))
+    cancelable = session_module._CancellableDispatch(dispatch, lambda: False)
+    console.step.side_effect = lambda: cancelable(True, 1)
+
+    assert session_module.step_blocking(console, 1, lambda: False) is frame
+
+    console.step.assert_called_once_with()
+    assert dispatch.call_count == 3
+    assert all(0 <= args[0][1] <= 0.005 for args in dispatch.call_args_list)
+
+
+def test_dispatch_cancellation_interrupts_a_partial_frame() -> None:
+    cancel = Mock(return_value=False)
+
+    def poll(_polling: bool, _timeout: float) -> None:
+        cancel.return_value = True
+
+    dispatch = session_module._CancellableDispatch(poll, cancel)
+    with pytest.raises(session_module.SessionCanceled, match="during frame read"):
+        dispatch(True, 10)
+
+
 @pytest.mark.parametrize("gfx_backend", ["Vulkan", "OGL"])
 def test_session_configures_graphics_backend_native_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gfx_backend: DolphinGraphicsBackend

@@ -206,6 +206,23 @@ class SessionCanceled(RuntimeError):
     """The session owner requested cancellation."""
 
 
+@dataclass(frozen=True, slots=True)
+class _CancellableDispatch:
+    dispatch: Callable[[bool, float], dict[str, object] | None]
+    canceled: Callable[[], bool]
+
+    def __call__(self, polling_mode: bool, timeout: float = 0) -> dict[str, object] | None:
+        if not polling_mode:
+            raise ValueError("cancellable sessions require polling")
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.canceled():
+                raise SessionCanceled("local session canceled during frame read")
+            message = self.dispatch(True, min(0.005, max(0, deadline - time.monotonic())))
+            if message is not None or time.monotonic() >= deadline:
+                return message
+
+
 def connect_cancellable(client: SlippstreamClient, canceled: Callable[[], bool], timeout_seconds: float) -> bool:
     """Bound the pinned libmelee 0.47.0+hal.realtime.1 connection handshake.
 
@@ -230,6 +247,11 @@ def connect_cancellable(client: SlippstreamClient, canceled: Callable[[], bool],
     if type(connected) is not bool:
         raise RuntimeError("invalid Dolphin connection handshake")
     client.running = connected
+    if connected and not isinstance(client.dispatch, _CancellableDispatch):
+        # Pinned libmelee must poll inside dispatch: retrying Console.step()
+        # repeats its controller FLUSH and can stall blocking-input games.
+        # Remove when upstream supports cancellation during dispatch.
+        client.__dict__["dispatch"] = _CancellableDispatch(client.dispatch, canceled)
     return connected
 
 
@@ -650,11 +672,7 @@ class Session:
             # Console.step() flushes every controller before polling. With a
             # zero timeout, _step_blocking can flush several commands before
             # one frame arrives and the newest command overwrites the others.
-            polling_timeout=min(self.step_timeout_seconds, 0.005)
-            if self.canceled is not None
-            else self.step_timeout_seconds
-            if self.polling_mode
-            else 0,
+            polling_timeout=self.step_timeout_seconds if self.polling_mode else 0,
             setup_gecko_codes=self.setup_gecko_codes,
             tmp_home_directory=self.tmp_home_directory,
             replay_dir=self.replay_dir,

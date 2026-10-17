@@ -93,7 +93,7 @@ def worker(
     engine_stop: CancelSignal,
     dolphin_pid: ctypes.c_int,
 ) -> None:
-    # A separate process group contains the worker and its Dolphin descendants.
+    # Isolate the worker before it can launch Dolphin in another process group.
     os.setsid()
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     from hal.netplay_service.runner import SlotHealthReporter
@@ -162,7 +162,7 @@ def worker(
                 config.iso_path,
                 dolphin_path=config.dolphin_path,
                 slippi_port=config.slippi_port,
-                step_timeout_seconds=1,
+                step_timeout_seconds=5,
                 start_timeout_seconds=60,
                 replay_dir=Path(directory),
                 blocking_input=True,

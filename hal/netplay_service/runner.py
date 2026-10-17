@@ -1229,7 +1229,14 @@ class _IdleDemo:
             if children <= descendants:
                 break
             descendants.update(children)
-        self._groups.update(group for pid, _, group in rows if pid in descendants)
+        supervisor_group = os.getpgrp()
+        # Spawn can be canceled before worker() calls setsid(). Never signal
+        # the inherited supervisor group, which also owns human workers.
+        for pid, _, group in rows:
+            if pid in descendants and group == supervisor_group:
+                with suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        self._groups.update(group for pid, _, group in rows if pid in descendants and group != supervisor_group)
         self._groups.update((worker_pid, self.dolphin_pid.value))
         for pid in self._groups:
             if pid > 0:

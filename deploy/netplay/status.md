@@ -1,17 +1,18 @@
 # Netplay deployment status
 
-Updated October 15, 2026. Website restyle and the independent overlay service are
-live. The one-GPU gameplay VM in `us-west4-a` has eight healthy slots and admissions
-are open. Physical delays 2 and 3 are offered; shared-profile inference p99 passed
-at 15.177 ms against delay 3's 16.667 ms limit. An overlay-only source-bundle
-rollout preserved the gameplay container, process, and readiness. All training
-and evaluation VMs remain stopped. See the [overlay release record](history/overlay-service-2026-10-15.md)
-and the [initial release record](history/difficulty-stream-2026-10-15.md).
+Updated October 16, 2026. The live-overlay/self-play candidate was rolled back
+after a demo frame timeout. Production again runs the prior matched runner and
+overlay releases, with eight healthy slots and both delay budgets qualified at
+p99 15.637 ms. Its admission flag is open, but the existing daily queue-write
+guard has exhausted its 35,000-credit budget and blocks new reservations until
+its UTC reset. The budget was not changed. Training and evaluation VMs remain
+stopped. See the [candidate and rollback record](history/live-overlay-self-play-2026-10-16.md)
+and the [prior overlay release](history/overlay-service-2026-10-15.md).
 
 | Component | Last verified state |
 | --- | --- |
 | Website | `hal-netplay-web`, route `20xx.xyz/*`; version `fad5795b-68c8-4206-b429-cc65bc51ff15`. Easy = return 20; Medium = return 120. |
-| API | `hal-netplay-api`, route `20xx.xyz/v1/*`; version `f4d45a2c-9bdf-464c-a9f8-c53a7c80ed2d`; maintenance off, admissions open. |
+| API | `hal-netplay-api`, route `20xx.xyz/v1/*`; version `f4d45a2c-9bdf-464c-a9f8-c53a7c80ed2d`; maintenance off, admission flag open; daily queue budget exhausted. |
 | Queue | Protocol 4, schema 7, `global-v7`. Verified 059 policy and HAL#9000 account references restored; one active runner session; no reservations at verification. |
 | Gameplay G4 | `hal-netplay-g4-1015-us-west4-a`, project `centering-star-502613-k3`, zone `us-west4-a`; one `g4-standard-48`, one RTX PRO 6000, eight-slot target, fresh 100 GB boot disk. No MIG. |
 | Gameplay state | `RUNNING`; instance ID `7185265734144818248`; address `34.125.176.210`. NVIDIA driver `580.178.04`, Vulkan preflight passed. |
@@ -52,8 +53,8 @@ replacement host's retained disk. See [teardown](history/g4-teardown.md) and the
 
 ## Verification and operating boundaries
 
-The built-in full-load qualification passed with 200 samples: p50 10.164 ms,
-p95 14.767 ms, p99 15.177 ms. Both delays share prefix 4, replan 4 and horizon 8.
+The rollback full-load qualification passed with 200 samples: p50 10.981 ms,
+p95 15.321 ms, p99 15.637 ms. Both delays share prefix 4, replan 4 and horizon 8.
 Delay 2 allows two inference frames; delay 3 allows one. Qualification uses
 the stricter delay-3 limit of 16.667 ms at all eight streams. All eight slots reported fresh healthy state; the host
 health endpoint returned `ok`. Admissions were resumed after these checks.
