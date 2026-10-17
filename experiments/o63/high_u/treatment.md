@@ -11,7 +11,7 @@ parallelism 32, and deployment timing (4, 2, 2) as the original sweep. Use the
 existing dashboard cluster-bootstrap `net_stock_lcb` metric.
 
 Run on Modal, one RTX PRO 6000 per evaluation. Each job requests 32 CPU cores
-(limit 48), 128 GiB RAM (limit 384), and 128 GiB scratch. No replay datasets or
+(limit 48), 128 GiB RAM (limit 384), and 512 GiB scratch. No replay datasets or
 training data are downloaded. Evaluation reads only its verified final
 checkpoint, feature-normalization statistics, and emulator fixtures.
 
@@ -32,3 +32,7 @@ The original warmup difference remains: 059 conditioned from update 1, and 063
 from 4,097. These additional evaluations do not resolve that training difference.
 HL-Gauss smoothing also means that requested u is not an exact calibrated return
 percentile. High settings may have limited training support.
+
+The first submission requested 128 GiB scratch. Modal rejected Function
+creation because its minimum is 512 GiB; no evaluation workers ran. The
+corrected submissions request 512 GiB. See [failed_launches.json](failed_launches.json).
