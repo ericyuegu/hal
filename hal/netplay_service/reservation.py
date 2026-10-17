@@ -50,6 +50,8 @@ from hal.netplay_service.domain import Settings
 from hal.netplay_service.domain import WindDown
 from hal.netplay_service.health import FRAME_STALL_SECONDS
 from hal.netplay_service.health import SlotStatus
+from hal.netplay_service.melee_choices import character_from_choice
+from hal.netplay_service.melee_choices import stage_from_choice
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import QueueUnavailableError
 from hal.netplay_service.queue_client import RemoteQueue
@@ -512,10 +514,10 @@ def _write_match_failure(
 
 def _selection(link: ReservationLink) -> DirectSelection:
     settings = link.settings()
-    stage = melee.Stage.RANDOM_STAGE if settings.stage is None else melee.Stage[settings.stage]
+    stage = melee.Stage.RANDOM_STAGE if settings.stage is None else stage_from_choice(settings.stage)
     return DirectSelection(
         settings.revision,
-        melee.Character[settings.character],
+        character_from_choice(settings.character),
         0,
         stage,
         settings.imitation,
@@ -643,7 +645,7 @@ def run_reservation(
                         result = run_netplay_match(
                             session,
                             NetplaySetup(
-                                melee.Character[current.character],
+                                character_from_choice(current.character),
                                 job.player_code,
                                 local_code=config.bot_connect_code,
                             ),

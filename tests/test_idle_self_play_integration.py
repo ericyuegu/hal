@@ -22,8 +22,11 @@ from hal.inference.api import action_plan
 from hal.inference.client import InferenceClient
 from hal.inference.engine import InferenceEngine
 from hal.netplay_service.control import QueueControl
+from hal.netplay_service.domain import CHARACTERS
+from hal.netplay_service.domain import STAGES
 from hal.netplay_service.graphics import PanelRenderer
 from hal.netplay_service.queue_client import QueueEndpoint
+from hal.netplay_service.self_play import DemoSelection
 from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.telemetry import TelemetryPublisher
 from hal.netplay_service.telemetry import TelemetryReceiver
@@ -85,6 +88,38 @@ def test_local_selection_preserves_sheik_and_zelda_identity(
         for _ in range(120):
             for port, character in enumerate(characters, 1):
                 assert frame["ports"][port]["leader"]["post"]["character"] == character.value
+            frame, playing = session.step({1: NEUTRAL_CONTROLLER_ACTION, 2: NEUTRAL_CONTROLLER_ACTION})
+            assert playing
+
+
+@pytest.mark.parametrize("index", range(len(CHARACTERS)), ids=[choice.value for choice in CHARACTERS])
+def test_complete_published_catalog_starts_on_both_ports(prerequisites, tmp_path: Path, index: int) -> None:
+    chosen = DemoSelection(
+        (CHARACTERS[index].value, CHARACTERS[(index - 3) % len(CHARACTERS)].value),
+        ("MASTER", "MASTER"),
+        STAGES[(index + 4) % len(STAGES)].value,
+    )
+    matchup = chosen.matchup()
+    cancel = threading.Event()
+    with Session(
+        ISO_PATH,
+        dolphin_path=NETPLAY_EMULATOR_PATH,
+        slippi_port=51841,
+        replay_dir=tmp_path,
+        blocking_input=True,
+        polling_mode=True,
+        canceled=cancel.is_set,
+        disable_audio=True,
+        gfx_backend="OGL",
+        emulation_speed=0,
+        dolphin_version=dolphin_version(str(NETPLAY_EMULATOR_PATH)),
+        dolphin_batch=True,
+    ) as session:
+        frame = session.start_match(matchup)
+        assert frame["stage"] == matchup.stage.value
+        for _ in range(150):
+            for player in matchup.players:
+                assert frame["ports"][player.port]["leader"]["post"]["character"] == player.character.value
             frame, playing = session.step({1: NEUTRAL_CONTROLLER_ACTION, 2: NEUTRAL_CONTROLLER_ACTION})
             assert playing
 

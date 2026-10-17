@@ -14,6 +14,7 @@ from hal.eval.results import PlayResult
 from hal.eval.scheduling import FrameTiming
 from hal.inference.api import RuntimeConfig
 from hal.netplay_service import reservation
+from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import EndReason
 from hal.netplay_service.domain import FinishedGame
 from hal.netplay_service.domain import GameResult
@@ -23,6 +24,7 @@ from hal.netplay_service.domain import Observed
 from hal.netplay_service.domain import Phase
 from hal.netplay_service.domain import Settings
 from hal.netplay_service.domain import WindDown
+from hal.netplay_service.melee_choices import character_from_choice
 from hal.netplay_service.queue_client import QueueEndpoint
 from hal.netplay_service.queue_client import QueueRejectedError
 from hal.netplay_service.queue_contract import InvalidTransitionError
@@ -197,16 +199,20 @@ def _never() -> Mock:
     return stop
 
 
+@pytest.mark.parametrize("character", [choice.value for choice in CHARACTERS])
 def test_disconnect_after_a_game_ends_as_player_disconnected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    character: str,
 ) -> None:
-    queue = _Queue([_job()])
+    job = _job(settings=Settings(1, character, "IBDW#0", "DREAMLAND", 20.0, 1.0))
+    queue = _Queue([job])
     monkeypatch.setattr(reservation, "NetplaySession", _Session)
+    play = Mock(wraps=_play([_fake_result(), PlayerDisconnected("left")]))
     monkeypatch.setattr(
         reservation,
         "run_netplay_match",
-        _play([_fake_result(), PlayerDisconnected("left")]),
+        play,
     )
     monkeypatch.setattr(
         reservation,
@@ -220,7 +226,7 @@ def test_disconnect_after_a_game_ends_as_player_disconnected(
         queue,  # type: ignore[arg-type]
         Mock(),
         _RUNTIME,
-        _job(),
+        job,
         _never(),
         Mock(),
         _TIMING,
@@ -228,6 +234,8 @@ def test_disconnect_after_a_game_ends_as_player_disconnected(
 
     assert queue.ends == [(EndReason.PLAYER_DISCONNECTED, False)]
     assert queue.reports[-1].finished_games[0].result is GameResult.LOSS
+    assert play.call_args_list[0].args[0].ego_character is character_from_choice(character)
+    assert play.call_args_list[0].args[1].character is character_from_choice(character)
 
 
 def test_leave_at_character_select_ends_as_player_canceled(

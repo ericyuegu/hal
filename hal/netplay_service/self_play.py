@@ -15,8 +15,6 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Protocol
 
-import melee
-
 from hal.eval import self_play
 from hal.inference.api import PolicySpec
 from hal.inference.api import PreparedInferenceProfile
@@ -24,6 +22,8 @@ from hal.inference.client import InferenceClient
 from hal.netplay_service.domain import CHARACTERS
 from hal.netplay_service.domain import IMITATIONS
 from hal.netplay_service.domain import STAGES
+from hal.netplay_service.melee_choices import character_from_choice
+from hal.netplay_service.melee_choices import stage_from_choice
 from hal.netplay_service.stream import GameStreamState
 from hal.netplay_service.stream import IdleStreamState
 from hal.netplay_service.stream import write_stream_state
@@ -64,6 +64,12 @@ class DemoSelection:
     characters: tuple[str, str]
     imitations: tuple[str, str]
     stage: str
+
+    def matchup(self) -> Matchup:
+        return Matchup(
+            stage_from_choice(self.stage),
+            tuple(PlayerSetup(port, character_from_choice(value)) for port, value in enumerate(self.characters, 1)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +125,7 @@ def worker(
     try:
         if cancel.is_set():
             raise SessionCanceled
+        matchup = chosen.matchup()
         with ExitStack() as resources:
             directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="hal-self-play-"))
             clients = tuple(
@@ -175,13 +182,6 @@ def worker(
                 dolphin_batch=True,
                 stream_output=True,
             ) as session:
-                matchup = Matchup(
-                    melee.Stage[chosen.stage],
-                    tuple(
-                        PlayerSetup(port, melee.Character[character])
-                        for port, character in enumerate(chosen.characters, 1)
-                    ),
-                )
                 metrics = self_play.run_match(
                     session,
                     matchup,
