@@ -1,7 +1,7 @@
 # O63: return percentile conditioning
 
-Status: all four Modal runs have started training after GCE capacity failures. The actual
-063 closed-loop smoke passed. No comparative gameplay results yet.
+Status: all four runs passed their full 96-boot evaluations at update 8,192
+and resumed training. The primary 16,384-update results remain pending.
 
 ## Fixed comparison
 
@@ -13,8 +13,8 @@ Primary metric naming follows the existing 059 dashboard: `eval/net_stock_lcb`
 is the raw evidence field `net_stock_cluster_bootstrap_lcb`. The raw JSON also
 has a legacy conservative marginal-CI bound named `net_stock_lcb`; retain and
 report that separately. This naming was checked before any gameplay result
-arrived. The user was asked to resolve the ambiguity; the dashboard convention
-is the stated default while that optional preference is pending.
+arrived. The user confirmed the dashboard cluster-bootstrap bound as the primary
+metric. The legacy bound remains a secondary diagnostic.
 
 | Arm | Program | Decoder condition | Primary target |
 | --- | --- | --- | --- |
@@ -219,3 +219,25 @@ the boundary (update 4,100) has nonzero conditioning. Subsequent full windows
 show about 80.0% conditioning for `return60`, 60.9% for `bootstrap30`, and
 79.5% for `match`. These are diagnostic snapshots, not gameplay comparisons.
 See [warmup_evidence.json](warmup_evidence.json).
+
+
+## Intermediate 8,192-update evaluation
+
+These checks do not select the winning arm. All four cohorts completed all
+96 boots, with 7,200 recorded frames and active gameplay in each boot. There
+were no crashes, failed workers, or timed-out workers. Countdown-only tail
+fragments from instant match restart are excluded from rates as specified by
+the existing evaluator; they are not failed boots.
+
+| Arm | Target | Net stocks / active min | Dashboard LCB | Legacy marginal-CI LCB | Eval wall time incl. compile |
+| --- | --- | ---: | ---: | ---: | ---: |
+| control | p90 | 0.01064 | -0.11713 | -0.15800 | 13.97 min |
+| return60 | u75 | -0.37184 | -0.48913 | -0.52459 | 21.75 min |
+| bootstrap30 | u75 | -0.36661 | -0.49452 | -0.52107 | 16.38 min |
+| match | u75 | -0.26030 | -0.37725 | -0.41945 | 19.77 min |
+
+Every run resumed training after its evaluation. The inline evaluator logs to
+W&B after the complete cohort and evidence upload, so its metrics are absent
+while the evaluation runs. The `return60` point appeared at 02:12:58 PDT; W&B's
+API confirmed `eval/net_stock_lcb = -0.48913238519636915` at update 8,192.
+Raw evidence is in [gameplay_results.json](gameplay_results.json).

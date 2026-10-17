@@ -126,5 +126,6 @@
   "primary_metric": "eval/net_stock_lcb",
   "primary_metric_raw_field": "net_stock_cluster_bootstrap_lcb",
   "secondary_legacy_lcb_raw_field": "net_stock_lcb",
-  "metric_naming_decided_before_gameplay_results": true
+  "metric_naming_decided_before_gameplay_results": true,
+  "primary_metric_user_confirmed": true
 }
