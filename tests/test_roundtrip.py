@@ -337,6 +337,7 @@ def test_instant_restart_enabled_match_is_bit_exact(tmp_path: Path) -> None:
         tmp_home_directory=False,
         replay_dir=str(tmp_path),
         instant_match_restart=True,
+        blocking_input=True,
     ) as s:
         drive(s, matchup, record_sources, max_frames=n_frames)
 
@@ -357,6 +358,7 @@ def test_instant_restart_enabled_match_is_bit_exact(tmp_path: Path) -> None:
         tmp_home_directory=False,
         replay_dir=str(tmp_path),
         instant_match_restart=True,
+        blocking_input=True,
     ) as s:
         live = drive(s, matchup, replay_sources, max_frames=n_frames)
 
