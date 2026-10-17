@@ -1,0 +1,17 @@
+[
+  {
+    "path": "/tmp/o63-control-serial.log",
+    "sha256": "3da5aa1bb84fee9f227248c75070485e8fb266339f3862b389e4525885f2a470",
+    "bytes": 370936
+  },
+  {
+    "path": "/tmp/o63-return60-tail.log",
+    "sha256": "c47f3efd807f78c90ebcdfb3b8099d04c095dd09a1f458f09108b94bcc835289",
+    "bytes": 1177
+  },
+  {
+    "path": "/tmp/o63-return60-all-modal.log",
+    "sha256": "749b03552474974270b8be80d9b125710426d0da026997feffaa32b72dc3b0cf",
+    "bytes": 37100
+  }
+]

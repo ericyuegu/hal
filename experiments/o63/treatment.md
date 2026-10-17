@@ -9,6 +9,13 @@ At update **16,384**, compare each O63 arm at **u75** with O59 at **p90**.
 Use `net_stock_lcb` over the same 96 standard matchups. This is the primary
 comparison. The u sweep is secondary. Validation NLL is diagnostic only.
 
+Primary metric naming follows the existing 059 dashboard: `eval/net_stock_lcb`
+is the raw evidence field `net_stock_cluster_bootstrap_lcb`. The raw JSON also
+has a legacy conservative marginal-CI bound named `net_stock_lcb`; retain and
+report that separately. This naming was checked before any gameplay result
+arrived. The user was asked to resolve the ambiguity; the dashboard convention
+is the stated default while that optional preference is pending.
+
 | Arm | Program | Decoder condition | Primary target |
 | --- | --- | --- | --- |
 | Control | 059 | Raw 60-frame discounted return | Positive-return p90 |
@@ -190,3 +197,25 @@ label draws, metrics, and gradients. Compiled CUDA cases pass with deterministic
 kernels. Default Inductor embedding reductions use atomic operations and showed
 small numerical differences in optimizer state. Production settings remain
 unchanged; bitwise equality with those default compiled kernels is not claimed.
+
+
+The live W&B configurations were compared field by field after training began.
+Only `arm`, experiment identity, checkpoint version, and conditioning protocol
+differ from the control. The full resolved inputs are saved in
+[resolved_configs.json](resolved_configs.json), SHA-256
+`38e5f032098fd2ec2ad1e82527913fd376039a945f284e927745c6eee66bf3fa`.
+
+
+All four checkpoints after 2,048 completed updates were downloaded and hashed.
+Their recorded source, environment, data, identity artifacts, and optimizer
+settings match. All three treatments contain the saved labeler RNG. The raw
+checkpoint `step` field is zero-based; evidence also records completed updates.
+See [checkpoint_identities.json](checkpoint_identities.json).
+
+
+Logged warmup history confirms that each treatment's last pre-boundary sample
+(update 4,075) has zero conditioned positions, and the first window spanning
+the boundary (update 4,100) has nonzero conditioning. Subsequent full windows
+show about 80.0% conditioning for `return60`, 60.9% for `bootstrap30`, and
+79.5% for `match`. These are diagnostic snapshots, not gameplay comparisons.
+See [warmup_evidence.json](warmup_evidence.json).
