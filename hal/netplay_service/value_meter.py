@@ -137,7 +137,7 @@ class MeterDisplay:
                 "Model value",
                 "text_ft2_source_v2",
                 {
-                    "text": "Model value\n+0.0",
+                    "text": "State value\n+0.0",
                     "font": {"face": "DejaVu Sans", "size": 26},
                     "color1": 0xFFFFFFFF,
                     "color2": 0xFFFFFFFF,
@@ -205,7 +205,7 @@ class MeterDisplay:
             {
                 "inputName": "Model value",
                 "inputSettings": {
-                    "text": f"Model value\n{value:+.1f}",
+                    "text": f"State value\n{value:+.1f}",
                 },
             },
         )

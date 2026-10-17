@@ -117,7 +117,7 @@ class PanelRenderer:
             self._value_layer = Image.new("RGBA", PANEL_SIZE)
         if value_key is not None and self._value_layer.getbbox() is None:
             draw = ImageDraw.Draw(self._value_layer)
-            draw.text((32, 228), "MODEL VALUE", font=self._mono, fill="#5C646C")
+            draw.text((32, 228), "STATE VALUE", font=self._mono, fill="#5C646C")
             draw.text((424, 221), value_key[0], anchor="ra", font=self._sans[20], fill="#0E6E63")
             draw.rounded_rectangle((32, 258, 424, 264), radius=3, fill="#DDE7E3")
             endpoint = value_key[1]

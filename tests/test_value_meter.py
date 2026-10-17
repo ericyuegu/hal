@@ -100,7 +100,7 @@ def test_display_uses_only_meter_sources_and_clamps_only_the_bar() -> None:
         meter.update(value)
         calls = [call.args for call in connection.request.call_args_list]
         settings = {data["inputName"]: data["inputSettings"] for method, data in calls if method == "SetInputSettings"}
-        assert settings["Model value"]["text"] == f"Model value\n{value:+.1f}"
+        assert settings["Model value"]["text"] == f"State value\n{value:+.1f}"
         assert settings["Value fill"]["height"] == (1 if value == 0 else 180)
         assert all(method not in ("StartStream", "StopStream", "SetCurrentProgramScene") for method, _data in calls)
         assert all("Dolphin" not in str(data) for _method, data in calls)

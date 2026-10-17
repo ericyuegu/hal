@@ -37,10 +37,14 @@ _INK_SOFT = _rgb("#5C646C")
 _RULE = _rgb("#E4E7EA")
 _ASIDE = _rgb("#FAFBFB")
 _ACCENT = _rgb("#0E6E63")
-# Exact 4:3 so the Dolphin capture fills the well with no letterbox.
-_VIDEO_X, _VIDEO_Y, _VIDEO_W, _VIDEO_H = 36, 36, 1344, 1008
+# Match the visible header top (43) and footer bottom (1068) with the pinned
+# fonts and OBS release. Scale Melee's native image without stretching it.
+_VIDEO_X, _VIDEO_Y, _VIDEO_W, _VIDEO_H = 36, 43, 1344, 1025
 _SIDE_X = _VIDEO_X + _VIDEO_W + 48
 _SIDE_W = 1920 - 36 - _SIDE_X
+# Slippi 3.6.4 rounds its 73:60 viewport to 1312x1080 in our 1920x1080
+# stream window. Remove only its pillarboxes before proportional scaling.
+_DOLPHIN_PILLARBOX = 304
 
 
 class ObsNotReady(RuntimeError):
@@ -420,6 +424,8 @@ class ObsStudio(ObsConnection):
                 "sceneName": "HAL",
                 "sceneItemId": self._capture_id,
                 "sceneItemTransform": {
+                    "cropLeft": 0 if ranked else _DOLPHIN_PILLARBOX,
+                    "cropRight": 0 if ranked else _DOLPHIN_PILLARBOX,
                     "boundsType": "OBS_BOUNDS_SCALE_INNER",
                     "boundsWidth": 1920 if ranked else _VIDEO_W,
                     "boundsHeight": 1080 if ranked else _VIDEO_H,

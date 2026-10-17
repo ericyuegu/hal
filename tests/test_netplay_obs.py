@@ -125,12 +125,37 @@ def test_obs_scene_keeps_a_styled_background_below_live_capture(tmp_path: Path) 
     assert inputs["Overlay"]["sceneItemEnabled"]
     transforms = [call.args[1] for call in request.call_args_list if call.args[0] == "SetSceneItemTransform"]
     assert transforms[-1]["sceneItemTransform"] == {
+        "cropLeft": 304,
+        "cropRight": 304,
         "boundsType": "OBS_BOUNDS_SCALE_INNER",
         "boundsWidth": 1344,
-        "boundsHeight": 1008,
+        "boundsHeight": 1025,
         "positionX": 36,
-        "positionY": 36,
+        "positionY": 43,
     }
+
+
+@pytest.mark.parametrize("ranked", [False, True])
+def test_capture_removes_only_the_netplay_pillarboxes(tmp_path: Path, ranked: bool) -> None:
+    studio = obs.ObsStudio(":90", tmp_path, {})
+    request = Mock(return_value={"sceneItemId": 7})
+    studio.request = request
+    studio._configure_scene(ranked=ranked)
+    transform = [
+        call.args[1]["sceneItemTransform"]
+        for call in request.call_args_list
+        if call.args[0] == "SetSceneItemTransform"
+    ][-1]
+    # Slippi aligns the native viewport width down to a multiple of four.
+    native_width = int(1080 * 73 / 60) // 4 * 4
+    visible_width = 1920 - transform["cropLeft"] - transform["cropRight"]
+    assert visible_width == (1920 if ranked else native_width)
+    assert transform.get("cropTop", 0) == transform.get("cropBottom", 0) == 0
+    assert transform["boundsType"] == "OBS_BOUNDS_SCALE_INNER"
+    if not ranked:
+        assert transform["positionY"] == 43
+        assert transform["positionY"] + transform["boundsHeight"] == 1068
+        assert visible_width * transform["boundsHeight"] / 1080 <= transform["boundsWidth"]
 
 
 def test_screenshot_does_not_capture_an_unset_source(tmp_path: Path) -> None:

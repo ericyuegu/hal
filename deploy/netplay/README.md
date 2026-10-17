@@ -45,9 +45,6 @@ Pillow composes packaged controller layers and website sprites. Two PNG buffers
 in the overlay container's `/dev/shm` feed one OBS image source at up to 60 Hz.
 The private stream-state schema is version 2; public queue APIs are unchanged.
 A schema change requires a matched runner and overlay release.
-The idle panel shows how many human games are playing right now. It counts fresh
-local slot health and excludes waiting connections and self-play. No extra queue
-requests are needed for this count.
 
 Production enables `--idle-self-play` and requires at least two slots. One local
 Dolphin uses two dedicated connections to the existing qualified inference engine.
@@ -189,7 +186,7 @@ OBS captures only Dolphin, including menus, at 1080p60 with NVENC. The queue
 selects one stream slot; other emulators are not captured. Direct play offers Easy (desired return 20) and Medium (desired return 120)
 on the 059 policy. The stream shows its player, character, game number, and connection
 status beside the live game. The live panel also shows actual policy difficulty,
-physical controller inputs, and the smoothed model value. OBS continues through
+physical controller inputs, and the smoothed state value. OBS continues through
 self-play and human handoffs. A light waiting screen stays visible when Dolphin
 has no render window. Ranked displays the smoothed value head on the right.
 Neither overlay may contain a connect code. Stream failure must not stop gameplay.
