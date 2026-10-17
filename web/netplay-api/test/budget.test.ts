@@ -9,16 +9,16 @@ function spent(sql: SqlStorage, day: number, credits: number): void {
 }
 
 describe("temporary acceptance write allowance", () => {
-  it("retains accounting and enforces the extra 2,000-credit cap", async () => {
+  it("retains accounting and enforces the extra 15,000-credit cap", async () => {
     await withStore((_store, clock, sql) => {
       clock.now = DAY * 86_400;
       spent(sql, DAY, 35_224);
       const budget = new WriteBudget(sql, () => clock.now, "2026-10-17");
-      expect(budget.summary()).toEqual({ day: DAY, spent: 35_224, limit: 37_000 });
+      expect(budget.summary()).toEqual({ day: DAY, spent: 35_224, limit: 50_000 });
       expect(() => budget.requireCapacity()).not.toThrow();
       expect(budget.charge(36)).toBe(false);
       expect(budget.summary().spent).toBe(35_260);
-      expect(budget.charge(1_540)).toBe(true);
+      expect(budget.charge(14_540)).toBe(true);
       expect(() => budget.requireCapacity()).toThrow("control budget");
     });
   });
@@ -27,7 +27,7 @@ describe("temporary acceptance write allowance", () => {
     await withStore((_store, clock, sql) => {
       clock.now = (DAY + 1) * 86_400 - 1;
       const budget = new WriteBudget(sql, () => clock.now, "2026-10-17");
-      expect(budget.summary().limit).toBe(37_000);
+      expect(budget.summary().limit).toBe(50_000);
       clock.now += 1;
       expect(budget.summary()).toEqual({ day: DAY + 1, spent: 0, limit: COMMAND_WRITE_BUDGET });
       spent(sql, DAY + 1, 35_000);
