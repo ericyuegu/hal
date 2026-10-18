@@ -80,12 +80,13 @@ def test_pilot_uses_separate_evaluation_and_deterministic_training(tmp_path: Pat
     assert evaluation[evaluation.index("--anchors") + 1] == str(tmp_path / "payloads/final.pt")
 
 
-def test_pilot_logs_existing_interval_names(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_pilot_logs_existing_interval_names(tmp_path: Path, version: int) -> None:
     interval = {"mean": 0.6, "low": 0.5, "high": 0.7}
     (tmp_path / "results.json").write_text(
         json.dumps(
             {
-                "format": "hal.o65.evaluation-results.v1",
+                "format": f"hal.o65.evaluation-results.v{version}",
                 "split": "selection",
                 "groups": [
                     {

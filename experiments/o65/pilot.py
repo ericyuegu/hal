@@ -203,7 +203,9 @@ def evaluation_command(
 
 def log_evaluation(path: Path, update: int, environment: dict[str, str], *, online: bool) -> None:
     result = json.loads((path / "results.json").read_text())
-    if result["format"] != "hal.o65.evaluation-results.v1" or result["split"] not in ("selection", "held_out"):
+    if result["format"] not in ("hal.o65.evaluation-results.v1", "hal.o65.evaluation-results.v2") or result[
+        "split"
+    ] not in ("selection", "held_out"):
         raise ValueError("unexpected pilot evaluation result")
     metrics: dict[str, float] = {"global_step": float(update)}
     for index, group in enumerate(result["groups"]):

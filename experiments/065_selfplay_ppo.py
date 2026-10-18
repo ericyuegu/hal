@@ -2980,7 +2980,10 @@ def run_training(
 
 def periodic_evaluation_metrics(path: Path) -> dict[str, float]:
     result = json.loads(path.read_text())
-    if result.get("format") != "hal.o65.evaluation-results.v1" or result.get("split") != "selection":
+    if (
+        result.get("format") not in ("hal.o65.evaluation-results.v1", "hal.o65.evaluation-results.v2")
+        or result.get("split") != "selection"
+    ):
         raise ValueError("unsupported periodic evaluation result identity")
     metrics = {"evaluation/update": float(result["checkpoint_provenance"]["update"])}
     for index, group in enumerate(result["groups"]):

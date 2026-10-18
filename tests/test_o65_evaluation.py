@@ -22,6 +22,7 @@ from hal.eval.conditioned_matchups import EvaluationMatch
 from hal.eval.conditioned_matchups import EvaluationSet
 from hal.eval.conditioned_matchups import EvaluationStart
 from hal.eval.conditioned_matchups import compare_simulators
+from hal.eval.conditioned_matchups import evaluate
 from hal.eval.conditioned_matchups import native_observation_rows
 from hal.eval.conditioned_matchups import pilot_protocol
 from hal.eval.conditioned_matchups import score_match
@@ -258,6 +259,35 @@ def test_batched_policy_keeps_distinct_model_weights_and_cadences() -> None:
         actual = batched.plan_rows(rows)
         for slot, player in serial.items():
             np.testing.assert_array_equal(actual[slot][0], player.step(rows[slot][0]))
+
+
+def test_batched_evaluation_rejects_sliding_history_and_invalid_workers(tmp_path: Path) -> None:
+    missing = tmp_path / "absent.pt"
+    conditions = (PlayerCondition(), PlayerCondition())
+    with pytest.raises(ValueError, match="requires block history"):
+        evaluate(
+            missing,
+            (missing,),
+            tmp_path / "sliding",
+            protocol=pilot_protocol(),
+            split="selection",
+            conditions=conditions,
+            simulators=("dolphin",),
+            history_mode="sliding",
+        )
+    with pytest.raises(ValueError, match="worker count"):
+        evaluate(
+            missing,
+            (missing,),
+            tmp_path / "workers",
+            protocol=pilot_protocol(),
+            split="selection",
+            conditions=conditions,
+            simulators=("dolphin",),
+            dolphin_workers=0,
+        )
+    assert not (tmp_path / "sliding").exists()
+    assert not (tmp_path / "workers").exists()
 
 
 def test_selection_and_held_out_reject_seed_and_start_overlap() -> None:

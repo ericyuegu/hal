@@ -1061,12 +1061,13 @@ def test_proxy_muon_repeated_fit_on_long_history(deterministic_execution: None) 
         torch.testing.assert_close(policy.model.state_dict()[name].cpu(), value, rtol=0, atol=0, msg=name)
 
 
-def test_periodic_metrics_preserve_unscored_budget_matches(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_periodic_metrics_preserve_unscored_budget_matches(tmp_path: Path, version: int) -> None:
     result = tmp_path / "results.json"
     result.write_text(
         json.dumps(
             {
-                "format": "hal.o65.evaluation-results.v1",
+                "format": f"hal.o65.evaluation-results.v{version}",
                 "split": "selection",
                 "checkpoint_provenance": {"update": 2},
                 "groups": [
