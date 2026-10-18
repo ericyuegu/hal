@@ -43,6 +43,10 @@ def test_existing_job_bounds_training_and_upload_without_vm_mutations() -> None:
     assert "--checkpoint-retention compact" in script
     assert "42949672960" in script
     assert "flock -n 9" in script
+    # The driver hashes its absolute output path into the W&B run id.
+    assert 'result_root="/hal-output/$HAL_RUN_NAME"' in script
+    assert '"$output:/hal-output/$HAL_RUN_NAME"' in script
+    assert "-e HAL_GIT_SHA -e HAL_RUN_NAME" in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
     runtime = script.split("<<'HAL_RUNTIME'\n", 1)[1].split("\nHAL_RUNTIME", 1)[0]
     subprocess.run(["bash", "-n"], input=runtime, text=True, check=True)
@@ -81,6 +85,7 @@ def test_stop_requires_original_name_and_needs_no_source_checkout(capsys: pytest
         ("secret", 7, 0),
         ("inspection", 6, 0),
         ("image", 2, 125),
+        ("prepare", 9, 9),
     ],
 )
 def test_systemd_post_stop_uploads_after_exit_failure_or_kill(
@@ -96,6 +101,9 @@ def test_systemd_post_stop_uploads_after_exit_failure_or_kill(
             'printf "test-credential"\n'
         ),
         "nvidia-smi": "true\n",
+        "install": (
+            'if [[ "$FAIL_STAGE" == prepare && "$*" == *control/hal* ]]; then exit 9; fi\nexec /usr/bin/install "$@"\n'
+        ),
         "df": 'printf "Avail\\n%s\\n" "${DISK_BYTES:-50000000000}"\n',
         "systemctl": 'if [[ "$FAIL_STAGE" == netplay ]]; then echo active; else echo inactive; fi\n',
         "docker": (
@@ -177,10 +185,11 @@ def test_systemd_post_stop_uploads_after_exit_failure_or_kill(
         console.seek(0)
         assert "test-credential" not in console.read()
     lines = events.read_text().splitlines()
-    assert lines.count("upload") == 1
+    assert lines.count("upload") == (0 if stage == "prepare" else 1)
     if stage in ("ok", "training", "cap", "stop", "upload", "upload-timeout"):
         assert lines.index("docker rm -f hal-o65-test-training") < lines.index("upload")
-    assert "docker rm -f hal-o65-test-upload" in lines
+    if stage != "prepare":
+        assert "docker rm -f hal-o65-test-upload" in lines
     assert not any("hal-netplay-" in line and "rm -f" in line for line in lines)
     assert not (job / "scratch").exists()
     assert not (job / "control/job.env").exists()

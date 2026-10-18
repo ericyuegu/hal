@@ -192,6 +192,12 @@ def test_compact_checkpoints_validates_before_removing_files(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="latest checkpoint is missing"):
         _MODULE.compact_checkpoints(directory, 96)
     assert old.exists()
+    renamed = latest.with_name("update-00000065.json")
+    latest.rename(renamed)
+    with pytest.raises(ValueError, match="filename differs"):
+        _MODULE.compact_checkpoints(directory, 64)
+    assert old.exists()
+    renamed.rename(latest)
     history = tmp_path / "retired-checkpoints"
     history.mkdir()
     (history / old.name).write_text("conflict")

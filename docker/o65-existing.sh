@@ -72,28 +72,30 @@ cd /opt/hal
 git checkout --quiet --detach "$HAL_GIT_SHA"
 [ "$(git rev-parse HEAD)" = "$HAL_GIT_SHA" ]
 uv sync --locked
-Xvfb :99 -screen 0 1280x720x24 >/hal-output/xvfb.log 2>&1 &
+result_root="/hal-output/$HAL_RUN_NAME"
+Xvfb :99 -screen 0 1280x720x24 >"$result_root/xvfb.log" 2>&1 &
 export DISPLAY=:99
 uv run python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable inside HAL container'"
-bash docker/o65-pilot.sh --output /hal-output/pilot --checkpoint-retention compact
+bash docker/o65-pilot.sh --output "$result_root/pilot" --checkpoint-retention compact
 HAL_RUNTIME
   docker run --rm --pull=never --name "$training" --entrypoint bash --gpus all --ipc=host \
     --log-driver=local --log-opt max-size=10m --log-opt max-file=2 \
-    --env-file "$control/job.env" -e HAL_GIT_SHA \
-    -v "$output:/hal-output" -v "$scratch:/hal-scratch" -v "$control:/hal-control:ro" \
+    --env-file "$control/job.env" -e HAL_GIT_SHA -e HAL_RUN_NAME \
+    -v "$output:/hal-output/$HAL_RUN_NAME" -v "$scratch:/hal-scratch" -v "$control:/hal-control:ro" \
     "$HAL_IMAGE" /hal-control/run.sh
   ;;
 finish)
-  prepare
+  set +e
+  install -d -m 0700 "$output"
   printf '%s\n' "${SERVICE_RESULT:-unknown}" > "$output/service-result"
   printf '%s %s\n' "${EXIT_CODE:-unknown}" "${EXIT_STATUS:-unknown}" > "$output/job-exit-code"
-  set +e
   # systemd reserves 900 seconds after its 85,500-second runtime limit.
   timeout --kill-after=5s 810s /bin/bash "$0" upload
   upload_code=$?
   printf '%s\n' "$upload_code" > "$output/upload-exit-code"
   timeout --kill-after=5s 60s /bin/bash "$0" clean
   clean_code=$?
+  printf '%s\n' "$upload_code" > "$output/upload-exit-code"
   if [ "$upload_code" != 0 ]; then
     log "RESULT UPLOAD FAILED (${upload_code}); results remain in ${output}"
     exit "$upload_code"
@@ -123,8 +125,8 @@ clean)
       remove_container "$container" || code=1
     fi
   done
-  rm -rf -- "$scratch" "$output/pilot/delivery" "$output/pilot/tmp" "$output/.upload" "$control/docker"
-  rm -f -- "$control/job.env" "$control/job.env.partial"
+  rm -rf -- "$scratch" "$output/pilot/delivery" "$output/pilot/tmp" "$output/.upload" "$control/docker" || code=1
+  rm -f -- "$control/job.env" "$control/job.env.partial" || code=1
   exit "$code"
   ;;
 *) exit 2 ;;
