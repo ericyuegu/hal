@@ -1,212 +1,386 @@
 # O65: self-play PPO in melee-sim-light
 
-Status: plan. Nothing here is implemented or measured. Numbers marked *est.*
-come from FLOP counts and assumed utilization; the pilot replaces them with
-measurements. The worked example uses one B200 with $D = 12$ and $R = 4$.
+Status: plan. Nothing here is implemented or measured yet. Numbers marked
+*est.* come from FLOP counts and assumed utilization, and the pilot replaces
+them with measurements. The worked example uses a single B200 with $D = 12$ and
+$R = 4$. A version of this plan with figures lives at
+<https://claude.ai/artifact/HW926PwvrWtdj9kmKxPEac>.
 
 O65 fine-tunes the O64 production percentile checkpoint with KL-regularized
 self-play PPO. Rollouts run in melee-sim-light (MSL) through HAL's native
-adapter, and finalists are confirmed in Dolphin.
+adapter. Dolphin evaluations run alongside training and confirm the finalists.
 
 ## Decisions
 
 | Topic | Decision |
 | --- | --- |
 | Starting policy | The O64 production checkpoint. A frozen copy serves as $\pi_{\text{ref}}$. |
-| Objective | Maximize $\mathbb{E}[\text{return}] - \lambda\,\mathrm{KL}(\pi \,\Vert\, \pi_{\text{ref}})$. The KL enters the reward, computed exactly from each factor's full logits along the sampled path. |
-| $\lambda$ | Sampled per player per episode, log-uniform over $[\lambda_{\min}, \lambda_{\max}]$ with $\lambda_{\min} = 0.01$. Critic warmup sets $\lambda_{\max}$ from the measured advantage scale, provisionally 10 to 100. $\log\lambda$ enters a zero-initialized column of the conditioner. |
+| Objective | Maximize $\mathbb{E}[\text{return}] - \lambda\,\mathrm{KL}(\pi \,\Vert\, \pi_{\text{ref}})$. The per-factor KL enters the reward, and a differentiable KL loss supplies its direct gradient. |
+| $\lambda$ | Sampled per player per episode, log-uniform over $[\lambda_{\min}, \lambda_{\max}]$ with $\lambda_{\min} = 0.01$. Critic warmup sets $\lambda_{\max}$, provisionally 10 to 100. |
 | $u^*$ | 0.95 in the student and the reference. The percentile head goes unused. |
-| Policy loss | GSPO with a length-normalized ratio per decision and a truncated importance weight for the rollout-to-$\pi_{\text{old}}$ gap. One epoch ($E = 1$). |
-| Critic | `value_head` plus a zero-initialized residual head on the detached decoder state after the queue. Inputs include $\log\lambda$, plus the opponent's $\log\lambda$ and $D$ as privileged inputs. Several epochs on cached features. |
-| Delay and replanning | $D$ sampled per player per episode from $[10, 21]$. $R$ sampled from $\{4, 5, 6\}$ subject to $D + R \le 24$, with $R = 2$ at $D = 21$. |
+| Policy loss | PPO on the joint ratio of each decision's executed factors, with standard clipping. One epoch ($E = 1$). |
+| Policy conditioning | $\log\lambda$, $D$ and $R$ enter new zero-initialized conditioner columns. |
+| Critic | `value_head` plus a zero-initialized residual head on the detached decoder state after the queue. The residual head also reads $\log\lambda$, $D$, and privileged opponent inputs: $\log\lambda$, $D$ and the committed queue. The critic heads train with their own optimizer. |
+| Delay and replanning | Each group of matches uses a fixed $R$: one group each at $R = 4, 5, 6$, and a fourth at $R = 2$. $D$ is sampled per player per episode, from $[10, 24 - R]$ in the first three groups and from $[19, 21]$ in the $R = 2$ group. |
 | Offsets | RL uses offsets 1 to 24. Offsets 27 and 30 go unused. |
 | Context | Block restart: 128-frame blocks with contexts of 129 to 256 frames. Deployment uses the same scheme. |
-| Rollout per update | 256 frames (2 blocks). GAE bootstraps at the end. |
-| Discount | $\gamma = 0.99855$ per frame. $\lambda_{\text{gae}}$ starts at 0.99 per frame. |
+| Rollout per visit | $R \lfloor 256/R \rfloor$ frames: 256 at $R = 2$ and $R = 4$, 255 at $R = 5$, 252 at $R = 6$. Every visit ends on a decision boundary. |
+| Discount | $\gamma = 0.99855$ per frame. $\lambda_{\text{gae}} = 0.99$ per frame to start. |
+| Episode ends | A match end is terminal. A time-out is a truncation, and the observation carries no timer. |
+| Opponents | About 15% of matches pair the student with a frozen anchor: $\pi_{\text{ref}}$ or a recent snapshot. Only the student side trains. |
 | Identities | (identity, character) pairs drawn with weight $\text{count}^{0.5}$ above a data floor. The masked identity at about 10%. The deployment identity (masked or Master) oversampled to 20 to 25%. |
-| Starting states | Fresh matches, plus a fraction started from sampled human replay states with off-stage, ledge and recovery states oversampled. |
-| Episode ends | A match end is terminal. A time-out is a truncation. No timer feature. |
-| Resets in windows | Varlen flash attention masks the episode boundary, so window shapes stay static. |
-| Evaluation | An in-loop group of matches against $\pi_{\text{ref}}$ with frozen weights. Finalists confirmed in Dolphin. |
+| Starting states | Fresh matches, plus a fraction started from human replay states with off-stage, ledge and recovery states oversampled. |
+| Evaluation | An in-loop matchup matrix against frozen anchors in MSL, periodic Dolphin evaluations throughout training, and held-out seeds and starts for the final report. |
 | Hardware | An 8×B200 node for production. The pilot runs on RTX PRO 6000 Blackwell. |
 
 ## Objective and update rules
 
 $$
 \max_\theta\; \mathbb{E}_{\pi_\theta}\Big[\sum_t \gamma^t r_t\Big] - \lambda\,\mathrm{KL}\big(\pi_\theta \,\Vert\, \pi_{\text{ref}}\big),
-\qquad \pi_\lambda \propto \pi_{\text{ref}} \exp(Q/\lambda),
 \qquad \log\lambda \sim \mathcal{U}\big[\log\lambda_{\min},\, \log\lambda_{\max}\big]
 $$
 
-A smaller $\lambda$ gives a higher expected return, and $\lambda \to \infty$
-recovers $\pi_{\text{ref}}$. Every $\lambda$ starts at $\pi_{\text{ref}}$
-because the new conditioner column is zero.
+The new conditioner columns start at zero, so every $\lambda$ starts at
+$\pi_{\text{ref}}$. For a fixed opponent and exact optimization, the optimum is
+$\pi_\lambda \propto \pi_{\text{ref}} \exp(Q_\lambda/\lambda)$, with
+$Q_\lambda$ the regularized action value, and a smaller $\lambda$ gives a higher
+return. Our policy shares weights across $\lambda$ and plays opponents that keep
+changing, so we measure the return against KL for each $\lambda$ bin rather
+than assume the ordering holds.
 
-$\lambda$ carries units of reward per nat. At the optimum, each action gets
-reweighted by $\exp(A/\lambda)$. At $\lambda = 1$, an action worth 3 damage
-more than its alternatives gains a factor of about 20 over $\pi_{\text{ref}}$.
-So the range has to extend to values comparable to the per-decision advantage
-scale before any part of it stays close to $\pi_{\text{ref}}$. We want that
-close end for two reasons:
+### Scale of $\lambda$
+
+$\lambda$ carries units of reward per nat. Near the optimum, the policy
+reweights each action by about $\exp(A/\lambda)$. At $\lambda = 1$, an action
+worth 3 damage more than its alternatives gains a factor of about 20 over
+$\pi_{\text{ref}}$. For the range to include policies close to
+$\pi_{\text{ref}}$, $\lambda_{\max}$ has to be comparable to the per-decision
+advantage scale. We keep that close end for two reasons:
 
 1. It steadies early training.
-2. It gives a conservative deployment option if small $\lambda$ exploits
-   $\pi_{\text{ref}}$ rather than improving play.
+2. It leaves a conservative deployment option, in case small $\lambda$ learns
+   to exploit $\pi_{\text{ref}}$ more than it improves play.
 
-Critic warmup measures the advantage scale, and we set $\lambda_{\max}$ from it.
+The KL cost grows quickly at large $\lambda$. At $\lambda = 10$, a KL of 0.1 nat
+per frame costs 60 reward units per second, half a stock per second under this
+reward.
+
+We calibrate in two steps:
+
+1. Critic warmup measures the spread of per-decision advantages under
+   $\pi_{\text{ref}}$, by $D$ and $R$. We set $\lambda_{\max}$ to a few times
+   that spread.
+2. Early PPO measures return and KL by $\lambda$ bin. Advantage spread includes
+   opponent randomness and critic error, so this second measurement checks the
+   first.
 
 ### Decisions and factors
 
-A player decides every $R$ frames. At decision $j$, made at frame $t_j$:
+The decoder samples four categorical factors per frame, in the order C-stick,
+main stick, triggers, buttons. Both triggers share a joint categorical. A player
+decides every $R$ frames. At decision $j$, made at frame $t_j$:
 
-- the decoder replays the $D$ committed actions at offsets 1 to $D$;
-- it samples offsets $D+1$ to $D+R$, five controller factors per offset, in
-  decode order.
+1. the decoder replays the $D$ committed actions at offsets 1 to $D$;
+2. it samples offsets $D+1$ to $D+R$, which are $4R$ factors.
 
-$\mathcal{E}_j$ denotes the $5R$ executed factors of decision $j$.
+$\mathcal{E}_j$ denotes the factors of decision $j$ executed before the episode
+ends: all $4R$ of them, except in the last decisions of a match.
+
+### Transitions and credit
+
+We treat the committed queue as part of the state. Decision $j$ receives the
+rewards of the $\Delta_j$ frames after it, with $\Delta_j = R$ except at a match
+end. Those rewards mostly follow from earlier decisions. Decision $j$ changes the
+queue, and later returns credit it for that. We leave rewards unshifted by $D$.
+
+Every rollout visit lasts a multiple of $R$ frames, so no decision straddles the
+end of a visit. Within a visit:
+
+- a match end cuts the last interval short, and we discount it by
+  $\gamma^{\Delta_j}$;
+- decisions made in the last $D$ frames of a match never execute, so we mask
+  them out of the policy and KL losses; GAE still uses their values;
+- a reset discards the queue, so the new episode begins with neutral actions.
+
+Each decision record holds the observation frame, the decision frame, the
+sampled indices, the committed prefix, $\log\mu$ for the executed factors, the
+actual duration $\Delta_j$, the policy version, and the episode and segment ids.
 
 ### Reward and KL
 
 $$
 \begin{aligned}
 \mathrm{KL}_j &= \sum_{i \in \mathcal{E}_j} \mathrm{KL}\big(\pi_\theta(\cdot \mid c_i)\,\Vert\,\pi_{\text{ref}}(\cdot \mid c_i)\big) \\
-r_j &= \sum_{f=1}^{R} \gamma^{f-1}\, r_{t_j+f} \;-\; \lambda\, \mathrm{KL}_j
+r_j &= \sum_{f=1}^{\Delta_j} \gamma^{f-1}\, r_{t_j+f} \;-\; \lambda\, \mathrm{KL}_j
 \end{aligned}
 $$
 
-$r_f$ is the per-frame reward from `hal/training/returns.py`: damage dealt
-minus damage taken, 120 per stock difference, and 50 more on the deciding
-stock. The context $c_i$ holds $h_j$, the forced prefix, the earlier sampled
-factors and $u^*$. Both models apply the same button mask. $\mathrm{KL}_j$ and
-the frame rewards both accrue per frame, so $\lambda$ keeps its meaning across
-$R$.
+$r_f$ is the per-frame reward from `hal/training/returns.py`: damage dealt minus
+damage taken, 120 per stock difference, and 50 more on the deciding stock. The
+context $c_i$ holds the history $h_j$, the forced prefix, the earlier sampled
+factors and $u^*$. Both models apply the same button mask. $\mathrm{KL}_j$ sums
+exact per-factor KLs along the sampled path, which makes it an unbiased estimate
+of the KL of the whole chunk. The no-grad pass computes it under
+$\pi_{\text{old}}$. $\mathrm{KL}_j$ and the frame rewards both accrue per frame,
+so $\lambda$ keeps its meaning across $R$.
+
+### KL gradient
+
+With $\mathrm{KL}_j$ treated as a constant reward, the policy gradient credits
+earlier actions for the states they lead to. That covers only part of the
+gradient of the objective. Each conditional KL also depends on $\theta$ directly,
+and with a constant reward that term averages to zero. We add it back as a
+differentiable loss on the trained decisions:
+
+$$
+L_{\text{KL}} = \frac{1}{J} \sum_{j} \frac{\lambda_j}{\sigma_A} \sum_{i \in \mathcal{E}_j} \mathrm{KL}\big(\pi_\theta(\cdot \mid c_i)\,\Vert\,\pi_{\text{ref}}(\cdot \mid c_i)\big)
+$$
+
+- $\lambda_j$ belongs to the deciding player.
+- $\sigma_A$ is the advantage standard deviation used to normalize $\hat A$.
+  Dividing by it keeps the ratio between the return term and the KL term the
+  same as in the objective.
+- The no-grad pass stores $\pi_{\text{ref}}$'s full distributions for the
+  trained decisions: 355 values per frame across the four factors, about 45 KB
+  per window at $R = 4$.
+- The reward term plus $L_{\text{KL}}$ gives the gradient of the regularized
+  objective.
+
+As a check, the pilot also runs the simpler estimator: the sampled log-ratio
+$\sum_{i \in \mathcal{E}_j} [\log\mu(a_i \mid c_i) - \log\pi_{\text{ref}}(a_i \mid c_i)]$
+as the reward penalty, without $L_{\text{KL}}$. Its gradient has the same
+expectation with higher variance. A unit test on a small categorical chain
+compares both estimators with the gradient of the enumerated objective.
 
 ### Advantages
 
 $$
 \begin{aligned}
-\gamma_R &= \gamma^R, \qquad \lambda_R = \lambda_{\text{gae}}^R \\
-\delta_j &= r_j + \gamma_R\,(1 - d_j)\,V_{j+1} - V_j \\
-\hat A_j &= \delta_j + \gamma_R\,\lambda_R\,(1 - d_j)\,\hat A_{j+1} \\
+\delta_j &= r_j + \gamma^{\Delta_j}\, b_j\, V'_{j+1} - V_j \\
+\hat A_j &= \delta_j + (\gamma\lambda_{\text{gae}})^{\Delta_j}\, c_j\, \hat A_{j+1} \\
 V^{\text{target}}_j &= \hat A_j + V_j
 \end{aligned}
 $$
 
-We lift the per-frame $\gamma$ and $\lambda_{\text{gae}}$ to the decision grid.
-$d_j$ marks a match end; a time-out bootstraps. GAE runs over each stream's 256
-rollout frames and bootstraps with $V$ at the end.
+We keep two masks per decision:
 
-$\lambda_{\text{gae}}$ starts at 0.99 per frame, which credits about 100
-frames. At 0.95 per frame, $\lambda_R = 0.81$ at $R = 4$, credit reaches back
-only about 20 frames, and the advantage leans almost entirely on a new,
-partly privileged critic. We lower it only if advantage variance hurts.
+- $b_j$ allows a bootstrap. It is 0 after a match end and 1 everywhere else.
+- $c_j$ continues the trace. It is 0 at any episode boundary and at the end of
+  the visit.
 
-### Policy loss (GSPO)
+$V'_{j+1}$ is the value of the state after decision $j$'s interval:
+
+- the next decision's value, inside an episode;
+- the value of the last state before a time-out reset, computed during rollout
+  before the reset;
+- the value at the visit's final decision boundary, computed during rollout.
+
+The next visit's first decision re-encodes its context after the update, so the
+end-of-visit value uses a 256-frame context, and the next decision will receive
+129 frames. The pilot measures the gap on a subset by recomputing that value
+with the re-encoded context.
+
+$\lambda_{\text{gae}}$ starts at 0.99 per frame. Lifted to the decision grid,
+0.95 per frame would give 0.81 at $R = 4$ and credit only about 20 frames, which
+leaves the advantage almost entirely to a new critic.
+
+### Policy loss
 
 $$
 \begin{aligned}
-s_j(\theta) &= \exp\Big(\frac{1}{n_j} \sum_{i \in \mathcal{E}_j} \big[\log \pi_\theta(a_i \mid c_i) - \log \pi_{\text{old}}(a_i \mid c_i)\big]\Big), \qquad n_j = 5R \\
+\rho_j(\theta) &= \exp \sum_{i \in \mathcal{E}_j} \big[\log \pi_\theta(a_i \mid c_i) - \log \pi_{\text{old}}(a_i \mid c_i)\big] \\
 w_j &= \min\Big(\exp \sum_{i \in \mathcal{E}_j} \big[\log \pi_{\text{old}}(a_i \mid c_i) - \log \mu(a_i \mid c_i)\big],\; C\Big) \\
-L_\pi &= -\frac{1}{J} \sum_{j} \mathrm{sg}(w_j)\, \min\big(s_j\,\hat A_j,\; \operatorname{clip}(s_j,\, 1-\epsilon,\, 1+\epsilon)\,\hat A_j\big)
+L_\pi &= -\frac{1}{J} \sum_{j} \mathrm{sg}(w_j)\, \min\big(\rho_j\,\hat A_j,\; \operatorname{clip}(\rho_j,\, 1-\epsilon,\, 1+\epsilon)\,\hat A_j\big)
 \end{aligned}
 $$
 
-- $\pi_{\text{old}}$ log-probs come from the student's no-grad pass, which uses
+- $\rho_j$ is the joint ratio of the chunk, 16 to 24 factors.
+- $\epsilon$ starts at 0.2, and the pilot tunes it to a clip fraction of roughly
+  10 to 20%.
+- $\pi_{\text{old}}$ log-probs come from the student's no-grad pass, which runs
   the training step's kernels.
 - $\mu$ is the rollout policy. It has the same weights, but the rollout decodes
-  from the KV cache with other kernels and batch shapes, so its log-probs differ
-  slightly from $\pi_{\text{old}}$. The actions come from $\mu$, so the
-  truncated weight $w_j$ corrects for the gap. $\mathrm{sg}$ stops the
-  gradient. An uncorrected gap of this kind acts as off-policy data and has
-  destabilized RL on language models.
-- We normalize $\hat A$ per minibatch, and per $D$ group if their scales
-  differ.
-- The length-normalized ratio stays close to 1, so $\epsilon$ is much smaller
-  than PPO's 0.2. The pilot tunes it to a clip fraction of roughly 10 to 20%.
-- The policy loss trains 16 decisions per window, sampled at uniform positions.
-  GAE uses every decision.
-- With one epoch, each window enters exactly one gradient step.
+  from the KV cache with other kernels and batch sizes, so its log-probs differ
+  slightly. $w_j$ corrects for the gap at the sampled decision. It leaves later
+  states and GAE targets uncorrected, so we treat a large gap as a parity bug.
+- We normalize $\hat A$ per minibatch, using the global mean and standard
+  deviation across ranks.
+- The policy loss trains 16 decisions per window, sampled uniformly from the
+  unmasked decisions. GAE uses every decision.
+- Each window enters exactly one gradient step.
+- The total loss is $L_\pi + L_{\text{KL}}$, averaged over the global count of
+  trained decisions.
 
 ### Critic loss
 
-Squared error to $V^{\text{target}}$, scaled like O64's value loss. The critic
-trains for $K_v$ epochs on features cached from the no-grad pass, with no trunk
-or decoder recompute.
+The critic regresses on $V^{\text{target}}$ with squared error, scaled like
+O64's value loss. It trains for $K_v$ epochs on features cached in the no-grad
+pass, with no trunk or decoder recompute. Its parameters (`value_head` and
+$\text{head}_{\text{res}}$) live in a separate optimizer. HAL's Muon optimizer
+fills a missing gradient with zeros and keeps stepping momentum, so critic-only
+epochs through the shared optimizer would move the actor.
+
+Cached features go stale once the actor updates. We report the critic's
+explained variance on the next rollout's fresh features, before any fitting on
+them. We also compare its values against Monte Carlo returns from full episodes
+in the evaluation group.
 
 ### Optimizer
 
-- BC's optimizer family, with the learning rate swept on the pilot. RL
-  fine-tuning needs a much smaller rate, and each step carries about 8 times
-  BC's tokens.
-- Weight decay 0. Decay pulls weights toward zero, away from $\pi_{\text{ref}}$,
-  and so works against the KL term.
+- The actor uses BC's optimizer family with fresh state, and the learning rate
+  comes from a sweep on the pilot. RL fine-tuning needs a much smaller rate, and
+  each step carries about 8 times BC's tokens.
 - Muon's orthogonalized updates scale differently from Adam's, so the sweep
   covers that.
+- The actor's parameter set excludes the critic heads and the percentile head.
+  We freeze the percentile head before wrapping the model in DDP.
+- Weight decay 0. Decay pulls weights toward zero, away from $\pi_{\text{ref}}$,
+  and so works against the KL term.
 - Gradient clipping and a short warmup.
+
+## Reward horizon
+
+| Quantity | Value |
+| --- | ---: |
+| Reward discount half-life | 478 frames, 7.96 s |
+| Weight of a reward 30 s later | 0.073 |
+| Weight of a reward 60 s later | 0.0054 |
+| GAE trace half-life, $\gamma\lambda_{\text{gae}}$ | about 60 frames |
+
+The critic carries credit beyond the trace. We expect training to improve
+punishes, damage avoidance, recovery and edgeguards first, since those pay off
+within seconds. Larger $D$ should favor anticipation and safer positioning.
+
+The damage term in `hal/training/returns.py` is part of the task definition. It
+can favor safe damage over a risky kill, or discourage a trade worth taking. A
+comparison against an outcome-focused reward is an optional later arm.
 
 ## Model changes
 
-- **Conditioner.** `Linear(1, 128)` becomes `Linear(2, 128)`. The new column
-  starts at zero and reads $\log\lambda$, rescaled to $[-1, 1]$ over the final
-  sampling range. $u^*$ stays at 0.95 and enters as $(2u - 1) \cdot 120$.
+- **Conditioner.** The `ReturnConditioner` embedding grows from `Linear(1, E)` to
+  `Linear(4, E)`. The new columns read $\log\lambda$, $D$ and $R$, each rescaled
+  to $[-1, 1]$ over its range, and start at zero. The embedding then matches
+  O64's exactly at init, and so does every per-layer projection. $u^*$ enters as
+  before.
 - **Critic.**
-  $V = \text{value\_head}(\text{trunk}) + \text{head}_{\text{res}}(z_{D+1},\ \log\lambda,\ \log\lambda_{\text{opp}},\ D_{\text{opp}})$,
-  with $z_{D+1}$ the decoder state at offset $D+1$, after it has consumed the
-  queue. Both feature inputs are detached. The output layer of
-  $\text{head}_{\text{res}}$ starts at zero, so $V$ starts exactly at
-  `value_head`. The opponent's queue state can join later.
-- **No $D$ input to the policy.** The decoder reads offset embeddings, so it
-  already knows where sampling starts.
-- **Percentile head.** It stays in the checkpoint and receives no loss.
+  $V = \text{value\_head}(\text{trunk}) + \text{head}_{\text{res}}(z_{D+1},\ \log\lambda,\ D,\ \log\lambda_{\text{opp}},\ D_{\text{opp}},\ q_{\text{opp}})$.
+  - $z_{D+1}$ is the decoder state at the input to offset $D+1$. It has consumed
+    the queue and precedes the first sampled factor, so the baseline excludes
+    the ego's sampled action.
+  - $q_{\text{opp}}$ encodes the opponent's committed queue. Each queued frame's
+    action goes through the codec embeddings plus an offset embedding, and a
+    masked mean feeds a small MLP.
+  - Both players in a match share $R$ and the decision clock, so the critic
+    needs no phase input.
+  - Both feature inputs are detached. The output layer starts at zero, so $V$
+    starts at `value_head`.
+- **Percentile head.** It stays in the checkpoint, frozen.
+- **Episode boundaries.** A per-frame segment id drives trunk attention, decoder
+  history attention and feature construction, as the next section describes.
 - **Inference.** A per-stream trunk KV cache with per-stream lengths, an
-  incremental cache of the decoder's history projection, and decode variants
-  compiled per $(D, R)$.
+  incremental cache of the decoder's history projection, and one compiled decode
+  variant per group, padded across $D$.
 
-## Context, caches and windows
+## Context, caches and episode boundaries
 
-BC supervised only contexts of 129 to 256 frames (`direct_loss_start = 128`).
-Each block lasts 128 frames, and a decision inside a block reads from 128 frames
-before the block's start up to itself.
+BC trained with `ctx_pad = 0` and supervised window positions from 128 onward
+(`direct_loss_start = 128`). Every supervised decision therefore had at least
+129 frames of history. Replays start at frame −123 (`GAME_START_FRAME`), so the
+earliest supervised decision was at frame 5.
 
-1. At each block start, we encode the previous 128 frames from scratch under the
-   current weights. Positions restart at 0.
-2. During the block, we append each frame to the cache. The window grows from
-   129 to 256 frames and drops nothing, so a single causal pass over the window
-   reproduces every cached key and value.
+### Block restart
+
+Each stream's cache runs in 128-frame blocks:
+
+1. At a block start, we re-encode the stream's previous 128 frames under the
+   current weights, with positions restarting at 0.
+2. During the block, we append each frame. The window grows from 129 to 256
+   frames and drops nothing, so a single causal pass over the window reproduces
+   every cached key and value.
 3. At the block end, we discard the cache.
 
-128 is the longest block this checkpoint supports: a longer block would put
-decisions at contexts below 129 frames, which BC never trained. The update
-boundary falls on a block boundary, and the weight change invalidates the cache
-there anyway.
+Two exceptions keep every decision's context between 129 and 256 frames:
 
-A reset inside a window starts a new varlen segment. The training pass masks
-the same boundary.
+- **A reset** restarts the stream's cache at the new episode's first frame.
+- **A young episode** keeps its cache across a block boundary. If the episode is
+  less than 128 frames old at the boundary, its context still fits in 256 frames
+  by the end of the next block.
+
+The training window for a stream and block covers that stream's cache span
+during the block. It may also hold the tail of the previous episode as a
+separate segment.
+
+128 is the longest block this checkpoint supports: a longer block would put
+decisions at contexts below 129 frames. An update always falls on a block
+boundary, and the weight change invalidates the cache there anyway.
 
 For netplay, a second cache starts at each block's start, receives every frame
-and swaps in at the boundary. This removes the 128-token prefill spike and keeps
-the cost at 2 trunk tokens per frame.
+and swaps in at the boundary. That removes the 128-token prefill spike at a cost
+of 2 trunk tokens per frame.
+
+### Match start
+
+The context includes frames from −123 onward, as in BC. Each player's queue holds
+neutral actions until the first decision, at the first tick of the group's clock
+at or after frame 5. That decision has a context of at least 129 frames, and its
+actions execute from frame $t_j + D + 1$. Deployment follows the same rule.
+
+### Episode boundaries
+
+A per-frame segment id marks episode boundaries inside a window. We apply it at
+every place the previous match could leak in:
+
+- **Trunk attention:** varlen segments through `cu_seqlens`. The current varlen
+  path in `hal/models/attention.py` handles an ignored prefix plus a valid
+  suffix, so it needs general segments.
+- **Decoder history attention:** `hal/models/action_sequence.py` masks history by
+  a per-row `ctx_pad`. We replace that with a per-query segment start.
+- **Feature construction:** previous-action features at an episode's first frame
+  take BC's first-frame values.
+- **Value bootstraps:** the $b_j$ and $c_j$ masks above.
+
+An acceptance test overwrites every byte of the previous episode in a window and
+checks that all outputs after the reset stay bitwise identical.
 
 ## Rollout system
 
-Each GPU runs one process. `hal/sim/native_adapter.c` already projects
-`MslObservation` into HAL's 71 schema columns, quantizes actions to wire inputs
-as the pinned libmelee does, and computes the reward in canonical float32. It
-writes one 440-byte `HalFrame` per match-frame. O65 builds on that adapter.
+Each GPU runs a single process. `hal/sim/native_adapter.c` already projects
+`MslObservation` into HAL's 71 schema columns. It quantizes actions to controller
+inputs as the libmelee version HAL depends on does, and it computes the reward in
+canonical float32. It writes a 440-byte `HalFrame` per match-frame. O65 builds on
+that adapter.
 
-### Pool and groups
+### Pool, groups and cadence
 
-Each GPU holds 4k matches in $G = 4$ groups of 1k. Each group is a separate
-native batch with separate buffers. One group steps per update while the others
-wait. To suspend a group we stop stepping it; to resume it we prefill from its
-frame history. Neither step copies simulator state.
+Each GPU holds 4k matches in $G = 4$ groups of 1k, one group per $R$. One group
+steps per update while the others wait. To suspend a group we stop stepping it.
+To resume it we prefill from its frame history, so neither step copies simulator
+state.
+
+Each group keeps a decision clock. Every stream in the active group decides at
+frames where the clock is a multiple of $R$. Decode batches therefore hold all
+due streams together, padded across $D$ with per-stream forced lengths. Consecutive
+updates rotate through the four $R$ values. The pilot watches per-$R$ KL and
+return across updates for oscillation. If it appears, the fallback mixes $R$
+classes inside each active set at the cost of smaller decode batches.
+
+### Simulator shards
+
+A native batch steps on a single thread. Each half of the active group therefore
+splits into shards of about 125 matches, one native batch and one thread per
+shard. Each shard has its own page-locked input and output buffers. A CUDA event
+on each host-to-device copy gates the shard's next write to that buffer.
+
+Resets and replay fast-forwards run on a separate worker pool. The workers
+prepare start states into standby lanes ahead of time, and a reset swaps a
+prepared lane in. A reset then costs a stepping shard only the swap.
 
 ### Data path
 
-1. The adapter writes each step's `HalFrame` records into a page-locked buffer.
+1. Each shard writes its step's `HalFrame` records into its page-locked buffer.
 2. We copy them into a GPU ring of 384 frames per match: 128 frames of context
-   plus the 256-frame rollout. At about 160k match-frames/s per GPU during
-   rollout, that comes to about 70 MB/s host-to-device *est.*
+   plus the visit. At about 160k match-frames/s per GPU during rollout, that
+   comes to about 70 MB/s host-to-device *est.*
 3. The GPU builds HAL's `Context` from the columns, takes rewards from the
    adapter's reward field and runs the policy.
 4. The sampled indices go back as 14-float action vectors, and the adapter
@@ -218,15 +392,15 @@ convention without a slot swap.
 ### Stepping loop
 
 The active group splits into halves A and B. While the GPU decides for one half,
-the simulator steps the other half $R$ frames from its queue. A decision made at
+the shards of the other half step $R$ frames from its queue. A decision made at
 frame $t$ first executes at frame $t + D + 1$, after $t + R$, so the overlap is
-valid. `ctypes.CDLL` releases the GIL during the native call, so simulator
-threads for separate batches run in parallel.
+valid. `ctypes.CDLL` releases the GIL during the native call, so shard threads
+run in parallel.
 
 Per half at $D = 12, R = 4$ *est.*:
 
 - GPU: $1\text{k streams} \times 4 \text{ frames} \times 0.94 \text{ GFLOP} \approx 3.8$ TFLOP, about 11 ms at 15% decode utilization.
-- Simulator: 500 matches × 4 frames on about 4 cores, about 10 ms at an assumed
+- Simulator: 4 shards of 125 matches, 4 frames each, about 10 ms at an assumed
   50k frames/s per core.
 
 ### Episodes and resets
@@ -236,65 +410,83 @@ A finished match resets in place. A fresh reset samples:
 - a matchup from the training prior;
 - a stage from the supported set, with Stadium frozen;
 - each player's (identity, character) pair;
-- $\lambda$, $D$ and $R$ for each player;
-- a stock count and starting percents, to mix match phases.
+- $\lambda$ and $D$ for each player, with $D$ drawn from the group's range;
+- a stock count and starting percents, to mix match phases;
+- whether one player is a frozen anchor.
 
-A fraction of resets start from a human replay state instead:
+### Replay starts
 
-1. We sample a frame from an admitted replay, weighting off-stage, ledge and
-   recovery states up. The failure budget puts 91% of deaths at the bottom blast
-   zone, and fresh matches arrive at those states rarely.
-2. MSL replays the recorded inputs and RNG from game start to that frame. At
-   about 120k frames/s per core, a full match takes about 0.1 core-seconds.
-3. The 128 replay frames before the start become the first block's context. The
-   replay's next $D$ actions fill each player's committed queue.
+A fraction of resets start from a human replay state. The start changes the
+reset distribution. Actions after the start come from the student and stay
+on-policy.
+
+1. We sample a frame at least 128 frames into an admitted replay, weighting
+   off-stage, ledge and recovery states up. The failure budget puts 91% of
+   deaths at the bottom blast zone, and fresh matches arrive at those states
+   rarely.
+2. A worker replays the recorded inputs and RNG in MSL from game start to that
+   frame, then switches to the simulator's own RNG. At about 120k frames/s per
+   core, a full match takes about 0.1 core-seconds.
+3. The 128 frames MSL produced before the start become the first block's
+   context. The replay's next $D$ actions fill each player's committed queue as
+   a forced prefix, and they receive no policy gradient.
 4. Stage, characters and identities follow the replay, with the usual masking
-   rate. We sample $\lambda$, $D$ and $R$ as for a fresh match.
+   rate. We sample $\lambda$ and $D$ as for a fresh match.
 
-Frames before `GAME_START_FRAME` (−123) stay out of the context, as in
-`hal/data/extract.py`. The simulator runs the countdown with neutral inputs.
+Replay starts carry risks of their own:
 
-A reset mid-block restarts that stream's cache and positions.
-`flash_attn_with_kvcache` handles per-stream lengths through `cache_seqlens`.
+- the human's queued actions can rescue or doom a state before the student acts;
+- a recovery state may already be lost at the sampled $D$;
+- oversampling shifts the training distribution toward rare states;
+- a correct reconstruction under recorded RNG does not show that free-running
+  play from that point matches Dolphin.
 
-### Decode grouping
+We log whether each replay-start outcome was decided within its first $D$
+frames, the success rate from those starts, and how often ordinary play arrives
+at the same kinds of states.
 
-We group streams by $(D, R)$ for compiled decode. `window_policy` already keys
-compiled decoders on bucket, horizon and committed frames. The two players of a
-match may fall in different groups.
+### Frozen anchors
+
+About 15% of matches pair a student player with a frozen anchor: $\pi_{\text{ref}}$
+at $u^* = 0.95$, or a snapshot from a small pool refreshed every few hundred
+updates. Anchors decode with their own weights in a separate batch. Only the
+student side contributes training windows, about 8% fewer windows per
+match-frame overall.
 
 ### In-loop evaluation group
 
-Every $N$ updates, a fixed group of matches plays the current weights, frozen at
-the start of the evaluation, against $\pi_{\text{ref}}$. It covers a grid of
-$\lambda$ and $D$ with fixed seeds. It runs inference only and contributes no
-training data.
+Every $N$ updates, a fixed evaluation group plays the current weights, frozen at
+the start of the evaluation, against each anchor. It covers a grid of $\lambda$,
+$D$ and $R$ with fixed seeds, runs inference only and contributes no training
+data.
 
 ## One update
 
 1. Prefill block 1: for each stream in the active group, encode the previous 128
    frames.
-2. Roll out 128 frames. Each decision stores its sampled indices, $\log\mu$ and
-   $V$.
-3. Prefill block 2 from block 1's frames, then roll out 128 more.
-4. Run the no-grad pass over all windows. The student and the reference both run
-   every decision, which yields the exact per-decision KL, $\pi_{\text{old}}$
-   log-probs and the critic features. We cache the critic features.
-5. Compute rewards and GAE over each stream's 256 frames.
+2. Roll out block 1. Each decision stores its record. At time-out resets, we
+   compute the value of the last state before the reset.
+3. Prefill block 2, roll out the rest of the visit, and compute the
+   end-of-visit bootstrap value.
+4. Run the no-grad pass over all windows. The student and the reference run
+   every decision. This yields $\mathrm{KL}_j$, $\pi_{\text{old}}$ log-probs,
+   $\pi_{\text{ref}}$'s distributions for the trained decisions, and the critic
+   features, which we cache.
+5. Compute rewards and GAE over each stream's visit.
 6. Run the critic epochs on the cached features.
-7. Run one GSPO epoch. Each step takes 512 windows per GPU with DDP across the
+7. Run one PPO epoch. Each step takes 512 windows per GPU with DDP across the
    node, and we spread a match's windows across steps.
 8. Checkpoint every $N$ updates.
 
-Estimated timeline per B200 at $D = 12, R = 4$, 1k active matches (2k streams)
-*est.*:
+Estimated timeline per B200 at $D = 12, R = 4$ with 1k active matches (2k
+streams) *est.*:
 
 | Phase | Time |
 | --- | ---: |
 | Rollout, two blocks with prefills | 1.6 s |
 | No-grad pass, student and reference | 1.6 s |
 | GAE and critic epochs | 0.1 s |
-| GSPO, 8 steps | 2.2 s |
+| PPO, 8 steps | 2.2 s |
 | Update total | 5.5 s |
 
 Assumed utilization of the 2.25 PFLOP/s dense BF16 peak: 35% for prefill and the
@@ -310,7 +502,7 @@ $k = (D + R)/R$ decoder tokens per frame:
 | --- | --- | ---: |
 | Rollout, per stream-frame | 1 trunk append + 1 amortized prefill + $k$ decoder | $0.60 + 0.16k$ |
 | No-grad pass, per window, both models | 256 trunk + $(128/R)(D+R)$ decoder, each | $2 \times (77 + 0.16 \cdot \text{decoder tokens})$ |
-| GSPO step, per window | 256 trunk + $16\,(D+R)$ decoder | $232 + 0.49 \cdot 16\,(D+R)$ |
+| PPO step, per window | 256 trunk + $16\,(D+R)$ decoder | $232 + 0.49 \cdot 16\,(D+R)$ |
 
 Worked example per B200 *est.*:
 
@@ -318,33 +510,34 @@ Worked example per B200 *est.*:
 | --- | ---: | ---: |
 | Rollout per update | 1.6 s | 3.4 s |
 | No-grad pass | 1.6 s | 3.2 s |
-| GSPO epoch (8 steps) | 2.2 s | 2.4 s |
+| PPO epoch (8 steps) | 2.2 s | 2.4 s |
 | Update total | 5.5 s | 9.2 s |
 | Match-frames/s per GPU | 46k | 28k |
 | Match-frames/s per node | 370k | 220k |
 
-A mix of $D$ falls between the two columns. At large $D$ the no-grad pass
-dominates, because it runs the decoder through $D + R$ tokens for every decision
-of both models.
+Groups take turns, so the run alternates between the update times of the four
+$R$ classes. At large $D$ the no-grad pass dominates, because it runs the decoder
+through $D + R$ tokens for every decision of both models.
 
 ### Calibration against BC
 
-[The O64 throughput report](../o64/performance/report.md) measured a BC update
-of 512 windows on one B200 at 0.534 s for an estimated 340.8 TFLOP, or 28.3% MFU,
-with 175.9 GiB peak reserved. That agrees with the 30% training utilization
-assumed here. An RL GSPO window at $D = 12, R = 4$ with 16 decisions costs about
+[The O64 throughput report](../o64/performance/report.md) measured a BC update of
+512 windows on a single B200 at 0.534 s for an estimated 340.8 TFLOP, or 28.3%
+MFU, with 175.9 GiB peak reserved. That agrees with the 30% training utilization
+assumed here. An RL PPO window at $D = 12, R = 4$ with 16 decisions costs about
 0.56 of a BC window, since it runs 256 decoder tokens instead of 832. Decode and
-prefill utilization remain unmeasured, so the pilot measures them first.
+prefill utilization remain unmeasured, and the pilot measures them first.
 
 ### CPU and host
 
 - Simulator demand comes in bursts. It runs only during rollout, at about 160k
-  match-frames/s per GPU, which needs about 4 cores per GPU at an assumed 50k
-  frames/s per server core, or about 32 per node *est.* Bind them to each GPU's
-  socket.
+  match-frames/s per GPU, or about 4 shard threads per GPU at an assumed 50k
+  frames/s per server core *est.* That makes about 32 cores per node, bound to
+  each GPU's socket.
+- Reset and replay workers need a few more cores per GPU, at about 0.1
+  core-seconds per replay start.
 - The pool needs about 1.5 to 2 MB of host RAM per match for the simulator
   arena and its config, or about 64 GB per node at 32k matches.
-- Replay starts add fast-forward work, about 0.1 core-seconds per start.
 - Feature building runs on the GPU, which removes the Python per-frame path from
   the loop.
 
@@ -356,26 +549,25 @@ Per B200 at 1k active matches *est.*:
 | --- | ---: | ---: | ---: | ---: |
 | Rollout | 14 GB | 27 GB | 2 GB | 43 GB |
 | No-grad pass | 14 GB | 27 GB | 8 GB | 49 GB |
-| GSPO step | 14 GB | 27 GB | 82 GB | 123 GB |
+| PPO step | 14 GB | 27 GB | 82 GB | 123 GB |
 
-- **Fixed:** student weights, gradients and optimizer state, BF16 reference
-  weights and workspace.
+- **Fixed:** student weights, gradients and optimizer state, BF16 weights for
+  $\pi_{\text{ref}}$ and the anchor snapshots, and workspace.
 - **KV cache:** 13.6 MB per stream for 2k streams. It holds the trunk's keys and
   values over 256 frames in 12 layers, plus the decoder's history projection.
-- **GSPO activations:** about 160 MB per window for 512 windows without
+- **PPO activations:** about 160 MB per window for 512 windows without
   recomputation. The trunk accounts for about 107 MB and the decoder's
   $16 \times 16$ tokens for about 53 MB, at roughly $34d$ bytes per token per
   layer.
 - **Allocator overhead.** The same rule predicts about 157 GB for the O64 BC
   step, which measured 175.9 GiB (189 GB) peak reserved. Applying that 20% to
-  the GSPO step gives about 148 GB of a B200's 192 GB.
-- **The reference stores no activations.** No gradient flows through
-  $\pi_{\text{ref}}$, and it runs only in the no-grad pass.
-- **The KV cache can stay resident** at 1k active matches, which allows static
-  allocation and keeps CUDA graphs available for decode. Beyond about 4k active
-  matches per GPU, we would release the cache between phases, through the
-  caching allocator with `expandable_segments` or through CUDA virtual memory
-  release as in torch_memory_saver.
+  the PPO step gives about 148 GB of a B200's 192 GB.
+- **Reference and anchors:** no activations. No gradient flows through them.
+- **Static allocation.** The KV cache can stay resident at 1k active matches,
+  which keeps CUDA graphs available for decode. Beyond about 4k active matches
+  per GPU, we would release the cache between phases through the caching
+  allocator with `expandable_segments`, or through CUDA virtual memory release
+  as in torch_memory_saver.
 - **A larger step** of about 650 windows per GPU fits without accumulation, if
   the gradient noise scale calls for it.
 
@@ -384,143 +576,216 @@ Per B200 at 1k active matches *est.*:
 | Quantity | Value |
 | --- | ---: |
 | Windows per gradient step (node) | 4,096 (512 × 8 GPUs) |
-| Distinct matches per step | 4,096 |
-| Steps per update | 8 |
-| Windows per match visit | 4 (2 players × 2 blocks), each in a different step |
+| Distinct matches per step | about 4,096 |
+| Steps per update | about 8 |
+| Windows per match visit | up to 4 (2 players × 2 blocks), each in a different step |
 | Updates between visits to a match | 4 ($G$) |
 | Steps between visits | at least 24 |
 | Window repeats | none ($E = 1$) |
 
-Steps per update equal $A_{\text{local}}/128$, where $A_{\text{local}}$ counts
-active matches per GPU. At 1k active matches, each update runs 8 steps before
-new data arrives, which keeps the drift from $\pi_{\text{old}}$ small. The pilot
-sweeps $A_{\text{local}}$ from 1k down to 512 and compares the KL to
-$\pi_{\text{old}}$ across steps against decode utilization. The gradient noise
-scale measured on the pilot decides whether 4,096 windows per step lies above or
-below the critical batch size.
+Steps per update come to about $A_{\text{local}}/128$, where $A_{\text{local}}$
+counts active matches per GPU. At 1k active matches, each update runs about 8
+steps before new data arrives, which keeps the drift from $\pi_{\text{old}}$
+small. The pilot sweeps $A_{\text{local}}$ from 1k down to 512 and compares the
+KL to $\pi_{\text{old}}$ across steps with decode utilization. The gradient
+noise scale measured on the pilot decides whether 4,096 windows per step lies
+above or below the critical batch size.
 
 ## Critic warmup
 
-- **Rollouts.** $\pi_{\text{ref}}$ plays under PPO's sampling: $u^* = 0.95$ and
-  sampled identities, $D$, $R$, $\lambda$ and starting states. At init the
+- **Rollouts.** $\pi_{\text{ref}}$ plays under PPO's sampling: $u^* = 0.95$,
+  identities, $D$ and $R$ groups, $\lambda$ and starting states. At init the
   student equals $\pi_{\text{ref}}$ for every $\lambda$, so these rollouts are
   on-policy for all of them.
-- **Training.** Only the critic heads train: `value_head` and
-  $\text{head}_{\text{res}}$ with its privileged inputs, all on detached
-  features. Warmup skips the no-grad pass, since the KL is zero.
+- **Training.** Only the critic heads train, on detached features and with
+  their own optimizer. Warmup skips the KL terms, which are zero.
 - **$\lambda$ dependence waits for PPO.** During warmup $\lambda$ changes no
   behavior, so the critic cannot yet learn how the return depends on either
   player's $\lambda$. Those weights stay near zero until PPO separates the
-  policies, which is the correct value until then. $D$ does change behavior, so
-  the critic learns $D$ and queue effects during warmup.
+  policies, which is the correct value until then. $D$, $R$ and the queues do
+  change behavior, and the critic learns their effects during warmup.
 - **$\lambda$ calibration.** Warmup measures the spread of per-decision
-  advantages under $\pi_{\text{ref}}$, by $D$ and $R$. We set $\lambda_{\max}$
-  to a few times that spread before PPO starts and record it in the resolved
-  configuration.
-- **Phase mixing.** Every fresh match starts at frame −123 at the same time.
-  Warmup continues until each match has advanced about one match length, roughly
+  advantages by $D$ and $R$, and we set $\lambda_{\max}$ from it before PPO
+  starts. The resolved configuration records the value.
+- **Phase mixing.** Fresh matches all start at frame −123 together. Warmup
+  continues until each match has advanced about one match length, roughly
   $43 \text{ visits} \times G = 172$ updates, or about 5 minutes on the node at
   rollout-only cost *est.* Stock counts, starting percents and replay starts mix
   phases further.
-- **Ending.** Warmup ends once the critic's explained variance plateaus and the
-  phases have mixed.
+- **Ending.** Warmup ends once the critic's explained variance on fresh rollouts
+  plateaus and the phases have mixed.
 
-## Exact resume
+## Checkpoints and resume
 
-We checkpoint at update boundaries. Every update starts with a prefill, so the
-KV cache stays out of the checkpoint. A checkpoint holds:
+We checkpoint at update boundaries. Every visit ends on a decision boundary and
+every update starts with a prefill, so no transition is pending and the KV cache
+stays out of the checkpoint. Each rank writes a shard holding:
 
-1. the model, optimizer, scheduler and the critic cache's step counter;
-2. every pool match's state from the adapter's save path, compressed, at a size
-   not yet measured;
-3. each match's last 128 `HalFrame` records and both players' committed queues;
-4. episode metadata: $\lambda$, $D$, $R$, identities, characters, start type,
-   episode counters and seed keys;
-5. the pool schedule position and the evaluation schedule position.
+1. the model, both optimizers and the scheduler (rank 0 only);
+2. every pool match's simulator state from the adapter's save path, compressed;
+3. each match's last 128 `HalFrame` records, both players' committed queues and
+   the group's decision clock;
+4. episode metadata: $\lambda$, $D$, $R$, identities, characters, anchor
+   assignments, start type, episode counters and stable logical stream ids;
+5. the standby lanes prepared by the reset workers;
+6. the pool schedule position, the evaluation schedule position and the anchor
+   pool.
 
-Sampling, resets and replay-start draws use counter-based RNG keyed by (run
-seed, stream, episode, frame), which leaves no generator state to save. Tests
-compare the next batch and the next optimizer update after a resume with an
-uninterrupted run.
+After a barrier confirms every shard is durable, rank 0 writes a manifest with
+the shard hashes and publishes it by atomic rename. A resume reads only
+checkpoints with a manifest.
+
+`hal_native_restore` re-projects the whole batch for every lane it restores, so
+restoring a full batch lane by lane costs quadratic work. The adapter needs a
+batch restore that projects once.
+
+### Random numbers
+
+Every draw comes from a counter-based generator keyed by (run seed, domain,
+logical stream id, episode, frame, offset, factor). The domains separate action
+sampling, reset choices, replay-start choices, decision subsampling, minibatch
+placement, critic shuffling and evaluation. Logical stream ids survive
+rebatching and restore, so the generator has no state to save.
+
+### Resume scope
+
+Resume restores the complete training state. On the same hardware, software
+and world size:
+
+- the next batch's data, window choice and decision subsampling match an
+  uninterrupted run exactly;
+- the next optimizer update matches within a measured tolerance.
+
+Bitwise identical execution is out of scope. Numerical differences can flip a
+categorical sample even under an identical random draw.
+
+## Distributed training
+
+- Each GPU runs a DDP rank over the actor. The critic heads sync gradients
+  through a separate all-reduce after each critic epoch.
+- We freeze the percentile head before wrapping, so DDP skips it.
+- Losses divide by global counts of trained decisions and critic targets, which
+  we all-reduce before each step.
+- Ranks run equal step counts. We log each rank's rollout time to find
+  stragglers before the synchronized phases.
+- The pilot tests the real CUDA and NCCL path on two GPUs. A Gloo CPU test
+  checks the sync logic only.
+
+## Deployment
+
+In deployment, $D$ counts every frame from the observed frame to the first
+frame a new action can execute: input delay, transport and the compute
+allowance together. The forced prefix holds every action already committed for
+those frames. The netplay runner computes $D$ this way from its schedule and
+uses a policy trained at that $D$.
+
+Deployment needs its own measurements: batch-1 latency with the two-cache
+handoff, and the rate of missed deadlines at each $D$ and $R$.
 
 ## Evaluation and run protocol
 
-### Controls before RL
+### Simulator validation before RL
 
+- Bitwise parity of the adapter's columns and rewards against
+  `hal/data/extract.py` and `hal/training/returns.py` on admitted replays.
+- Replay-start reconstruction followed by free-running continuation, checked for
+  determinism across save and restore.
+- Event statistics in MSL and Dolphin for the same pairs of distinct policies:
+  deaths, ledge grabs, techs, match length and stock differential. A symmetric
+  $\pi_{\text{ref}}$ ditto can stay near 50% in a wrong simulator, so the
+  comparison uses distinct opponents.
 - $\pi_{\text{ref}}$ at $u^* = 0.95$ at each $D$ and $R$ in Dolphin, with block
   restart against the current sliding context.
-- $\pi_{\text{ref}}$ head-to-head in MSL against the same matches in Dolphin, to
-  check gameplay agreement within confidence intervals.
+
+### During training
+
+- **In MSL:** the matchup matrix against the anchors, every $N$ updates.
+- **In Dolphin:** periodic evaluations against $\pi_{\text{ref}}$ on the
+  existing evaluation VMs, so simulator-specific gains show up early.
+- **Selection set:** fixed seeds and starts for choosing checkpoints and
+  $\lambda$.
+- **Held-out set:** separate seeds and starts, used once for the final report.
+- **Statistics:** confidence intervals treat each match or paired seed as a
+  sample.
+- **Progress signals:** results against anchors and specific failure rates.
+  Win rate in current-versus-current self-play stays near 50% by construction.
 
 ### First run
 
 - **Treatment:** PPO from $\pi_{\text{ref}}$ with the decisions above.
-- **Control:** $\pi_{\text{ref}}$ under the same $u^*$, $D$ and $R$ sets,
+- **Control:** $\pi_{\text{ref}}$ under the same $u^*$, $D$ and $R$ groups,
   identity sampling, matchup prior, stage set and evaluation protocol.
 - **Invariant inputs:** checkpoint, $u^*$, identity sampling, matchup prior,
   stage set, evaluation seeds, simulator build and data manifest.
-- **Selection:** `net_stock_lcb` and head-to-head win rate against
-  $\pi_{\text{ref}}$ in MSL at matched $D$, over a $\lambda$ grid. Finalists are
-  confirmed in Dolphin. Offline metrics serve only for diagnosis.
+- **Selection:** `net_stock_lcb` and head-to-head win rate against the anchors at
+  matched $D$, over a $\lambda$ grid, confirmed in Dolphin. Offline metrics
+  serve only for diagnosis.
 - **Records:** Git SHA, resolved configuration, seed, environment, simulator and
   adapter hashes, data manifests and checkpoint hashes.
 
-### Pilot on RTX PRO 6000 Blackwell
+## Pilot stages
 
-1. Run the 17M proxy architecture end to end on one GPU to debug the loop,
-   logging and resume.
-2. Run the 248M checkpoint with a small active set to measure per-phase
-   utilization, the $\mu$-to-$\pi_{\text{old}}$ gap and the gradient noise
-   scale.
-3. Test DDP on two GPUs. NCCL rejects two ranks on one device, so a gloo CPU
-   test covers the gradient sync logic as a fallback.
+Each stage needs its evidence before the next begins.
+
+| Stage | Evidence |
+| --- | --- |
+| Math checks | KL gradients against an enumerated objective, joint ratios, delayed-action credit on a toy delay task, terminal and truncation masks |
+| State and inference | No attention across episodes, cached against full-window log-probs, queue and reset parity, replay-start reconstruction |
+| Debug loop | The 17M proxy architecture end to end on one GPU: loop, logging, checkpoint and resume |
+| Minimal learning | The 248M checkpoint on one matchup and stage, fixed $D$, $R$ and $\lambda$, joint PPO, separate critic optimizer |
+| Gameplay | Improvement against frozen anchors in MSL and in Dolphin |
+| Scaling | All four $R$ groups, real two-GPU NCCL training, full-pool checkpoint and restore, complete-path throughput |
+| Expanded run | $\lambda$ range, identities, replay starts and anchors, each added with its own comparison |
 
 ## Metrics
 
 | Group | Metrics |
 | --- | --- |
-| Policy | KL per frame to $\pi_{\text{ref}}$ by $D$ group and $\lambda$ bin, KL to $\pi_{\text{old}}$ across the steps of an update, clip fraction, ratio quantiles, entropy per controller group |
-| Critic | explained variance overall and by position in the block, value loss, advantage mean and std by $D$ group |
-| Numerics | $\log(\mu/\pi_{\text{old}})$ per decision, its quantiles by $D$ group, fraction of truncated weights |
-| Gameplay | net stocks, damage, win rate and match length by $\lambda$ bin and $D$, from training matches and the evaluation group |
-| Systems | time per phase, decode and training utilization, simulator frames/s per core, host-to-device bytes, peak HBM per phase, compiled variant count |
-| Data | identity, character, stage and matchup counts, time-outs, resets per update, replay-start fraction by state tag |
+| Policy | KL per frame to $\pi_{\text{ref}}$ by $D$, $R$ and $\lambda$ bin, KL to $\pi_{\text{old}}$ across the steps of an update, clip fraction, ratio quantiles, entropy per controller factor, $L_{\text{KL}}$ |
+| Return and KL | return against KL by $\lambda$ bin, cumulative KL cost per match |
+| Critic | explained variance on fresh features before fitting, by $R$ and by position in the block; value against Monte Carlo returns; value loss; advantage mean and standard deviation by $D$ and $R$; end-of-visit bootstrap gap |
+| Numerics | $\log(\mu/\pi_{\text{old}})$ per decision, its quantiles by $D$ and $R$, fraction of truncated weights |
+| Gameplay | net stocks, damage, win rate and match length against each anchor, by $\lambda$ bin, $D$ and $R$, in MSL and Dolphin |
+| Replay starts | fraction by state tag, outcomes decided within $D$ frames, success rate, frequency of the same states in ordinary play |
+| Systems | time per phase, decode and training utilization, decode batch sizes, simulator frames/s per shard, reset wait time, host-to-device bytes, peak HBM per phase, per-rank rollout time |
+| Data | identity, character, stage and matchup counts, anchor share, time-outs, resets per update |
 
 W&B logging records `global_step` as data with `define_metric` and keeps keys
 one level deep.
 
 ## Risks
 
-- **Simulator exploits.** MSL validation covers admitted human replays with
-  recorded RNG. RL policies will visit states outside that set, so finalists
-  are confirmed in Dolphin.
-- **Non-transitive cycling.** $\lambda$ and $D$ sampling diversify opponents.
-  Head-to-head against fixed anchors ($\pi_{\text{ref}}$ and earlier
-  checkpoints) detects cycling. Opponent snapshots come next if it appears.
+- **Simulator exploits.** MSL validation covers admitted human replays. RL
+  policies will visit states outside that set, which is why Dolphin evaluations
+  run throughout training.
+- **Non-transitive cycling.** Shared weights move together across $\lambda$,
+  $D$ and identities, so that diversity alone cannot preserve an old
+  counterstrategy. Frozen anchors and the matchup matrix detect cycling.
+- **Rotation across $R$.** Each update trains a single $R$ class. The pilot
+  checks for oscillation in per-$R$ KL and return.
 - **KL growth at small $\lambda$ and large $D$.** $\pi_{\text{ref}}$ is weakest
   at large $D$, so RL moves furthest there. The advantage scale may differ by
-  $D$, and one $\lambda$ range may not fit every delay. Warmup measures the
-  scale per $D$.
-- **Replay-start bias.** A replay start puts human history in the context. That
-  matches BC's training distribution, but neither policy produced that history,
-  so the first block after a replay start is slightly off-policy for both
-  players.
+  $D$, so warmup measures it per $D$.
+- **Reward shaping.** The damage term biases play toward safe damage. The
+  outcome-focused arm tests this if gameplay suggests it.
+- **Identity style.** At low $\lambda$, every identity faces the same
+  competitive pressure, and recognizable human styles may fade.
 - **Camping.** Deferred. If it appears, an asymmetric reward change addresses
-  it; a timer feature would make the observation non-Markovian.
+  it. A timer feature would make the observation non-Markovian.
+- **Time-outs.** A tournament clock expiring decides a real game. We treat it as
+  a truncation, which leaves timed endings outside the task.
 - **Rare characters.** The matchup prior keeps them rare, and they also have the
   weakest $\pi_{\text{ref}}$. Their KL and gameplay need separate monitoring.
 - **Privileged critic.** It keeps the ego's history as input, which keeps its
   baseline unbiased in a partially observed game (Baisero and Amato, 2022).
-- **Deterministic order.** Exact resume depends on a deterministic data order,
-  not on deterministic kernels.
 
 ## TODOs
 
 ### melee-sim-light
 
-- [ ] Expose the replay-start path publicly: the initial seed plus per-frame RNG
-      injection from recorded replays. HAL's parity test and RL replay starts
-      both use it.
+- [ ] Expose the replay-start path publicly: the initial seed and per-frame RNG
+      injection from recorded replays, then a switch to the simulator's own RNG.
+      HAL's parity tests and RL replay starts both use it.
 - [ ] Benchmark on the B200 node's server CPU. The published baseline uses a
       desktop V-cache core.
 - [ ] Measure thread scaling across separate batches stepped in parallel.
@@ -537,83 +802,99 @@ one level deep.
       `hal/data/extract.py`, bitwise on admitted replays.
 - [ ] Parity test: the adapter's reward against `hal/training/returns.py` on the
       same replays.
-- [ ] Parity test: the adapter's quantized wire inputs against the Dolphin input
-      path for the same action stream.
+- [ ] Parity test: the adapter's quantized controller inputs against the Dolphin
+      input path for the same action stream.
+- [ ] Batch restore that projects once, replacing per-lane restores of a full
+      batch.
 - [ ] Adapter output into caller-provided page-locked buffers. Optionally, a
       multi-frame step that takes $R$ frames of inputs per call.
-- [ ] Group batches with independent stepping, plus a thread pool bound to the
-      GPU's socket.
+- [ ] Shards: one native batch and one thread per shard, with separate buffers,
+      bound to the GPU's socket.
+- [ ] Reset and replay workers that prepare standby lanes.
 
 ### HAL: model and inference
 
-- [ ] Widen the conditioner to `Linear(2, 128)` with a zero column. A parity
-      test confirms identical outputs to O64 at init for every $\lambda$.
-- [ ] Critic residual head with privileged inputs and a zero-initialized output.
-      A parity test confirms $V$ equals `value_head` at init.
+- [ ] Widen the conditioner embedding to four inputs with zero columns. A parity
+      test confirms identical outputs to O64 at init for every $\lambda$, $D$
+      and $R$.
+- [ ] Critic residual head with the opponent-queue encoder and a
+      zero-initialized output. A parity test confirms $V$ equals `value_head` at
+      init.
+- [ ] Per-frame segment ids in trunk varlen attention, decoder history attention
+      and feature construction, with the byte-overwrite test.
 - [ ] GPU `Context` builder from adapter columns, with a parity test against the
       current Python feature path.
-- [ ] Block-restart inference: a per-stream trunk KV cache with
-      `cache_seqlens` and an incremental decoder history projection. A parity
-      test compares log-probs with the full-window pass.
+- [ ] Block-restart inference with the young-episode rule: a per-stream trunk KV
+      cache with `cache_seqlens` and an incremental decoder history projection.
+      A parity test compares log-probs with the full-window pass.
+- [ ] One compiled decode variant per $R$, padded across $D$.
 - [ ] Block restart in Dolphin evaluation and netplay, with the second-cache
-      handoff for netplay.
-- [ ] Decode variants per $(D, R)$.
+      handoff and the match-start rule.
+- [ ] Netplay: subtract transport and compute allowance from $D$, and measure
+      batch-1 latency and missed deadlines.
 
 ### HAL: RL loop (joins model and simulation)
 
-- [ ] Rollout engine: pool rotation, half alternation, resets with episode
-      sampling, and in-loop evaluation groups.
+- [ ] Rollout engine: pool rotation by $R$, group decision clocks, half
+      alternation over shards, visit lengths in multiples of $R$, resets, frozen
+      anchors and evaluation groups.
 - [ ] Episode sampler: matchup prior, tempered (identity, character) table with
-      a data floor, masked and deployment-identity rates, $\lambda$, $D$ and
-      $R$, stock counts and starting percents.
+      a data floor, masked and deployment-identity rates, $\lambda$, $D$, stock
+      counts, starting percents and anchor assignment.
 - [ ] Replay-start sampler: an index of admitted replay frames tagged off-stage,
-      ledge and recovery, with oversampling weights and a fast-forward worker
-      pool.
-- [ ] No-grad pass: exact KL with the button mask, $\pi_{\text{old}}$ log-probs
-      and cached critic features.
-- [ ] GAE at decision granularity with terminal and truncation flags.
-- [ ] GSPO loss with decision subsampling, minibatch placement across steps and
-      the truncated importance weight.
-- [ ] $\lambda$ calibration from warmup advantages, written into the resolved
-      configuration.
-- [ ] Critic epochs on cached features.
-- [ ] Varlen masking for resets inside training windows.
-- [ ] DDP with equal step counts across ranks.
-- [ ] Counter-based RNG for sampling, resets and replay starts.
-- [ ] Checkpoint and exact resume, including the pool, with tests on the next
+      ledge and recovery, with oversampling weights.
+- [ ] Decision records with all fields listed above.
+- [ ] No-grad pass: $\mathrm{KL}_j$ with the button mask, $\pi_{\text{old}}$
+      log-probs, $\pi_{\text{ref}}$ distributions for trained decisions, cached
+      critic features.
+- [ ] GAE with $\Delta_j$, bootstrap masks and trace masks, plus time-out and
+      end-of-visit bootstrap values.
+- [ ] Joint-ratio PPO with the truncated weight, $L_{\text{KL}}$, decision
+      subsampling and masking of unexecuted decisions.
+- [ ] Separate critic optimizer and critic epochs on cached features.
+- [ ] $\lambda$ calibration from warmup advantages.
+- [ ] DDP with frozen parameters excluded, a separate critic all-reduce, and
+      global loss normalization.
+- [ ] Counter-based RNG with separate domains and logical stream ids.
+- [ ] Sharded checkpoints with an atomic manifest, and resume tests on the next
       batch and the next optimizer update.
+- [ ] Anchor snapshot pool.
 - [ ] The metrics above.
+
+### Evaluation
+
+- [ ] Periodic Dolphin evaluations against $\pi_{\text{ref}}$ during training.
+- [ ] Selection and held-out seed and start sets.
+- [ ] MSL against Dolphin event statistics for distinct policy pairs.
 
 ### Experiment
 
 - [ ] `experiments/065_selfplay_ppo.py` holds the RL configuration and loop and
       imports only `hal`. Code moves into `hal` once its interface is stable.
 - [ ] Record the treatment, control and invariant inputs before the first run.
-- [ ] Run the pre-RL controls.
-- [ ] Pilot stages 1 to 3 on RTX PRO 6000 Blackwell.
+- [ ] Run the simulator validation before RL.
+- [ ] Run the pilot stages in order.
 
 ### Validation before handoff
 
 - [ ] `ruff format --check`, `ruff check`, `ty check` on the maintained targets,
       and `pytest -m "not integration"`.
-- [ ] The integration suite with `HAL_REQUIRE_INTEGRATION=1`. This work changes
-      wire format handling, controller input, session stepping and offline-live
-      parity.
+- [ ] The integration suite with `HAL_REQUIRE_INTEGRATION=1`, because this work
+      changes controller input, session stepping and offline-live parity.
 
 ## Open decisions
 
-- $\lambda_{\max}$, from warmup advantages
+- $\lambda_{\max}$, from warmup advantages and early return-KL curves
 - Truncation cap $C$
 - Whether $\mu$ can replace $\pi_{\text{old}}$. If the measured gap is tiny, the
   no-grad pass runs only $\pi_{\text{ref}}$ and saves about 0.8 s of the 5.5 s
-  update. Exact KL then needs the student's per-factor distributions stored at
-  rollout, a few GB per update.
+  update. The student's per-factor distributions would then come from rollout.
 - Replay-start fraction and state oversampling weights
+- Anchor share and snapshot refresh interval
 - $\lambda_{\text{gae}}$, if 0.99 per frame proves too noisy
-- GSPO $\epsilon$ and the learning rate
+- PPO $\epsilon$ and the learning rate
 - Windows per step, from the measured gradient noise scale
-- $A_{\text{local}}$ and $G$, from the drift-versus-utilization sweep
+- $A_{\text{local}}$, from the drift-versus-utilization sweep
 - Critic epochs $K_v$
-- When to add the opponent's queue state to the critic
-- Opponent snapshots, if cycling appears
 - The deployment identity: masked or Master
+- The outcome-focused reward arm
