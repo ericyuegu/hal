@@ -1,0 +1,56 @@
+{
+  "format": "hal.o65.sampler.v1",
+  "identities": [
+    {
+      "identity": 1,
+      "character": 1,
+      "count": 22172
+    },
+    {
+      "identity": 1,
+      "character": 22,
+      "count": 21118
+    },
+    {
+      "identity": 2,
+      "character": 1,
+      "count": 13481
+    },
+    {
+      "identity": 2,
+      "character": 22,
+      "count": 13761
+    },
+    {
+      "identity": 3,
+      "character": 1,
+      "count": 18152
+    },
+    {
+      "identity": 3,
+      "character": 22,
+      "count": 11536
+    }
+  ],
+  "matchups": [
+    {
+      "characters": [
+        1,
+        22
+      ],
+      "weight": 1.0
+    }
+  ],
+  "stages": [
+    25
+  ],
+  "stocks": [
+    4
+  ],
+  "percents": [
+    0.0,
+    30.0,
+    60.0,
+    90.0
+  ]
+}

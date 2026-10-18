@@ -56,6 +56,9 @@ set -euo pipefail
 log() { echo "[hal-container] $*"; }
 trap 'code=$?; log "boot failed at line ${LINENO}"; exit "$code"' ERR
 
+install -d -m 0700 /hal-output/tmp
+export TMPDIR=/hal-output/tmp
+
 cd /
 rm -rf /opt/hal
 log "cloning HAL @ ${HAL_GIT_SHA}"
@@ -64,9 +67,11 @@ cd /opt/hal
 git checkout --quiet "$HAL_GIT_SHA"
 uv sync --locked
 
-log "fetching fixtures"
-uv run fetch
-pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &)
+if [ "${HAL_SKIP_FIXTURES:-0}" != "1" ]; then
+  log "fetching fixtures"
+  uv run fetch
+fi
+pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/hal-output/xvfb.log 2>&1 &)
 export DISPLAY=:99
 uv run python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable inside HAL container'"
 ulimit -n "$(ulimit -Hn)" || true
@@ -78,9 +83,11 @@ HAL_RUNTIME
 chmod 0700 /run/hal/run.sh
 
 set +e
+install -d -m 0700 /var/lib/hal
 docker run --rm --gpus all --ipc=host \
   --env-file /run/hal/job.env \
-  -e HAL_GIT_SHA -e HAL_TRAIN_CMD_B64 \
+  -e HAL_GIT_SHA -e HAL_TRAIN_CMD_B64 -e HAL_SKIP_FIXTURES \
+  -v /var/lib/hal:/hal-output \
   -v /run/hal/run.sh:/run/hal/run.sh:ro \
   "$HAL_IMAGE" bash /run/hal/run.sh 2>&1 | tee /var/log/hal-training.log
 code=${PIPESTATUS[0]}

@@ -1,0 +1,23 @@
+{
+  "format": "hal.o65.delivery.v1",
+  "msl_commit": "8fc56d6f2523e978bf6037d8147c57778bd206fa",
+  "source": {
+    "key": "o65/pilot/v1/msl-8fc56d6f2523e978bf6037d8147c57778bd206fa-adbd1146b67a28ccd665bb99740653a5e46fbc2df48eaf2413b9af2fee32d69f.tar",
+    "sha256": "adbd1146b67a28ccd665bb99740653a5e46fbc2df48eaf2413b9af2fee32d69f",
+    "size_bytes": 14336000
+  },
+  "inputs": {
+    "key": "o65/pilot/v1/inputs-47332f2c9738f8d0a61087a36cae8d1df699fa2662760bba8e4b3796a8efd253.tar",
+    "sha256": "47332f2c9738f8d0a61087a36cae8d1df699fa2662760bba8e4b3796a8efd253",
+    "size_bytes": 122869760
+  },
+  "checkpoint": {
+    "key": "runs/261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30/final.pt",
+    "sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "size_bytes": 156426408
+  },
+  "game_manifest_sha256": "4c2b074e872a7ad55176b63a3971fd6a3bbf09dd1988240d1dbdaf61a63616cb",
+  "statistics_sha256": "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3",
+  "sampler_sha256": "c5ffb1b5f75aa0d9245192304871c2979de9a3e59ddf0c5d55e6877994ab661e",
+  "sampler_source_sha256": "6a580b695d34c51325737dc69c6a2f168d28a91c446e2c66e206f311aacd75d3"
+}

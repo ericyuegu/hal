@@ -101,3 +101,65 @@ def test_create_command_rejects_g4_gpu_count_mismatch() -> None:
     args = Args(cmd=["python", "train.py"], machine_type="g4-standard-96", gpu_count=1)
     with pytest.raises(ValueError, match="has 2 integrated GPUs"):
         create_command(args, project="project", name="hal-o60", startup_file="/tmp/start.sh")
+
+
+def test_dry_run_of_unpublished_commit_needs_no_cloud_cli(tmp_path: Path) -> None:
+    for command in (
+        ["git", "init", "--quiet"],
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ],
+    ):
+        subprocess.run(command, cwd=tmp_path, check=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_MODULE.ROOT / "scripts/launch_gce.py"),
+            "--dry-run",
+            "--project",
+            "project",
+            "--max-run-hours",
+            "24",
+            "--no-spot",
+            "--",
+            "true",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--max-run-duration=24h" in result.stdout
+    assert "--instance-termination-action=STOP" in result.stdout
+    assert "remote SHA, auth, image access, quota and secrets remain unchecked" in result.stderr
+    assert "pushing" not in result.stderr
+
+
+@pytest.mark.parametrize("hours", [0, -1, 2881])
+def test_invalid_wall_clock_cap(hours: int) -> None:
+    with pytest.raises(ValueError, match="max run hours"):
+        create_command(Args(max_run_hours=hours), project="project", name="job", startup_file="start.sh")
+
+
+def test_startup_preserves_results_and_supports_targeted_fixtures() -> None:
+    script = startup_script(
+        sha="a" * 40,
+        train_cmd="true",
+        project="project",
+        secrets=[],
+        image="image",
+        keep_alive=False,
+        skip_fixtures=True,
+    )
+    assert "export HAL_SKIP_FIXTURES=1" in script
+    assert "-v /var/lib/hal:/hal-output" in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)

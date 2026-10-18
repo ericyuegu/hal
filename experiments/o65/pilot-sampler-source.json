@@ -1,0 +1,5 @@
+{
+  "source": "data/processed/ranked-anonymized-1/index-v6.jsonl",
+  "sha256": "2fc24f0e46510c66c55c4ebc46cdb371376d98d746bb8d78b422d8d45464afd2",
+  "count_unit": "player appearances in ranked index; Fox/Falco functional pilot only"
+}

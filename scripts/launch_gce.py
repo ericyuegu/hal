@@ -1,33 +1,14 @@
-"""Launch one HAL training command on a Google Compute Engine GPU VM.
+"""Launch a HAL training command on a Google Compute Engine GPU VM.
 
-This is a fire-and-forget counterpart to ``launch_vast.py``.  It uses the
-locally authenticated ``gcloud`` CLI, so a human can launch with
-``gcloud auth login``; no service-account key file is required.  The VM reads
-R2/W&B credentials from Secret Manager through its attached service account.
-Secret *values* are never placed in instance metadata.
+Authenticate gcloud locally and grant the VM service account access to the
+declared Secret Manager entries. The VM reads R2 and W&B credentials through
+that account. Instance metadata contains secret identifiers.
 
-One-time setup (an administrator may need to do the IAM steps)::
-
-    gcloud auth login
-    gcloud config set project MY_PROJECT
-    # Create one Secret Manager secret for each default --secret below, then grant
-    # the VM service account roles/secretmanager.secretAccessor on those secrets.
-
-Launch examples::
-
-    uv run scripts/launch_gce.py --dry-run --zone us-central1-a -- \
-        uv run experiments/059_muon_action_sequence.py
-    uv run scripts/launch_gce.py --zone us-central1-a --service-account hal-jobs@MY_PROJECT.iam.gserviceaccount.com -- \
-        uv run experiments/059_muon_action_sequence.py --cfg.max-steps 100000
-    uv run scripts/launch_gce.py --project centering-star-502613-k3 \
-        --zone us-central1-b --machine-type g4-standard-96 --gpu-count 2 \
-        --disk 3000 --disk-type hyperdisk-balanced --no-spot -- \
-        torchrun --standalone --nproc-per-node=2 \
-        experiments/060_compute_optimal_action_sequence.py train --smoke --stop-after-update 512
-
-The startup log is available with ``gcloud compute instances get-serial-port-output``.
-On completion the VM shuts down, stopping compute charges but retaining its boot
-disk for inspection. Delete the instance when it is no longer needed.
+Use --dry-run with --project to check local inputs and print the create
+request. Publish the source commit before a real launch. Set --max-run-hours
+to bound VM lifetime. Read startup output with gcloud compute instances
+get-serial-port-output. After training, the VM shuts down and retains its
+boot disk for inspection.
 """
 
 from __future__ import annotations
@@ -93,9 +74,16 @@ def parse_secrets(specs: list[str] | tuple[str, ...]) -> list[tuple[str, str]]:
 
 
 def startup_script(
-    *, sha: str, train_cmd: str, project: str, secrets: list[tuple[str, str]], image: str, keep_alive: bool
+    *,
+    sha: str,
+    train_cmd: str,
+    project: str,
+    secrets: list[tuple[str, str]],
+    image: str,
+    keep_alive: bool,
+    skip_fixtures: bool = False,
 ) -> str:
-    """Render the metadata startup script. It contains secret names, never values."""
+    """Render startup metadata with secret identifiers."""
     # Bash read skips an unterminated final record; the W&B key is last by default.
     secret_specs = "".join(f"{env_name}={secret_id}\n" for env_name, secret_id in secrets)
     values = {
@@ -105,12 +93,15 @@ def startup_script(
         "HAL_SECRET_SPECS_B64": base64.b64encode(secret_specs.encode()).decode(),
         "HAL_IMAGE": image,
         "HAL_KEEP_ALIVE": "1" if keep_alive else "0",
+        "HAL_SKIP_FIXTURES": "1" if skip_fixtures else "0",
     }
     exports = "\n".join(f"export {name}={shlex.quote(value)}" for name, value in values.items())
     return f"#!/usr/bin/env bash\n{exports}\n\n{STARTUP_PATH.read_text()}"
 
 
 def create_command(args: Args, *, project: str, name: str, startup_file: str) -> list[str]:
+    if args.max_run_hours is not None and not 1 <= args.max_run_hours <= 2880:
+        raise ValueError("max run hours must be between 1 and 2880")
     if args.machine_type.startswith("g4-"):
         expected_gpus = _G4_GPU_COUNTS.get(args.machine_type)
         if expected_gpus is None:
@@ -147,12 +138,26 @@ def create_command(args: Args, *, project: str, name: str, startup_file: str) ->
         command.append(f"--service-account={args.service_account}")
     if args.spot:
         command.extend(("--provisioning-model=SPOT", "--instance-termination-action=DELETE"))
+    if args.max_run_hours is not None:
+        command.append(f"--max-run-duration={args.max_run_hours}h")
+        if not args.spot:
+            command.append("--instance-termination-action=STOP")
     if args.no_external_ip:
         command.append("--no-address")
     return command
 
 
 def _preflight(args: Args, secrets: list[tuple[str, str]]) -> tuple[str, str]:
+    if _git("status", "--porcelain"):
+        raise SystemExit("working tree is dirty; commit before launching (the VM runs the published SHA).")
+    sha = _git("rev-parse", "HEAD")
+    if args.dry_run:
+        if not args.project:
+            raise SystemExit("--dry-run requires --project; it performs local checks only.")
+        logger.info(
+            "[dry-run] local rendering only; remote SHA, auth, image access, quota and secrets remain unchecked"
+        )
+        return sha, args.project
     if shutil.which("gcloud") is None:
         raise SystemExit("gcloud is not installed; install the Google Cloud CLI, then run `gcloud auth login`.")
     account = _run_gcloud("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
@@ -162,13 +167,11 @@ def _preflight(args: Args, secrets: list[tuple[str, str]]) -> tuple[str, str]:
     if not project or project == "(unset)":
         raise SystemExit("no project selected; pass --project or run `gcloud config set project PROJECT_ID`.")
 
-    if _git("status", "--porcelain"):
-        raise SystemExit("working tree is dirty — commit before launching (the VM runs the pushed SHA).")
-    sha = _git("rev-parse", "HEAD")
-    if not _git("branch", "-r", "--contains", sha):
-        branch = _git("rev-parse", "--abbrev-ref", "HEAD")
-        logger.info(f"{sha[:10]} not on a remote branch; pushing {branch}")
-        subprocess.run(["git", "push", "origin", branch], check=True)
+    # Query GitHub to check publication; local tracking refs can be stale.
+    _git("fetch", "--quiet", "--prune", "https://github.com/ericyuegu/hal.git", "+refs/heads/*:refs/hal-launch/*")
+    published = _git("for-each-ref", "--contains", sha, "--format=%(refname)", "refs/hal-launch/")
+    if not published:
+        raise SystemExit(f"SHA {sha} is unpublished; publish it explicitly before launching.")
 
     for _env_name, secret_id in secrets:
         try:
@@ -181,7 +184,7 @@ def _preflight(args: Args, secrets: list[tuple[str, str]]) -> tuple[str, str]:
     return sha, project
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Args:
     cmd: tyro.conf.Positional[list[str]] = field(default_factory=list)
     """Training command after `--`."""
@@ -216,7 +219,11 @@ class Args:
     keep_alive: bool = False
     """Leave the VM running after training for debugging instead of shutting it down."""
     dry_run: bool = False
-    """Run local/auth/git/secret preflight and print the redacted create request without creating a VM."""
+    """Check local inputs and print the create request."""
+    max_run_hours: int | None = None
+    """Stop an on-demand VM at this wall-clock limit, even if startup or training hangs."""
+    skip_fixtures: bool = False
+    """Let the job fetch its specific fixtures instead of fetching every development fixture."""
 
 
 def main(args: Args) -> None:
@@ -230,7 +237,13 @@ def main(args: Args) -> None:
     train_cmd = shlex.join(args.cmd)
     name = args.name or f"hal-{datetime.now(UTC):%Y%m%d-%H%M%S}-{sha[:7]}"
     rendered = startup_script(
-        sha=sha, train_cmd=train_cmd, project=project, secrets=secrets, image=args.image, keep_alive=args.keep_alive
+        sha=sha,
+        train_cmd=train_cmd,
+        project=project,
+        secrets=secrets,
+        image=args.image,
+        keep_alive=args.keep_alive,
+        skip_fixtures=args.skip_fixtures,
     )
 
     # gcloud requires a file for a multiline startup script. The file only contains
@@ -244,9 +257,6 @@ def main(args: Args) -> None:
             raise SystemExit(str(error)) from error
         if args.dry_run:
             printable = ["<startup-script>" if item.startswith("--metadata-from-file=") else item for item in command]
-            logger.info(
-                f"[dry-run] authenticated as {_run_gcloud('auth', 'list', '--filter=status:ACTIVE', '--format=value(account)')}"
-            )
             logger.info(f"[dry-run] secret mappings (names only): {dict(secrets)}")
             logger.info(f"[dry-run] startup script: {len(rendered)} bytes; SHA={sha}; command={train_cmd}")
             print(shlex.join(printable))

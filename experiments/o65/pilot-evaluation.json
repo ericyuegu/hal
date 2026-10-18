@@ -1,0 +1,12 @@
+{
+  "format": "hal.o65.protocol.v1",
+  "selection": {
+    "seeds": [17, 29],
+    "starts": [{"name": "fd-fox-falco", "stage": 25, "characters": [1, 22]}]
+  },
+  "held_out": {
+    "seeds": [10017, 10029, 10041, 10053, 10067, 10079, 10093, 10111],
+    "starts": [{"name": "bf-fox-falco", "stage": 24, "characters": [1, 22]}]
+  },
+  "max_frames": 7324
+}
