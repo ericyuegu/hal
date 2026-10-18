@@ -18,6 +18,7 @@ from pathlib import Path
 
 import torch
 import tyro
+import wandb
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,7 +71,6 @@ def training_command(
     updates: int,
     checkpoint_every: int,
     warmup: int,
-    protocol: Path | None,
     verify: bool,
 ) -> list[str]:
     command = [
@@ -104,10 +104,8 @@ def training_command(
         "--training.checkpoint-interval",
         str(checkpoint_every),
         "--evaluation-every",
-        "0" if protocol is None else str(checkpoint_every * 4),
+        "0",
     ]
-    if protocol is not None:
-        command.extend(("--evaluation-protocol", str(protocol), "--evaluation-device", "cuda"))
     if verify:
         command.append("--verify-resume")
     return command
@@ -128,7 +126,9 @@ def qualify_pool(rows: list[list[dict[str, float]]]) -> None:
         )
 
 
-def evaluation_command(delivery: Path, checkpoint: Path, protocol: Path, output: Path, *, held_out: bool) -> list[str]:
+def evaluation_command(
+    delivery: Path, checkpoint: Path, protocol: Path, output: Path, *, held_out: bool, simulators: tuple[str, ...]
+) -> list[str]:
     return [
         sys.executable,
         str(ROOT / "scripts/eval_o65.py"),
@@ -151,7 +151,33 @@ def evaluation_command(delivery: Path, checkpoint: Path, protocol: Path, output:
         "1",
         "--device",
         "cuda",
+        "--simulators",
+        *simulators,
     ]
+
+
+def log_evaluation(path: Path, update: int, environment: dict[str, str], *, online: bool) -> None:
+    result = json.loads((path / "results.json").read_text())
+    if result["format"] != "hal.o65.evaluation-results.v1":
+        raise ValueError("unexpected pilot evaluation result")
+    metrics: dict[str, float] = {"global_step": float(update)}
+    for index, group in enumerate(result["groups"]):
+        for simulator, values in group["metrics"].items():
+            prefix = f"evaluation/{simulator}_cell{index}"
+            for name in ("net_stocks_per_min", "win_rate"):
+                for statistic in ("mean", "low", "high"):
+                    value = values[name][statistic]
+                    if value is not None:
+                        metrics[f"{prefix}_{name}_{statistic}"] = float(value)
+            for name in ("matches", "completed_pairs", "net_stock_lcb"):
+                if values[name] is not None:
+                    metrics[f"{prefix}_{name}"] = float(values[name])
+    (path / "wandb-metrics.json").write_text(json.dumps(metrics, indent=2))
+    if online:
+        with wandb.init(project="hal-o65", id=environment["WANDB_RUN_ID"], resume="must"):
+            wandb.define_metric("global_step")
+            wandb.define_metric("*", step_metric="global_step")
+            wandb.log(metrics)
 
 
 def main(args: Args) -> None:
@@ -180,9 +206,11 @@ def main(args: Args) -> None:
             output / "delivery.log",
             environment,
         )
-    # A local installation must pass the same committed manifest identity.
-    if (delivery / "delivery.json").read_bytes() != (ROOT / "experiments/o65/pilot-inputs.json").read_bytes():
-        raise ValueError("installed delivery differs from the committed manifest")
+    execute(
+        [sys.executable, str(ROOT / "scripts/o65_delivery.py"), "--action", "verify", "--output", str(delivery)],
+        output / "verify-delivery.log",
+        environment,
+    )
     environment["PYTHONPATH"] = os.pathsep.join((str(delivery / "msl"), str(ROOT)))
     environment["MSL_CORE_LIBRARY"] = str(delivery / "msl/build/melee_core/python/libmelee_core.so")
     environment["HAL_NATIVE_LIBRARY"] = str(delivery / "libhal_native.so")
@@ -215,7 +243,6 @@ def main(args: Args) -> None:
                 updates=3,
                 checkpoint_every=3,
                 warmup=0,
-                protocol=None,
                 verify=False,
             ),
             output / f"qualify-{size * len(cpus)}.log",
@@ -227,7 +254,14 @@ def main(args: Args) -> None:
     if not args.tiny:
         qualify_pool([row["steady_updates"] for row in qualification])
         execute(
-            evaluation_command(delivery, delivery / "payloads/final.pt", protocol, output / "control", held_out=False),
+            evaluation_command(
+                delivery,
+                delivery / "payloads/final.pt",
+                protocol,
+                output / "control",
+                held_out=False,
+                simulators=("msl", "dolphin"),
+            ),
             output / "control.log",
             environment,
         )
@@ -241,11 +275,10 @@ def main(args: Args) -> None:
         cpus,
         matches=1 if args.tiny else 64,
         groups=2 if args.tiny else 4,
-        updates=updates,
+        updates=kill_update + checkpoint_every,
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 172,
-        protocol=protocol,
-        verify=True,
+        verify=False,
     )
     if args.wandb:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -253,11 +286,34 @@ def main(args: Args) -> None:
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))
     manifest = run / f"checkpoints/update-{kill_update:08d}.json"
-    kill_at_checkpoint(command, manifest, output / "before-kill.log", environment)
-    (output / "kill.json").write_text(
-        json.dumps({"signal": "SIGKILL", "manifest": str(manifest), "update": kill_update})
-    )
-    execute([*command, "--resume", str(manifest)], output / "resumed.log", environment)
+    # Stop at each evaluation boundary, so one GPU never trains and evaluates concurrently.
+    boundaries = range(1, updates + 1) if args.tiny else range(32, updates + 1, 32)
+    previous: Path | None = None
+    for boundary in boundaries:
+        current = command.copy()
+        current[current.index("--updates") + 1] = str(boundary)
+        if previous is not None:
+            current.extend(("--resume", str(previous)))
+        if boundary == kill_update:
+            # Give the child another update to do after publication, so the kill cannot race normal exit.
+            current[current.index("--updates") + 1] = str(boundary + checkpoint_every)
+            kill_at_checkpoint(current, manifest, output / "before-kill.log", environment)
+            (output / "kill.json").write_text(
+                json.dumps({"signal": "SIGKILL", "manifest": str(manifest), "update": kill_update})
+            )
+        else:
+            if boundary == kill_update + checkpoint_every:
+                current.append("--verify-resume")
+            execute(current, output / f"train-{boundary:08d}.log", environment)
+        previous = run / f"checkpoints/update-{boundary:08d}.json"
+        simulators = ("msl", "dolphin") if not args.tiny and boundary % 128 == 0 else ("msl",)
+        result = output / "selection" / f"update-{boundary:08d}"
+        execute(
+            evaluation_command(delivery, previous, protocol, result, held_out=False, simulators=simulators),
+            output / f"evaluation-{boundary:08d}.log",
+            environment,
+        )
+        log_evaluation(result, boundary, environment, online=args.wandb)
     metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     last = next(row for row in reversed(metrics) if "train/warming" in row)
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):
@@ -274,10 +330,12 @@ def main(args: Args) -> None:
                 final_protocol,
                 output / "held-out",
                 held_out=True,
+                simulators=("msl", "dolphin"),
             ),
             output / "held-out.log",
             environment,
         )
+        log_evaluation(output / "held-out", updates, environment, online=args.wandb)
     print(f"O65 complete: {output}; inspect gameplay intervals before claiming a learning signal", flush=True)
 
 

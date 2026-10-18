@@ -183,8 +183,8 @@ MSL branch o65-hal-parity contains cleanup commit
 comments while preserving the public replay ABI. Linux x86-64 and GCC 15.2
 produce library SHA-256
 9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a.
-The frozen pilot delivery manifest continues to identify its original 8fc56d6
-source archive.
+The current pilot delivery manifest pins this commit and its Git archive hash.
+Earlier performance measurements retain their original simulator identity.
 
 Run from the MSL checkout, using the HAL environment as PY:
 

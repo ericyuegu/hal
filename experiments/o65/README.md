@@ -64,3 +64,7 @@ MSL, compares pool sizes, kills training after checkpoint publication, then
 resumes. `--tiny --no-wandb` selects a local functional check. The full pilot
 requires an RTX PRO 6000 and its declared CPU allocation. The
 [input manifest](pilot-inputs.json) identifies the fixed source and data.
+The [hardware protocol](pilot-protocol.md) defines the treatment, frequent MSL
+checks, periodic Dolphin checks, learning criteria, launch, monitoring and
+teardown. Run `bash scripts/launch_o65.sh --dry-run` from the final clean SHA
+to inspect the one-VM request. Publish its required inputs before a real launch.
