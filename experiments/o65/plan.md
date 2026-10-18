@@ -1,10 +1,12 @@
 # O65: self-play PPO in melee-sim-light
 
-Status: plan. Nothing here is implemented or measured yet. Numbers marked
-*est.* come from FLOP counts and assumed utilization, and the pilot replaces
-them with measurements. The worked example uses a single B200 with $D = 16$ and
-$R = 4$. A version of this plan with figures lives at
-<https://claude.ai/artifact/HW926PwvrWtdj9kmKxPEac>.
+Status: the single-GPU proxy loop, native replay parity, paired evaluation,
+and exact resume are implemented and tested locally. RTX 3060 measurements
+cover complete updates through 512 active matches and the BF16 decoder ablation.
+The RTX PRO 6000 learning pilot, O64 production run, two-GPU NCCL path, and
+deployment latency measurements remain open. See [measured results](performance/report.md)
+and [validation](validation.md). Numbers marked *est.* below remain estimates;
+the worked production example uses a B200 with $D = 16$ and $R = 4$.
 
 O65 fine-tunes the O64 production percentile checkpoint with KL-regularized
 self-play PPO. Rollouts run in melee-sim-light (MSL) through HAL's native
@@ -100,6 +102,11 @@ straddles the end of a rollout. Within a rollout:
   $\gamma^{\Delta_j}$;
 - decisions made in the last $D$ frames of a match never execute, so we mask
   them out of the policy and KL losses; GAE still uses their values;
+- decisions in the last $D$ frames of a rollout, in a match that is still
+  running, execute in the next rollout, and we train on all $R$ of their
+  frames. The match occasionally ends before they execute. Their advantage then
+  cannot depend on the unexecuted action, so the gradient stays unbiased and
+  only gains noise;
 - a reset discards the queue, so the new episode begins with neutral actions.
 
 Each decision record holds the observation frame, the decision frame, the
@@ -400,13 +407,16 @@ Per half and per 2 frames at $D = 16, R = 4$ *est.*:
 
 ### Episodes and resets
 
-A finished match resets in place. A fresh reset samples:
+A finished match waits for the next block boundary and then resets in place. Every
+episode therefore begins at a block start, as it does in deployment, and its blocks
+fall on the same episode frames in training and evaluation. The wait averages 64
+frames, under 1% of a match. A fresh reset samples:
 
 - a matchup from the training prior;
 - a stage from the supported set, with Stadium frozen;
 - each player's (identity, character) pair;
 - $\lambda$, $D$ and $R$ for each player;
-- a stock count and starting percents, to mix match phases;
+- a stock count shared by both players, and starting percents, to mix match phases;
 - whether one player is a frozen anchor.
 
 ### Frozen anchors
@@ -763,90 +773,91 @@ one level deep.
 
 ### melee-sim-light
 
-- [ ] Expose the recorded-replay path publicly: the initial seed and per-frame
+- [x] Expose the recorded-replay path publicly: the initial seed and per-frame
       RNG injection from recorded replays. HAL's parity tests use it.
 - [ ] Benchmark on the B200 node's server CPU. The published baseline uses a
       desktop V-cache core.
 - [ ] Measure thread scaling across separate batches stepped in parallel.
-- [ ] Measure save size, add compression, and test save and restore across
+- [x] Measure save size, add compression, and test save and restore across
       batches for determinism.
-- [ ] Confirm that Stadium always runs frozen, and document the character-id
+- [x] Confirm that Stadium always runs frozen, and document the character-id
       space.
 
 ### HAL: simulator boundary (`hal/sim`, torch-free)
 
-- [ ] Integration test of `native_adapter.c` against the real MSL build. Current
-      tests use a stub.
-- [ ] Parity test: replay through MSL and the adapter's 71 columns against
+- [x] Integration tests of `native_adapter.c` against real MSL, plus stub tests
+      for invalid inputs and cleanup.
+- [x] Parity test: replay through MSL and the adapter's 71 columns against
       `hal/data/extract.py`, bitwise on admitted replays.
-- [ ] Parity test: the adapter's reward against `hal/training/returns.py` on the
+- [x] Parity test: the adapter's reward against `hal/training/returns.py` on the
       same replays.
-- [ ] Parity test: the adapter's quantized controller inputs against the Dolphin
+- [x] Parity test: the adapter's quantized controller inputs against the Dolphin
       input path for the same action stream.
-- [ ] Batch restore that projects once, replacing per-lane restores of a full
+- [x] Batch restore that projects once, replacing per-lane restores of a full
       batch.
-- [ ] Adapter output into caller-provided page-locked buffers. Optionally, a
-      multi-frame step that takes $R$ frames of inputs per call.
-- [ ] Shards: one native batch and one thread per shard, with separate buffers,
+- [x] Adapter output into caller-provided page-locked buffers. The loop steps
+      each frame to retain intermediate rewards; multi-frame calls remain optional.
+- [x] Shards: one native batch and one thread per shard, with separate buffers,
       bound to the GPU's socket.
 
 ### HAL: model and inference
 
-- [ ] Widen the conditioner embedding to four inputs with zero columns. A parity
+- [x] Widen the conditioner embedding to four inputs with zero columns. A parity
       test confirms identical outputs to O64 at init for every $\lambda$, $D$
       and $R$.
-- [ ] Critic residual head with the opponent-queue encoder and a
+- [x] Critic residual head with the opponent-queue encoder and a
       zero-initialized output. A parity test confirms $V$ equals `value_head` at
       init.
-- [ ] Per-frame segment ids in trunk varlen attention, decoder history attention
+- [x] Per-frame segment ids in trunk varlen attention, decoder history attention
       and feature construction, with the byte-overwrite test.
-- [ ] GPU `Context` builder from adapter columns, with a parity test against the
+- [x] GPU `Context` builder from adapter columns, with a parity test against the
       current Python feature path.
-- [ ] Block-restart inference: a per-stream trunk KV
+- [x] Block-restart inference: a per-stream trunk KV
       cache with `cache_seqlens` and an incremental decoder history projection.
       A parity test compares log-probs with the full-window pass.
-- [ ] Two compiled decode variants, for 2 and 4 sampled offsets, padded across $D$.
-- [ ] Block restart in Dolphin evaluation and netplay, with the second-cache
+- [x] Two compiled decode variants, for 2 and 4 sampled offsets, padded across $D$.
+- [x] Block restart in Dolphin evaluation and netplay, with the second-cache
       handoff.
 - [ ] Netplay: subtract transport and compute allowance from $D$, and measure
       batch-1 latency and missed deadlines.
 
 ### HAL: RL loop (joins model and simulation)
 
-- [ ] Rollout engine: pool rotation, group decision clocks for mixed $R$, half
+- [x] Rollout engine: pool rotation, group decision clocks for mixed $R$, half
       alternation over shards, resets, frozen anchors and evaluation groups.
-- [ ] Episode sampler: matchup prior, tempered (identity, character) table with
+- [x] Episode sampler: matchup prior, tempered (identity, character) table with
       a data floor, masked and deployment-identity rates, $\lambda$, $D$, $R$,
       stock counts, starting percents and anchor assignment.
-- [ ] Decision records with all fields listed above.
-- [ ] No-grad pass: $\mathrm{KL}_j$ with the button mask, $\pi_{\text{old}}$
+- [x] Decision records with all fields listed above.
+- [x] No-grad pass: $\mathrm{KL}_j$ with the button mask, $\pi_{\text{old}}$
       log-probs, $\pi_{\text{ref}}$ distributions for trained decisions, cached
       critic features.
-- [ ] GAE with $\Delta_j$, bootstrap masks and trace masks, plus time-out and
+- [x] GAE with $\Delta_j$, bootstrap masks and trace masks, plus time-out and
       end-of-rollout bootstrap values.
-- [ ] Joint-ratio PPO with the truncated weight, $L_{\text{KL}}$, decision
+- [x] Joint-ratio PPO with the truncated weight, $L_{\text{KL}}$, decision
       subsampling and masking of unexecuted decisions.
-- [ ] Separate critic optimizer and critic epochs on cached features.
-- [ ] $\lambda$ calibration from warmup advantages.
+- [x] Separate critic optimizer and critic epochs on cached features.
+- [x] $\lambda$ calibration from warmup advantages.
 - [ ] DDP with frozen parameters excluded, a separate critic all-reduce, and
       global loss normalization.
-- [ ] Counter-based RNG with separate domains and logical stream ids.
-- [ ] Sharded checkpoints with an atomic manifest, and resume tests on the next
+- [x] Counter-based RNG with separate domains and logical stream ids.
+- [x] Sharded checkpoints with an atomic manifest, and resume tests on the next
       batch and the next optimizer update.
-- [ ] Anchor snapshot pool.
-- [ ] The metrics above.
+- [x] Anchor snapshot pool.
+- [ ] Complete the production metric set. The proxy logs phase timing, PPO,
+      KL, critic, identity, and simulator diagnostics.
 
 ### Evaluation
 
-- [ ] Periodic Dolphin evaluations against $\pi_{\text{ref}}$ during training.
-- [ ] Selection and held-out seed and start sets.
+- [x] Periodic Dolphin evaluations against $\pi_{\text{ref}}$ during training.
+- [x] Selection and held-out seed and start sets.
 - [ ] MSL against Dolphin event statistics for distinct policy pairs.
 
 ### Experiment
 
-- [ ] `experiments/065_selfplay_ppo.py` holds the RL configuration and loop and
+- [x] `experiments/065_selfplay_ppo.py` holds the RL configuration and loop and
       imports only `hal`. Code moves into `hal` once its interface is stable.
-- [ ] Record the treatment, control and invariant inputs before the first run.
+- [x] Record the treatment, control and invariant inputs before the first run.
 - [ ] Run the simulator validation before RL.
 - [ ] Run the pilot stages in order.
 
