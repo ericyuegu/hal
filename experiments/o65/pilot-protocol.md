@@ -95,8 +95,13 @@ evaluation and startup separately because update throughput excludes them.
 4. Publish a checkpoint every 32 updates. At every boundary, stop the trainer
    and run MSL selection evaluation against pi_ref. At 128, 256, 384 and 512,
    also run Dolphin against that same reference. Evaluation uses the fixed
-   lambda=1 and both cadences. Selection matches have a 7,324-frame budget;
-   they diagnose progress and may not produce scored wins.
+   lambda=1 and both cadences. Selection matches have a 1,924-frame budget
+   (30 seconds of active play plus the countdown and final observation);
+   they diagnose progress and may not produce scored wins. The earlier prep
+   used 7,324 frames. Local eager evaluation measures about 17 total simulator
+   frames per wall second on 132-frame matches, so that budget would consume
+   most of a VM day. This shorter diagnostic budget is a provisional cost
+   choice. The full-match held-out learning criterion remains unchanged.
    These jobs use the same GPU serially, so evaluation cannot exhaust training
    memory or lag behind an unbounded child queue. Reopen the same checkpoint
    and W&B run before the next training segment.
@@ -180,7 +185,7 @@ The instance is `hal-o65-proxy-<first eight HAL SHA digits>`, in project
 `centering-star-502613-k3`, zone `us-central1-b`. It is one on-demand
 g4-standard-48 with one GPU and a 500 GB Hyperdisk Balanced boot disk.
 The GCE max-run-duration is 24 hours. A VM-local systemd timer also forces
-shutdown after 24 hours of startup-script time. At 23h45m, a second timer
+shutdown after 24 hours from VM boot. At 23h45m from boot, a second timer
 kills training and starts cleanup, reserving 15 minutes for an upload bounded
 to 12 minutes plus a 30-second kill allowance.
 
@@ -212,8 +217,8 @@ Delete the VM and its boot disk after results are verified:
 gcloud compute instances delete "$NAME" --project centering-star-502613-k3 --zone us-central1-b --delete-disks=boot --quiet
 ```
 
-Outward actions of a real launch: read GitHub publication refs, gcloud account
-and Secret Manager metadata locally; create exactly one VM and its boot disk
+Outward actions of a real launch: check R2 input availability, read GitHub
+publication refs, gcloud account and Secret Manager metadata locally; create exactly one VM and its boot disk
 with an external IP and the selected service account; read five secret values
 on the VM; configure Docker authentication, pull the pinned Artifact Registry
 image, and install Docker/toolchain packages if missing; clone HAL and the MSL
@@ -225,11 +230,13 @@ change IAM or delete the retained disk. Teardown is the separate command above.
 
 Budget assumption: roughly three times the local 512-match complete-path rate
 gives about 5,500 match-frames/s, or 48 seconds per 1,024-match PPO update.
-Allow 8–16 VM-hours including warmup, process starts, qualification, evaluation,
+Allow 12–24 VM-hours including warmup, process starts, qualification, evaluation,
 resume checks and uploads. This is an estimate; eager evaluation can dominate.
 At the listed US-central on-demand rate of $4.49993/hour, compute costs about
-$36–72, with a 24-hour compute ceiling near $108. Add disk, IP, network and
+$54–108, with a 24-hour compute ceiling near $108. Add disk, IP, network and
 storage charges; disk charges continue after shutdown until deletion.
 The rate was checked on 2026-10-18 in
 [Google's accelerator price table](https://cloud.google.com/products/compute/pricing/accelerator-optimized?hl=en).
 The VM qualification replaces the throughput assumption before any extension.
+Long matches can still exhaust the cap, especially in held-out evaluation;
+that produces incomplete evidence, not a successful learning decision.

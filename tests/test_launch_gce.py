@@ -217,8 +217,8 @@ def test_vm_lifecycle_uploads_before_shutdown(tmp_path: Path, stage: str, code: 
     )
     assert result.returncode == code, result.stdout + result.stderr
     lines = events.read_text().splitlines()
-    assert any("hal-hard-stop --on-active=86400s" in line for line in lines)
-    assert any("hal-job-deadline --on-active=85500s" in line for line in lines)
+    assert any("hal-hard-stop --on-boot=86400s" in line for line in lines)
+    assert any("hal-job-deadline --on-boot=85500s" in line for line in lines)
     assert lines.index("upload") < lines.index("shutdown")
     assert "test-credential" not in result.stdout + result.stderr
     assert not (tmp_path / "run/job.env").exists()

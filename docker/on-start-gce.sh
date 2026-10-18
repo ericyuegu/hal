@@ -41,13 +41,13 @@ install -d -m 0700 /var/lib/hal /run/hal/hal
 exec > >(tee -a /var/log/hal-training.log) 2>&1
 # The kernel's service manager owns the timers even if this startup process hangs.
 if [ "${HAL_MAX_RUN_SECONDS:-0}" -gt 0 ]; then
-  systemd-run --unit=hal-hard-stop --on-active="${HAL_MAX_RUN_SECONDS}s" /sbin/shutdown -h now
+  systemd-run --unit=hal-hard-stop --on-boot="${HAL_MAX_RUN_SECONDS}s" /sbin/shutdown -h now
   cat > /run/hal/deadline.sh <<HAL_DEADLINE
 #!/usr/bin/env bash
 docker kill hal-training || true
 kill -TERM $$
 HAL_DEADLINE
-  systemd-run --unit=hal-job-deadline --on-active="$((HAL_MAX_RUN_SECONDS - 900))s" \
+  systemd-run --unit=hal-job-deadline --on-boot="$((HAL_MAX_RUN_SECONDS - 900))s" \
     /bin/bash /run/hal/deadline.sh
 fi
 

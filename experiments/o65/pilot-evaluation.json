@@ -8,5 +8,5 @@
     "seeds": [10017, 10029, 10041, 10053, 10067, 10079, 10093, 10111],
     "starts": [{"name": "bf-fox-falco", "stage": 24, "characters": [1, 22]}]
   },
-  "max_frames": 7324
+  "max_frames": 1924
 }
