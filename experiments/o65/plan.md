@@ -29,7 +29,6 @@ adapter. Dolphin evaluations run alongside training and confirm the finalists.
 | Episode ends | A match end is terminal. A time-out is a truncation, and the observation carries no timer. |
 | Opponents | About 15% of matches pair the student with a frozen anchor: $\pi_{\text{ref}}$ or a recent snapshot. Only the student side trains. |
 | Identities | (identity, character) pairs drawn with weight $\text{count}^{0.5}$ above a data floor. The masked identity at about 10%. The deployment identity (masked or Master) oversampled to 20 to 25%. |
-| Starting states | Fresh matches, plus a fraction started from human replay states with off-stage, ledge and recovery states oversampled. |
 | Evaluation | An in-loop matchup matrix against frozen anchors in MSL, periodic Dolphin evaluations throughout training, and held-out seeds and starts for the final report. |
 | Hardware | An 8×B200 node for production. The pilot runs on RTX PRO 6000 Blackwell. |
 
@@ -367,9 +366,9 @@ splits into shards of about 125 matches, one native batch and one thread per
 shard. Each shard has its own page-locked input and output buffers. A CUDA event
 on each host-to-device copy gates the shard's next write to that buffer.
 
-Resets and replay fast-forwards run on a separate worker pool. The workers
-prepare start states into standby lanes ahead of time, and a reset swaps a
-prepared lane in. A reset then costs a stepping shard only the swap.
+A finished match resets in place on its shard's thread. If the pilot finds
+resets slow enough to stall a shard, a worker pool can prepare fresh matches in
+standby lanes for the shard to swap in.
 
 ### Data path
 
@@ -409,37 +408,6 @@ A finished match resets in place. A fresh reset samples:
 - $\lambda$, $D$ and $R$ for each player;
 - a stock count and starting percents, to mix match phases;
 - whether one player is a frozen anchor.
-
-### Replay starts
-
-A fraction of resets start from a human replay state. The start changes the
-reset distribution. Actions after the start come from the student and stay
-on-policy.
-
-1. We sample a frame at least 128 frames into an admitted replay, weighting
-   off-stage, ledge and recovery states up. The failure budget puts 91% of
-   deaths at the bottom blast zone, and fresh matches arrive at those states
-   rarely.
-2. A worker replays the recorded inputs and RNG in MSL from game start to that
-   frame, then switches to the simulator's own RNG. At about 120k frames/s per
-   core, a full match takes about 0.1 core-seconds.
-3. The 128 frames MSL produced before the start become the first block's
-   context. The replay's next $D$ actions fill each player's committed queue as
-   a forced prefix, and they receive no policy gradient.
-4. Stage, characters and identities follow the replay, with the usual masking
-   rate. We sample $\lambda$, $D$ and $R$ as for a fresh match.
-
-Replay starts carry risks of their own:
-
-- the human's queued actions can rescue or doom a state before the student acts;
-- a recovery state may already be lost at the sampled $D$;
-- oversampling shifts the training distribution toward rare states;
-- a correct reconstruction under recorded RNG does not show that free-running
-  play from that point matches Dolphin.
-
-We log whether each replay-start outcome was decided within its first $D$
-frames, the success rate from those starts, and how often ordinary play arrives
-at the same kinds of states.
 
 ### Frozen anchors
 
@@ -529,8 +497,6 @@ prefill utilization remain unmeasured, and the pilot measures them first.
   match-frames/s per GPU, or 3 to 4 shard threads per GPU at an assumed 50k
   frames/s per server core *est.* That makes about 32 cores per node, bound to
   each GPU's socket.
-- Reset and replay workers need a few more cores per GPU, at about 0.1
-  core-seconds per replay start.
 - The pool needs about 1.5 to 2 MB of host RAM per match for the simulator
   arena and its config, or about 64 GB per node at 32k matches.
 - Feature building runs on the GPU, which removes the Python per-frame path from
@@ -589,7 +555,7 @@ above or below the critical batch size.
 ## Critic warmup
 
 - **Rollouts.** $\pi_{\text{ref}}$ plays under PPO's sampling: $u^* = 0.95$,
-  identities, $D$, $R$, $\lambda$ and starting states. At init the
+  identities, $D$, $R$, $\lambda$, stock counts and starting percents. At init the
   student equals $\pi_{\text{ref}}$ for every $\lambda$, so these rollouts are
   on-policy for all of them.
 - **Training.** Only the critic heads train, on detached features and with
@@ -606,7 +572,7 @@ above or below the critical batch size.
   continues until each match has advanced about one match length. A match
   takes about 43 rollouts of 256 frames and rolls out every $G$-th update, so
   that comes to $43 \times G = 172$ updates, or about 5 minutes on the node at
-  rollout-only cost *est.* Stock counts, starting percents and replay starts mix
+  rollout-only cost *est.* Stock counts and starting percents mix
   phases further.
 - **Ending.** Warmup ends once the critic's explained variance on fresh rollouts
   plateaus and the phases have mixed.
@@ -622,9 +588,8 @@ stays out of the checkpoint. Each rank writes a shard holding:
 3. each match's last 128 `HalFrame` records, both players' committed queues and
    the group's decision clock;
 4. episode metadata: $\lambda$, $D$, $R$, identities, characters, anchor
-   assignments, start type, episode counters and stable logical stream ids;
-5. the standby lanes prepared by the reset workers;
-6. the pool schedule position, the evaluation schedule position and the anchor
+   assignments, episode counters and stable logical stream ids;
+5. the pool schedule position, the evaluation schedule position and the anchor
    pool.
 
 After a barrier confirms every shard is durable, rank 0 writes a manifest with
@@ -639,7 +604,7 @@ batch restore that projects once.
 
 Every draw comes from a counter-based generator keyed by (run seed, domain,
 logical stream id, episode, frame, offset, factor). The domains separate action
-sampling, reset choices, replay-start choices, decision subsampling, minibatch
+sampling, reset choices, decision subsampling, minibatch
 placement, critic shuffling and evaluation. Logical stream ids survive
 rebatching and restore, so the generator has no state to save.
 
@@ -684,8 +649,8 @@ handoff, and the rate of missed deadlines at each $D$ and $R$.
 
 - Bitwise parity of the adapter's columns and rewards against
   `hal/data/extract.py` and `hal/training/returns.py` on admitted replays.
-- Replay-start reconstruction followed by free-running continuation, checked for
-  determinism across save and restore.
+- Free-running play from a fresh match, checked for determinism across save and
+  restore.
 - Event statistics in MSL and Dolphin for the same pairs of distinct policies:
   deaths, ledge grabs, techs, match length and stock differential. A symmetric
   $\pi_{\text{ref}}$ ditto can stay near 50% in a wrong simulator, so the
@@ -726,12 +691,12 @@ Each stage needs its evidence before the next begins.
 | Stage | Evidence |
 | --- | --- |
 | Math checks | KL gradients against an enumerated objective, joint ratios, delayed-action credit on a toy delay task, terminal and truncation masks |
-| State and inference | No attention across episodes, cached against full-window log-probs, queue and reset parity, replay-start reconstruction |
+| State and inference | No attention across episodes, cached against full-window log-probs, queue and reset parity |
 | Debug loop | The 17M proxy architecture end to end on one GPU: loop, logging, checkpoint and resume |
 | Minimal learning | The 248M checkpoint on one matchup and stage, fixed $D$, $R$ and $\lambda$, joint PPO, separate critic optimizer |
 | Gameplay | Improvement against frozen anchors in MSL and in Dolphin |
 | Scaling | All 11 $(D, R)$ configurations mixed in each group, real two-GPU NCCL training, full-pool checkpoint and restore, complete-path throughput |
-| Expanded run | $\lambda$ range, identities, replay starts and anchors, each added with its own comparison |
+| Expanded run | $\lambda$ range, identities and anchors, each added with its own comparison |
 
 ## Metrics
 
@@ -742,7 +707,6 @@ Each stage needs its evidence before the next begins.
 | Critic | explained variance on fresh features before fitting, by $R$ and by position in the block; value against Monte Carlo returns; value loss; advantage mean and standard deviation by $D$ and $R$; end-of-rollout bootstrap gap |
 | Numerics | $\log(\mu/\pi_{\text{old}})$ per decision, its quantiles by $D$ and $R$, fraction of truncated weights |
 | Gameplay | net stocks, damage, win rate and match length against each anchor, by $\lambda$ bin, $D$ and $R$, in MSL and Dolphin |
-| Replay starts | fraction by state tag, outcomes decided within $D$ frames, success rate, frequency of the same states in ordinary play |
 | Systems | time per phase, decode and training utilization, decode batch sizes, simulator frames/s per shard, reset wait time, host-to-device bytes, peak HBM per phase, per-rank rollout time |
 | Data | identity, character, stage and matchup counts, anchor share, time-outs, resets per update |
 
@@ -777,9 +741,8 @@ one level deep.
 
 ### melee-sim-light
 
-- [ ] Expose the replay-start path publicly: the initial seed and per-frame RNG
-      injection from recorded replays, then a switch to the simulator's own RNG.
-      HAL's parity tests and RL replay starts both use it.
+- [ ] Expose the recorded-replay path publicly: the initial seed and per-frame
+      RNG injection from recorded replays. HAL's parity tests use it.
 - [ ] Benchmark on the B200 node's server CPU. The published baseline uses a
       desktop V-cache core.
 - [ ] Measure thread scaling across separate batches stepped in parallel.
@@ -804,7 +767,6 @@ one level deep.
       multi-frame step that takes $R$ frames of inputs per call.
 - [ ] Shards: one native batch and one thread per shard, with separate buffers,
       bound to the GPU's socket.
-- [ ] Reset and replay workers that prepare standby lanes.
 
 ### HAL: model and inference
 
@@ -834,8 +796,6 @@ one level deep.
 - [ ] Episode sampler: matchup prior, tempered (identity, character) table with
       a data floor, masked and deployment-identity rates, $\lambda$, $D$, $R$,
       stock counts, starting percents and anchor assignment.
-- [ ] Replay-start sampler: an index of admitted replay frames tagged off-stage,
-      ledge and recovery, with oversampling weights.
 - [ ] Decision records with all fields listed above.
 - [ ] No-grad pass: $\mathrm{KL}_j$ with the button mask, $\pi_{\text{old}}$
       log-probs, $\pi_{\text{ref}}$ distributions for trained decisions, cached
@@ -882,7 +842,6 @@ one level deep.
 - Whether $\mu$ can replace $\pi_{\text{old}}$. If the measured gap is tiny, the
   no-grad pass runs only $\pi_{\text{ref}}$ and saves about 0.8 s of the 5.5 s
   update. The student's per-factor distributions would then come from rollout.
-- Replay-start fraction and state oversampling weights
 - Anchor share and snapshot refresh interval
 - $\lambda_{\text{gae}}$, if 0.99 per frame proves too noisy
 - PPO $\epsilon$ and the learning rate
