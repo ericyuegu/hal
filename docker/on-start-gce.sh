@@ -6,8 +6,10 @@ set -euo pipefail
 log() { echo "[hal-gce] $*"; }
 
 finish() {
+  # Keep a late TERM from interrupting upload. Its timeout and the hard stop still apply.
+  trap '' TERM INT
   code="$1"
-  trap - EXIT ERR TERM INT
+  trap - EXIT ERR
   set +e
   systemctl stop hal-job-deadline.timer 2>/dev/null
   if [ -n "${HAL_RESULTS_PREFIX:-}" ]; then
@@ -42,10 +44,9 @@ exec > >(tee -a /var/log/hal-training.log) 2>&1
 # The kernel's service manager owns the timers even if this startup process hangs.
 if [ "${HAL_MAX_RUN_SECONDS:-0}" -gt 0 ]; then
   systemd-run --unit=hal-hard-stop --on-boot="${HAL_MAX_RUN_SECONDS}s" /sbin/shutdown -h now
-  cat > /run/hal/deadline.sh <<HAL_DEADLINE
+  cat > /run/hal/deadline.sh <<'HAL_DEADLINE'
 #!/usr/bin/env bash
 docker kill hal-training || true
-kill -TERM $$
 HAL_DEADLINE
   systemd-run --unit=hal-job-deadline --on-boot="$((HAL_MAX_RUN_SECONDS - 900))s" \
     /bin/bash /run/hal/deadline.sh

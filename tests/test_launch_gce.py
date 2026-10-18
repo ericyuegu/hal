@@ -168,7 +168,7 @@ def test_startup_preserves_results_and_supports_targeted_fixtures() -> None:
     subprocess.run(["bash", "-n"], input=runtime, text=True, check=True)
 
 
-@pytest.mark.parametrize("stage,code", [("ok", 0), ("training", 3), ("pull", 4), ("upload", 1)])
+@pytest.mark.parametrize("stage,code", [("ok", 0), ("training", 3), ("pull", 4), ("upload", 1), ("late-term", 0)])
 def test_vm_lifecycle_uploads_before_shutdown(tmp_path: Path, stage: str, code: int) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -177,7 +177,9 @@ def test_vm_lifecycle_uploads_before_shutdown(tmp_path: Path, stage: str, code: 
         "gcloud": 'printf "test-credential"\n',
         "nvidia-smi": "true\n",
         "systemd-run": 'echo "timer $*" >> "$EVENTS"\n',
-        "systemctl": 'echo "cancel $*" >> "$EVENTS"\n',
+        "systemctl": (
+            'echo "cancel $*" >> "$EVENTS"\nif [[ "$FAIL_STAGE" == late-term ]]; then kill -TERM "$PPID"; fi\n'
+        ),
         "shutdown": 'echo shutdown >> "$EVENTS"\n',
         "docker": (
             'echo "docker $*" >> "$EVENTS"\n'
