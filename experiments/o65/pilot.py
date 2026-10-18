@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 
 import torch
 import tyro
@@ -112,14 +113,19 @@ def training_command(
 
 
 def qualify_pool(rows: list[list[dict[str, float]]]) -> None:
+    if len(rows) != 3 or any(not run for run in rows):
+        raise ValueError("pool qualification requires three nonempty candidates")
     rates = []
     for run in rows:
-        rate = sum(row["systems/match_frames_per_second"] for row in run) / len(run)
-        if not math.isfinite(rate) or rate <= 0:
+        samples = [row["systems/match_frames_per_second"] for row in run]
+        if any(not math.isfinite(rate) or rate <= 0 for rate in samples):
             raise ValueError("pool qualification requires finite positive throughput")
-        if any(row["systems/peak_reserved_bytes"] >= 80 * 2**30 for row in run):
+        memory = [row["systems/peak_reserved_bytes"] for row in run]
+        if any(not math.isfinite(value) or value < 0 for value in memory):
+            raise ValueError("pool qualification requires finite nonnegative memory")
+        if any(value >= 80 * 2**30 for value in memory):
             raise ValueError("pool qualification exceeded the 80 GiB memory limit")
-        rates.append(rate)
+        rates.append(sum(samples) / len(samples))
     if rates[-1] < 0.9 * max(rates):
         raise ValueError(
             "the planned 1024-match pool is over 10% slower; review throughput.json before changing the pool"
@@ -127,7 +133,13 @@ def qualify_pool(rows: list[list[dict[str, float]]]) -> None:
 
 
 def evaluation_command(
-    delivery: Path, checkpoint: Path, protocol: Path, output: Path, *, held_out: bool, simulators: tuple[str, ...]
+    delivery: Path,
+    checkpoint: Path,
+    protocol: Path,
+    output: Path,
+    *,
+    held_out: bool,
+    simulators: tuple[Literal["msl", "dolphin"], ...],
 ) -> list[str]:
     return [
         sys.executable,
@@ -158,12 +170,12 @@ def evaluation_command(
 
 def log_evaluation(path: Path, update: int, environment: dict[str, str], *, online: bool) -> None:
     result = json.loads((path / "results.json").read_text())
-    if result["format"] != "hal.o65.evaluation-results.v1":
+    if result["format"] != "hal.o65.evaluation-results.v1" or result["split"] not in ("selection", "held_out"):
         raise ValueError("unexpected pilot evaluation result")
     metrics: dict[str, float] = {"global_step": float(update)}
     for index, group in enumerate(result["groups"]):
         for simulator, values in group["metrics"].items():
-            prefix = f"evaluation/{simulator}_cell{index}"
+            prefix = f"evaluation/{result['split']}_{simulator}_cell{index}"
             for name in ("net_stocks_per_min", "win_rate"):
                 for statistic in ("mean", "low", "high"):
                     value = values[name][statistic]
@@ -191,6 +203,8 @@ def main(args: Args) -> None:
     if not args.tiny:
         if not args.wandb:
             raise ValueError("the hardware pilot requires W&B logging")
+        if not os.environ.get("WANDB_API_KEY"):
+            raise ValueError("the hardware pilot requires WANDB_API_KEY")
         if (
             len(available) != 48
             or torch.cuda.device_count() != 1
@@ -306,7 +320,9 @@ def main(args: Args) -> None:
                 current.append("--verify-resume")
             execute(current, output / f"train-{boundary:08d}.log", environment)
         previous = run / f"checkpoints/update-{boundary:08d}.json"
-        simulators = ("msl", "dolphin") if not args.tiny and boundary % 128 == 0 else ("msl",)
+        simulators: tuple[Literal["msl", "dolphin"], ...] = (
+            ("msl", "dolphin") if not args.tiny and boundary % 128 == 0 else ("msl",)
+        )
         result = output / "selection" / f"update-{boundary:08d}"
         execute(
             evaluation_command(delivery, previous, protocol, result, held_out=False, simulators=simulators),

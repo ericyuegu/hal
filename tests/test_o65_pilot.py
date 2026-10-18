@@ -53,6 +53,16 @@ def test_qualification_rejects_bad_scaling_and_memory() -> None:
         _MODULE.qualify_pool([row(3000), row(5000), row(5100, 80)])
     with pytest.raises(ValueError, match="finite positive"):
         _MODULE.qualify_pool([row(3000), row(5000), row(float("nan"))])
+    with pytest.raises(ValueError, match="finite nonnegative memory"):
+        _MODULE.qualify_pool(
+            [
+                row(3000),
+                row(5000),
+                [{"systems/match_frames_per_second": 5000, "systems/peak_reserved_bytes": float("nan")}],
+            ]
+        )
+    with pytest.raises(ValueError, match="nonempty candidates"):
+        _MODULE.qualify_pool([row(3000), [], row(5000)])
 
 
 def test_pilot_uses_separate_evaluation_and_deterministic_training(tmp_path: Path) -> None:
@@ -75,6 +85,7 @@ def test_pilot_logs_existing_interval_names(tmp_path: Path) -> None:
         json.dumps(
             {
                 "format": "hal.o65.evaluation-results.v1",
+                "split": "selection",
                 "groups": [
                     {
                         "metrics": {
@@ -93,5 +104,5 @@ def test_pilot_logs_existing_interval_names(tmp_path: Path) -> None:
     )
     _MODULE.log_evaluation(tmp_path, 32, {}, online=False)
     metrics = json.loads((tmp_path / "wandb-metrics.json").read_text())
-    assert metrics["evaluation/msl_cell0_win_rate_low"] == 0.5
-    assert metrics["evaluation/msl_cell0_net_stocks_per_min_high"] == 0.7
+    assert metrics["evaluation/selection_msl_cell0_win_rate_low"] == 0.5
+    assert metrics["evaluation/selection_msl_cell0_net_stocks_per_min_high"] == 0.7
