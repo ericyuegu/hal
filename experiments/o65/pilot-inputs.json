@@ -1,11 +1,8 @@
 {
-  "format": "hal.o65.delivery.v1",
-  "msl_commit": "8fc56d6f2523e978bf6037d8147c57778bd206fa",
-  "source": {
-    "key": "o65/pilot/v1/msl-8fc56d6f2523e978bf6037d8147c57778bd206fa-adbd1146b67a28ccd665bb99740653a5e46fbc2df48eaf2413b9af2fee32d69f.tar",
-    "sha256": "adbd1146b67a28ccd665bb99740653a5e46fbc2df48eaf2413b9af2fee32d69f",
-    "size_bytes": 14336000
-  },
+  "format": "hal.o65.delivery.v2",
+  "msl_commit": "2dbca5e3214d88859ac80333cc19caa328d4be4a",
+  "msl_repository": "https://github.com/ericyuegu/melee-sim-light.git",
+  "source_sha256": "3da991920685a9702cee22ae8b78184bb5b356acb0e1c90a9ead85d4298fc4d3",
   "inputs": {
     "key": "o65/pilot/v1/inputs-47332f2c9738f8d0a61087a36cae8d1df699fa2662760bba8e4b3796a8efd253.tar",
     "sha256": "47332f2c9738f8d0a61087a36cae8d1df699fa2662760bba8e4b3796a8efd253",

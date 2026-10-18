@@ -17,7 +17,8 @@ import tyro
 
 from hal import r2
 
-MSL_COMMIT = "8fc56d6f2523e978bf6037d8147c57778bd206fa"
+MSL_COMMIT = "2dbca5e3214d88859ac80333cc19caa328d4be4a"
+MSL_REPOSITORY = "https://github.com/ericyuegu/melee-sim-light.git"
 PROXY_KEY = (
     "runs/261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-"
     "dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30/final.pt"
@@ -57,7 +58,8 @@ class Blob:
 class Manifest:
     format: str
     msl_commit: str
-    source: Blob
+    msl_repository: str
+    source_sha256: str
     inputs: Blob
     checkpoint: Blob
     game_manifest_sha256: str
@@ -66,9 +68,14 @@ class Manifest:
     sampler_source_sha256: str
 
     def __post_init__(self) -> None:
-        if self.format != "hal.o65.delivery.v1" or self.msl_commit != MSL_COMMIT:
+        if (
+            self.format != "hal.o65.delivery.v2"
+            or self.msl_commit != MSL_COMMIT
+            or self.msl_repository != MSL_REPOSITORY
+        ):
             raise ValueError("unsupported O65 delivery identity")
         for value in (
+            self.source_sha256,
             self.game_manifest_sha256,
             self.statistics_sha256,
             self.sampler_sha256,
@@ -86,7 +93,7 @@ def read_manifest(path: Path) -> Manifest:
     raw = json.loads(path.read_text())
     if not isinstance(raw, dict) or set(raw) != {f.name for f in dataclasses.fields(Manifest)}:
         raise ValueError("invalid O65 delivery manifest fields")
-    for name in ("source", "inputs", "checkpoint"):
+    for name in ("inputs", "checkpoint"):
         value = raw[name]
         if not isinstance(value, dict) or set(value) != {f.name for f in dataclasses.fields(Blob)}:
             raise ValueError("invalid O65 blob fields")
@@ -140,9 +147,10 @@ def prepare(msl: Path, root: Path, checkpoint: Path, output: Path, manifest_path
                 archive.addfile(info, data)
     source_hash, inputs_hash = sha256(source), sha256(inputs)
     manifest = Manifest(
-        "hal.o65.delivery.v1",
+        "hal.o65.delivery.v2",
         commit,
-        Blob(f"o65/pilot/v1/msl-{commit}-{source_hash}.tar", source_hash, source.stat().st_size),
+        MSL_REPOSITORY,
+        source_hash,
         Blob(f"o65/pilot/v1/inputs-{inputs_hash}.tar", inputs_hash, inputs.stat().st_size),
         Blob(PROXY_KEY, PROXY_SHA256, checkpoint.stat().st_size),
         sha256(msl / "data/raw/manifest.json"),
@@ -152,6 +160,19 @@ def prepare(msl: Path, root: Path, checkpoint: Path, output: Path, manifest_path
     )
     manifest_path.write_text(json.dumps(dataclasses.asdict(manifest), indent=2) + "\n")
     (output / "SHA256SUMS").write_text(f"{source_hash}  msl-source.tar\n{inputs_hash}  inputs.tar\n")
+
+
+def verify_source(msl: Path, expected_commit: str, expected_sha256: str, archive: Path) -> None:
+    commit = subprocess.check_output(["git", "-C", str(msl), "rev-parse", "HEAD"], text=True).strip()
+    if commit != expected_commit:
+        raise ValueError("cloned MSL commit mismatch")
+    if subprocess.check_output(["git", "-C", str(msl), "status", "--porcelain", "--untracked-files=no"]):
+        raise ValueError("MSL tracked source is dirty")
+    subprocess.run(
+        ["git", "-C", str(msl), "archive", "--format=tar", f"--output={archive.resolve()}", commit], check=True
+    )
+    if sha256(archive) != expected_sha256:
+        raise ValueError("cloned MSL source archive mismatch")
 
 
 def install(manifest_path: Path, root: Path, output: Path, local_payloads: Path | None = None) -> None:
@@ -165,7 +186,6 @@ def install(manifest_path: Path, root: Path, output: Path, local_payloads: Path 
     cache = output / "payloads"
     cache.mkdir()
     for name, blob in (
-        ("msl-source.tar", manifest.source),
         ("inputs.tar", manifest.inputs),
         ("final.pt", manifest.checkpoint),
     ):
@@ -176,7 +196,24 @@ def install(manifest_path: Path, root: Path, output: Path, local_payloads: Path 
             # A hard link keeps local validation read-only and avoids another checkpoint copy.
             path.hardlink_to(local_payloads / name)
         verify_blob(path, blob)
-    extract(cache / "msl-source.tar", output / "msl")
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--single-branch",
+            "--branch",
+            "o65-hal-parity",
+            manifest.msl_repository,
+            str(output / "msl"),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(output / "msl"), "checkout", "--quiet", "--detach", manifest.msl_commit], check=True
+    )
+    verify_source(output / "msl", manifest.msl_commit, manifest.source_sha256, cache / "msl-source.tar")
     extract(cache / "inputs.tar", output / "inputs")
     stats = output / "inputs/hal" / STATS_PATH
     data = output / "inputs/msl/data"
@@ -196,10 +233,37 @@ def install(manifest_path: Path, root: Path, output: Path, local_payloads: Path 
     (output / "delivery.json").write_bytes(manifest_path.read_bytes())
 
 
+def verify_installation(manifest_path: Path, root: Path, output: Path) -> None:
+    manifest = read_manifest(manifest_path)
+    if (output / "delivery.json").read_bytes() != manifest_path.read_bytes():
+        raise ValueError("installed delivery differs from the committed manifest")
+    for name, blob in (("inputs.tar", manifest.inputs), ("final.pt", manifest.checkpoint)):
+        verify_blob(output / "payloads" / name, blob)
+    for path, expected in (
+        (root / SAMPLER_PATH, manifest.sampler_sha256),
+        (root / SAMPLER_SOURCE_PATH, manifest.sampler_source_sha256),
+        (root / STATS_PATH, manifest.statistics_sha256),
+        (output / "inputs/hal" / STATS_PATH, manifest.statistics_sha256),
+        (output / "inputs/msl/data/raw/manifest.json", manifest.game_manifest_sha256),
+    ):
+        if sha256(path) != expected:
+            raise ValueError(f"installed input identity mismatch: {path}")
+    verify_source(output / "msl", manifest.msl_commit, manifest.source_sha256, output / "payloads/msl-source.tar")
+
+
+def check_remote(manifest_path: Path) -> None:
+    """Check availability before allocation; install still verifies the downloaded bytes."""
+    manifest = read_manifest(manifest_path)
+    client = r2.client(timeout_seconds=30)
+    for blob in (manifest.inputs, manifest.checkpoint):
+        if client.head_object(Bucket=r2.bucket(), Key=blob.key)["ContentLength"] != blob.size_bytes:
+            raise ValueError(f"remote artifact size mismatch: {blob.key}")
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    action: Literal["prepare", "install"]
-    output: Path
+    action: Literal["prepare", "install", "verify", "check-remote"]
+    output: Path | None = None
     manifest: Path = Path("experiments/o65/pilot-inputs.json")
     root: Path = Path(".")
     msl: Path = Path.home() / "src/melee-sim-light"
@@ -208,10 +272,17 @@ class Args:
 
 
 def main(args: Args) -> None:
+    if args.action == "check-remote":
+        check_remote(args.manifest)
+        return
+    if args.output is None:
+        raise ValueError("--output is required for prepare, install and verify")
     if args.action == "prepare":
         prepare(args.msl, args.root, args.checkpoint, args.output, args.manifest)
-    else:
+    elif args.action == "install":
         install(args.manifest, args.root, args.output, args.local_payloads)
+    else:
+        verify_installation(args.manifest, args.root, args.output)
 
 
 if __name__ == "__main__":

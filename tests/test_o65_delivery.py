@@ -2,6 +2,7 @@ import dataclasses
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -24,7 +25,8 @@ MANIFEST = Path(__file__).parents[1] / "experiments/o65/pilot-inputs.json"
 
 def test_committed_delivery_manifest_is_strict(tmp_path: Path) -> None:
     manifest = read_manifest(MANIFEST)
-    assert manifest.msl_commit == "8fc56d6f2523e978bf6037d8147c57778bd206fa"
+    assert manifest.msl_commit == "2dbca5e3214d88859ac80333cc19caa328d4be4a"
+    assert manifest.msl_repository == "https://github.com/ericyuegu/melee-sim-light.git"
     raw = dataclasses.asdict(manifest)
     raw["checkpoint"]["sha256"] = "0" * 64
     path = tmp_path / "manifest.json"
@@ -36,6 +38,55 @@ def test_committed_delivery_manifest_is_strict(tmp_path: Path) -> None:
     path.write_text(json.dumps(raw))
     with pytest.raises(ValueError, match="blob fields"):
         read_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "field,value", [("msl_commit", "8fc56d6"), ("msl_repository", "https://github.com/kyhavlov/melee-sim-light.git")]
+)
+def test_delivery_rejects_wrong_source(tmp_path: Path, field: str, value: str) -> None:
+    raw = json.loads(MANIFEST.read_text())
+    raw[field] = value
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="delivery identity"):
+        read_manifest(path)
+
+
+def test_cloned_source_checks_commit_archive_and_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    source = repo / "source.c"
+    source.write_text("qualified source\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "Source",
+        ],
+        check=True,
+    )
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    archive = tmp_path / "source.tar"
+    subprocess.run(["git", "-C", str(repo), "archive", f"--output={archive}", "HEAD"], check=True)
+    digest = sha256(archive)
+    _MODULE.verify_source(repo, commit, digest, archive)
+    with pytest.raises(ValueError, match="commit mismatch"):
+        _MODULE.verify_source(repo, "0" * 40, digest, archive)
+    with pytest.raises(ValueError, match="archive mismatch"):
+        _MODULE.verify_source(repo, commit, "0" * 64, archive)
+    source.write_text("changed source\n")
+    with pytest.raises(ValueError, match="source is dirty"):
+        _MODULE.verify_source(repo, commit, digest, archive)
 
 
 def test_mismatch_rejected_before_extraction(tmp_path: Path) -> None:
