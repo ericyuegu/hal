@@ -221,3 +221,138 @@ and needs a separate experiment.
 
 Production O64 gameplay, the RTX PRO 6000 learning pilot, two-GPU NCCL training,
 reset-heavy throughput, and deployment deadlines still need qualification.
+
+## RTX PRO 6000 pilot preparation, 2026-10-18
+
+The [protocol](pilot-protocol.md) now defines the treatment, fixed control,
+input identities, qualification, warmup, evaluation schedule, resume check,
+learning criterion, launch, monitoring and teardown. The delivery manifest
+pins MSL 2dbca5e and verifies its commit and Git archive. The launch uses a
+container digest, one g4-standard-48 and a 24-hour cap. No VM was created,
+no input was uploaded, and no Git commit was pushed during preparation.
+
+The final code changes end at b03e36d9de0c18b1fffe077d11eb359952d9079f.
+The handoff includes a later documentation commit; the final report records
+its exact launch SHA. The launcher uses the clean HEAD, checks publication
+before allocation, and the VM verifies that SHA after checkout.
+
+Local validation uses the RTX 3060, Python 3.14.4 and Torch 2.11.0+cu130.
+The clean tiny run uses source 839f9c63bb4d910032dba8e8cc4dbb778b506549.
+Later code changes concern VM cleanup; the later diagnostic budget change
+does not affect tiny mode, which fixes its own budget at 132 frames.
+
+```sh
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 bash docker/o65-pilot.sh \
+  --output runs/o65-prep-tiny-final --tiny --no-wandb \
+  --local-delivery runs/o65-prep-final-installed
+```
+
+Result: passed. Qualification steady rates at 2, 4 and 8 active matches are
+124.69, 188.59 and 255.01 match-frames/s. Training reaches update 4 after a
+forced process-group kill at update 2 and restore. All 16 scheduled MSL matches
+publish; source_dirty is false in all four reports. These 132-frame matches
+exercise publication, not learning. Their win rates and interval bounds are
+null. Tiny mode bypasses critic warmup and online W&B.
+
+At update 3, exact resume compares the next batch and optimizer update:
+
+| Check | Result |
+| --- | --- |
+| Next batch, both paths | `41613e2a1f672872d5ea096953389fd895e7fe79cda9310574d8b263815b2716` |
+| Optimizers and scheduler, both paths | `fd1e5e28bfe6de593cfb43715796cf27b4e9d1e11f43a65a782e444aff3e4153` |
+| Maximum parameter error | 0 |
+
+The pinned container is
+`us-west1-docker.pkg.dev/centering-star-502613-k3/hal-netplay/hal-netplay-runner@sha256:93b281d12c0614516eca8b5a508dae2723da80e53933e9616bb08d6e926f3016`.
+Its locked environment sync passes. Its Python is 3.14.3, with Torch
+2.11.0+cu130 and NumPy 2.1.3. A network-disabled MSL and adapter build passes
+inside that image with GCC 13.3. The host build passes with GCC 15.2.
+The image's baked entrypoint and source are replaced at boot. Online W&B,
+VM timers, cloud IAM, quota and real image pulls still need VM qualification.
+
+The O63 checkpoint was also downloaded directly from R2: 156,426,408 bytes,
+SHA-256 `65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6`.
+The input archive is absent from R2 (HEAD returns 404). Its verified local
+copy and explicit publication command are recorded in the protocol. The
+launch wrapper checks remote availability before requesting a VM.
+
+Final validation commands use TMPDIR under the supplied scratch directory:
+
+```sh
+uv run ruff format --check .
+uv run ruff check .
+uv run ty check --python-version 3.14 --error-on-warning \
+  hal experiments/059_muon_action_sequence.py scripts \
+  experiments/065_selfplay_ppo.py experiments/o65/pilot.py \
+  tests/test_o65_delivery.py tests/test_o65_pilot.py \
+  tests/test_o65_results.py tests/test_launch_gce.py
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
+HAL_O65_PROXY_CHECKPOINT=runs/proxy/final.pt \
+uv run pytest -q -rs -m 'not integration' --basetemp="$TMPDIR/handoff-final"
+```
+
+| Command | Final result |
+| --- | --- |
+| Ruff format check | Passed, 372 files |
+| Ruff lint | Passed |
+| Ty, required targets and new/changed Python files | Passed, zero diagnostics |
+| Non-integration suite | 2,463 passed, 8 skipped, 84 deselected, 26 warnings; 254.05 s |
+| Four preparation test files | 41 passed, no skips |
+| Native integration | 19 passed, 88 deselected, no skips; 80.92 s |
+| Dolphin integration | 8 passed, 6 deselected, no skips; 57.00 s |
+| Launch dry run and outer/inner Bash syntax checks | Passed |
+
+The eight skips are the same eight named above: two production GPU profile
+checks and six missing-v7 schema checks. The six required-fixture skips remain
+a handoff failure. No substitute fixture or schema was used.
+
+Native and Dolphin commands are:
+
+```sh
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
+HAL_REQUIRE_INTEGRATION=1 HAL_O65_PROXY_CHECKPOINT=runs/proxy/final.pt \
+HAL_MSL_SOURCE="$PWD/runs/o65-prep-final-installed/msl" \
+PYTHONPATH="$PWD/runs/o65-prep-final-installed/msl:$PWD" xvfb-run -a \
+uv run pytest -q -rs tests/test_native_sim_integration.py tests/test_065_loop.py \
+  -m integration --basetemp="$TMPDIR/native-complete"
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 TORCHINDUCTOR_COMPILE_THREADS=1 \
+HAL_REQUIRE_INTEGRATION=1 xvfb-run -a uv run pytest -q -rs \
+  tests/test_roundtrip.py tests/test_session_cleanup.py \
+  -m integration --basetemp="$TMPDIR/dolphin-final"
+```
+
+Preparation failures and corrections:
+
+- The first local install lacked final.pt in its local-payload directory.
+  Linking the verified checkpoint there and using a fresh output succeeds.
+- The default GHCR image rejects an anonymous manifest request. The launch
+  now selects the existing Artifact Registry image by digest. The remote
+  describe command fails because local gcloud authentication needs renewal.
+- Offline container sync cannot obtain uncached setuptools/wheel build
+  requirements. Normal `uv sync --locked` succeeds with network access.
+- The first result-helper test collection could not import the scripts
+  namespace. It now uses the repository's existing file-module test loader.
+- The first tiny run rejects resume after HEAD changes during the run. The
+  complete repeat holds HEAD fixed and passes, including exact resume.
+- A new late-TERM regression first fails with signal 15. Cleanup now ignores
+  late TERM, and the deadline service no longer signals the startup shell.
+  All 41 focused cases and the final full suite pass after this correction.
+- Two native attempts each return 12 failed, 7 passed, 88 deselected because
+  the fresh clone has LFS pointers for the required recordings. The first
+  hydration script also selects a module name and fails before copying.
+  The corrected script verifies all 12 existing recordings against each
+  committed LFS size and SHA-256 before copying them into this worktree.
+  Strict verification initially rejects the stale LFS index after manual
+  copying. Refreshing that index leaves identical Git blobs and a clean tree;
+  strict delivery verification and the complete native suite then pass.
+- The first full suite passes 2,462 tests with the same eight skips. The
+  final repeat includes the new late-TERM case and passes 2,463 tests.
+
+Self-review examines the plan-to-HEAD diff and its risks. Fixes reject
+non-finite qualification memory, separate held-out W&B keys from selection,
+anchor timers to VM boot, protect upload from a late signal, and reduce the
+frequent diagnostic budget after measuring eager evaluation cost. Full-match
+held-out evaluation remains the learning decision. A second review and final
+validation follow the cleanup fix. PPO math, model architecture and simulation
+behavior are not changed by this preparation. The existing critic queue-order
+limitation and production qualifications above remain open.

@@ -51,7 +51,8 @@ does not push. It never uses the upstream MSL remote.
 
 ## Pool and throughput qualification
 
-Use one g4-standard-48: one 96 GiB RTX PRO 6000, 48 vCPUs and 180 GiB RAM.
+Use one g4-standard-48: one 96 GB RTX PRO 6000, 48 vCPUs and 180 GB RAM,
+as listed in [Google's GPU table](https://docs.cloud.google.com/compute/docs/gpus).
 Use 16 native shard threads, two Torch CPU threads, and four groups. Begin
 with three separate, three-update qualifications at 256, 512 and 1,024 active
 matches (16, 32 and 64 lanes per shard), one group each. Exclude the first
@@ -202,6 +203,8 @@ Monitor and fetch results (set NAME to the reported instance name):
 ```sh
 gcloud compute instances get-serial-port-output "$NAME" --project centering-star-502613-k3 --zone us-central1-b
 gcloud compute ssh "$NAME" --project centering-star-502613-k3 --zone us-central1-b --command 'sudo tail -n 100 /var/log/hal-training.log'
+gcloud compute ssh "$NAME" --project centering-star-502613-k3 --zone us-central1-b --command 'sudo tail -n 5 /var/lib/hal/pilot/train/metrics.jsonl'
+gcloud compute ssh "$NAME" --project centering-star-502613-k3 --zone us-central1-b --command 'sudo grep -m 1 https://wandb.ai/ /var/lib/hal/pilot/train-00000032.log'
 uv run python scripts/o65_results.py fetch --prefix "o65/pilot-results/$NAME" --root "runs/$NAME-results"
 ```
 
