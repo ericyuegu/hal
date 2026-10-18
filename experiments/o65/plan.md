@@ -692,11 +692,33 @@ Each stage needs its evidence before the next begins.
 | --- | --- |
 | Math checks | KL gradients against an enumerated objective, joint ratios, delayed-action credit on a toy delay task, terminal and truncation masks |
 | State and inference | No attention across episodes, cached against full-window log-probs, queue and reset parity |
-| Debug loop | The 17M proxy architecture end to end on one GPU: loop, logging, checkpoint and resume |
+| Debug loop | The O63 proxy under the development configuration, end to end on one RTX PRO 6000: loop, logging, checkpoint and resume, and a learning signal against $\pi_{\text{ref}}$ |
 | Minimal learning | The 248M checkpoint on one matchup and stage, fixed $D$, $R$ and $\lambda$, joint PPO, separate critic optimizer |
 | Gameplay | Improvement against frozen anchors in MSL and in Dolphin |
 | Scaling | All 11 $(D, R)$ configurations mixed in each group, real two-GPU NCCL training, full-pool checkpoint and restore, complete-path throughput |
 | Expanded run | $\lambda$ range, identities and anchors, each added with its own comparison |
+
+### Development configuration
+
+We build and debug the loop on the O63 bootstrap30 proxy before the O64
+checkpoint enters. We load `final.pt` from the R2 key
+`runs/261017-081127_063_percentile_conditioning_o63v1-bootstrap30-d256-L12-h4-c256-t256x6-ff1024-dual-nonlinear-head-rc1e128-drop0.2-muon-wsd-b150-wmax10-g0.99855__o63-ranked1-bootstrap30/final.pt`
+after 16,384 updates and run it on a single RTX PRO 6000.
+
+The proxy's decoder trained only on offsets 1 to 12, 16, 20, 24 and 28, so we
+keep every executed offset among those the proxy saw.
+
+- $D = 8$ with $R = 4$ executes offsets 9 to 12.
+- $D = 10$ with $R = 2$ executes offsets 11 and 12, and it exercises mixed
+  cadence within a group.
+
+The configuration loader reads the checkpoint's supervised offsets and rejects
+any $(D, R)$ whose executed offsets $D + 1, \dots, D + R$ fall outside them.
+The O64 checkpoint passes the production range under the same check.
+
+The proxy trained for delay 2 and replan 2, so delay 8 sits somewhat out of its
+distribution. The proxy runs show whether the loop learns. They say nothing
+about production gameplay.
 
 ## Metrics
 
