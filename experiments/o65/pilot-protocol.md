@@ -152,19 +152,27 @@ rate and offline loss cannot establish improvement over pi_ref.
 
 ## Launch, monitoring and teardown
 
-No launch has been performed for this preparation. Before allocation, publish
-the final HAL commit, renew local gcloud authentication, and grant the VM
-service account Secret Accessor for the five default secret ids and Artifact
-Registry Reader for the pinned image. The pinned environment image is an
-existing HAL image; boot replaces its baked source with the checked HAL SHA
-and runs `uv sync --locked`. Its entrypoint is overridden with Bash.
+The pilot uses the existing `hal-netplay-g4-1015-us-west4-a` instance in
+`us-west4-a`, project `centering-star-502613-k3`. The orchestrator starts it
+only after the user confirms netplay cleanup. The launcher rejects active
+netplay services or containers. It leaves their files in place.
 
-The input archive is currently local and **absent from R2**. The orchestrator
-must publish it before launch. From this prepared worktree, this explicit
-command verifies it before upload (it is not run as part of local preparation):
+Before starting, publish the final HAL commit, check local gcloud
+authentication, and verify input availability in R2. The existing VM service
+account has Secret Accessor on the five credential secrets and Artifact
+Registry Reader on `hal-netplay`. The launcher checks secret metadata
+locally. The job reads secret values through the VM service account.
+The job uses the image digest in `scripts/launch_o65_existing.py`, replaces
+the image's HAL source with the requested commit, verifies HEAD, then runs
+`uv sync --locked`. Delivery still checks the MSL fork commit and source
+archive, checkpoint, input archive, statistics and raw game hashes.
+
+The read-only R2 size check passed for the input archive and checkpoint on
+2026-10-18. If the archive needs publication again, the orchestrator can
+verify and upload it from this worktree with:
 
 ```sh
-uv run python - <<'PY'
+uv run python - <<'PYTHON'
 from pathlib import Path
 from hal import r2
 from scripts.o65_delivery import read_manifest, verify_blob
@@ -172,74 +180,122 @@ manifest = read_manifest(Path("experiments/o65/pilot-inputs.json"))
 archive = Path("runs/o65-prep-final-payloads/inputs.tar")
 verify_blob(archive, manifest.inputs)
 r2.client().upload_file(str(archive), r2.bucket(), manifest.inputs.key)
-PY
+PYTHON
 ```
 
-Run the local render, then the single launch command from the final clean SHA:
+After committing, render locally for inspection:
 
 ```sh
-bash scripts/launch_o65.sh --dry-run
-bash scripts/launch_o65.sh
+bash scripts/launch_o65.sh --dry-run --render runs/o65-existing-job.sh
 ```
 
-The instance is `hal-o65-proxy-<first eight HAL SHA digits>`, in project
-`centering-star-502613-k3`, zone `us-central1-b`. It is one on-demand
-g4-standard-48 with one GPU and a 500 GB Hyperdisk Balanced boot disk.
-The GCE max-run-duration is 24 hours. A VM-local systemd timer also forces
-shutdown after 24 hours from VM boot. At 23h45m from boot, a second timer
-kills training and starts cleanup, reserving 15 minutes for an upload bounded
-to 12 minutes plus a 30-second kill allowance.
-
-On normal exit or failure, the VM uploads a hash-indexed result tar and then
-its manifest to `o65/pilot-results/<instance>/`. It uploads logs, configuration,
-evaluations and checkpoints, excluding delivery inputs and scratch files.
-If bootstrap cannot pull the image, credentials fail, R2 is unavailable or
-upload exceeds its bound, remote publication can fail. The failure is logged;
-the hard cap still stops billing for compute and the boot disk is retained
-for recovery. No software can guarantee upload during a network outage.
-
-Monitor and fetch results (set NAME to the reported instance name):
+The dry run writes the job script and prints the SCP and SSH commands.
+It makes no cloud requests. For the approved start, set a unique run name
+and use the same name for monitoring, stopping and result retrieval:
 
 ```sh
-gcloud compute instances get-serial-port-output "$NAME" --project centering-star-502613-k3 --zone us-central1-b
-gcloud compute ssh "$NAME" --project centering-star-502613-k3 --zone us-central1-b --command 'sudo tail -n 100 /var/log/hal-training.log'
-gcloud compute ssh "$NAME" --project centering-star-502613-k3 --zone us-central1-b --command 'sudo tail -n 5 /var/lib/hal/pilot/train/metrics.jsonl'
-gcloud compute ssh "$NAME" --project centering-star-502613-k3 --zone us-central1-b --command 'sudo grep -m 1 https://wandb.ai/ /var/lib/hal/pilot/train-00000032.log'
+NAME="hal-o65-proxy-$(git rev-parse --short=8 HEAD)"
+bash scripts/launch_o65.sh --run-name "$NAME"
+```
+
+The launcher checks R2 input sizes and HAL publication before copying the
+rendered script with `gcloud compute scp`. Over SSH, it installs the script
+under `/var/lib/hal-o65/$NAME/`, starts `$NAME.service` with `systemd-run`,
+then returns. Systemd supervises the detached job after SSH disconnects.
+The transient unit has a 85,500-second runtime limit and a 900-second stop
+limit, so training ends at 23h45m and cleanup finishes within the remaining
+15 minutes. The limit starts with this job, irrespective of VM uptime.
+At the limit, systemd kills the job's host processes, then invokes
+`ExecStopPost` to remove its training container and upload results.
+Systemd also invokes this hook after normal exit, failed startup and a
+manual stop. See [the systemd service reference](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#ExecStopPost=).
+
+The post-stop script allows 810 seconds for container removal and upload,
+then 60 seconds for cleanup, with a five-second kill allowance on each.
+The upload container has its own 720-second limit. It writes a hash-indexed
+result tar, then publishes its manifest under
+`o65/pilot-results/$NAME/`. The tar contains logs, resolved settings,
+evaluation reports and retained checkpoints. Input delivery and scratch
+files stay out of the upload. After the attempt, the job removes its
+containers, secret files, delivery directory and scratch. It preserves
+local result files, exit status and the job script for inspection.
+An upload failure remains visible in `output/upload-exit-code` and the
+journal. A network or storage failure can prevent remote publication;
+local results remain available for recovery.
+
+The manual stop follows the same upload and cleanup path:
+
+```sh
+bash scripts/launch_o65.sh --action stop --run-name "$NAME"
+```
+
+This command waits for systemd's stop operation, including result upload.
+Stopping uses the original run name even if the local checkout has changed.
+The VM stays allocated after all exit paths. The launcher does not change
+instance metadata or scheduling. It does not install host packages or
+change Docker configuration.
+
+Monitor the job and retrieve results:
+
+```sh
+gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo systemctl status $NAME.service --no-pager"
+gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo journalctl -u $NAME.service -n 100 --no-pager"
+gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo tail -n 5 /var/lib/hal-o65/$NAME/output/pilot/train/metrics.jsonl"
+gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo grep -m 1 https://wandb.ai/ /var/lib/hal-o65/$NAME/output/pilot/train-00000032.log"
+gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command 'df -h /; nvidia-smi'
 uv run python scripts/o65_results.py fetch --prefix "o65/pilot-results/$NAME" --root "runs/$NAME-results"
 ```
 
-The training log identifies the W&B run; its id is
-`o65-debug-<HAL SHA prefix>-<output-path hash>`. Open the `hal-o65` project in
-the configured W&B account. The fetch command verifies both the tar and each
-extracted file. If upload failed, start the stopped VM only for a separately
-bounded recovery; keep the disk until evidence is recovered.
+The W&B run id is `o65-debug-<HAL SHA prefix>-<output-path hash>`, in project
+`hal-o65`. Inside the training container, the output path includes the run
+name so separate jobs on the same HAL commit get separate W&B runs.
+The fetch command verifies the tar and every extracted file.
+The result directory remains on the VM after completion. Keep it until the
+retrieved evidence has been checked. Teardown consists of stopping the job
+if needed and allowing its cleanup to finish. The VM remains running.
 
-Delete the VM and its boot disk after results are verified:
+### Disk check
 
-```sh
-gcloud compute instances delete "$NAME" --project centering-star-502613-k3 --zone us-central1-b --delete-disks=boot --quiet
-```
+Read-only inspection on 2026-10-18 found 48,176,799,744 bytes free
+(44.87 GiB) on the 100 GB boot disk. Docker already has the requested image
+digest, 9,056,653,301 bytes (8.43 GiB), and lists the NVIDIA container
+runtime. The driver is 580.178.04 with CUDA 13.0. The netplay runner,
+health service and overlay container were still active during inspection.
+The launcher requires a cached image and at least 40 GiB free before
+training. Docker runs use `--pull=never`; a missing image fails the job.
 
-Outward actions of a real launch: check R2 input availability, read GitHub
-publication refs, gcloud account and Secret Manager metadata locally; create exactly one VM and its boot disk
-with an external IP and the selected service account; read five secret values
-on the VM; configure Docker authentication, pull the pinned Artifact Registry
-image, and install Docker/toolchain packages if missing; clone HAL and the MSL
-fork; resolve the locked Python environment from package/Git sources; download
-the R2 input archive, checkpoint and Melee fixture plus the public Dolphin
-fixture; send training and evaluation metrics to W&B; upload results to R2;
-stop the VM. It does not create evaluation VMs, publish images, push Git,
-change IAM or delete the retained disk. Teardown is the separate command above.
+For the 4,096-match pool, allow about 2 GiB per complete resume checkpoint,
+including frame history and compressed simulator state. This estimate
+extrapolates the local four-match checkpoint: 207.54 MiB of training state,
+66.28 MiB for its actor and 0.22 MiB of compressed simulator shards.
+It is a planning allowance, not a full-pool measurement. The compact
+retention mode keeps the latest resume checkpoint, update 256 and update
+288, plus all actor snapshots. After each completed selection evaluation,
+the driver moves older manifests to `retired-checkpoints/` and removes
+unreferenced training and simulator files. Historical manifests record
+hashes; they cannot resume the retired state. Training settings, evaluation
+boundaries and resume checks stay the same. Other callers retain all
+checkpoints by default.
 
-Budget assumption: roughly three times the local 512-match complete-path rate
-gives about 5,500 match-frames/s, or 48 seconds per 1,024-match PPO update.
-Allow 12–24 VM-hours including warmup, process starts, qualification, evaluation,
-resume checks and uploads. This is an estimate; eager evaluation can dominate.
-At the listed US-central on-demand rate of $4.49993/hour, compute costs about
-$54–108, with a 24-hour compute ceiling near $108. Add disk, IP, network and
-storage charges; disk charges continue after shutdown until deletion.
-The rate was checked on 2026-10-18 in
-[Google's accelerator price table](https://cloud.google.com/products/compute/pricing/accelerator-optimized?hl=en).
-The VM qualification replaces the throughput assumption before any extension.
-Long matches can still exhaust the cap, especially in held-out evaluation;
-that produces incomplete evidence, not a successful learning decision.
+Budget 8 GiB for retained results and another 8 GiB for their upload tar.
+Allow 4 GiB for delivery and emulator fixtures, including both ISO copies
+made by the fixture fetcher, and 12 GiB for the checkout, environment
+updates, compiler and caches. This totals about 32 GiB beyond the cached
+image, leaving about 13 GiB at the inspected free-space level. Monitor disk
+use during qualification because full-pool serialization and compiler
+caches remain estimates. Retaining all 16 complete checkpoints would put
+the upload copy at risk of filling this disk.
+
+The start reads GitHub publication refs and local secret metadata, copies
+the script, creates a transient unit, reads five secret values on the VM,
+clones HAL and the MSL fork, resolves the locked environment, builds MSL
+and the adapter, fetches verified inputs and emulator fixtures, runs the
+fixed pilot, sends W&B metrics, uploads R2 results, then removes job scratch.
+The job installs its compiler inside its disposable container.
+
+Budget assumption: about 5,500 match-frames/s gives 48 seconds per
+1,024-match PPO update. Allow 12 to 24 hours for preparation, qualification,
+warmup, training, evaluations, resume checks and upload. This estimate
+has not been measured on this VM. The existing instance continues to incur
+charges after the job ends. A cap expiry preserves partial evidence and
+fails completion. Long held-out matches can still exhaust the cap.
