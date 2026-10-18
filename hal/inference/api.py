@@ -1,4 +1,4 @@
-"""Model-independent input and output contract for live HAL policies."""
+"""Pass observations and action predictions between HAL policies and live callers."""
 
 import math
 import re
@@ -86,7 +86,7 @@ class RuntimeConfig:
 class PreparedInferenceProfile:
     name: str
     checkpoint_sha256: str
-    execution_mode: Literal["window", "kv_cache"]
+    execution_mode: Literal["window", "kv_cache", "block_restart"]
     prediction_horizon_frames: int
     fixed_prefix_frames: int
     update_shapes: tuple[int, ...]
@@ -100,7 +100,7 @@ class PreparedInferenceProfile:
             or re.fullmatch(r"[0-9a-f]{64}", self.checkpoint_sha256) is None
         ):
             raise ValueError("prepared inference profile needs a name and checkpoint hash")
-        if type(self.execution_mode) is not str or self.execution_mode not in ("window", "kv_cache"):
+        if type(self.execution_mode) is not str or self.execution_mode not in ("window", "kv_cache", "block_restart"):
             raise ValueError("prepared inference execution mode is unsupported")
         if (
             any(
@@ -267,7 +267,7 @@ class PredictionPolicy(Protocol):
     def checkpoint_sha256(self) -> str | None: ...
 
     @property
-    def history_mode(self) -> Literal["window", "kv_cache"]: ...
+    def history_mode(self) -> Literal["window", "kv_cache", "block_restart"]: ...
 
     @property
     def prepared_update_shapes(self) -> tuple[int, ...]: ...

@@ -108,6 +108,20 @@ def test_parallel_prefix_preserves_stochastic_draw_count() -> None:
     torch.testing.assert_close(first.get_state(), second.get_state())
 
 
+def test_parallel_prefix_rejects_sparse_offsets() -> None:
+    model = _model()
+    hidden = torch.randn(1, 8, model.cfg.d_model)
+    with pytest.raises(ValueError, match="contiguous offsets"):
+        model.temporal._prefill_forced_prefix(
+            torch.zeros(1, 4, dtype=torch.long),
+            (2,),
+            torch.zeros(1, 1, 4, dtype=torch.long),
+            torch.zeros(1, model.cfg.temporal_d_model),
+            model.temporal._live_history(hidden),
+            None,
+        )
+
+
 @torch.inference_mode()
 def test_parallel_prefix_uses_absolute_uniform_depth_with_runtime_temperature() -> None:
     torch.manual_seed(41)

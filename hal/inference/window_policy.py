@@ -35,6 +35,7 @@ from hal.inference.sampling import StreamGroupRng
 from hal.inference.warmup import canonical_context
 from hal.inference.warmup import synthetic_context
 from hal.models.action_sequence import ActionSequenceTransformer
+from hal.models.attention import segment_starts
 from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
 from hal.models.sampling import validate_sampling_temperature
@@ -125,7 +126,8 @@ def _pad_context(ctx: Context, bucket: int) -> Context:
             ),
         )
     )
-    return Context(features=features, ctx_pad=ctx_pad)
+    segment_ids = None if ctx.segment_ids is None else F.pad(ctx.segment_ids, (0, 0, 0, extra))
+    return Context(features=features, ctx_pad=ctx_pad, segment_ids=segment_ids)
 
 
 def condition_ego_player(ctx: Context, player_id: int) -> Context:
@@ -336,7 +338,7 @@ class WindowPolicy:
             # can reuse its output storage only after the decoder consumes it.
             torch.compiler.cudagraph_mark_step_begin()
         with self._amp_context(ctx.ctx_pad.device):
-            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed)
+            hidden = self._trunk(bucket)(padded.features, padded.ctx_pad, observed, padded.segment_ids)
             if committed is None:
                 forced_prefix = torch.empty(bucket, 0, CONTROLLER_GROUP_COUNT, dtype=torch.long, device=hidden.device)
             else:
@@ -351,7 +353,9 @@ class WindowPolicy:
         return _PreparedDecode(
             rows,
             bucket,
-            padded.ctx_pad,
+            padded.ctx_pad
+            if padded.segment_ids is None
+            else torch.maximum(segment_starts(padded.segment_ids), padded.ctx_pad[:, None]),
             hidden,
             observed[:, -1],
             uniforms,

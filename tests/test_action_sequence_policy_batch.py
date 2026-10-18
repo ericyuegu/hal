@@ -29,7 +29,9 @@ from hal.inference.warmup import make_warmup_observations
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.attention import KVMemory
+from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import DiscreteControllerCodec
+from hal.models.self_play import SelfPlayTransformer
 from hal.representation.features import BASE_ITEMS_PROJECTION
 from hal.representation.features import ITEM_COLUMNS
 from hal.representation.features import feature_kind
@@ -54,10 +56,11 @@ def _policy(
     device: torch.device | None = None,
     compiled: bool = False,
     cuda_graphs: bool = False,
-    history_mode: Literal["window", "kv_cache"] = "kv_cache",
+    history_mode: Literal["window", "kv_cache", "block_restart"] = "kv_cache",
     delay: int = 0,
     horizon: int = 4,
     prefix: int = 0,
+    log_lambda: float | None = None,
 ) -> ActionSequencePolicy:
     if device is None:
         device = torch.device("cpu")
@@ -66,7 +69,7 @@ def _policy(
         d_model=32,
         n_layers=2,
         n_heads=4,
-        L_ctx=8,
+        L_ctx=256 if history_mode == "block_restart" else 8,
         temporal_d_model=32,
         temporal_layers=1,
         temporal_heads=2,
@@ -98,6 +101,7 @@ def _policy(
         history_mode=history_mode,
         kv_update_frames=4,
         kv_cuda_graphs=cuda_graphs,
+        log_lambda=log_lambda,
     )
     policy.prepare_prediction(RuntimeConfig(capacity, (delay,)), horizon, prefix)
     return policy
@@ -805,3 +809,102 @@ def test_value_head_uses_serving_precision_and_returns_fp32(dtype: torch.dtype) 
     assert actual.dtype == torch.float32
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     torch.testing.assert_close(torch.get_rng_state(), before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("capacity", [1, 4])
+@torch.inference_mode()
+def test_block_restart_policy_handoff_and_sparse_rows_match_serial(capacity: int) -> None:
+    batched = _policy(capacity, history_mode="block_restart")
+    serial = _policy(capacity, history_mode="block_restart")
+    stream_ids = (42,) if capacity == 1 else (42, 7, 90)
+    sources = dict.fromkeys(stream_ids, -1)
+    sequences = dict.fromkeys(stream_ids, 0)
+    for wave in range(69):
+        ready = stream_ids if wave % 3 != 1 else stream_ids[:1]
+        requests = []
+        for stream_id in ready:
+            sources[stream_id] += 4
+            request = _request(batched, stream_id, sources[stream_id], 4, sequences[stream_id])
+            sequences[stream_id] += 1
+            requests.append(request)
+        actual = batched.predict(requests)
+        expected = tuple(serial.predict((request,))[0] for request in reversed(requests))
+        _assert_plans_match(actual, expected)
+        assert batched._cache_pool is not None
+        assert batched._secondary_pool is not None
+        for stream_id in ready:
+            stream = batched._prediction_streams[stream_id]
+            frames = sources[stream_id] + 1
+            expected_length = frames if frames <= 256 else 128 + (frames - 1) % 128 + 1
+            assert batched._cache_pool.storage.next_position[stream.row] == expected_length
+            assert batched._secondary_pool.storage.next_position[stream.row] == (frames - 1) % 128 + 1
+    row = batched._prediction_streams[42].row
+    batched.release_stream(42)
+    serial.release_stream(42)
+    request = _request(batched, 42, 0, 1, 0)
+    _assert_plans_match(batched.predict((request,)), serial.predict((request,)))
+    assert batched._cache_pool.storage.next_position[row] == 1
+    assert batched._secondary_pool.storage.next_position[row] == 1
+    profile = PreparedInferenceProfile("block", "a" * 64, "block_restart", 4, 0, (1, 2, 4), capacity)
+    batched.validate_prepared_profile(profile)
+
+
+@pytest.mark.parametrize("delay,replan", [(8, 4), (10, 2)])
+@pytest.mark.parametrize("desired_return", [108.0, (2 * 0.95 - 1) * 120.0])
+def test_widened_policy_serves_u95_with_block_restart(delay: int, replan: int, desired_return: float) -> None:
+    control = _policy(1, history_mode="block_restart", horizon=delay + replan, prefix=delay)
+    widened = SelfPlayTransformer(
+        control.model.cfg,
+        ConditioningRanges((-5.0, 5.0), (8, 10), (2, 4)),
+        max_opponent_queue=14,
+        critic_hidden_dim=16,
+    ).eval()
+    state = dict(control.model.state_dict())
+    state.update({name: value for name, value in widened.state_dict().items() if name.startswith("percentile_head.")})
+    widened.load_bc_state_dict(state)
+    candidate = _policy(
+        1, model=widened, history_mode="block_restart", horizon=delay + replan, prefix=delay, log_lambda=0.0
+    )
+    request = _request(control, 42, 3, 4, 0)
+    observations = tuple(
+        replace(item, desired_return=desired_return, temperature=1.0) for item in request.observations
+    )
+    request = replace(request, observations=observations, fixed_actions=(NEUTRAL_CONTROLLER_ACTION,) * delay)
+    _assert_plans_match(candidate.predict((request,)), control.predict((request,)))
+    invalid = replace(_request(candidate, 42, 4, 1, 1), fixed_actions=request.fixed_actions)
+    with pytest.raises(ValueError, match="u95"):
+        candidate.predict((invalid,))
+
+
+def test_block_reset_uses_neutral_first_frame_controller_features() -> None:
+    control = _policy(1, history_mode="block_restart")
+    candidate = _policy(1, history_mode="block_restart")
+    stale_action = replace(NEUTRAL_CONTROLLER_ACTION, main_x=1.0, c_y=-1.0, trigger_l=1.0)
+    for generation in (1, 2):
+        request = replace(_request(control, 42, 3, 4, 0), generation=generation)
+        changed = replace(
+            request,
+            observations=(replace(request.observations[0], applied_action=stale_action), *request.observations[1:]),
+        )
+        _assert_plans_match(candidate.predict((changed,)), control.predict((request,)))
+        assert candidate._cache_pool is not None
+        assert candidate._secondary_pool is not None
+        assert candidate._cache_pool.storage.next_position.item() == 4
+        assert candidate._secondary_pool.storage.next_position.item() == 4
+
+
+def test_block_policy_rejects_reset_inside_a_generation_before_mutating_state() -> None:
+    policy = _policy(1, history_mode="block_restart")
+    request = _request(policy, 42, 3, 4, 0)
+    request = replace(
+        request,
+        observations=(
+            *request.observations[:2],
+            replace(request.observations[2], reset=True),
+            request.observations[3],
+        ),
+    )
+    with pytest.raises(ValueError, match="reset must start"):
+        policy.predict((request,))
+    assert not policy._prediction_streams
+    assert policy._free_rows == {0}

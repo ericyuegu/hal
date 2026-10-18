@@ -142,22 +142,17 @@ _STICK_TRIGGER_SUFFIXES = (
 
 @dataclass(frozen=True, slots=True)
 class Context:
-    """The observed gamestate the model conditions on. Built identically by the
-    train dataloader and the closed-loop driver, so the model never branches on
-    which.
+    """Supply the model with the same features during training and live play.
 
-    ``features`` carries per-feature columns at length ``L_ctx`` (normalized
-    floats + their mask sidecars + int64 categorical ids + raw stick/trigger/
-    button channels, including the ego's own controller history). ``ctx_pad``
-    hides each sample's not-yet-filled leftmost context positions from attention.
-
-    Deliberately neutral: any already-committed action prefix an RTC experiment
-    conditions on is part of the predicted chunk (at train) or supplied to the
-    inference integrator (at eval), not carried here.
+    Normalize float columns, retain their missing-data masks, encode categorical
+    ids as int64, and preserve observed controller values. Use ctx_pad to exclude
+    left padding from attention. Segment ids separate episodes within a window.
+    Pass committed future actions separately to the decoder.
     """
 
     features: dict[str, Tensor]
     ctx_pad: Tensor  # [B] int64
+    segment_ids: Tensor | None = None  # [B, L] contiguous episode labels
 
     @property
     def batch(self) -> int:
@@ -167,6 +162,7 @@ class Context:
         return Context(
             features={k: v.to(device, non_blocking=True) for k, v in self.features.items()},
             ctx_pad=self.ctx_pad.to(device, non_blocking=True),
+            segment_ids=None if self.segment_ids is None else self.segment_ids.to(device, non_blocking=True),
         )
 
     def pin_memory(self) -> Context:
@@ -176,6 +172,7 @@ class Context:
         return Context(
             features={k: v.pin_memory() for k, v in self.features.items()},
             ctx_pad=self.ctx_pad.pin_memory(),
+            segment_ids=None if self.segment_ids is None else self.segment_ids.pin_memory(),
         )
 
 
@@ -224,9 +221,11 @@ def _standardize(arr: np.ndarray, s: FeatureStats) -> np.ndarray:
 
 
 def float_feature_transform(name: str, extra: ExtraColumns) -> str:
-    """Normalization for one float column. ``extra`` declares it per suffix; otherwise
-    percent + position standardize — their dataset max (percent ~507, off the 0-160
-    decision range) squashes min-max into a sliver — and every other float min-maxes."""
+    """Select normalization from extra columns or the default feature rule.
+
+    Standardize position and percent to preserve useful resolution within the
+    usual decision range. Other float features use min-max normalization.
+    """
     for suffix, transform in extra.floats.items():
         if name.endswith(f"_{suffix}"):
             return transform

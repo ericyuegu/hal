@@ -1,4 +1,4 @@
-"""Validate current 059 artifacts and construct the canonical model."""
+"""Validate 059 checkpoints and construct the model for live inference."""
 
 import hashlib
 import json
@@ -44,7 +44,7 @@ from hal.wire import ACTION_CHANNELS
 if TYPE_CHECKING:
     from hal.inference.action_sequence_policy import ActionSequencePolicy
 
-# These identifiers are persisted contracts, independent of Python module names.
+# Persist these format identifiers independently of Python module names.
 ACTION_SEQUENCE_BACKEND: Final[str] = "o59-history-decoder"
 ACTION_SEQUENCE_BACKEND_VERSION: Final[int] = 2
 _CONFIG_MEMBER: Final[str] = "backend.json"
@@ -536,7 +536,7 @@ def load_action_sequence_policy(
     device: str = "cuda",
     seed: int | None = None,
     compiled: bool = False,
-    history_mode: Literal["window", "kv_cache"] = "kv_cache",
+    history_mode: Literal["window", "kv_cache", "block_restart"] = "kv_cache",
     kv_update_frames: int = 2,
     kv_cuda_graphs: bool = True,
 ) -> ActionSequencePolicy:

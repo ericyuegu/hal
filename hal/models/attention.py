@@ -19,7 +19,7 @@ AttnMask = Bool[Tensor, "B 1 L L"]
 
 @dataclass(frozen=True, slots=True)
 class TrunkConfig:
-    """The trunk geometry. Experiment configs build one of these from their own fields."""
+    """Resolve trunk dimensions from the experiment configuration."""
 
     d_model: int
     n_layers: int
@@ -80,23 +80,19 @@ class Rotary(nn.Module):
         return self.at(x.shape[1], x.device, x.dtype)
 
     def at(self, length: int, device: torch.device, dtype: torch.dtype | None = None) -> tuple[Tensor, Tensor]:
-        """RoPE factors for absolute positions ``0..length-1``, in the module's dtype.
+        """Compute RoPE factors for absolute positions 0..length-1.
 
-        The angles are ALWAYS built at fp32, from the integer geometry rather than from the
-        ``inv_freq`` buffer, because this table is a lookup and not a weight. A whole-module cast to
-        fp16 (what an eval decode cast leaves behind) puts 4e-4 of relative slack on a frequency,
-        which the position multiplies into a phase error of 2e-2 over a 128-frame window and 3.9e-1
-        over 1024 — against the 2.4e-4 that rounding the finished table costs. An fp16 position
-        counter also stops being exact past 2048 frames. The buffer stays registered, and stays the
-        source whenever it is still fp32, so neither the checkpoint keys nor the fp32 arithmetic
-        move."""
+        Build angles in FP32 before casting the factors to the requested dtype.
+        Recompute frequencies from integer dimensions if inv_freq was cast to a
+        lower precision. FP16 frequency error grows with position; FP16 position
+        counters also lose integer precision beyond 2048. Retain the registered buffer
+        for checkpoint loading and use it directly when it contains FP32 values.
+        """
         output_dtype = self.inv_freq.dtype if dtype is None else dtype
         key = (length, device, output_dtype)
         if torch.compiler.is_compiling():
-            # A cached tensor created while CUDA Graph capture is tracing becomes
-            # graph-owned storage. Saving it on the module makes the next replay
-            # read storage that the graph has already overwritten. Compiled paths
-            # keep the same RoPE arithmetic but own the factors inside the graph.
+            # Compute factors inside the graph. A module cache would retain
+            # captured output storage after the next replay overwrites it.
             inv_freq = self.inv_freq
             if inv_freq.dtype != torch.float32:
                 inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))
@@ -159,9 +155,10 @@ def rmsnorm(x0: Float[Tensor, "... d"], eps: float = 1e-6) -> Float[Tensor, "...
 
 
 def dense_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> Bool[Tensor, "B 1 L L"]:
-    """The bool attention mask for ``scaled_dot_product_attention``: causal, inside the window, and
-    clear of each sample's left-padded cold-start prefix. A padded query keeps its diagonal, so its
-    row is never fully masked (SDPA would give NaN)."""
+    """Build causal attention inside the context window and after left padding.
+
+    Keep the diagonal for padded queries so SDPA receives a valid key in each row.
+    """
     idx = torch.arange(L, device=ctx_pad.device)
     keep = idx[:, None] >= idx[None, :]
     if attn_window > 0:
@@ -169,6 +166,34 @@ def dense_mask(ctx_pad: Int[Tensor, " B"], L: int, attn_window: int) -> Bool[Ten
     key_real = idx[None, :] >= ctx_pad[:, None]
     diag = torch.eye(L, dtype=torch.bool, device=ctx_pad.device)
     return (keep[None] & (key_real[:, None, :] | diag[None]))[:, None]
+
+
+def segment_starts(segment_ids: Tensor) -> Tensor:
+    """Start position of each contiguous episode segment, independent of its label."""
+    if segment_ids.ndim != 2 or segment_ids.dtype not in (torch.int32, torch.int64):
+        raise ValueError("segment ids must be integer [B, L]")
+    positions = torch.arange(segment_ids.shape[1], device=segment_ids.device)[None].expand_as(segment_ids)
+    boundary = torch.cat(
+        (torch.ones_like(segment_ids[:, :1], dtype=torch.bool), segment_ids[:, 1:] != segment_ids[:, :-1]), dim=1
+    )
+    return torch.where(boundary, positions, 0).cummax(dim=1).values
+
+
+def segment_cu_seqlens(segment_ids: Tensor, ctx_pad: Tensor) -> Tensor:
+    """Static-shape varlen boundaries; zero-length sequences keep compilation static."""
+    starts = segment_starts(segment_ids)
+    positions = torch.arange(segment_ids.shape[1], device=segment_ids.device)[None]
+    starts = torch.maximum(starts, torch.where(positions >= ctx_pad[:, None], ctx_pad[:, None], 0))
+    ends = torch.cat((starts[:, 1:] != starts[:, :-1], torch.ones_like(starts[:, :1], dtype=torch.bool)), dim=1)
+    lengths = torch.where(ends, positions - starts + 1, 0).flatten().to(torch.int32)
+    return torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=torch.int32)))
+
+
+def segmented_mask(ctx_pad: Tensor, segment_ids: Tensor, attn_window: int) -> Tensor:
+    starts = segment_starts(segment_ids)
+    positions = torch.arange(segment_ids.shape[1], device=segment_ids.device)
+    same_segment = positions[None, None, :] >= starts[:, :, None]
+    return dense_mask(ctx_pad, segment_ids.shape[1], attn_window) & same_segment[:, None]
 
 
 class CausalSelfAttention(nn.Module):
@@ -204,10 +229,12 @@ class CausalSelfAttention(nn.Module):
         x: Float[Tensor, "B L d_model"],
         mask: AttnMask | None,
         ctx_pad: Int[Tensor, " B"],
+        cu_seqlens: Tensor | None = None,
+        force_dense: bool = False,
     ) -> Float[Tensor, "B L d_model"]:
         B, L, _ = x.shape
         q, k, v = self._qkv(x)
-        if self.attention_backend == "varlen_flash" and x.device.type == "cuda":
+        if not force_dense and self.attention_backend == "varlen_flash" and x.device.type == "cuda":
             if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
                 raise RuntimeError(
                     "varlen_flash requires matching FP16/BF16 QKV activations; "
@@ -217,9 +244,10 @@ class CausalSelfAttention(nn.Module):
             # Keep a static B*L token shape.  Each ignored prefix and real suffix is
             # an independent causal sequence, so real queries cannot see padded keys.
             # Zero-length prefix sequences are valid and keep cu_seqlens fixed at 2B+1.
-            lengths = torch.stack((ctx_pad, L - ctx_pad), dim=1).reshape(-1).to(torch.int32)
-            cumulative = lengths.cumsum(0, dtype=torch.int32)
-            cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
+            if cu_seqlens is None:
+                lengths = torch.stack((ctx_pad, L - ctx_pad), dim=1).reshape(-1).to(torch.int32)
+                cumulative = lengths.cumsum(0, dtype=torch.int32)
+                cu_seqlens = torch.cat((cumulative.new_zeros(1), cumulative))
             window = (-1, 0) if self.attn_window == 0 else (self.attn_window - 1, 0)
             y = cast(
                 Tensor,
@@ -265,9 +293,14 @@ class Block(nn.Module):
         self.mlp_scale = cfg.mlp_scale
 
     def forward(
-        self, x: Float[Tensor, "B L d_model"], mask: AttnMask | None, ctx_pad: Int[Tensor, " B"]
+        self,
+        x: Float[Tensor, "B L d_model"],
+        mask: AttnMask | None,
+        ctx_pad: Int[Tensor, " B"],
+        cu_seqlens: Tensor | None = None,
+        force_dense: bool = False,
     ) -> Float[Tensor, "B L d_model"]:
-        x = x + self.attn_scale * self.attn(rmsnorm(x), mask, ctx_pad)
+        x = x + self.attn_scale * self.attn(rmsnorm(x), mask, ctx_pad, cu_seqlens, force_dense)
         x = x + self.mlp_scale * self.mlp(rmsnorm(x))
         return x
 
@@ -294,15 +327,17 @@ class Trunk(nn.Module):
     @torch.compiler.disable
     def resolve_attention(self, device_type: str) -> None:
         """Resolve the declared backend before compiling the complete model."""
-        if self._attn_path is not None:
+        path = "varlen_flash" if self.attention_backend == "varlen_flash" and device_type == "cuda" else "dense"
+        if self._attn_path == path:
             return
-        self._attn_path = (
-            "varlen_flash" if self.attention_backend == "varlen_flash" and device_type == "cuda" else "dense"
-        )
+        self._attn_path = path
         logger.info(f"trunk attention: {self._attn_path} path, window={self.attn_window}")
 
     def _mask(self, ctx_pad: Int[Tensor, " B"], length: int) -> AttnMask | None:
-        if self._attn_path is None:
+        path = (
+            "varlen_flash" if self.attention_backend == "varlen_flash" and ctx_pad.device.type == "cuda" else "dense"
+        )
+        if self._attn_path != path:
             self.resolve_attention(ctx_pad.device.type)
         if self._attn_path == "varlen_flash":
             return None
@@ -310,10 +345,8 @@ class Trunk(nn.Module):
 
     @staticmethod
     def _check_shape(x: Tensor, ctx_pad: Tensor) -> None:
-        # The one runtime shape check on the trunk's input path, at the per-STEP boundary. A ctx_pad
-        # of the wrong length does not raise further down, it BROADCASTS — one sample's cold-start
-        # prefix silently masks every sample. 0.3 us, and dynamo traces it, which a jaxtyped wrapper
-        # is not (it raises on the traced tensor, so a checked forward cannot be compiled).
+        # A mismatched padding vector can broadcast a sample's mask across
+        # the batch. This check also runs during Dynamo tracing.
         if x.ndim != 3 or ctx_pad.shape != x.shape[:1]:
             raise ValueError(
                 f"trunk takes x [B, L, d_model] and ctx_pad [B]; got {tuple(x.shape)}, {tuple(ctx_pad.shape)}"
@@ -324,17 +357,35 @@ class Trunk(nn.Module):
         x: Float[Tensor, "B L d_model"],
         ctx_pad: Int[Tensor, " B"],
         mask: AttnMask | None,
+        cu_seqlens: Tensor | None = None,
+        force_dense: bool = False,
     ) -> Float[Tensor, "B L d_model"]:
         for block in self.blocks:
-            x = block(x, mask, ctx_pad)
+            x = block(x, mask, ctx_pad, cu_seqlens, force_dense)
         return rmsnorm(x)
 
     def forward_dense(
-        self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]
+        self,
+        x: Float[Tensor, "B L d_model"],
+        ctx_pad: Int[Tensor, " B"],
+        segment_ids: Tensor | None = None,
+        *,
+        force_dense: bool = False,
     ) -> Float[Tensor, "B L d_model"]:
-        """Run the dense SDPA correctness path."""
+        """Build a dense mask, preserving BC's configured CUDA backend by default.
+
+        Frozen BC programs used this entry point with varlen FlashAttention.
+        Segment masks and explicit correctness checks must use dense SDPA.
+        """
         self._check_shape(x, ctx_pad)
-        return self._forward_with_mask(x, ctx_pad, dense_mask(ctx_pad, x.size(1), self.attn_window))
+        if segment_ids is not None and segment_ids.shape != x.shape[:2]:
+            raise ValueError("segment ids must match trunk [B, L]")
+        mask = (
+            dense_mask(ctx_pad, x.size(1), self.attn_window)
+            if segment_ids is None
+            else segmented_mask(ctx_pad, segment_ids, self.attn_window)
+        )
+        return self._forward_with_mask(x, ctx_pad, mask, force_dense=force_dense or segment_ids is not None)
 
     def forward_unpadded(self, x: Tensor) -> Tensor:
         """Run the faster native causal path for batches without left padding."""
@@ -346,7 +397,20 @@ class Trunk(nn.Module):
             x = cast(Block, block).forward_unpadded(x)
         return rmsnorm(x)
 
-    def forward(self, x: Float[Tensor, "B L d_model"], ctx_pad: Int[Tensor, " B"]) -> Float[Tensor, "B L d_model"]:
+    def forward(
+        self,
+        x: Float[Tensor, "B L d_model"],
+        ctx_pad: Int[Tensor, " B"],
+        segment_ids: Tensor | None = None,
+    ) -> Float[Tensor, "B L d_model"]:
         self._check_shape(x, ctx_pad)
         mask = self._mask(ctx_pad, x.size(1))
-        return self._forward_with_mask(x, ctx_pad, mask)
+        cu_seqlens = None
+        if segment_ids is not None:
+            if segment_ids.shape != x.shape[:2]:
+                raise ValueError("segment ids must match trunk [B, L]")
+            if mask is None:
+                cu_seqlens = segment_cu_seqlens(segment_ids, ctx_pad)
+            else:
+                mask = segmented_mask(ctx_pad, segment_ids, self.attn_window)
+        return self._forward_with_mask(x, ctx_pad, mask, cu_seqlens)

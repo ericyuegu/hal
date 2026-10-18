@@ -22,6 +22,7 @@ from hal.models.attention import Trunk
 from hal.models.attention import TrunkConfig
 from hal.models.attention import apply_rotary_emb
 from hal.models.attention import rotate_positions
+from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import BUTTONS_GROUP
 from hal.models.controller_codec import CONTROLLER_DECODE_ORDER
 from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
@@ -111,7 +112,7 @@ def _history_score_mod(
     query_positions: Tensor,
 ) -> Tensor:
     del h
-    allowed = (kv >= ctx_pad[b]) & (kv <= query_positions[b, q])
+    allowed = (kv >= ctx_pad[b, q]) & (kv <= query_positions[b, q])
     return torch.where(allowed, score, -torch.inf)
 
 
@@ -272,8 +273,11 @@ def depth_rule(stack: Literal["trunk", "temporal"], layers: int, alpha: float) -
 class ReturnConditioner(nn.Module):
     """Modulate decoder norms once per prefix; absence is exactly neutral."""
 
-    def __init__(self, cfg: ActionSequenceConfig) -> None:
+    def __init__(self, cfg: ActionSequenceConfig, ranges: ConditioningRanges | None = None) -> None:
         super().__init__()
+        self.ranges = ranges
+        if ranges is not None and (not cfg.return_conditioning or cfg.return_embed_dim == 0):
+            raise ValueError("self-play requires return conditioning")
         if cfg.return_embed_dim < 0:
             raise ValueError("return_embed_dim must be non-negative")
         if cfg.return_embed_dim == 0 and cfg.return_conditioning:
@@ -282,7 +286,9 @@ class ReturnConditioner(nn.Module):
         self.layers = cfg.temporal_layers
         self.enabled = cfg.return_conditioning
         self.omitted = cfg.return_embed_dim == 0
-        self.embedding: nn.Module = nn.Identity() if self.omitted else nn.Linear(1, cfg.return_embed_dim, bias=True)
+        self.embedding: nn.Module = (
+            nn.Identity() if self.omitted else nn.Linear(1 if ranges is None else 4, cfg.return_embed_dim, bias=True)
+        )
         self.projections = nn.ModuleList(
             ()
             if self.omitted
@@ -291,19 +297,31 @@ class ReturnConditioner(nn.Module):
         if isinstance(self.embedding, nn.Linear):
             nn.init.normal_(self.embedding.weight, std=cfg.hidden_std_multiplier)
             nn.init.zeros_(self.embedding.bias)
+            if ranges is not None:
+                with torch.no_grad():
+                    self.embedding.weight[:, 1:].zero_()
         for module in self.projections:
             projection = cast(nn.Linear, module)
             nn.init.zeros_(projection.weight)
             nn.init.zeros_(projection.bias)
 
-    def forward(self, return_value: Tensor, condition_present: Tensor) -> tuple[Tensor, ...] | None:
+    def forward(
+        self, return_value: Tensor, condition_present: Tensor, policy_condition: Tensor | None = None
+    ) -> tuple[Tensor, ...] | None:
         if return_value.shape != condition_present.shape or condition_present.dtype != torch.bool:
             raise ValueError("return values and boolean presence must have the same shape")
         if self.omitted:
             return None
         present = condition_present & self.enabled
         safe = torch.where(present, return_value, 0.0)
-        embedded = F.silu(self.embedding((safe / RETURN_SCALE)[..., None]))
+        inputs = (safe / RETURN_SCALE)[..., None]
+        if self.ranges is not None:
+            if policy_condition is None or policy_condition.shape != (*safe.shape, 3):
+                raise ValueError("widened conditioner requires normalized [log_lambda, D, R]")
+            inputs = torch.cat((inputs, policy_condition), dim=-1)
+        elif policy_condition is not None:
+            raise ValueError("policy conditioning requires a widened conditioner")
+        embedded = F.silu(self.embedding(inputs))
         return tuple(
             torch.where(
                 present[..., None, None],
@@ -485,12 +503,16 @@ class HistoryCrossAttention(nn.Module):
         length = key.shape[2]
         if key.shape != (batch, self.n_heads, length, self.head_dim) or value.shape != key.shape:
             raise ValueError("history K/V shape mismatch")
-        if ctx_pad.shape != (batch,) or prefix_positions.ndim != 2:
+        if ctx_pad.shape not in ((batch,), (batch, length)) or prefix_positions.ndim != 2:
             raise ValueError("history padding and prefix positions have the wrong shape")
         if queries != prefix_positions.shape[1] * offsets_per_prefix:
             raise ValueError("history query packing does not match prefix positions")
 
         query = self.query(decoder_rmsnorm(x)).view(batch, queries, self.n_heads, self.head_dim)
+        starts = (
+            ctx_pad[:, None].expand_as(prefix_positions) if ctx_pad.ndim == 1 else ctx_pad.gather(1, prefix_positions)
+        )
+        query_starts = starts.repeat_interleave(offsets_per_prefix, dim=1)
         query_positions = prefix_positions.repeat_interleave(offsets_per_prefix, dim=1)
         cos, sin = self.rotary.at(length, query.device, query.dtype)
         query_cos = cos[0, :, 0][query_positions][:, :, None, :]
@@ -504,17 +526,26 @@ class HistoryCrossAttention(nn.Module):
                     query,
                     key,
                     value,
-                    score_mod=partial(_history_score_mod, ctx_pad=ctx_pad, query_positions=query_positions),
+                    score_mod=partial(_history_score_mod, ctx_pad=query_starts, query_positions=query_positions),
                 ),
             )
         else:
             memory = torch.arange(length, device=x.device)
-            valid = (memory[None, None, :] >= ctx_pad[:, None, None]) & (
+            valid = (memory[None, None, :] >= query_starts[:, :, None]) & (
                 memory[None, None, :] <= query_positions[:, :, None]
             )
             attended = F.scaled_dot_product_attention(query, key, value, attn_mask=valid[:, None])
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         return x + self.scale * self.output(attended)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionOutput:
+    actions: Tensor  # [B, sampled_offsets, groups], relative to D+1
+    valid: Tensor  # [B, sampled_offsets]
+    log_probs: Tensor  # [B, sampled_offsets, groups], zero outside valid
+    distributions: tuple[Tensor, ...]  # canonical group order
+    decoder_state: Tensor  # z at D+1, before its first factor
 
 
 class CausalTemporalDecoder(nn.Module):
@@ -574,14 +605,10 @@ class CausalTemporalDecoder(nn.Module):
     return_conditioner: ReturnConditioner
 
     def _state_bias(self, trunk: Tensor) -> Tensor:
-        """The trunk share of the token projection, computed once per position.
+        """Project the trunk state once for each decision position.
 
-        A linear layer over a concatenation decomposes into a sum of per-part
-        linears: ``W [h | a | o] + b = W_h h + W_a a + W_o o + b``. The trunk
-        part is constant across the chain's steps, so it never needs the
-        per-step copy the concatenation implied. The single ``token_projection``
-        parameter is kept (same shape, same initialization as the concatenating
-        form); only the compute schedule changes.
+        Split W[h|a|o]+b into W_h h+b, W_a a, and W_o o using slices of the same
+        token_projection parameter. Reuse the trunk projection across decoder steps.
         """
         weight = self.token_projection.weight
         return F.linear(trunk, weight[:, : self.trunk_width], self.token_projection.bias)
@@ -642,8 +669,10 @@ class CausalTemporalDecoder(nn.Module):
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
         """Compute known prefix states together before the sampled tail."""
         count = forced_prefix.shape[1]
+        if offsets[:count] != tuple(range(1, count + 1)):
+            raise ValueError("forced prefill requires contiguous offsets starting at one")
         previous = torch.cat((observed[:, None], forced_prefix[:, :-1]), dim=1)
-        offset_ids = torch.tensor(offsets[:count], device=observed.device).expand(observed.shape[0], count)
+        offset_ids = torch.arange(1, count + 1, device=observed.device).expand(observed.shape[0], count)
         state = decoder_rmsnorm(state_bias[:, None] + self._step_features(previous, offset_ids))
         caches: list[tuple[Tensor, Tensor] | None] = []
         for index, module in enumerate(self.blocks):
@@ -995,6 +1024,7 @@ class CausalTemporalDecoder(nn.Module):
         ctx_pad: Tensor | None = None,
         forced_prefix: Tensor | None = None,
         history: KVMemory | None = None,
+        policy_condition: Tensor | None = None,
     ) -> Tensor:
         indices, _ = self._sample_indices_and_logits(
             hidden,
@@ -1010,6 +1040,7 @@ class CausalTemporalDecoder(nn.Module):
             ctx_pad=ctx_pad,
             forced_prefix=forced_prefix,
             history=history,
+            policy_condition=policy_condition,
         )
         return indices
 
@@ -1028,6 +1059,7 @@ class CausalTemporalDecoder(nn.Module):
         ctx_pad: Tensor | None = None,
         forced_prefix: Tensor | None = None,
         history: KVMemory | None = None,
+        policy_condition: Tensor | None = None,
     ) -> tuple[Tensor, tuple[Tensor, ...]]:
         """Sample once and return the exact conditional logits used by each draw."""
         return self._sample_indices_and_logits(
@@ -1044,6 +1076,7 @@ class CausalTemporalDecoder(nn.Module):
             ctx_pad=ctx_pad,
             forced_prefix=forced_prefix,
             history=history,
+            policy_condition=policy_condition,
         )
 
     def configure_live_horizons(self, horizons: tuple[int, ...]) -> None:
@@ -1071,6 +1104,7 @@ class CausalTemporalDecoder(nn.Module):
         ctx_pad: Tensor | None,
         forced_prefix: Tensor | None,
         history: KVMemory | None = None,
+        policy_condition: Tensor | None = None,
     ) -> tuple[Tensor, tuple[Tensor, ...]]:
         if not isinstance(temperature, Tensor):
             temperature = validate_sampling_temperature(temperature)
@@ -1093,7 +1127,7 @@ class CausalTemporalDecoder(nn.Module):
         previous = observed
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         memory = self._live_history(hidden, ctx_pad) if history is None else history
-        conditioning = self.return_conditioner(return_value, condition_present)
+        conditioning = self.return_conditioner(return_value, condition_present, policy_condition)
         frames: list[Tensor] = []
         captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
         forced_count = 0
@@ -1142,6 +1176,189 @@ class CausalTemporalDecoder(nn.Module):
             tuple(torch.stack(captured[name], dim=1) for name in CONTROLLER_GROUP_NAMES) if capture_logits else ()
         )
         return torch.stack(frames, dim=1), logits_by_group
+
+    def decode_decisions(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        forced_queue: Tensor,
+        delay: Tensor,
+        replan: Tensor,
+        policy_condition: Tensor,
+        uniforms: Tensor,
+        *,
+        max_delay: int,
+        sampled_offsets: int,
+        ctx_pad: Tensor | None = None,
+        history: KVMemory | None = None,
+        sampled_actions: Tensor | None = None,
+        forced_prefix_length: int = 0,
+    ) -> DecisionOutput:
+        """Decode a padded batch; return only offsets D+1..D+R.
+
+        ``sampled_actions`` replays the same conditional path with gradients.
+        Uniforms are indexed by offset relative to D+1 and canonical factor.
+        The critic state precedes every sampled factor, including C-stick.
+        """
+        batch = hidden.shape[0]
+        if sampled_offsets not in (2, 4):
+            raise ValueError("decision decode supports 2 or 4 sampled offsets")
+        if forced_queue.shape != (batch, max_delay, CONTROLLER_GROUP_COUNT):
+            raise ValueError("forced queue must be [B, max_delay, groups]")
+        if delay.shape != (batch,) or replan.shape != (batch,):
+            raise ValueError("decision delay and replan must be [B]")
+        if uniforms.shape != (sampled_offsets, CONTROLLER_GROUP_COUNT, batch):
+            raise ValueError("decision uniforms must be [sampled_offsets, groups, B]")
+        if sampled_actions is not None and sampled_actions.shape != (batch, sampled_offsets, CONTROLLER_GROUP_COUNT):
+            raise ValueError("sampled actions must match the padded decision shape")
+        raw_trunk = hidden[:, -1]
+        bias = self._state_bias(decoder_rmsnorm(raw_trunk))
+        skips = self._trunk_skip_logits(raw_trunk)
+        returns = torch.full((batch,), 0.9 * RETURN_SCALE, device=hidden.device)
+        present = torch.ones(batch, dtype=torch.bool, device=hidden.device)
+        conditioning = self.return_conditioner(returns, present, policy_condition)
+        memory = self._live_history(hidden, ctx_pad) if history is None else history
+        caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
+        previous = observed
+        if not 0 <= forced_prefix_length <= max_delay:
+            raise ValueError("forced prefill length exceeds the queue")
+        if forced_prefix_length:
+            _, caches = self._prefill_forced_prefix(
+                observed,
+                tuple(range(1, forced_prefix_length + 1)),
+                forced_queue[:, :forced_prefix_length],
+                bias,
+                memory,
+                conditioning,
+            )
+            previous = forced_queue[:, forced_prefix_length - 1]
+        states: list[Tensor] = []
+        frames: list[Tensor] = []
+        captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
+        rows = torch.arange(batch, device=hidden.device)
+        # All rows replay the same dense chain. Only the forced length differs.
+        for depth in range(forced_prefix_length, max_delay + sampled_offsets):
+            state, caches = self._decode_step(previous, depth + 1, bias, caches, memory, conditioning)
+            states.append(state)
+            relative = (depth - delay).clamp(0, sampled_offsets - 1)
+            forced = forced_queue[:, min(depth, max_delay - 1)] if max_delay else observed
+            embedded: dict[str, Tensor] = {}
+            picks: dict[str, Tensor] = {}
+            for name in CONTROLLER_DECODE_ORDER:
+                group = CONTROLLER_GROUP_INDEX[name]
+                logits = self._center(
+                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    + skips[name]
+                )
+                if name == "buttons":
+                    logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), -torch.inf)
+                captured[name].append(logits)
+                pick = (
+                    sampled_actions[rows, relative, group]
+                    if sampled_actions is not None
+                    else sample_categorical(logits, argmax=False, uniform=uniforms[relative, group, rows])
+                )
+                pick = torch.where(depth < delay, forced[:, group], pick)
+                picks[name] = pick
+                embedded[name] = self.codec.group_embedding(name, pick)
+            previous = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
+            frames.append(previous)
+        indices = delay[:, None] - forced_prefix_length + torch.arange(sampled_offsets, device=hidden.device)[None]
+        actions = torch.stack(frames, dim=1)[rows[:, None], indices]
+        distributions: list[Tensor] = []
+        log_probs: list[Tensor] = []
+        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
+            logits = torch.stack(captured[name], dim=1)[rows[:, None], indices].float()
+            log_distribution = F.log_softmax(logits, dim=-1)
+            distributions.append(log_distribution.exp())
+            log_probs.append(log_distribution.gather(-1, actions[..., group, None]).squeeze(-1))
+        valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
+        return DecisionOutput(
+            actions,
+            valid,
+            torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
+            tuple(distributions),
+            torch.stack(states, dim=1)[rows, delay - forced_prefix_length],
+        )
+
+    def replay_decisions(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        forced_queue: Tensor,
+        delay: Tensor,
+        replan: Tensor,
+        policy_condition: Tensor,
+        uniforms: Tensor,
+        *,
+        max_delay: int,
+        sampled_offsets: int,
+        ctx_pad: Tensor | None = None,
+        history: KVMemory | None = None,
+        sampled_actions: Tensor | None = None,
+    ) -> DecisionOutput:
+        """Replay the recorded chain with parallel causal attention over offsets.
+
+        The queue and sampled path are known. No categorical draw or head at a
+        forced offset is needed. The critic still reads z at D+1 before its draw.
+        """
+        if sampled_actions is None:
+            raise ValueError("parallel replay requires recorded actions")
+        batch = hidden.shape[0]
+        if sampled_actions.shape != (batch, sampled_offsets, CONTROLLER_GROUP_COUNT):
+            raise ValueError("sampled actions must match the padded decision shape")
+        depth = torch.arange(max_delay + sampled_offsets, device=hidden.device)[None]
+        rows = torch.arange(batch, device=hidden.device)
+        relative = (depth - delay[:, None]).clamp(0, sampled_offsets - 1)
+        sampled = sampled_actions[rows[:, None], relative]
+        forced = forced_queue[:, depth[0].clamp(max=max_delay - 1)] if max_delay else sampled
+        targets = torch.where((depth < delay[:, None])[..., None], forced, sampled)
+        previous = torch.cat((observed[:, None], targets[:, :-1]), dim=1)
+        raw_trunk = hidden[:, -1]
+        bias = self._state_bias(decoder_rmsnorm(raw_trunk))
+        state = decoder_rmsnorm(bias[:, None] + self._step_features(previous, depth + 1))
+        conditioning = self.return_conditioner(
+            torch.full((batch,), 0.9 * RETURN_SCALE, device=hidden.device),
+            torch.ones(batch, dtype=torch.bool, device=hidden.device),
+            policy_condition,
+        )
+        memory = self._live_history(hidden, ctx_pad) if history is None else history
+        for index, module in enumerate(self.blocks):
+            block = cast(TemporalBlock, module)
+            modulation = None if conditioning is None else conditioning[index][:, None]
+            state, _ = block.prefill(state, modulation)
+            if index == 0:
+                if isinstance(memory, KVMemory):
+                    state = self.history_attention.forward_with_kv_cache(state, memory)
+                else:
+                    key, value, pad, positions = memory
+                    state = self.history_attention.forward_projected(
+                        state, key, value, pad, positions, offsets_per_prefix=state.shape[1]
+                    )
+        state = decoder_rmsnorm(state)
+        indices = delay[:, None] + torch.arange(sampled_offsets, device=hidden.device)[None]
+        selected = state[rows[:, None], indices]
+        actions = targets[rows[:, None], indices]
+        embedded = self.codec.embed_groups(actions)
+        skips = self._trunk_skip_logits(raw_trunk)
+        distributions: list[Tensor] = []
+        log_probs: list[Tensor] = []
+        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
+            head = cast(NonlinearActionHead, self.outputs[name])
+            logits = self._center(head.project(self.group_features(selected, name, embedded)) + skips[name][:, None])
+            if name == "buttons":
+                logits = logits.masked_fill(self.codec.button_mask(actions[..., TRIGGERS_GROUP]), -torch.inf)
+            logs = F.log_softmax(logits.float(), dim=-1)
+            distributions.append(logs.exp())
+            log_probs.append(logs.gather(-1, actions[..., group, None]).squeeze(-1))
+        valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
+        return DecisionOutput(
+            actions,
+            valid,
+            torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
+            tuple(distributions),
+            state[rows, delay],
+        )
 
     def rollout_conditioned_logits(
         self,
@@ -1332,17 +1549,24 @@ class ActionSequenceTransformer(nn.Module):
         player_ids = features["ego_player_id"].clamp(0, self.player_embedding.num_embeddings - 1)
         return observation + self.player_projection(self.player_embedding(player_ids))
 
-    def forward(self, features: dict[str, Tensor], ctx_pad: Tensor, action_indices: Tensor | None = None) -> Tensor:
-        return self.trunk(self.context_tokens(features, action_indices), ctx_pad)
+    def forward(
+        self,
+        features: dict[str, Tensor],
+        ctx_pad: Tensor,
+        action_indices: Tensor | None = None,
+        segment_ids: Tensor | None = None,
+    ) -> Tensor:
+        return self.trunk(self.context_tokens(features, action_indices), ctx_pad, segment_ids)
 
     def forward_dense(
         self,
         features: dict[str, Tensor],
         ctx_pad: Tensor,
         action_indices: Tensor | None = None,
+        segment_ids: Tensor | None = None,
     ) -> Tensor:
         """Run the shared model weights through the dense inference trunk."""
-        return self.trunk.forward_dense(self.context_tokens(features, action_indices), ctx_pad)
+        return self.trunk.forward_dense(self.context_tokens(features, action_indices), ctx_pad, segment_ids)
 
 
 def center_class_logits(logits: Tensor) -> Tensor:

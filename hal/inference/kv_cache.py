@@ -218,6 +218,10 @@ def forward_with_kv_cache(
 def forward_tokens_with_kv_cache(model: ActionSequenceTransformer, x: Tensor, cache: KVCache) -> Tensor:
     if x.ndim != 3 or x.shape[0] != cache.batch_size or not 1 <= x.shape[1] <= cache.max_update_frames:
         raise ValueError("KV cache input exceeds the prepared batch or update size")
+    return _append_tokens(model, x, cache)
+
+
+def _append_tokens(model: ActionSequenceTransformer, x: Tensor, cache: KVCache) -> Tensor:
     batch, count, _ = x.shape
     positions = cache.next_position[:, None] + torch.arange(count, device=x.device)[None]
     slots = positions % cache.capacity
@@ -251,3 +255,139 @@ def forward_tokens_with_kv_cache(model: ActionSequenceTransformer, x: Tensor, ca
     cache.hidden.copy_(hidden[:, -1:])
     cache.next_position.add_(count)
     return hidden
+
+
+class BlockRestartCache:
+    """A growing causal window with an explicit 128-frame block lifecycle.
+
+    Restart receives left-padded previous frames from the current episode only.
+    The caller restarts at every weight update. No cached feature survives it.
+    """
+
+    def __init__(
+        self,
+        model: ActionSequenceTransformer,
+        batch_size: int,
+        device: torch.device,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        if model.cfg.L_ctx < 256 or model.cfg.attn_window:
+            raise ValueError("block restart requires full causal attention and at least 256 context frames")
+        self.model = model
+        self.cache = KVCache(model, 4, device, batch_size=batch_size, dtype=dtype)
+        self.frames_in_block = torch.zeros(batch_size, device=device, dtype=torch.long)
+
+    @property
+    def cache_seqlens(self) -> Tensor:
+        return self.cache.next_position
+
+    def reset(self, row: int | None = None) -> None:
+        self.cache.reset(row)
+        if row is None:
+            self.frames_in_block.zero_()
+        else:
+            self.frames_in_block[row] = 0
+
+    @torch.inference_mode()
+    def restart(self, previous_tokens: Tensor, lengths: Tensor) -> None:
+        batch, count, width = previous_tokens.shape
+        if (batch, width) != (self.cache.batch_size, self.model.cfg.d_model) or not 0 <= count <= 128:
+            raise ValueError("block prefill must be [B, at most 128, d_model]")
+        if lengths.shape != (batch,) or lengths.dtype not in (torch.int32, torch.int64):
+            raise ValueError("block prefill lengths must be integer [B]")
+        if bool(((lengths < 0) | (lengths > count)).any()):
+            raise ValueError("block prefill lengths exceed the supplied history")
+        self.reset()
+        if count:
+            self.cache.next_position.copy_(lengths - count)
+            valid = torch.arange(count, device=previous_tokens.device)[None] >= count - lengths[:, None]
+            previous_tokens = torch.where(valid[..., None], previous_tokens, 0)
+            _append_tokens(self.model, previous_tokens, self.cache)
+            self.cache.hidden[lengths == 0] = 0
+
+    @torch.inference_mode()
+    def append(self, tokens: Tensor) -> Tensor:
+        if tokens.ndim != 3 or tokens.shape[0] != self.cache.batch_size or tokens.shape[-1] != self.model.cfg.d_model:
+            raise ValueError("block input must be [B, frames, d_model]")
+        if bool((self.frames_in_block + tokens.shape[1] > 128).any()):
+            raise ValueError("block is exhausted; restart before appending")
+        hidden = forward_tokens_with_kv_cache(self.model, tokens, self.cache)
+        self.frames_in_block.add_(tokens.shape[1])
+        return hidden
+
+    def memory(self) -> KVMemory:
+        return self.cache.memory()
+
+
+class DualBlockRestartCache:
+    """Deployment handoff: re-encode the next block's context as frames arrive."""
+
+    def __init__(
+        self,
+        model: ActionSequenceTransformer,
+        batch_size: int,
+        device: torch.device,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        self.active = BlockRestartCache(model, batch_size, device, dtype=dtype)
+        self.next = BlockRestartCache(model, batch_size, device, dtype=dtype)
+
+    def reset(self, row: int | None = None) -> None:
+        self.active.reset(row)
+        self.next.reset(row)
+
+    @torch.inference_mode()
+    def append(self, tokens: Tensor) -> Tensor:
+        if tokens.ndim != 3 or tokens.shape[1] != 1:
+            raise ValueError("dual block restart appends one frame at a time")
+        boundary = self.active.frames_in_block == 128
+        source = self.next.cache
+        target = self.active.cache
+        for dst, src in zip(target.buffers(), source.buffers(), strict=True):
+            row_axis = 1 if dst.ndim == 5 else 0
+            shape = [1] * dst.ndim
+            shape[row_axis] = boundary.shape[0]
+            dst.copy_(torch.where(boundary.reshape(shape), src, dst))
+        self.active.frames_in_block.masked_fill_(boundary, 0)
+        source.positions.masked_fill_(boundary[:, None], -1)
+        source.next_position.masked_fill_(boundary, 0)
+        source.hidden.masked_fill_(boundary[:, None, None], 0)
+        self.next.frames_in_block.masked_fill_(boundary, 0)
+        hidden = self.active.append(tokens)
+        self.next.append(tokens)
+        return hidden
+
+    def memory(self) -> KVMemory:
+        return self.active.memory()
+
+
+def forward_tokens_with_block_handoff(
+    model: ActionSequenceTransformer,
+    tokens: Tensor,
+    active: KVCache,
+    secondary: KVCache,
+) -> Tensor:
+    """Append at most four frames, swapping per-stream caches at block boundaries."""
+    if model.cfg.L_ctx < 256 or model.cfg.attn_window:
+        raise ValueError("block handoff requires at least 256 frames and full causal attention")
+    if active is secondary or active.batch_size != secondary.batch_size or active.window != secondary.window:
+        raise ValueError("block handoff requires distinct caches with matching geometry")
+    if tokens.ndim != 3 or not 1 <= tokens.shape[1] <= 4 or tokens.shape[0] != active.batch_size:
+        raise ValueError("block handoff input must be [B, 1..4, d_model]")
+    outputs: list[Tensor] = []
+    for frame in range(tokens.shape[1]):
+        boundary = (active.next_position == 128) | (active.next_position == 256)
+        for dst, src in zip(active.buffers(), secondary.buffers(), strict=True):
+            row_axis = 1 if dst.ndim == 5 else 0
+            shape = [1] * dst.ndim
+            shape[row_axis] = boundary.shape[0]
+            dst.copy_(torch.where(boundary.reshape(shape), src, dst))
+        secondary.positions.masked_fill_(boundary[:, None], -1)
+        secondary.next_position.masked_fill_(boundary, 0)
+        secondary.hidden.masked_fill_(boundary[:, None, None], 0)
+        token = tokens[:, frame : frame + 1]
+        outputs.append(forward_tokens_with_kv_cache(model, token, active))
+        forward_tokens_with_kv_cache(model, token, secondary)
+    return torch.cat(outputs, dim=1)

@@ -18,6 +18,15 @@ def validate_sampling_temperature(temperature: float) -> float:
     return float(temperature)
 
 
+def _sample_uniform(probabilities: Tensor, uniform: Tensor) -> Tensor:
+    cumulative = probabilities.cumsum(-1)
+    # Rounding must not leave the CDF below a valid draw at a masked tail.
+    cumulative = cumulative / cumulative[..., -1:]
+    upper = 1.0 - torch.finfo(probabilities.dtype).eps / 2
+    uniform = uniform.to(device=probabilities.device, dtype=probabilities.dtype).clamp_max(upper)
+    return (cumulative <= uniform[..., None]).sum(-1).clamp_max(probabilities.shape[-1] - 1)
+
+
 def sample_categorical(
     logits: Tensor,
     *,
@@ -36,11 +45,10 @@ def sample_categorical(
         return torch.multinomial(probabilities, 1, generator=generator).squeeze(-1)
     if uniform.shape != probabilities.shape[:-1]:
         raise ValueError(f"uniform shape {tuple(uniform.shape)} != batch shape {tuple(probabilities.shape[:-1])}")
-    uniform = uniform.to(device=probabilities.device, dtype=probabilities.dtype)
-    return (probabilities.cumsum(-1) < uniform[..., None]).sum(-1).clamp_max(probabilities.shape[-1] - 1)
+    return _sample_uniform(probabilities, uniform)
 
 
 def sample_with_temperature(logits: Tensor, uniform: Tensor, temperature: Tensor) -> Tensor:
     """Use a runtime temperature tensor without specializing compiled decoding."""
     probabilities = F.softmax(logits.float() / temperature, dim=-1)
-    return (probabilities.cumsum(-1) < uniform[..., None]).sum(-1).clamp_max(probabilities.shape[-1] - 1)
+    return _sample_uniform(probabilities, uniform)

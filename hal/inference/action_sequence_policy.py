@@ -1,5 +1,6 @@
 """Execute prepared action-sequence predictions over independent observation streams."""
 
+import math
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from hal.inference.gpu_observations import GpuObservationBatch
 from hal.inference.gpu_observations import GpuObservationUpdates
 from hal.inference.kv_cache import KVCache
 from hal.inference.kv_cache import KVCachePool
+from hal.inference.kv_cache import forward_tokens_with_block_handoff
 from hal.inference.kv_cache import forward_with_kv_cache
 from hal.inference.observation_history import ObservationHistory
 from hal.inference.sampling import StreamGroupRng
@@ -42,6 +44,7 @@ from hal.inference.window_policy import WindowPolicy
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.attention import KVMemory
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.self_play import validate_executed_offsets
 from hal.representation.features import BASE_ITEMS_PROJECTION
 from hal.representation.features import ITEM_COLUMNS
 from hal.representation.features import feature_kind
@@ -114,11 +117,15 @@ class _Stream:
 
 
 class ActionSequencePolicy:
-    """Stateful action sequence with explicit prediction requests."""
+    """Stateful action sequence with explicit prediction requests.
+
+    The displayed state value uses the BC value head. The privileged residual
+    critic requires opponent state and is evaluated by the training program.
+    """
 
     _prediction_frames = 4
     _prefix_frames = 2
-    history_mode: Literal["window", "kv_cache"] = "window"
+    history_mode: Literal["window", "kv_cache", "block_restart"] = "window"
 
     def __init__(
         self,
@@ -133,13 +140,28 @@ class ActionSequencePolicy:
         device: torch.device,
         seed: int | None,
         compiled: bool,
-        history_mode: Literal["window", "kv_cache"] = "window",
+        history_mode: Literal["window", "kv_cache", "block_restart"] = "window",
         kv_update_frames: int = 2,
         kv_cuda_graphs: bool = True,
+        log_lambda: float | None = None,
     ) -> None:
         self.model = model
-        if history_mode not in ("window", "kv_cache") or kv_update_frames not in (1, 2, 4):
+        ranges = model.temporal.return_conditioner.ranges
+        if ranges is not None:
+            if history_mode != "block_restart" or log_lambda is None or not math.isfinite(log_lambda):
+                raise ValueError("self-play inference requires block_restart and a finite log_lambda")
+            if not ranges.log_lambda[0] <= log_lambda <= ranges.log_lambda[1]:
+                raise ValueError("log_lambda is outside the conditioner range")
+        elif log_lambda is not None:
+            raise ValueError("log_lambda requires a widened conditioner")
+        self.log_lambda = log_lambda
+        self._policy_condition: Tensor | None = None
+        if history_mode not in ("window", "kv_cache", "block_restart") or kv_update_frames not in (1, 2, 4):
             raise ValueError("history must be window or kv_cache, with one, two, or four frames per update")
+        if history_mode == "block_restart" and (model.cfg.L_ctx < 256 or model.cfg.attn_window):
+            raise ValueError("block restart requires at least 256 frames and full causal attention")
+        if history_mode == "block_restart" and kv_cuda_graphs:
+            raise ValueError("block restart currently requires kv_cuda_graphs=False")
         self.history_mode = history_mode
         self.kv_update_frames = kv_update_frames
         self.kv_cuda_graphs = kv_cuda_graphs and compiled and device.type == "cuda"
@@ -160,6 +182,8 @@ class ActionSequencePolicy:
         self._dense_policy: DenseWindowPredictionPolicy | None = None
         self._kv_trunk = self._advance
         self._cache_pool: KVCachePool | None = None
+        self._secondary_pool: KVCachePool | None = None
+        self._block_advance = forward_tokens_with_block_handoff
         self._free_rows: set[int] = set()
         self._observation_batches: dict[tuple[int, int], GpuObservationBatch] = {}
         self._update_calls: dict[tuple[int, int], CapturedCall[Tensor]] = {}
@@ -187,7 +211,7 @@ class ActionSequencePolicy:
     def prepared_update_shapes(self) -> tuple[int, ...]:
         if not self._prepared_ready:
             raise RuntimeError("action-sequence policy has not been prepared")
-        if self.history_mode == "kv_cache":
+        if self.history_mode != "window":
             return tuple(count for count in (1, 2, 4) if count <= self.kv_update_frames)
         return tuple(count for count in (1, 2, 4) if count <= self.cfg.L_ctx)
 
@@ -198,11 +222,24 @@ class ActionSequencePolicy:
         if set(runtime.transport_delays) - set(self.spec.supported_transport_delays):
             raise ValueError("059 prediction input delay is unsupported")
         self.model.temporal.configure_live_horizons(tuple(sorted(set(self.model.temporal.live_horizons) | {horizon})))
+        ranges = self.model.temporal.return_conditioner.ranges
+        if ranges is not None:
+            validate_executed_offsets(self.model.head_offsets, ((prefix_frames, horizon - prefix_frames),))
+            if (
+                runtime.replan_interval_frames is not None
+                and runtime.replan_interval_frames != horizon - prefix_frames
+            ):
+                raise ValueError("self-play inference cadence differs from its sampled offsets")
+            self._policy_condition = ranges.normalize(
+                torch.tensor([self.log_lambda], device=self.device),
+                torch.tensor([prefix_frames], device=self.device),
+                torch.tensor([horizon - prefix_frames], device=self.device),
+            )
         self._prediction_frames = horizon
         self._prefix_frames = prefix_frames
         self._runtime = runtime
         self.reset_prediction()
-        if self.history_mode == "kv_cache":
+        if self.history_mode != "window":
             # One additional profile covers the two local fixed-prefix shapes
             # that can share a declared transport delay.
             profile_count = len(self.spec.supported_transport_delays) + 1
@@ -238,11 +275,7 @@ class ActionSequencePolicy:
 
     def validate_prepared_profile(self, profile: PreparedInferenceProfile) -> None:
         runtime = self._runtime
-        if (
-            not self._prepared_ready
-            or runtime is None
-            or (self.history_mode == "kv_cache" and self._cache_pool is None)
-        ):
+        if not self._prepared_ready or runtime is None or (self.history_mode != "window" and self._cache_pool is None):
             raise ValueError("action-sequence policy has not been prepared")
         if self.history_mode == "window" and self._dense_policy is None:
             raise ValueError("action-sequence window policy has not been prepared")
@@ -255,7 +288,7 @@ class ActionSequencePolicy:
         ):
             raise ValueError("prepared inference profile differs from the action-sequence policy")
         supported = (
-            self.prepared_update_shapes if self.history_mode == "kv_cache" else tuple(range(1, self.cfg.L_ctx + 1))
+            self.prepared_update_shapes if self.history_mode != "window" else tuple(range(1, self.cfg.L_ctx + 1))
         )
         if not set(profile.update_shapes) <= set(supported):
             raise ValueError("prepared inference profile declares an unprepared observation update shape")
@@ -285,6 +318,9 @@ class ActionSequencePolicy:
             temperature=temperature,
             forced_prefix=forced,
             history=memory,
+            policy_condition=None
+            if self._policy_condition is None
+            else self._policy_condition.expand(hidden.shape[0], -1),
         )
         return indices, self.model.estimate_value(hidden)
 
@@ -292,10 +328,14 @@ class ActionSequencePolicy:
         if self._compiled:
             self._kv_trunk = torch.compile(self._advance, dynamic=False, fullgraph=True)
             self._kv_decoder = torch.compile(self._sample_with_kv_cache, dynamic=False, fullgraph=True)
+            if self.history_mode == "block_restart":
+                self._block_advance = torch.compile(forward_tokens_with_block_handoff, dynamic=False, fullgraph=True)
         assert self._runtime is not None
         capacity = self._runtime.max_batch_size
         pool = KVCachePool(self.model, capacity, self.device, max_update_frames=4)
         self._cache_pool = pool
+        if self.history_mode == "block_restart":
+            self._secondary_pool = KVCachePool(self.model, capacity, self.device, max_update_frames=4)
         self._free_rows = set(range(capacity))
         self._observation_batches.clear()
         self._update_calls.clear()
@@ -352,6 +392,16 @@ class ActionSequencePolicy:
                         )
                     else:
                         operation()
+                    if self.history_mode == "block_restart":
+                        if self._secondary_pool is None:
+                            raise RuntimeError("block restart cache was not prepared")
+                        secondary = (
+                            self._secondary_pool.row_view(0) if capacity == 1 else self._secondary_pool.scratch[bucket]
+                        )
+                        self._block_advance(
+                            self.model, self.model.context_tokens(batch.features(), batch.actions), cache, secondary
+                        )
+                        secondary.reset()
                     cache.reset()
                 first = self._observation_batches[(bucket, 1)]
                 self._kv_trunk(first.features(), first.actions, cache)
@@ -360,7 +410,9 @@ class ActionSequencePolicy:
                     (self._prediction_frames, len(CONTROLLER_GROUP_NAMES), bucket), 0.5, device=self.device
                 )
                 forced = torch.zeros((bucket, self._prefix_frames, len(ACTION_CHANNELS)), device=self.device)
-                values = torch.full((bucket,), 20.0, device=self.device)
+                values = torch.full(
+                    (bucket,), 108.0 if self._policy_condition is not None else 20.0, device=self.device
+                )
                 present = torch.ones(bucket, dtype=torch.bool, device=self.device)
                 temperature = torch.ones(bucket, 1, device=self.device)
                 inputs = (observed, uniforms, forced, values, present, temperature)
@@ -381,7 +433,7 @@ class ActionSequencePolicy:
                         action_vec_to_controller(action)
                 cache.reset()
             # Full batches execute against permanent rows. Partial batches retain
-            # their smaller scratch graphs, so idle streams never advance.
+            # their smaller scratch graphs to advance the active streams.
             if self.kv_cuda_graphs and capacity > 1 and capacity & (capacity - 1) == 0:
                 for count in (1, 2, 4):
                     if count > self.kv_update_frames:
@@ -443,7 +495,16 @@ class ActionSequencePolicy:
                 else:
                     self._update_calls[(bucket, count)](())
             else:
-                self._kv_trunk(batch.features(), batch.actions, cache)
+                if self.history_mode == "block_restart":
+                    if self._secondary_pool is None:
+                        raise RuntimeError("block restart cache was not prepared")
+                    rows = tuple(stream.row for stream in streams)
+                    secondary = self._secondary_pool.gather(rows, bucket)
+                    tokens = self.model.context_tokens(batch.features(), batch.actions)
+                    self._block_advance(self.model, tokens, cache, secondary)
+                    self._secondary_pool.scatter(rows, secondary)
+                else:
+                    self._kv_trunk(batch.features(), batch.actions, cache)
         for stream in streams:
             stream.pending_frames -= count
         return cache
@@ -476,8 +537,13 @@ class ActionSequencePolicy:
             if self._cache_pool is None:
                 raise RuntimeError("KV cache was not prepared")
             self._cache_pool.reset(row)
+            if self._secondary_pool is not None:
+                self._secondary_pool.reset(row)
             stream.cache = self._cache_pool.row_view(row)
         action = _action_vector(item.applied_action)
+        if self.history_mode == "block_restart" and item.reset:
+            # A reset has no preceding input, matching the rollout context builder.
+            action.fill(0)
         stream.history.gather(flat, action)
         stream.history.push()
         stream.gpu.push(action)
@@ -533,7 +599,10 @@ class ActionSequencePolicy:
         temperature = torch.ones(bucket, 1)
         for index, request in enumerate(requests):
             item = request.observations[-1]
-            if item.desired_return is not None:
+            if self._policy_condition is not None:
+                values[index] = 108.0
+                present[index] = True
+            elif item.desired_return is not None:
                 values[index] = item.desired_return
                 present[index] = True
             temperature[index, 0] = item.temperature
@@ -586,6 +655,8 @@ class ActionSequencePolicy:
         self._prediction_streams.clear()
         if self._cache_pool is not None:
             self._cache_pool.storage.reset()
+        if self._secondary_pool is not None:
+            self._secondary_pool.storage.reset()
         for history, stage in zip(self._row_histories, self._row_updates, strict=True):
             history.reset()
             stage.reset()
@@ -603,6 +674,8 @@ class ActionSequencePolicy:
             return
         if self._cache_pool is not None:
             self._cache_pool.reset(stream.row)
+        if self._secondary_pool is not None:
+            self._secondary_pool.reset(stream.row)
         self._row_histories[stream.row].reset()
         self._row_updates[stream.row].reset()
         self._free_rows.add(stream.row)
@@ -635,10 +708,20 @@ class ActionSequencePolicy:
                 context_frames=self.context_frames,
                 prefix_frames=self._prefix_frames,
             )
+            if self.history_mode == "block_restart" and any(item.reset for item in request.observations[1:]):
+                raise ValueError("block restart reset must start a prediction generation")
             stream = self._prediction_streams.get(request.stream_id)
             generation = None if stream is None else stream.generation
             for observation in request.observations:
                 _validate_prepared_observation(observation)
+                if self._policy_condition is not None and (
+                    (
+                        observation.desired_return is not None
+                        and not math.isclose(observation.desired_return, 108.0, rel_tol=0.0, abs_tol=1e-12)
+                    )
+                    or observation.temperature != 1.0
+                ):
+                    raise ValueError("self-play inference requires u95 and temperature 1")
             if generation is not None and request.generation < generation:
                 raise ValueError("obsolete action sequence prediction generation")
             if stream is not None and generation == request.generation and request.sequence <= stream.sequence:
@@ -677,7 +760,7 @@ class ActionSequencePolicy:
                 for index, (_, request, row, _) in enumerate(group):
                     item = request.observations[at]
                     states[index] = self._ingest(replace(item, reset=states[index] is None), states[index], row)
-                if self.history_mode == "kv_cache" and (at + 1) % self.kv_update_frames == 0:
+                if self.history_mode != "window" and (at + 1) % self.kv_update_frames == 0:
                     cache = self._advance_batch(
                         tuple(cast(_Stream, state) for state in states), self.kv_update_frames, cache=cache
                     )

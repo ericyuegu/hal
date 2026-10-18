@@ -96,3 +96,16 @@ def test_varlen_flash_matches_dense_on_valid_tokens_and_gradients(window: int) -
     dense_output[valid].float().square().mean().backward()
     flash_output[valid].float().square().mean().backward()
     torch.testing.assert_close(flash_input.grad[valid], dense_input.grad[valid], rtol=5e-2, atol=5e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@torch.inference_mode()
+def test_bc_cuda_backend_is_preserved_and_dense_reference_is_explicit() -> None:
+    trunk = _trunk(backend="varlen_flash").cuda().bfloat16()
+    values = torch.randn(2, 48, 64, device="cuda", dtype=torch.bfloat16)
+    padding = torch.tensor([0, 11], device="cuda")
+    expected = trunk(values, padding)
+    torch.testing.assert_close(trunk.forward_dense(values, padding), expected, rtol=0, atol=0)
+    reference = trunk.forward_dense(values, padding, force_dense=True)
+    valid = torch.arange(48, device="cuda")[None] >= padding[:, None]
+    torch.testing.assert_close(reference[valid], expected[valid], rtol=2e-2, atol=2e-2)
