@@ -171,8 +171,11 @@ MslResult msl_batch_reset(MslBatch* batch, const MslMatchConfig configs[],
   return MSL_OK;
 }
 
+static uint32_t observe_calls;
+uint32_t msl_test_observe_calls(void) { return observe_calls; }
 MslResult msl_batch_observe(const MslBatch* batch, MslObservation observations[],
                             MslTerminal terminals[]) {
+  ++observe_calls;
   if (!batch || !observations || !terminals) return MSL_INVALID_ARGUMENT;
   for (uint32_t index = 0; index < batch->size; ++index) {
     if (!batch->lanes[index].active) return MSL_INVALID_STATE;

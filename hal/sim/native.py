@@ -8,7 +8,9 @@ import importlib
 import json
 import math
 import struct
+import threading
 import weakref
+import zlib
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -26,7 +28,8 @@ from hal.wire import ACTION_DIM
 from hal.wire import ITEM_SLOTS
 
 _ABI_VERSION = 2
-_SNAPSHOT_MAGIC = b"HALMSL02"
+_SNAPSHOT_MAGIC = b"HALMSL03"
+_LIFECYCLE_LOCK = threading.Lock()
 _OBSERVATION_SCHEMA = "hal.flat.numeric.v1"
 _ACTION_SCHEMA = "hal.controller.v1"
 _STAGE_TO_NATIVE = {8: 2, 18: 3, 6: 8, 26: 28, 24: 31, 25: 32}
@@ -71,6 +74,8 @@ FRAME_DTYPE = np.dtype(
 
 @dataclass(frozen=True, slots=True)
 class NativePlayer:
+    """Use libmelee's internal character kind; Ice Climbers is Popo (10)."""
+
     port: int
     character: int
     facing: int | None = None
@@ -188,7 +193,7 @@ def _validate_match(config: NativeMatch) -> None:
     if type(config.stocks) is not int or not 1 <= config.stocks <= 255:
         raise ValueError("stocks must be in 1..255")
     if (
-        not isinstance(config.damage_ratio, (int, float))
+        type(config.damage_ratio) not in (int, float)
         or not math.isfinite(config.damage_ratio)
         or config.damage_ratio <= 0
     ):
@@ -200,7 +205,7 @@ def _validate_match(config: NativeMatch) -> None:
     for player in config.players:
         if type(player.port) is not int or type(player.character) is not int:
             raise ValueError("port and character must be integers")
-        if player.facing is not None and player.facing not in (-1, 1):
+        if player.facing is not None and (type(player.facing) is not int or player.facing not in (-1, 1)):
             raise ValueError("facing must be -1, 1, or None")
         if type(player.costume) is not int or not 0 <= player.costume <= 255:
             raise ValueError("costume must be a uint8")
@@ -229,14 +234,23 @@ def _quantize(actions: NDArray[np.float32]) -> NDArray[np.int16]:
     return result
 
 
-class NativeRolloutBatch:
-    """Two HAL ports per lane; the caller owns policy streams and frame history.
+def _destroy(lib: ctypes.CDLL, handle: ctypes.c_void_p) -> None:
+    # MSL's immutable game-data reference count is process-wide.
+    with _LIFECYCLE_LOCK:
+        lib.hal_native_destroy(handle)
 
-    ``chunk_frames`` remains accepted for callers of the former ring-buffer
-    adapter; current-frame storage is now constant-sized.
+
+class NativeRolloutBatch:
+    """Step two HAL ports per lane into the current-frame buffer.
+
+    Retain the allocation behind records through close. A NumPy view of pinned
+    memory can supply that allocation. Serialize calls on each batch and wait
+    for asynchronous readers before overwriting output.
     """
 
-    def __init__(self, data_dir: Path, batch_size: int, *, chunk_frames: int = 256) -> None:
+    def __init__(
+        self, data_dir: Path, batch_size: int, *, chunk_frames: int = 256, records: NDArray | None = None
+    ) -> None:
         if (
             type(batch_size) is not int
             or not 0 < batch_size <= 0xFFFFFFFF
@@ -253,7 +267,17 @@ class NativeRolloutBatch:
         self._library_sha = hashlib.sha256(Path(sim.native_library_path()).read_bytes()).hexdigest()
         self._configs: list[NativeMatch | None] = [None] * batch_size
         self._active = np.zeros(batch_size, dtype=np.bool_)
-        records = np.zeros(batch_size, dtype=FRAME_DTYPE)
+        if records is None:
+            records = np.zeros(batch_size, dtype=FRAME_DTYPE)
+        if (
+            not isinstance(records, np.ndarray)
+            or records.dtype != FRAME_DTYPE
+            or records.shape != (batch_size,)
+            or not records.flags.c_contiguous
+            or not records.flags.writeable
+            or records.ctypes.data % 4
+        ):
+            raise ValueError("records must be writable aligned C-contiguous HalFrame[B]")
         self.frame = NativeFrameBatch(
             columns={
                 name: records["columns"][:, i].view(MDS_PER_FRAME_DTYPES[name])
@@ -272,8 +296,9 @@ class NativeRolloutBatch:
         self._adapter_sha = native_bridge.library_sha256()
         self._handle = ctypes.c_void_p()
         self._step = self._lib.hal_native_step
-        self._lib_create(Path(data_dir), sim.native_library_path(), records)
-        self._finalizer = weakref.finalize(self, self._lib.hal_native_destroy, self._handle)
+        with _LIFECYCLE_LOCK:
+            self._lib_create(Path(data_dir), sim.native_library_path(), records)
+        self._finalizer = weakref.finalize(self, _destroy, self._lib, self._handle)
 
     def _lib_create(self, data_dir: Path, library: Path, records: NDArray) -> None:
         root = data_dir.expanduser().resolve()
@@ -374,11 +399,75 @@ class NativeRolloutBatch:
             native_bridge.check(self._lib, result)
         return self.frame
 
+    def replay_sizes(self) -> tuple[int, int, int]:
+        sizes = (ctypes.c_size_t * 3)()
+        native_bridge.check(self._lib, self._lib.hal_native_replay_sizes(sizes))
+        return sizes[0], sizes[1], sizes[2]
+
+    def _replay_buffer(self, value: NDArray[np.uint8], size: int) -> None:
+        if (
+            not isinstance(value, np.ndarray)
+            or value.dtype != np.uint8
+            or value.shape != (self.batch_size, size)
+            or not value.flags.c_contiguous
+        ):
+            raise ValueError(f"replay buffer must be C-contiguous uint8[{self.batch_size},{size}]")
+
+    def reset_replay(
+        self,
+        matches: Sequence[NativeMatch],
+        configs: NDArray[np.uint8],
+        previous: NDArray[np.uint8],
+        first: NDArray[np.uint8],
+    ) -> NativeFrameBatch:
+        """Replay ABI 1; publish the first recorded tick without a neutral tick.
+
+        ``configs``, ``previous``, and ``first`` come from MSL's admitted replay
+        exporter. ``matches`` supplies HAL port ordering and checkpoint metadata.
+        ``applied_action`` is zero: this path submits recorded inputs, not HAL
+        policy actions. ``wire_inputs`` carries the recorded physical bytes.
+        """
+        self._check_open()
+        for value, size in zip((configs, previous, first), self.replay_sizes(), strict=True):
+            self._replay_buffer(value, size)
+        if len(matches) != self.batch_size:
+            raise ValueError("matches must contain one match per lane")
+        native_configs = (native_bridge.MatchConfig * self.batch_size)()
+        for lane, match in enumerate(matches):
+            native_configs[lane] = self._native_config(match)
+        native_bridge.check(
+            self._lib,
+            self._lib.hal_native_reset_replay(
+                self._handle,
+                native_bridge.pointer(configs),
+                native_bridge.pointer(previous),
+                native_bridge.pointer(first),
+                native_configs,
+            ),
+        )
+        self._configs[:] = matches
+        self._active[:] = True
+        return self.frame
+
+    def step_replay(self, frames: NDArray[np.uint8], mask: NDArray[np.bool_]) -> NativeFrameBatch:
+        self._check_open()
+        self._replay_buffer(frames, self.replay_sizes()[2])
+        selected = np.ascontiguousarray(_mask(mask, self.batch_size))
+        native_bridge.check(
+            self._lib,
+            self._lib.hal_native_step_replay(
+                self._handle, native_bridge.pointer(frames), native_bridge.pointer(selected)
+            ),
+        )
+        return self.frame
+
     def save(self, lane: int) -> bytes:
         self._check_lane(lane)
         config = self._configs[lane]
         assert config is not None
         header = {
+            "snapshot_version": 3,
+            "compression": "zlib",
             "abi": _ABI_VERSION,
             "adapter_abi": native_bridge.ABI_VERSION,
             "adapter_sha256": self._adapter_sha,
@@ -393,7 +482,6 @@ class NativeRolloutBatch:
             "terminated": bool(self.frame.terminated[lane]),
             "truncated": bool(self.frame.truncated[lane]),
         }
-        metadata = json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         size = ctypes.c_size_t()
         native_bridge.check(self._lib, self._lib.hal_native_save_size(self._handle, lane, ctypes.byref(size)))
         buffer = ctypes.create_string_buffer(size.value)
@@ -401,12 +489,15 @@ class NativeRolloutBatch:
         native_bridge.check(
             self._lib, self._lib.hal_native_save(self._handle, lane, buffer, size.value, ctypes.byref(written))
         )
-        return _SNAPSHOT_MAGIC + struct.pack("<I", len(metadata)) + metadata + buffer.raw[: written.value]
+        payload = buffer.raw[: written.value]
+        header["payload_sha256"] = hashlib.sha256(payload).hexdigest()
+        metadata = json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        return _SNAPSHOT_MAGIC + struct.pack("<I", len(metadata)) + metadata + zlib.compress(payload)
 
     def restore(self, lane: int, state: bytes) -> NativeFrameBatch:
-        self._check_open()
-        if type(lane) is not int or not 0 <= lane < self.batch_size:
-            raise ValueError("lane is out of range")
+        return self.restore_many((lane,), (state,))
+
+    def _decode_snapshot(self, state: bytes) -> tuple[NativeMatch, int, NDArray, bytes]:
         if (
             not isinstance(state, bytes)
             or not state.startswith(_SNAPSHOT_MAGIC)
@@ -418,9 +509,32 @@ class NativeRolloutBatch:
         end = start + 4 + header_size
         if end >= len(state):
             raise ValueError("truncated HAL native snapshot")
-        header = json.loads(state[start + 4 : end])
+        parsed = json.loads(state[start + 4 : end])
+        expected_keys = {
+            "snapshot_version",
+            "compression",
+            "abi",
+            "adapter_abi",
+            "adapter_sha256",
+            "observation_schema",
+            "action_schema",
+            "manifest_sha256",
+            "library_sha256",
+            "payload_sha256",
+            "config",
+            "frame_id",
+            "applied_action",
+            "wire_inputs",
+            "terminated",
+            "truncated",
+        }
+        if not isinstance(parsed, dict) or set(parsed) != expected_keys:
+            raise ValueError("invalid HAL native snapshot metadata")
+        header = cast(dict[str, object], parsed)
         if (
-            header["abi"] != _ABI_VERSION
+            header["snapshot_version"] != 3
+            or header["compression"] != "zlib"
+            or header["abi"] != _ABI_VERSION
             or header.get("adapter_abi") != native_bridge.ABI_VERSION
             or header.get("adapter_sha256") != self._adapter_sha
             or header["observation_schema"] != _OBSERVATION_SCHEMA
@@ -429,33 +543,87 @@ class NativeRolloutBatch:
             or header["library_sha256"] != self._library_sha
         ):
             raise ValueError("HAL native snapshot identity does not match this simulator")
+        frame_id = header["frame_id"]
+        if type(frame_id) is not int or not -0x80000000 <= frame_id <= 0x7FFFFFFF:
+            raise ValueError("invalid HAL native snapshot frame id")
+        if type(header["terminated"]) is not bool or type(header["truncated"]) is not bool:
+            raise ValueError("invalid HAL native snapshot terminal flags")
         config = _read_config(header["config"])
-        action = np.asarray(header["applied_action"], dtype=np.float32)
-        wire = np.asarray(header["wire_inputs"], dtype=np.int16)
-        if action.shape != (2, ACTION_DIM) or wire.shape != (2, 7):
+        action = np.asarray(header["applied_action"])
+        wire = np.asarray(header["wire_inputs"])
+        if action.shape != (2, ACTION_DIM) or action.dtype.kind not in "fiu" or wire.shape != (2, 7):
             raise ValueError("HAL native snapshot action shape is invalid")
+        if (
+            not np.isfinite(action).all()
+            or (action[:, :4] < -1).any()
+            or (action[:, :4] > 1).any()
+            or (action[:, 4:] < 0).any()
+            or (action[:, 4:] > 1).any()
+            or wire.dtype.kind not in "iu"
+            or (wire[:, :4] < -128).any()
+            or (wire[:, :4] > 127).any()
+            or (wire[:, 4:6] < 0).any()
+            or (wire[:, 4:6] > 255).any()
+            or (wire[:, 6] < -32768).any()
+            or (wire[:, 6] > 32767).any()
+        ):
+            raise ValueError("HAL native snapshot action values are invalid")
         restored = np.zeros(1, dtype=FRAME_DTYPE)
         restored["applied_action"][0] = action
         restored["wire_inputs"][0] = wire
         restored["terminated"][0] = bool(header["terminated"])
         restored["truncated"][0] = bool(header["truncated"])
-        native_config = self._native_config(config)
-        payload = ctypes.create_string_buffer(state[end:])
+        decoder = zlib.decompressobj()
+        try:
+            payload = decoder.decompress(state[end:])
+        except zlib.error as error:
+            raise ValueError("invalid compressed HAL native snapshot") from error
+        if not decoder.eof or decoder.unused_data or hashlib.sha256(payload).hexdigest() != header["payload_sha256"]:
+            raise ValueError("HAL native snapshot payload mismatch")
+        return config, frame_id, restored, payload
+
+    def restore_many(self, lanes: Sequence[int], states: Sequence[bytes]) -> NativeFrameBatch:
+        """Restore selected lanes, then observe and project the batch once.
+
+        All HAL metadata is checked before mutation. A native restore failure
+        can leave earlier lanes restored; callers must discard that batch.
+        """
+        self._check_open()
+        if len(lanes) != len(states) or len(set(lanes)) != len(lanes):
+            raise ValueError("restore needs one snapshot per distinct lane")
+        for lane in lanes:
+            if type(lane) is not int or not 0 <= lane < self.batch_size:
+                raise ValueError("lane is out of range")
+        decoded = [self._decode_snapshot(state) for state in states]
+        if not lanes:
+            return self.frame
+        indices = np.asarray(lanes, dtype=np.uint32)
+        configs = (native_bridge.MatchConfig * len(lanes))()
+        restored = np.zeros(len(lanes), dtype=FRAME_DTYPE)
+        for index, (config, _frame_id, saved, _payload) in enumerate(decoded):
+            configs[index] = self._native_config(config)
+            restored[index] = saved[0]
+        # The native restore reads const bytes. Keep decoded alive through the
+        # call instead of making a second full copy of every native state.
+        pointers = (ctypes.c_char_p * len(lanes))(*(item[3] for item in decoded))
+        sizes = (ctypes.c_size_t * len(lanes))(*(len(item[3]) for item in decoded))
         native_bridge.check(
             self._lib,
-            self._lib.hal_native_restore(
+            self._lib.hal_native_restore_many(
                 self._handle,
-                lane,
-                payload,
-                len(state) - end,
-                ctypes.byref(native_config),
+                native_bridge.pointer(indices),
+                pointers,
+                sizes,
+                configs,
                 native_bridge.pointer(restored),
+                len(lanes),
             ),
         )
-        self._configs[lane] = config
-        self._active[lane] = True
-        if self.frame.frame_id[lane] != header["frame_id"]:
-            raise ValueError("HAL native snapshot frame mismatch")
+        for lane, (config, frame_id, _saved, _payload) in zip(lanes, decoded, strict=True):
+            self._configs[lane] = config
+            self._active[lane] = True
+            if self.frame.frame_id[lane] != frame_id:
+                raise ValueError("HAL native snapshot frame mismatch")
         return self.frame
 
     def _check_lane(self, lane: int) -> None:

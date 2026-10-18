@@ -22,6 +22,7 @@ from hal.sim.inputs import controller_action_readback
 from hal.sim.inputs import controller_actions_match
 from hal.sim.sources import MDSControllerSource
 from hal.wire import ACTION_CHANNELS
+from hal.wire import ACTION_DIM
 from hal.wire import BUTTON_BITS
 
 
@@ -181,3 +182,36 @@ def test_apply_inputs_rejects_nonfinite_analog_values(value: float) -> None:
     assert not sink.shoulders
     assert not sink.pressed
     assert not sink.released
+
+
+def test_native_readback_matches_scalar_at_every_stick_byte() -> None:
+    from hal.controller import action_vec_to_controller
+    from hal.controller import controller_to_action_vec
+    from hal.sim.inputs import native_controller_readback
+
+    grid = np.stack(np.meshgrid(np.arange(-80, 81), np.arange(-80, 81)), axis=-1).reshape(-1, 2)
+    rng = np.random.default_rng(65)
+    actions = rng.random((len(grid), ACTION_DIM), dtype=np.float32)
+    actions[:, :2] = grid / 80
+    actions[:, 2:4] = grid[:, ::-1] / 80
+    actual = native_controller_readback(actions)
+    expected = np.stack(
+        [
+            controller_to_action_vec(controller_action_readback(action_vec_to_controller(row)), dtype=np.float32)
+            for row in actions
+        ]
+    )
+    np.testing.assert_array_equal(actual, expected)
+    # Include float32 values adjacent to half-byte rounding boundaries.
+    edges = ((np.arange(-80, 80) + 0.5) / 80).astype(np.float32)
+    values = np.concatenate((edges, np.nextafter(edges, np.float32(1)), np.nextafter(edges, np.float32(-1))))
+    actions = rng.random((3, len(values), ACTION_DIM), dtype=np.float32)
+    actions[..., :4] = values[None, :, None]
+    actual = native_controller_readback(actions)
+    expected = np.stack(
+        [
+            controller_to_action_vec(controller_action_readback(action_vec_to_controller(row)), dtype=np.float32)
+            for row in actions.reshape(-1, ACTION_DIM)
+        ]
+    ).reshape(actions.shape)
+    np.testing.assert_array_equal(actual, expected)

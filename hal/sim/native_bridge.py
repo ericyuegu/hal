@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 
 
 class PlayerConfig(ctypes.Structure):
@@ -85,7 +85,10 @@ def _load(path: Path) -> tuple[ctypes.CDLL, str]:
         "hal_native_quantize": ([ptr, ptr, size], ctypes.c_int),
         "hal_native_save_size": ([ptr, u32, ctypes.POINTER(size)], ctypes.c_int),
         "hal_native_save": ([ptr, u32, ptr, size, ctypes.POINTER(size)], ctypes.c_int),
-        "hal_native_restore": ([ptr, u32, ptr, size, ptr, ptr], ctypes.c_int),
+        "hal_native_replay_sizes": ([ptr], ctypes.c_int),
+        "hal_native_reset_replay": ([ptr, ptr, ptr, ptr, ptr], ctypes.c_int),
+        "hal_native_step_replay": ([ptr, ptr, ptr], ctypes.c_int),
+        "hal_native_restore_many": ([ptr, ptr, ptr, ptr, ptr, ptr, u32], ctypes.c_int),
     }
     for name, (arguments, result) in signatures.items():
         function = getattr(lib, name)

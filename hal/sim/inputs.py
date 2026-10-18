@@ -1,13 +1,9 @@
-"""Per-frame controller-input value objects + libmelee setter dispatch.
+"""Apply per-frame controller values through libmelee.
 
-``ControllerAction`` and the stateful MDS source both satisfy the
-``ControllerInputs`` contract used by ``apply_inputs``.
-
-All values are logical (game-causal): sticks in [-1, 1], triggers in [0, 1],
-buttons a wire-bitmask. ``fix_analog_stick_signed`` / ``fix_analog_trigger``
-in libmelee own the wire conversion; the Controller is constructed with
-``fix_analog_inputs=False`` so the converted value reaches Dolphin unmodified.
-See ``hal.wire`` for the controller data model.
+Read ControllerInputs from a ControllerAction or an MDS source. Convert signed
+sticks and triggers with libmelee's fix_analog_stick_signed and
+fix_analog_trigger, then pass them to a Controller with fix_analog_inputs=False.
+hal.wire defines stick, trigger, and button values.
 """
 
 import math
@@ -21,6 +17,8 @@ from typing import cast
 from typing import runtime_checkable
 
 import melee
+import numpy as np
+from numpy.typing import NDArray
 
 from hal.controller import NEUTRAL_CONTROLLER_ACTION
 from hal.controller import POLICY_BUTTON_MASK
@@ -137,6 +135,32 @@ def controller_action_readback(action: ControllerInputs) -> ControllerAction:
     )
 
 
+def native_controller_readback(actions: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Convert submitted native inputs to the controller state seen in Dolphin.
+
+    Queues and simulator snapshots must retain submitted inputs. Apply this
+    conversion only at the observation boundary, before policy features.
+    """
+    if actions.dtype != np.float32 or actions.shape[-1:] != (len(ACTION_CHANNELS),):
+        raise ValueError("native inputs must be float32 HAL action vectors")
+    if (
+        not np.isfinite(actions).all()
+        or (np.abs(actions[..., :4]) > 1).any()
+        or (actions[..., 4:] < 0).any()
+        or (actions[..., 4:] > 1).any()
+    ):
+        raise ValueError("native inputs must be finite HAL controller values")
+    result = actions.copy()
+    sticks = actions[..., :4].astype(np.float64).reshape(*actions.shape[:-1], 2, 2)
+    # Python round uses double precision and ties to even at the wire boundary.
+    sticks = np.rint(((sticks + 1) / 2 - 0.5) * 160)
+    radius = np.hypot(sticks[..., 0], sticks[..., 1])
+    sticks = np.where((radius > 80)[..., None], np.trunc(sticks * 80 / np.maximum(radius, 80)[..., None]), sticks)
+    result[..., :4] = np.where(np.abs(sticks) < 23, 0, sticks / 80).reshape(*actions.shape[:-1], 4)
+    result[..., 6:] = actions[..., 6:] > 0.5
+    return result
+
+
 def controller_actions_match(
     expected: ControllerInputs,
     actual: ControllerInputs,
@@ -161,11 +185,10 @@ def _require_finite(name: str, value: float) -> None:
 
 
 def apply_inputs(controller: ControllerSink, src: ControllerInputs) -> None:
-    """Punch one frame of inputs into a libmelee Controller.
+    """Apply a frame of inputs to a libmelee Controller.
 
-    Setters write directly to the named pipe; ``Console.step()`` flushes — do
-    not call ``flush()`` here. The button loop unconditionally presses or
-    releases every button so we don't carry stale state from a previous source.
+    Setters write to the pipe; Console.step flushes it. Press or release every
+    button so the next input source starts with its declared button state.
     """
     main_x = src.main_x
     main_y = src.main_y

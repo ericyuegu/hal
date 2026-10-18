@@ -1,13 +1,15 @@
-"""The HAL/native boundary preserves the policy's stored row contract."""
+"""Check stored policy columns and actions through the native simulator boundary."""
 
 from __future__ import annotations
 
 import ctypes
 import gc
 import hashlib
+import json
 import math
 import struct
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -125,7 +127,7 @@ def test_step_quantizes_all_channels_routes_roster_rewards_and_masks(fake_sim: P
         actions[0, 1, 0] = 0.5
         frame = batch.step(actions, np.array([True, False]))
         assert frame.frame_id.tolist() == [-122, -123]
-        assert frame.wire_inputs[0, 0].tolist() == [-40, 0, 0, 0, 0, 43, 0x0120]
+        assert frame.wire_inputs[0, 0].tolist() == [-40, 0, 0, 0, 42, 140, 0x0120]
         assert frame.wire_inputs[0, 1, 0] == 40
         assert _last_input(fake_sim, 0, 1)[0] == -40
         assert _last_input(fake_sim, 0, 0)[0] == 40
@@ -215,7 +217,7 @@ def test_all_buttons_and_half_step_axis_quantization(fake_sim: Path) -> None:
     actions[0, 0, 4:6] = np.array([1, 0], dtype=np.float32)
     actions[0, 0, 6:] = 1
     wire = native._quantize(actions)
-    assert wire[0, 0].tolist() == [1, -1, 80, -80, 140, 0, 0x0F78]
+    assert wire[0, 0].tolist() == [1, -1, 80, -80, 140, 140, 0x0F78]
 
 
 def test_supported_stage_ids_match_pinned_libmelee() -> None:
@@ -244,7 +246,7 @@ def test_quantization_matches_pinned_libmelee_at_threshold_neighbors(fake_sim: P
     for row, value in enumerate(trigger_values):
         wire = melee.controller.fix_analog_trigger(float(value))
         expected = math.floor(wire * 255)
-        assert actual[row, 0, 4] == (0 if expected < 43 else expected), (row, value, expected)
+        assert actual[row, 0, 4] == expected, (row, value, expected)
 
 
 @pytest.mark.parametrize(
@@ -287,7 +289,21 @@ def test_reward_matches_canonical_float32_bytes(
                 win_reward=50.0,
                 stock_value=120.0,
             )[1]
-        expected_pair = np.asarray([expected, -expected], dtype=np.float32)
+        with np.errstate(over="ignore", invalid="ignore"):
+            expected_opp = frame_reward(
+                {
+                    "p1_stock": np.asarray([old_stock[0], new_stock[0]], dtype=np.int32),
+                    "p2_stock": np.asarray([old_stock[1], new_stock[1]], dtype=np.int32),
+                    "p1_percent": np.asarray([old_percent[0], new_percent[0]], dtype=np.float32),
+                    "p2_percent": np.asarray([old_percent[1], new_percent[1]], dtype=np.float32),
+                },
+                ego="p2",
+                opp="p1",
+                damage_shaping=1.0,
+                win_reward=50.0,
+                stock_value=120.0,
+            )[1]
+        expected_pair = np.asarray([expected, expected_opp], dtype=np.float32)
         np.testing.assert_array_equal(frame.reward[0].view(np.uint32), expected_pair.view(np.uint32))
 
 
@@ -398,7 +414,7 @@ def test_close_is_idempotent_and_gc_releases_native_batch(fake_sim: Path) -> Non
     assert library.msl_game_data_references() == 0
 
 
-def test_random_quantization_has_old_float32_wire_bytes(fake_sim: Path) -> None:
+def test_random_quantization_matches_dolphin_physical_bytes(fake_sim: Path) -> None:
     rng = np.random.default_rng(7391)
     actions = rng.uniform(0, 1, size=(4096, 2, ACTION_DIM)).astype(np.float32)
     actions[..., :4] = rng.uniform(-1, 1, size=(4096, 2, 4)).astype(np.float32)
@@ -406,12 +422,13 @@ def test_random_quantization_has_old_float32_wire_bytes(fake_sim: Path) -> None:
     sticks = actions[..., :4].astype(np.float64)
     expected[..., :4] = np.rint(((sticks + 1.0) / 2.0 - 0.5) * 160.0).astype(np.int16)
     triggers = np.rint(actions[..., 4:6].astype(np.float64) * 140.0).astype(np.int16)
-    triggers[triggers < 43] = 0
     expected[..., 4:6] = triggers
     button_masks = np.asarray(
         [BUTTON_BITS[channel.removeprefix("button_")] for channel in ACTION_CHANNELS[6:]], dtype=np.int16
     )
     expected[..., 6] = np.sum((actions[..., 6:] > np.float32(0.5)) * button_masks, axis=-1, dtype=np.int16)
+    expected[..., 4] = np.where(expected[..., 6] & BUTTON_BITS["l"], 140, expected[..., 4])
+    expected[..., 5] = np.where(expected[..., 6] & BUTTON_BITS["r"], 140, expected[..., 5])
     actual = native._quantize(actions)
     np.testing.assert_array_equal(actual.view(np.uint8), expected.view(np.uint8))
 
@@ -452,3 +469,108 @@ def test_restore_into_one_lane_of_fresh_multi_lane_batch(fake_sim: Path) -> None
         assert frame.columns["p1_stock"][1] == MASK_INT32
         frame = target.step(actions, np.array([True, False]))
         assert frame.frame_id.tolist() == [-121, 0]
+
+
+def test_restore_many_observes_once_and_validates_before_mutation(fake_sim: Path) -> None:
+    with native.NativeRolloutBatch(fake_sim, 4) as batch:
+        mask = np.ones(4, dtype=np.bool_)
+        batch.reset(_matches(4), mask)
+        saved = tuple(batch.save(lane) for lane in range(4))
+        library = _test_library(fake_sim)
+        before = library.msl_test_observe_calls()
+        batch.restore_many((3, 1, 2, 0), saved)
+        assert library.msl_test_observe_calls() == before + 1
+        for lanes, states in (((0, 0), saved[:2]), ((-1,), saved[:1]), ((0,), saved[:2])):
+            with pytest.raises(ValueError):
+                batch.restore_many(lanes, states)
+        bad = saved[1].replace(b'"action_schema":"hal.controller.v1"', b'"action_schema":"hal.controller.v2"')
+        with pytest.raises(ValueError, match="identity"):
+            batch.restore_many((0, 1), (saved[0], bad))
+        assert library.msl_test_observe_calls() == before + 1
+
+
+def test_output_buffer_validation_and_ownership(fake_sim: Path) -> None:
+    records = np.empty(2, dtype=native.FRAME_DTYPE)
+    with native.NativeRolloutBatch(fake_sim, 2, records=records) as batch:
+        frame = batch.reset(_matches(2), np.ones(2, dtype=np.bool_))
+        assert frame.records is records
+        assert np.shares_memory(frame.columns["p1_position_x"], records)
+    readonly = records.copy()
+    readonly.flags.writeable = False
+    for bad in (readonly, records[:1], records[::-1], np.empty(2, dtype=np.float32)):
+        with pytest.raises(ValueError, match="records"):
+            native.NativeRolloutBatch(fake_sim, 2, records=bad)
+
+
+def test_compressed_snapshot_rejects_corruption_and_trailing_bytes(fake_sim: Path) -> None:
+    with native.NativeRolloutBatch(fake_sim, 1) as batch:
+        batch.reset(_matches(1), np.ones(1, dtype=np.bool_))
+        saved = batch.save(0)
+        bad = bytearray(saved)
+        bad[-1] ^= 1
+        for malformed in (bytes(bad), saved + b"trailing", saved[:-1]):
+            with pytest.raises(ValueError, match="snapshot"):
+                batch.restore(0, malformed)
+
+
+@pytest.mark.parametrize(
+    "field", ("nonfinite", "axis", "axis_rounding", "button", "string", "wire_fraction", "wire_range", "facing")
+)
+def test_snapshot_rejects_invalid_action_metadata_before_restore(fake_sim: Path, field: str) -> None:
+    with native.NativeRolloutBatch(fake_sim, 1) as batch:
+        batch.reset(_matches(1), np.ones(1, dtype=np.bool_))
+        saved = batch.save(0)
+        size = struct.unpack_from("<I", saved, 8)[0]
+        metadata = json.loads(saved[12 : 12 + size])
+        if field == "nonfinite":
+            metadata["applied_action"][0][0] = float("nan")
+        elif field == "axis":
+            metadata["applied_action"][0][0] = 1.01
+        elif field == "axis_rounding":
+            metadata["applied_action"][0][0] = 1.0 + 1e-8
+        elif field == "button":
+            metadata["applied_action"][0][6] = -0.1
+        elif field == "string":
+            metadata["applied_action"][0][0] = "0.5"
+        elif field == "wire_fraction":
+            metadata["wire_inputs"][0][0] = 0.5
+        elif field == "wire_range":
+            metadata["wire_inputs"][0][0] = 128
+        else:
+            metadata["config"]["players"][0]["facing"] = True
+        changed = json.dumps(metadata, separators=(",", ":")).encode()
+        malformed = saved[:8] + struct.pack("<I", len(changed)) + changed + saved[12 + size :]
+        library = _test_library(fake_sim)
+        before = library.msl_test_observe_calls()
+        with pytest.raises(ValueError, match="snapshot"):
+            batch.restore(0, malformed)
+        assert library.msl_test_observe_calls() == before
+
+
+def test_match_rejects_boolean_damage_ratio(fake_sim: Path) -> None:
+    with native.NativeRolloutBatch(fake_sim, 1) as batch, pytest.raises(ValueError, match="damage_ratio"):
+        batch.reset((replace(_matches(1)[0], damage_ratio=True),), np.ones(1, dtype=np.bool_))
+
+
+def test_shard_wait_callback_failure_preserves_state(fake_sim: Path) -> None:
+    import os
+
+    from hal.sim import native_shard
+
+    cpu = min(os.sched_getaffinity(0))
+    with native_shard.NativeShard(fake_sim, 1, cpu=cpu) as shard:
+        frame = shard.reset(_matches(1), np.ones(1, dtype=np.bool_)).result()
+
+        def failed_copy() -> None:
+            raise RuntimeError("copy failed")
+
+        with pytest.raises(RuntimeError, match="copy failed"):
+            shard.step(
+                np.zeros((1, 2, 14), dtype=np.float32), np.ones(1, dtype=np.bool_), before_write=failed_copy
+            ).result()
+        assert frame.frame_id[0] == -123
+        frame = shard.step(np.zeros((1, 2, 14), dtype=np.float32), np.ones(1, dtype=np.bool_)).result()
+        assert frame.frame_id[0] == -122
+    shard.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        shard.save(0)

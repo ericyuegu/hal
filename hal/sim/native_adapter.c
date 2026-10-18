@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HAL_ABI 1
+#define HAL_ABI 2
 #define HAL_CORE_ABI 2
 
 typedef struct {
@@ -311,13 +311,17 @@ static void pack(const float actions[14], int16_t wire[7], MslInputPlayer *out) 
   }
   for (int i = 4; i < 6; ++i) {
     int v = rounded((double)actions[i] * 140.0);
-    wire[i] = v < 43 ? 0 : v;
+    wire[i] = v;
   }
   unsigned buttons = 0;
   for (int i = 0; i < 8; ++i) {
     if (actions[6 + i] > 0.5f)
       buttons |= hal_buttons[i];
   }
+  /* Dolphin's GCPad digital shoulder sets the corresponding analog axis.
+     Slippi publishes that axis after the game's 140-byte trigger clamp. */
+  if (buttons & MSL_BUTTON_L) wire[4] = 140;
+  if (buttons & MSL_BUTTON_R) wire[5] = 140;
   wire[6] = buttons;
   out->main_x = wire[0];
   out->main_y = wire[1];
@@ -378,46 +382,8 @@ int hal_native_reset(HalBatch *b, const MslMatchConfig *configs, const uint8_t *
   return 0;
 }
 
-int hal_native_step(HalBatch *b, const char *actions, ptrdiff_t lane_stride,
-                    ptrdiff_t port_stride, ptrdiff_t channel_stride,
-                    const uint8_t *mask, ptrdiff_t mask_stride) {
-  if (!b || !actions || !mask)
-    return 14;
-  /* Validate the whole selected batch before changing any output or simulator state. */
-  for (uint32_t i = 0; i < b->count; ++i) {
-    if (*(mask + i * mask_stride)) {
-      if (!b->active[i])
-        return 10;
-      if (b->frames[i].terminated || b->frames[i].truncated)
-        return 11;
-      for (int p = 0; p < 2; ++p) {
-        for (int c = 0; c < 14; ++c) {
-          float v;
-          memcpy(&v, actions + i * lane_stride + p * port_stride + c * channel_stride, 4);
-          if (!isfinite(v))
-            return 12;
-          if (v < (c < 4 ? -1.0f : 0.0f) || v > 1.0f)
-            return 13;
-        }
-      }
-    }
-  }
-  for (uint32_t i = 0; i < b->count; ++i) {
-    b->mask[i] = !!*(mask + i * mask_stride);
-    if (!b->mask[i])
-      continue;
-    memset(b->inputs + i, 0, sizeof(*b->inputs));
-    for (int roster = 0; roster < 2; ++roster) {
-      int port = b->configs[i].players[roster].controller_port;
-      float *a = b->actions[i][port];
-      for (int c = 0; c < 14; ++c)
-        memcpy(a + c, actions + i * lane_stride + port * port_stride + c * channel_stride, 4);
-      pack(a, b->wire[i][port], &b->inputs[i].players[roster]);
-    }
-  }
-  int rc = b->step(b->batch, b->inputs, b->mask, b->observations, b->terminals);
-  if (rc)
-    return rc;
+static int finish_step(HalBatch *b) {
+  int rc;
   for (uint32_t i = 0; i < b->count; ++i) {
     HalFrame *f = b->frames + i;
     int old_stock[2] = {f->columns[HAL_COL_P1_STOCK], f->columns[HAL_COL_P2_STOCK]};
@@ -451,12 +417,138 @@ int hal_native_step(HalBatch *b, const char *actions, ptrdiff_t lane_stride,
     float difference = damage[1] - damage[0];
     float base = 120 * (loss[1] - loss[0]) + 50 * (final[1] - final[0]);
     f->reward[0] = base + difference;
-    f->reward[1] = -f->reward[0];
+    f->reward[1] = -base + (damage[0] - damage[1]);
     f->terminated = b->terminals[i].stockout != 0;
     f->truncated = b->terminals[i].max_frame_reached != 0 && !f->terminated;
   }
   return 0;
 }
+
+int hal_native_step(HalBatch *b, const char *actions, ptrdiff_t lane_stride,
+                    ptrdiff_t port_stride, ptrdiff_t channel_stride,
+                    const uint8_t *mask, ptrdiff_t mask_stride) {
+  if (!b || !actions || !mask)
+    return 14;
+  /* Validate the whole selected batch before changing any output or simulator state. */
+  for (uint32_t i = 0; i < b->count; ++i) {
+    if (*(mask + (ptrdiff_t)i * mask_stride)) {
+      if (!b->active[i])
+        return 10;
+      if (b->frames[i].terminated || b->frames[i].truncated)
+        return 11;
+      for (int p = 0; p < 2; ++p) {
+        for (int c = 0; c < 14; ++c) {
+          float v;
+          memcpy(&v, actions + (ptrdiff_t)i * lane_stride + p * port_stride + c * channel_stride, 4);
+          if (!isfinite(v))
+            return 12;
+          if (v < (c < 4 ? -1.0f : 0.0f) || v > 1.0f)
+            return 13;
+        }
+      }
+    }
+  }
+  for (uint32_t i = 0; i < b->count; ++i) {
+    b->mask[i] = !!*(mask + (ptrdiff_t)i * mask_stride);
+    if (!b->mask[i])
+      continue;
+    memset(b->inputs + i, 0, sizeof(*b->inputs));
+    for (int roster = 0; roster < 2; ++roster) {
+      int port = b->configs[i].players[roster].controller_port;
+      float *a = b->actions[i][port];
+      for (int c = 0; c < 14; ++c)
+        memcpy(a + c, actions + (ptrdiff_t)i * lane_stride + port * port_stride + c * channel_stride, 4);
+      pack(a, b->wire[i][port], &b->inputs[i].players[roster]);
+    }
+  }
+  int rc = b->step(b->batch, b->inputs, b->mask, b->observations, b->terminals);
+  if (rc)
+    return rc;
+  return finish_step(b);
+}
+int hal_native_replay_sizes(size_t sizes[3]) {
+  if (!sizes) return 14;
+  sizes[0] = sizeof(MslReplayConfig);
+  sizes[1] = sizeof(MslReplayInput);
+  sizes[2] = sizeof(MslReplayFrame);
+  return 0;
+}
+
+int hal_native_reset_replay(HalBatch *b, const MslReplayConfig *configs,
+                            const MslReplayInput *previous, const MslReplayFrame *first,
+                            const MslMatchConfig *matches) {
+  if (!b || !configs || !previous || !first || !matches) return 14;
+  uint32_t (*abi)(void) = dlsym(b->library, "msl_replay_abi_version");
+  MslResult (*reset)(MslBatch *, const MslReplayConfig *, const MslReplayInput *, const uint8_t *) =
+      dlsym(b->library, "msl_batch_reset_replay");
+  MslResult (*step)(MslBatch *, const MslReplayFrame *, const uint8_t *, MslObservation *, MslTerminal *) =
+      dlsym(b->library, "msl_batch_step_replay");
+  if (!abi || abi() != 1 || !reset || !step) return 18;
+  for (uint32_t i = 0; i < b->count; ++i) {
+    if (matches[i].num_players != 2 || configs[i].num_players != 2 ||
+        matches[i].stage != configs[i].stage_id || matches[i].is_teams || configs[i].is_teams ||
+        matches[i].random_seed != configs[i].initial_random_seed ||
+        matches[i].stocks != configs[i].stock_count ||
+        matches[i].damage_ratio != configs[i].match_damage_ratio ||
+        matches[i].ucf_cardinals != configs[i].ucf_cardinals_1_0_enabled ||
+        matches[i].max_frame != -1 ||
+        matches[i].players[0].controller_port < 0 || matches[i].players[0].controller_port > 1 ||
+        matches[i].players[1].controller_port != 1 - matches[i].players[0].controller_port)
+      return 14;
+    for (int p = 0; p < 2; ++p) {
+      if (matches[i].players[p].character != configs[i].players[p].char_id ||
+          matches[i].players[p].facing != MSL_FACING_AUTO ||
+          matches[i].players[p].costume != configs[i].players[p].costume_id ||
+          matches[i].players[p].handicap != configs[i].players[p].handicap ||
+          matches[i].players[p].start_percent != configs[i].players[p].start_percent)
+        return 14;
+    }
+  }
+  int rc = reset(b->batch, configs, previous, NULL);
+  if (rc) return rc;
+  rc = step(b->batch, first, NULL, b->observations, b->terminals);
+  if (rc) return rc;
+  for (uint32_t i = 0; i < b->count; ++i) {
+    b->configs[i] = matches[i];
+    b->active[i] = 1;
+    memset(b->frames + i, 0, sizeof(*b->frames));
+    b->frames[i].reset = 1;
+    if ((rc = project(b, i))) return rc;
+    for (int roster = 0; roster < 2; ++roster) {
+      const MslReplayInputPlayer *input = &first[i].input.p[roster];
+      int16_t *wire = b->frames[i].wire_inputs[matches[i].players[roster].controller_port];
+      wire[0] = input->main_x; wire[1] = input->main_y;
+      wire[2] = input->c_x; wire[3] = input->c_y;
+      wire[4] = input->l; wire[5] = input->r; wire[6] = input->buttons;
+    }
+    b->frames[i].terminated = b->terminals[i].stockout != 0;
+  }
+  return 0;
+}
+
+int hal_native_step_replay(HalBatch *b, const MslReplayFrame *frames, const uint8_t *mask) {
+  if (!b || !frames || !mask) return 14;
+  MslResult (*step)(MslBatch *, const MslReplayFrame *, const uint8_t *, MslObservation *, MslTerminal *) =
+      dlsym(b->library, "msl_batch_step_replay");
+  if (!step) return 18;
+  for (uint32_t i = 0; i < b->count; ++i) {
+    b->mask[i] = !!mask[i];
+    if (!mask[i]) continue;
+    if (!b->active[i]) return 10;
+    if (b->frames[i].terminated || b->frames[i].truncated) return 11;
+    memset(b->actions[i], 0, sizeof(b->actions[i]));
+    for (int roster = 0; roster < 2; ++roster) {
+      const MslReplayInputPlayer *input = &frames[i].input.p[roster];
+      int16_t *wire = b->wire[i][b->configs[i].players[roster].controller_port];
+      wire[0] = input->main_x; wire[1] = input->main_y;
+      wire[2] = input->c_x; wire[3] = input->c_y;
+      wire[4] = input->l; wire[5] = input->r; wire[6] = input->buttons;
+    }
+  }
+  int rc = step(b->batch, frames, mask, b->observations, b->terminals);
+  return rc ? rc : finish_step(b);
+}
+
 int hal_native_save_size(HalBatch *b, uint32_t lane, size_t *size) {
   if (!b || lane >= b->count || !b->active[lane])
     return 14;
@@ -469,24 +561,35 @@ int hal_native_save(HalBatch *b, uint32_t lane, void *data, size_t size, size_t 
   return b->save(b->batch, lane, data, size, written);
 }
 
-int hal_native_restore(HalBatch *b, uint32_t lane, const void *data, size_t size,
-                       const MslMatchConfig *config, const HalFrame *saved) {
-  if (!b || lane >= b->count || !config || !saved)
+int hal_native_restore_many(HalBatch *b, const uint32_t *lanes,
+                            const void *const *data, const size_t *sizes,
+                            const MslMatchConfig *configs, const HalFrame *saved,
+                            uint32_t count) {
+  if (!b || !lanes || !data || !sizes || !configs || !saved || count > b->count)
     return 14;
-  int rc = b->restore(b->batch, lane, data, size);
-  if (rc)
-    return rc;
+  for (uint32_t j = 0; j < count; ++j) {
+    if (lanes[j] >= b->count || !data[j] || !sizes[j]) return 14;
+    if (configs[j].num_players != 2 || configs[j].is_teams || hal_stage(configs[j].stage) < 0 ||
+        configs[j].players[0].controller_port < 0 || configs[j].players[0].controller_port > 1 ||
+        configs[j].players[1].controller_port != 1 - configs[j].players[0].controller_port)
+      return 14;
+    for (uint32_t k = 0; k < j; ++k)
+      if (lanes[j] == lanes[k]) return 14;
+  }
+  int rc;
+  for (uint32_t j = 0; j < count; ++j) {
+    rc = b->restore(b->batch, lanes[j], data[j], sizes[j]);
+    if (rc) return rc;
+    b->configs[lanes[j]] = configs[j];
+    b->active[lanes[j]] = 1;
+    b->frames[lanes[j]] = saved[j];
+  }
   rc = b->observe(b->batch, b->observations, b->terminals);
-  if (rc)
-    return rc;
-  b->configs[lane] = *config;
-  b->active[lane] = 1;
-  b->frames[lane] = *saved;
+  if (rc) return rc;
   for (uint32_t i = 0; i < b->count; ++i) {
     b->frames[i].reward[0] = b->frames[i].reward[1] = 0;
     b->frames[i].reset = 0;
-    if (b->active[i] && (rc = project(b, i)))
-      return rc;
+    if (b->active[i] && (rc = project(b, i))) return rc;
   }
   return 0;
 }
