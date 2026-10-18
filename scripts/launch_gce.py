@@ -82,6 +82,8 @@ def startup_script(
     image: str,
     keep_alive: bool,
     skip_fixtures: bool = False,
+    max_run_hours: int | None = None,
+    results_prefix: str | None = None,
 ) -> str:
     """Render startup metadata with secret identifiers."""
     # Bash read skips an unterminated final record; the W&B key is last by default.
@@ -94,6 +96,10 @@ def startup_script(
         "HAL_IMAGE": image,
         "HAL_KEEP_ALIVE": "1" if keep_alive else "0",
         "HAL_SKIP_FIXTURES": "1" if skip_fixtures else "0",
+        "HAL_MAX_RUN_SECONDS": str(max_run_hours * 3600 if max_run_hours is not None else 0),
+        "HAL_RESULTS_PREFIX": results_prefix or "",
+        "HAL_RESULTS_HELPER_B64": base64.b64encode((ROOT / "scripts/o65_results.py").read_bytes()).decode(),
+        "HAL_R2_HELPER_B64": base64.b64encode((ROOT / "hal/r2.py").read_bytes()).decode(),
     }
     exports = "\n".join(f"export {name}={shlex.quote(value)}" for name, value in values.items())
     return f"#!/usr/bin/env bash\n{exports}\n\n{STARTUP_PATH.read_text()}"
@@ -102,6 +108,12 @@ def startup_script(
 def create_command(args: Args, *, project: str, name: str, startup_file: str) -> list[str]:
     if args.max_run_hours is not None and not 1 <= args.max_run_hours <= 2880:
         raise ValueError("max run hours must be between 1 and 2880")
+    if args.results_prefix is not None and (
+        re.fullmatch(r"o65/pilot-results/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", args.results_prefix) is None
+        or args.max_run_hours is None
+        or args.keep_alive
+    ):
+        raise ValueError("results upload needs an o65/pilot-results child prefix, a wall-clock cap, and auto-shutdown")
     if args.machine_type.startswith("g4-"):
         expected_gpus = _G4_GPU_COUNTS.get(args.machine_type)
         if expected_gpus is None:
@@ -224,6 +236,8 @@ class Args:
     """Stop an on-demand VM at this wall-clock limit, even if startup or training hangs."""
     skip_fixtures: bool = False
     """Let the job fetch its specific fixtures instead of fetching every development fixture."""
+    results_prefix: str | None = None
+    """Upload results and logs to this R2 child of o65/pilot-results before shutdown."""
 
 
 def main(args: Args) -> None:
@@ -244,6 +258,8 @@ def main(args: Args) -> None:
         image=args.image,
         keep_alive=args.keep_alive,
         skip_fixtures=args.skip_fixtures,
+        max_run_hours=args.max_run_hours,
+        results_prefix=args.results_prefix,
     )
 
     # gcloud requires a file for a multiline startup script. The file only contains

@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -163,3 +164,77 @@ def test_startup_preserves_results_and_supports_targeted_fixtures() -> None:
     assert "export HAL_SKIP_FIXTURES=1" in script
     assert "-v /var/lib/hal:/hal-output" in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+    runtime = script.split("<<'HAL_RUNTIME'\n", 1)[1].split("\nHAL_RUNTIME", 1)[0]
+    subprocess.run(["bash", "-n"], input=runtime, text=True, check=True)
+
+
+@pytest.mark.parametrize("stage,code", [("ok", 0), ("training", 3), ("pull", 4), ("upload", 1)])
+def test_vm_lifecycle_uploads_before_shutdown(tmp_path: Path, stage: str, code: int) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    events = tmp_path / "events"
+    for command, body in {
+        "gcloud": 'printf "test-credential"\n',
+        "nvidia-smi": "true\n",
+        "systemd-run": 'echo "timer $*" >> "$EVENTS"\n',
+        "systemctl": 'echo "cancel $*" >> "$EVENTS"\n',
+        "shutdown": 'echo shutdown >> "$EVENTS"\n',
+        "docker": (
+            'echo "docker $*" >> "$EVENTS"\n'
+            'if [[ "$1" == pull && "$FAIL_STAGE" == pull ]]; then exit 4; fi\n'
+            'if [[ "$1" == run ]]; then\n'
+            ' if [[ "$*" == *results.py* ]]; then\n'
+            '  echo upload >> "$EVENTS"\n'
+            '  if [[ "$FAIL_STAGE" == upload ]]; then exit 5; fi\n'
+            ' elif [[ "$FAIL_STAGE" == training ]]; then exit 3; fi\n'
+            "fi\n"
+        ),
+    }.items():
+        path = bin_dir / command
+        path.write_text("#!/bin/bash\n" + body)
+        path.chmod(0o755)
+    for directory in ("run", "output", "log"):
+        (tmp_path / directory).mkdir()
+    script = startup_script(
+        sha="a" * 40,
+        train_cmd="true",
+        project="project",
+        secrets=[("AWS_BUCKET", "bucket")],
+        image="test/image@sha256:" + "b" * 64,
+        keep_alive=False,
+        max_run_hours=24,
+        results_prefix="o65/pilot-results/test",
+    )
+    script = script.replace("/run/hal", str(tmp_path / "run"))
+    script = script.replace("/var/lib/hal", str(tmp_path / "output"))
+    script = script.replace("/var/log", str(tmp_path / "log"))
+    result = subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "EVENTS": str(events), "FAIL_STAGE": stage},
+    )
+    assert result.returncode == code, result.stdout + result.stderr
+    lines = events.read_text().splitlines()
+    assert any("hal-hard-stop --on-active=86400s" in line for line in lines)
+    assert any("hal-job-deadline --on-active=85500s" in line for line in lines)
+    assert lines.index("upload") < lines.index("shutdown")
+    assert "test-credential" not in result.stdout + result.stderr
+    assert not (tmp_path / "run/job.env").exists()
+    assert (tmp_path / "output/upload-exit-code").read_text().strip() == ("5" if stage == "upload" else "0")
+
+
+@pytest.mark.parametrize("prefix", ["elsewhere/run", "o65/pilot-results/../run", "o65/pilot-results/a//b"])
+def test_results_prefix_is_restricted(prefix: str) -> None:
+    with pytest.raises(ValueError, match="results upload"):
+        create_command(Args(results_prefix=prefix, max_run_hours=24), project="project", name="job", startup_file="s")
+
+
+def test_upload_requires_cap_and_auto_shutdown() -> None:
+    for args in (
+        Args(results_prefix="o65/pilot-results/job"),
+        Args(results_prefix="o65/pilot-results/job", max_run_hours=24, keep_alive=True),
+    ):
+        with pytest.raises(ValueError, match="wall-clock cap, and auto-shutdown"):
+            create_command(args, project="project", name="job", startup_file="s")
