@@ -163,3 +163,68 @@ but failed exact resume on an implicit BF16-to-FP32 indexed write. Making the
 conversion explicit fixed it. The retry passed both tests (19 deselections,
 15 dependency warnings), including odd-frame timeouts and deterministic exact
 resume. Both source-verified native profiles completed.
+
+
+## Step 4: window reference and actor graphs
+
+Reference replay packs each block/player window with 64 fixed slots. Actor
+steps gather 16 selected slots per window into 32 padded windows. The trunk
+stays eager inside capture; only the shared-history decoder is compiled, with
+BF16 cast preservation. The replay stream's FP32-reference qualification
+rejected whole-trunk compilation. Critic fitting uses rollout features;
+bootstrap graphs compute queue states and values without action probabilities.
+Actor diagnostics reuse its captured forward output. No student scoring pass
+runs. The graph objective now accepts the configured PPO clip and preserves an
+infinite KL when current mass appears outside reference support.
+
+Source-verified profiles use `f5cf13b0`, trainer SHA-256
+`f97ce833dae4d6df6fe4d46eb8e4cfe5e6e03e6af7d022a9eef91a03aecc7a3f`.
+Raw outputs are `runs/dense/step4-final16` and `runs/dense/step4-final64`.
+
+| Matches | Phase | Wall s | Main-thread CPU s | Eager launches, estimated | Graph launches, estimated | Kernel executions, estimated |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | rollout | 2.879 | 2.662 | 86,534 | 384 | 611,048 |
+| 16 | reference | 0.102 | 0.102 | 16 | 1 | 1,173 |
+| 16 | preparation | 0.124 | 0.124 | 74 | 1 | 1,230 |
+| 16 | critic | 0.017 | 0.013 | 601 | 0 | 613 |
+| 16 | actor | 0.472 | 0.472 | 3,636 | 4 | 18,920 |
+| 64 | rollout | 3.685 | 3.521 | 86,534 | 384 | 618,822 |
+| 64 | reference | 0.390 | 0.390 | 16 | 1 | 1,174 |
+| 64 | preparation | 0.380 | 0.379 | 74 | 1 | 1,228 |
+| 64 | critic | 0.044 | 0.041 | 593 | 0 | 609 |
+| 64 | actor | 0.931 | 0.931 | 7,272 | 8 | 37,840 |
+
+At 64 matches, reference time falls from 1.025 to 0.390 s and actor time from
+1.696 to 0.931 s. Update time falls from 6.731 to 5.433 s. Policy/tick-state
+CPU time is 3.146 and 3.292 ms per tick at 16 and 64 matches. Complete rollout
+CPU time divided by 128 ticks is 20.796 and 27.509 ms. Reference launch counts
+stay flat. Actor counts grow with its four versus eight fixed-shape steps.
+
+The actor count **projection** at 1,024 matches and 119 steps is about 3.79 s,
+using 14 us per eager launch and 5 us per remaining graph kernel. Rollout's
+projection remains 3.87 s. These omit GPU work growth and untraced setup; they
+are not measured PRO 6000 times. Preparation rises from 0.257 to 0.380 s at
+64 matches, which needs diagnosis before the next step.
+
+A separate warmed whole-preparation trace at 64 matches captures 5,818 kernel
+executions, 2,350 eager launches and three graph launches. Its host-cost
+projection is 0.050 s, but GPU work dominates the local measurement. Graph
+kernel time is 0.387 s for reference, 0.322 s for bootstrap values, and
+0.022 s for the context-gap subset. The bootstrap graph processes all four
+reserved rows per player although only the final row is usually used. The
+next local change evaluates only the required boundary roles at fixed shapes.
+The raw trace and CPU profile are in `runs/dense/step4-preparation`; the JSON
+evidence includes their summaries. The CPU profile's waits appear under
+`torch.equal` and GAE's `torch.where`, so their apparent time includes preceding
+GPU graph work.
+
+Validation: focused CPU checks pass 34 tests, then the queue/value checks pass
+28. The broad CPU loop run passes 78 with one stale fixture-width failure and
+one unset-proxy-path skip; the width retry passes. Five real-model/Muon resume
+checks pass. CUDA's two-stream update and resume pass; a subsequent helper test
+hits Torch's shared eight-variant compilation limit. Giving the compiler tests
+an explicit preparation scope fixes it: all three pass on retry. The first
+native profile finishes its updates but its coverage guard still requires old
+chunk sites; updating that guard passes all 15 profiler tests. Both canonical
+profiles then finish. A separate diagnostic harness first has a Python syntax
+error before execution; the corrected whole-preparation trace completes.
