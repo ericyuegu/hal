@@ -1122,6 +1122,9 @@ def test_periodic_and_native_evaluations_have_independent_cadence(tmp_path: Path
 
 
 class StockShard(FakeShard):
+    def reset(self, lane: int, episode: Any) -> Any:
+        return dataclasses.replace(super().reset(lane, episode), columns={"p1_stock": 2, "p2_stock": 2})
+
     def step(self, inputs: NDArray[np.float32], active: NDArray[np.bool_]) -> tuple[tuple[Any, ...], ...]:
         return tuple(
             tuple(dataclasses.replace(frame, columns={"p1_stock": 2, "p2_stock": 0}) for frame in row)

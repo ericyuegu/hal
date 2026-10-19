@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Literal
 from typing import Protocol
 from typing import cast
+from typing import overload
 
 import numpy as np
 import torch
@@ -894,7 +895,7 @@ NATIVE_COLUMN_LAYOUT = {
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DeviceFrameBlock:
-    """Write-once packed frames; recorded decisions keep their storage alive."""
+    """Stage write-once native transfers before copying them into group storage."""
 
     records: Tensor  # [128, lanes, bytes]
     actions: Tensor  # [128, lanes, 2, ACTION_DIM]
@@ -934,17 +935,17 @@ class SimulatorShard(Protocol):
 
     @property
     def match_ids(self) -> tuple[int, ...]: ...
-    def step(self, inputs: NDArray[np.float32], active: NDArray[np.bool_]) -> tuple[tuple[SimFrame, ...], ...]: ...
+    def step(self, inputs: NDArray[np.float32], active: NDArray[np.bool_]) -> Sequence[Sequence[SimFrame]]: ...
     def reset(self, lane: int, episode: Episode) -> SimFrame: ...
     def save(self) -> bytes: ...
     def restore(self, state: bytes) -> None: ...
 
 
 class NativeSimulatorShard:
-    """Step native matches with pinned buffers and retain copied rollout frames.
+    """Step native matches with pinned buffers and batch their device transfers.
 
-    Wait for the previous GPU copy before writing output again. Allocate device
-    blocks once, then retain them through decision replay.
+    Wait for the previous GPU copy before writing output again. The rollout owns
+    each batch's observations after it copies them into its group storage.
     """
 
     def __init__(
@@ -959,8 +960,8 @@ class NativeSimulatorShard:
         pinned = device.type == "cuda"
         self._output = torch.zeros(count * native.FRAME_DTYPE.itemsize, dtype=torch.uint8, pin_memory=pinned)
         self._records = self._output.numpy().view(native.FRAME_DTYPE)
-        self._input = torch.empty(count, 2, ACTION_DIM, dtype=torch.float32, pin_memory=pinned)
-        self._observed = torch.empty_like(self._input, pin_memory=pinned)
+        self._step_input = torch.empty(2, count, 2, ACTION_DIM, dtype=torch.float32, pin_memory=pinned)
+        self._observed = torch.empty(count, 2, ACTION_DIM, dtype=torch.float32, pin_memory=pinned)
         self._event: torch.cuda.Event | None = None
         self._device_block: DeviceFrameBlock | None = None
         self._device_frame = 128
@@ -976,71 +977,60 @@ class NativeSimulatorShard:
         if self._event is not None:
             self._event.synchronize()
 
-    def _frames(self, frame: native.NativeFrameBatch) -> tuple[SimFrame, ...]:
+    def _frames(self, frame: native.NativeFrameBatch) -> FrameBatch:
         if frame.records is None:
             raise ValueError("native rollout requires packed adapter records")
         columns = frame.records["columns"].copy()
         columns.flags.writeable = False
         observed = native_controller_readback(frame.applied_action)
-        packed_gpu = actions_gpu = None
-        block = None
+        self._observed.copy_(torch.from_numpy(observed))
+        if self._device_frame == 128:
+            self._device_block = DeviceFrameBlock(
+                torch.zeros(
+                    128, len(self.match_ids), native.FRAME_DTYPE.itemsize, device=self.device, dtype=torch.uint8
+                ),
+                torch.zeros(128, len(self.match_ids), 2, ACTION_DIM, device=self.device),
+            )
+            self._device_frame = 0
+        block = self._device_block
+        if block is None:
+            raise RuntimeError("native device frame storage was not allocated")
+        packed = block.records[self._device_frame]
+        actions = block.actions[self._device_frame]
+        packed.copy_(self._output.reshape(len(self.match_ids), -1), non_blocking=True)
+        actions.copy_(self._observed, non_blocking=True)
         if self.device.type == "cuda":
-            self._observed.copy_(torch.from_numpy(observed))
-            if self._device_frame == 128:
-                self._device_block = DeviceFrameBlock(
-                    torch.zeros(
-                        128, len(self.match_ids), native.FRAME_DTYPE.itemsize, device=self.device, dtype=torch.uint8
-                    ),
-                    torch.zeros(128, len(self.match_ids), 2, ACTION_DIM, device=self.device),
-                )
-                self._device_frame = 0
-            block = self._device_block
-            if block is None:
-                raise RuntimeError("native device frame storage was not allocated")
-            packed_gpu = block.records[self._device_frame]
-            actions_gpu = block.actions[self._device_frame]
-            packed_gpu.copy_(self._output.reshape(len(self.match_ids), -1), non_blocking=True)
-            actions_gpu.copy_(self._observed, non_blocking=True)
             self._event = torch.cuda.Event()
             self._event.record(torch.cuda.current_stream(self.device))
             self.copied_bytes += self._output.numel() + self._observed.numel() * self._observed.element_size()
-        result = tuple(
-            SimFrame(
-                NativeColumns(columns[lane]),
-                observed[lane].copy(),
-                (float(frame.reward[lane, 0]), float(frame.reward[lane, 1])),
-                bool(frame.terminated[lane]),
-                bool(frame.truncated[lane]),
-                None if packed_gpu is None else packed_gpu[lane],
-                None if actions_gpu is None else actions_gpu[lane],
-                block,
-                None if block is None else (self._device_frame, lane),
-            )
-            for lane in range(len(self.match_ids))
+        self._device_frame += 1
+        return FrameBatch(
+            packed, actions, columns, frame.reward.copy(), frame.terminated.copy(), frame.truncated.copy(), observed
         )
-        if block is not None:
-            self._device_frame += 1
-        return result
 
     def step(
-        self, inputs: NDArray[np.float32], active: NDArray[np.bool_] | None = None
-    ) -> tuple[tuple[SimFrame, ...], ...]:
+        self, inputs: Tensor | NDArray[np.float32], active: NDArray[np.bool_] | None = None
+    ) -> tuple[FrameBatch, ...]:
         started = time.perf_counter()
+        source = torch.from_numpy(inputs) if isinstance(inputs, np.ndarray) else inputs
         if (
-            inputs.dtype != np.float32
-            or inputs.ndim != 4
-            or inputs.shape[1:] != (len(self.match_ids), 2, ACTION_DIM)
-            or not len(inputs)
+            source.dtype != torch.float32
+            or source.ndim != 4
+            or source.shape[1:] != (len(self.match_ids), 2, ACTION_DIM)
+            or not len(source)
         ):
             raise ValueError("native step needs float32 [frames, lanes, 2, ACTION_DIM]")
         if active is None:
             active = self._mask
         if active.shape != (len(self.match_ids),) or active.dtype != np.bool_:
             raise ValueError("native active mask must be bool [lanes]")
+        if self._step_input.shape[0] < len(source):
+            self._step_input = torch.empty(source.shape, dtype=torch.float32, pin_memory=self.device.type == "cuda")
+        # A single device-to-pinned-host transfer supplies the whole tick.
+        self._step_input[: len(source)].copy_(source)
         rows = []
-        for actions in inputs:
-            self._input.copy_(torch.from_numpy(actions))
-            frame = self.shard.step(self._input.numpy(), active, before_write=self._before_write).result()
+        for actions in self._step_input[: len(source)]:
+            frame = self.shard.step(actions.numpy(), active, before_write=self._before_write).result()
             rows.append(self._frames(frame))
             self.stepped_frames += int(active.sum())
             if ((frame.terminated | frame.truncated) & active).any():
@@ -1077,7 +1067,7 @@ class NativeSimulatorShard:
     def save(self) -> bytes:
         states = self.shard.save_many(tuple(range(len(self.match_ids)))).result()
         header = json.dumps(
-            {"format": "hal.o65.native_pool.v1", "matches": self.match_ids, "max_frame": self.max_frame}
+            {"format": "hal.o65.native_pool.v2", "matches": self.match_ids, "max_frame": self.max_frame}
         ).encode()
         return (
             struct.pack("<I", len(header))
@@ -1090,7 +1080,7 @@ class NativeSimulatorShard:
             raise ValueError("truncated native pool snapshot")
         length = struct.unpack_from("<I", state)[0]
         at = 4 + length
-        expected = {"format": "hal.o65.native_pool.v1", "matches": list(self.match_ids), "max_frame": self.max_frame}
+        expected = {"format": "hal.o65.native_pool.v2", "matches": list(self.match_ids), "max_frame": self.max_frame}
         if json.loads(state[4:at]) != expected:
             raise ValueError("native pool snapshot identity mismatch")
         states = []
@@ -1114,6 +1104,12 @@ class NativeSimulatorShard:
             self.shard.close()
 
 
+def _step_shard(shard: SimulatorShard, inputs: Tensor, active: NDArray[np.bool_]) -> Sequence[Sequence[SimFrame]]:
+    if isinstance(shard, NativeSimulatorShard):
+        return shard.step(inputs, active)
+    return shard.step(inputs.cpu().numpy(), active)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class DecisionState:
     stream: int
@@ -1122,7 +1118,7 @@ class DecisionState:
     episode: Episode
     clock: int
     window: tuple[int, int, int, int]  # update, stream, block, episode
-    frames: tuple[SimFrame, ...]
+    frames: Sequence[SimFrame]
     prefix: Tensor  # [D, 4], codec order
     opponent_queue: Tensor  # [up to D_opp+R_opp, 4], codec order
 
@@ -1245,10 +1241,11 @@ class TransformerPolicy:
 
     @torch.no_grad()
     def _prepare_wire_tables(self) -> None:
-        self.wire_tables = tuple(
-            self.model.codec.semantic_values(name, torch.arange(size, device=self.device)).float().cpu().numpy()
+        self.device_wire_tables = tuple(
+            self.model.codec.semantic_values(name, torch.arange(size, device=self.device)).float()
             for name, size in zip(CONTROLLER_GROUP_NAMES, self.model.codec.group_vocabs, strict=True)
         )
+        self.wire_tables = tuple(value.cpu().numpy() for value in self.device_wire_tables)
 
     def actor_parameters(self) -> tuple[torch.nn.Parameter, ...]:
         return self.model.actor_parameters()
@@ -1276,6 +1273,29 @@ class TransformerPolicy:
     def _validate_states(self, states: Sequence[DecisionState], actions: Tensor | None = None) -> None:
         if not states:
             raise ValueError("policy batch must be nonempty")
+        if isinstance(states, DecisionRows):
+            meta = states.meta
+            if np.any((meta[:, SIDE] < 0) | (meta[:, SIDE] > 1)):
+                raise ValueError("decision side must be HAL port 1 or 2's zero-based index")
+            if np.any((meta[:, LENGTH] < 1) | (meta[:, LENGTH] > 256)):
+                raise ValueError("invalid rollout history span")
+            if np.any((meta[:, IDENTITY] < 0) | (meta[:, IDENTITY] >= self.model.cfg.player_vocab_size)):
+                raise ValueError("episode identity is outside the checkpoint vocabulary")
+            allowed = {(timing.delay, timing.replan) for timing in self.schedule.configurations}
+            for delay, replan in ((DELAY, REPLAN), (OPP_DELAY, OPP_REPLAN)):
+                if any((int(row[delay]), int(row[replan])) not in allowed for row in meta):
+                    raise ValueError("decision batch contains an unsupported configuration")
+            logs = states.table.log_lambda[states.ids]
+            low, high = self.model.ranges.log_lambda
+            if not np.isfinite(logs).all() or np.any((logs < low) | (logs > high)):
+                raise ValueError("episode conditioning is outside its declared range")
+            if np.any((meta[:, OPP_LENGTH] < 0) | (meta[:, OPP_LENGTH] > self.model.critic_residual.max_queue)):
+                raise ValueError("opponent queue exceeds the critic capacity or has the wrong shape")
+            self._validate_actions(states.tensor(states.table.prefix))
+            self._validate_actions(states.tensor(states.table.opponent))
+            if actions is not None:
+                self._validate_actions(actions)
+            return
         for state in states:
             if type(state.side) is not int or state.side not in (0, 1):
                 raise ValueError("decision side must be HAL port 1 or 2's zero-based index")
@@ -1374,10 +1394,18 @@ class TransformerPolicy:
     ) -> tuple[Tensor, Tensor]:
         if not 1 <= count <= 4:
             raise ValueError("cached context append must contain one to four frames")
-        if any(not 0 <= state.clock - state.window[2] < 128 for state in states):
+        clocks = (
+            states.meta[:, CLOCK] - states.meta[:, BLOCK]
+            if isinstance(states, DecisionRows)
+            else np.array([state.clock - state.window[2] for state in states])
+        )
+        if np.any((clocks < 0) | (clocks >= 128)):
             raise ValueError("block is exhausted; restart before appending")
-        frames = [state.frames[-count:] for state in states]
-        inputs = self._packed_inputs(states, frames, count)
+        if isinstance(states, DecisionRows):
+            inputs = states.packed(count, tail=count)
+        else:
+            frames = [tuple(state.frames[-count:]) for state in states]
+            inputs = self._packed_inputs(states, frames, count)
         key = 2 * count + int(torch.is_inference_mode_enabled())
         captured = cache.cache.updates.get(key)
         if captured is None:
@@ -1403,7 +1431,16 @@ class TransformerPolicy:
     def _contexts(
         self, states: Sequence[DecisionState], *, length: int | None = None, tail: int | None = None
     ) -> tuple[dict[str, Tensor], Tensor]:
-        frames = [state.frames if tail is None else state.frames[-tail:] for state in states]
+        if isinstance(states, DecisionRows):
+            required = {route[0] for route in self.builders[0].routes}
+            if not required.issubset(states.table.store.fields):
+                raise ValueError("simulator observations are missing required policy columns")
+            lengths = states.meta[:, LENGTH]
+            length = (
+                int(lengths.max() if tail is None else min(tail, int(lengths.max()))) if length is None else length
+            )
+            return self._packed_context(states.packed(length, tail))
+        frames = [tuple(state.frames if tail is None else state.frames[-tail:]) for state in states]
         length = max(len(row) for row in frames) if length is None else length
         if any(len(row) > length for row in frames):
             raise ValueError("context padding is shorter than its history")
@@ -1453,9 +1490,78 @@ class TransformerPolicy:
             torch.cat(observed_parts)[inverse],
         )
 
+    def _columnar_states(self, states: Sequence[DecisionState]) -> DecisionRows:
+        if isinstance(states, DecisionRows):
+            return states
+        # Explicit test and CPU-proxy inputs enter the same packed tensor path.
+        self._validate_states(states)
+        length = max(len(state.frames) for state in states)
+        fields = tuple(states[0].frames[0].columns)
+        store = FrameStore(length, len(states), self.device, fields)
+        records = np.zeros((length, len(states)), dtype=native.FRAME_DTYPE)
+        applied = np.zeros((length, len(states), 2, ACTION_DIM), dtype=np.float32)
+        encoded: dict[int, NDArray] = {}
+        for lane, state in enumerate(states):
+            for position, frame in enumerate(state.frames):
+                if frame.device_record is not None:
+                    records[position : position + 1, lane] = frame.device_record.cpu().numpy().view(native.FRAME_DTYPE)
+                else:
+                    packed = encoded.get(id(frame))
+                    if packed is None:
+                        packed = np.zeros(1, dtype=native.FRAME_DTYPE)
+                        for name, value in frame.columns.items():
+                            if name in NATIVE_COLUMN_LAYOUT:
+                                index, _ = NATIVE_COLUMN_LAYOUT[name]
+                                packed["columns"][0, index] = np.array([value], dtype=MDS_PER_FRAME_DTYPES[name]).view(
+                                    np.uint32
+                                )[0]
+                        encoded[id(frame)] = packed
+                    records[position, lane] = packed[0]
+                applied[position, lane] = frame.applied_actions
+        store.records.copy_(torch.from_numpy(records.view(np.uint8).reshape(length, len(states), -1)).to(self.device))
+        store.actions.copy_(torch.from_numpy(applied).to(self.device))
+        table = DecisionTable(len(states), store)
+        meta = []
+        for lane, state in enumerate(states):
+            player, opponent = state.player, state.episode.players[1 - state.side]
+            meta.append(
+                [
+                    state.stream,
+                    state.match,
+                    state.side,
+                    state.clock,
+                    state.window[0],
+                    state.window[2],
+                    state.episode.number,
+                    lane,
+                    0,
+                    len(state.frames),
+                    player.identity,
+                    player.character,
+                    state.episode.stage,
+                    player.timing.delay,
+                    player.timing.replan,
+                    opponent.timing.delay,
+                    opponent.timing.replan,
+                    len(state.opponent_queue),
+                ]
+            )
+        table.count = len(states)
+        table.meta[: table.count] = meta
+        table.integers.copy_(torch.tensor(meta, device=self.device))
+        table.log_lambda[:] = [
+            (state.player.log_lambda, state.episode.players[1 - state.side].log_lambda) for state in states
+        ]
+        table.conditions.copy_(torch.from_numpy(table.log_lambda).to(device=self.device, dtype=torch.float32))
+        for index, state in enumerate(states):
+            table.episodes[state.match, state.episode.number] = state.episode
+            table.prefix[index, : len(state.prefix)] = state.prefix.to(self.device)
+            table.opponent[index, : len(state.opponent_queue)] = state.opponent_queue.to(self.device)
+        return table.rows(np.arange(table.count))
+
     def _decode(
         self,
-        states: Sequence[DecisionState],
+        states: DecisionRows,
         hidden: Tensor,
         observed: Tensor,
         uniforms: Tensor,
@@ -1464,17 +1570,12 @@ class TransformerPolicy:
         history: KVMemory,
         count: int,
     ) -> PolicyEvaluation:
-        players = [state.player for state in states]
-        opponents = [state.episode.players[1 - state.side] for state in states]
-        delay = torch.tensor([player.timing.delay for player in players]).to(self.device, non_blocking=True)
-        replan = torch.tensor([player.timing.replan for player in players]).to(self.device, non_blocking=True)
-        log_lambda = torch.tensor([player.log_lambda for player in players]).to(self.device, non_blocking=True)
-        queue = torch.stack(
-            [
-                torch.nn.functional.pad(state.prefix, (0, 0, 0, self.decoder.max_delay - len(state.prefix)))
-                for state in states
-            ]
-        ).to(self.device, non_blocking=True)
+        integers = states.tensor(states.table.integers)
+        conditions = states.tensor(states.table.conditions)
+        delay = integers[:, DELAY].contiguous()
+        replan = integers[:, REPLAN].contiguous()
+        log_lambda = conditions[:, 0].contiguous()
+        queue = states.tensor(states.table.prefix)[:, : self.decoder.max_delay].contiguous()
         output = self.decoder(
             hidden,
             observed,
@@ -1490,25 +1591,19 @@ class TransformerPolicy:
         )
         condition = self.model.ranges.normalize(log_lambda, delay, replan, validate=False)
         opponent_condition = self.model.ranges.normalize(
-            torch.tensor([player.log_lambda for player in opponents]).to(self.device, non_blocking=True),
-            torch.tensor([player.timing.delay for player in opponents]).to(self.device, non_blocking=True),
-            torch.tensor([player.timing.replan for player in opponents]).to(self.device, non_blocking=True),
+            conditions[:, 1].contiguous(),
+            integers[:, OPP_DELAY].contiguous(),
+            integers[:, OPP_REPLAN].contiguous(),
             validate=False,
         )
         capacity = self.model.critic_residual.max_queue
-        opponent_queue = torch.stack(
-            [
-                torch.nn.functional.pad(state.opponent_queue, (0, 0, 0, capacity - len(state.opponent_queue)))
-                for state in states
-            ]
-        ).to(self.device, non_blocking=True)
         features = CriticFeatures(
             hidden[:, -1].detach(),
             output.decoder_state.detach(),
             condition.detach(),
             opponent_condition.detach(),
-            opponent_queue,
-            torch.tensor([len(state.opponent_queue) for state in states]).to(self.device, non_blocking=True),
+            states.tensor(states.table.opponent)[:, :capacity].contiguous(),
+            integers[:, OPP_LENGTH].contiguous(),
         )
         distributions = []
         for group in DECODE_GROUP_INDICES:
@@ -1529,37 +1624,39 @@ class TransformerPolicy:
             return self._sample(states, rng)
 
     def _sample(self, states: Sequence[DecisionState], rng: CounterRng) -> PolicyEvaluation:
+        states = self._columnar_states(states)
         self._validate_states(states)
-        if any(state.clock % state.player.timing.replan or state.clock % 4 != states[0].clock % 4 for state in states):
+        meta = states.meta
+        if np.any(meta[:, CLOCK] % meta[:, REPLAN]) or np.any(meta[:, CLOCK] % 4 != meta[0, CLOCK] % 4):
             raise ValueError("sampling batch must share a decision tick and respect each cadence")
-        groups: dict[tuple[int, int], list[tuple[int, DecisionState]]] = defaultdict(list)
-        for index, state in enumerate(states):
-            entry = self.caches.get(state.stream)
-            seen = entry.history_length if entry is not None and entry.window == state.window else 0
-            groups[len(state.frames), seen].append((index, state))
+        groups: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for index, row in enumerate(meta):
+            entry = self.caches.get(int(row[STREAM]))
+            window = _window_key(row)
+            seen = entry.history_length if entry is not None and entry.window == window else 0
+            groups[int(row[LENGTH]), seen].append(index)
         self.sample_group_counts[len(groups)] += 1
         rows: list[PolicyEvaluation] = []
         order: list[int] = []
-        for (_, seen), entries in groups.items():
-            batch = [state for _, state in entries]
+        for (_, seen), indices in groups.items():
+            batch = states.take(indices)
             self.sample_batch_counts[len(batch)] += 1
             hidden, last_observed, cache = self._advance_rollout_cache(batch, seen)
             uniforms = self._action_uniforms(batch, rng)
-            count = 4 if batch[0].clock % 4 == 0 else 2
+            count = 4 if meta[indices[0], CLOCK] % 4 == 0 else 2
             rows.append(
                 self._decode(batch, hidden[:, -1:], last_observed, uniforms, history=cache.memory(), count=count)
             )
-            order.extend(index for index, _ in entries)
+            order.extend(indices)
         return _take_evaluation(
             _concatenate_evaluations(rows), torch.tensor(np.argsort(order)).to(self.device, non_blocking=True)
         )
 
-    def _advance_rollout_cache(
-        self, batch: Sequence[DecisionState], seen: int
-    ) -> tuple[Tensor, Tensor, BlockRestartCache]:
-        length = len(batch[0].frames)
+    def _advance_rollout_cache(self, batch: DecisionRows, seen: int) -> tuple[Tensor, Tensor, BlockRestartCache]:
+        meta = batch.meta
+        length = int(meta[0, LENGTH])
         if not seen:
-            cache = self._rollout_cache_for(tuple(state.stream for state in batch))
+            cache = self._rollout_cache_for(tuple(int(stream) for stream in meta[:, STREAM]))
             features, observed = self._contexts(batch)
             tokens = self.model.context_tokens(features, observed)
             previous = tokens[:, :-1]
@@ -1568,32 +1665,27 @@ class TransformerPolicy:
             cache.restart(previous, torch.full((len(batch),), previous.shape[1], device=self.device))
             tokens = tokens[:, -1:]
         else:
-            sources = [self.caches[state.stream] for state in batch]
+            sources = [self.caches[int(stream)] for stream in meta[:, STREAM]]
             cache = sources[0].cache
             if cache.cache.batch_size != len(batch) or any(
                 source.cache is not cache or source.row != row for row, source in enumerate(sources)
             ):
-                cache = self._rollout_cache_for(tuple(state.stream for state in batch))
+                cache = self._rollout_cache_for(tuple(int(stream) for stream in meta[:, STREAM]))
                 for target_index, target in enumerate(cache.cache.buffers()):
                     axis = 1 if target.ndim == 5 else 0
-                    pieces = [
-                        source.cache.cache.buffers()[target_index].narrow(axis, source.row, 1) for source in sources
-                    ]
-                    target.copy_(torch.cat(pieces, dim=axis))
+                    target.copy_(
+                        torch.cat(
+                            [
+                                source.cache.cache.buffers()[target_index].narrow(axis, source.row, 1)
+                                for source in sources
+                            ],
+                            dim=axis,
+                        )
+                    )
                 cache.frames_in_block.copy_(
                     torch.cat([source.cache.frames_in_block[source.row : source.row + 1] for source in sources])
                 )
-        packed_append = (
-            seen
-            and self.compiled
-            and self.device.type == "cuda"
-            and all(
-                frame.device_record is not None and frame.device_actions is not None
-                for state in batch
-                for frame in state.frames[-(length - seen) :]
-            )
-        )
-        if packed_append:
+        if seen and self.compiled and self.device.type == "cuda":
             hidden, last_observed = self._append_packed(batch, length - seen, cache)
         else:
             if seen:
@@ -1601,8 +1693,9 @@ class TransformerPolicy:
                 tokens = self.model.context_tokens(features, observed)
             hidden = cache.append(tokens)
             last_observed = observed[:, -1]
-        for row, state in enumerate(batch):
-            self.caches[state.stream] = CachedStream(state.window, length, cache, row)
+        for row, data in enumerate(meta):
+            window = _window_key(data)
+            self.caches[int(data[STREAM])] = CachedStream(window, length, cache, row)
         return hidden, last_observed, cache
 
     def _rollout_cache_for(self, streams: tuple[int, ...]) -> BlockRestartCache:
@@ -1614,27 +1707,17 @@ class TransformerPolicy:
             self.rollout_caches[streams] = cache
         return cache
 
-    def _action_uniforms(self, batch: Sequence[DecisionState], rng: CounterRng) -> Tensor:
+    def _action_uniforms(self, batch: DecisionRows, rng: CounterRng) -> Tensor:
+        counters = [(int(row[STREAM]), int(row[EPISODE]), int(row[CLOCK]), int(row[DELAY])) for row in batch.meta]
         if self.device.type == "cuda":
             from hal.inference.action_rng import action_uniforms
 
-            return action_uniforms(
-                rng.seed,
-                [(state.stream, state.episode.number, state.clock, state.player.timing.delay) for state in batch],
-                self.device,
-            )
+            return action_uniforms(rng.seed, counters, self.device)
         draws = [
             [
                 [
-                    rng.uniform(
-                        "action",
-                        state.stream,
-                        state.episode.number,
-                        state.clock,
-                        state.player.timing.delay + offset + 1,
-                        factor,
-                    )
-                    for state in batch
+                    rng.uniform("action", stream, episode, clock, delay + offset + 1, factor)
+                    for stream, episode, clock, delay in counters
                 ]
                 for factor in CODEC_FACTOR_INDICES
             ]
@@ -1647,31 +1730,41 @@ class TransformerPolicy:
             return self._evaluate(states, actions)
 
     def _evaluate(self, states: Sequence[DecisionState], actions: Tensor) -> PolicyEvaluation:
+        states = self._columnar_states(states)
         self._validate_states(states, actions)
-        windows: dict[tuple[int, int, int, int], DecisionState] = {}
-        for state in states:
-            if state.window not in windows or len(state.frames) > len(windows[state.window].frames):
-                windows[state.window] = state
+        meta = states.meta
+        windows: dict[tuple[int, int, int, int], int] = {}
+        row_windows = []
+        for index, row in enumerate(meta):
+            key = _window_key(row)
+            row_windows.append(key)
+            if key not in windows or row[LENGTH] > meta[windows[key], LENGTH]:
+                windows[key] = index
+        window_states = states.take(list(windows.values()))
         encoded: dict[tuple[int, int, int, int], tuple[Tensor, Tensor, Tensor]] = {}
-        window_states = list(windows.values())
         for start in range(0, len(window_states), 16):
             batch = window_states[start : start + 16]
-            # The old-policy and actor passes use the same 256-frame trunk shape.
             features, observed = self._contexts(batch, length=256)
             hidden = self.model(features, torch.zeros(len(batch), dtype=torch.long, device=self.device), observed)
             keys, values = self.model.temporal.history_attention.project_memory(hidden)
             memory = torch.stack((keys, values))
-            for row, state in enumerate(batch):
-                encoded[state.window] = (hidden[row], observed[row], memory[:, row])
+            for row, data in enumerate(batch.meta):
+                encoded[_window_key(data)] = (hidden[row], observed[row], memory[:, row])
         outputs: list[PolicyEvaluation] = []
         for start in range(0, len(states), 128):
             batch = states[start : start + 128]
-            hidden = torch.stack([encoded[state.window][0][len(state.frames) - 1] for state in batch])[:, None]
-            observed = torch.stack([encoded[state.window][1][len(state.frames) - 1] for state in batch])
+            keys = row_windows[start : start + len(batch)]
+            positions_host = batch.meta[:, LENGTH] - 1
+            hidden = torch.stack(
+                [encoded[key][0][int(position)] for key, position in zip(keys, positions_host, strict=True)]
+            )[:, None]
+            observed = torch.stack(
+                [encoded[key][1][int(position)] for key, position in zip(keys, positions_host, strict=True)]
+            )
             memory = KVMemory(
-                torch.stack([encoded[state.window][2] for state in batch], dim=1),
+                torch.stack([encoded[key][2] for key in keys], dim=1),
                 torch.arange(256, device=self.device)[None].expand(len(batch), -1),
-                torch.tensor([len(state.frames) - 1 for state in batch]).to(self.device, non_blocking=True),
+                torch.from_numpy(positions_host.copy()).to(self.device),
                 256,
             )
             outputs.append(
@@ -1697,6 +1790,15 @@ class TransformerPolicy:
             features.opponent_lengths,
         )
 
+    def device_wire_actions(self, indices: Tensor) -> Tensor:
+        tables = self.device_wire_tables
+        result = torch.empty(*indices.shape[:-1], ACTION_DIM, device=indices.device, dtype=torch.float32)
+        result[..., :2] = tables[1][indices[..., 1]]
+        result[..., 2:4] = tables[2][indices[..., 2]]
+        result[..., 4:6] = tables[3][indices[..., 3]]
+        result[..., 6:] = tables[0][indices[..., 0]]
+        return result
+
     def wire_actions(self, indices: Tensor) -> NDArray[np.float32]:
         host = indices.detach().cpu().numpy()
         if host.dtype not in (np.int32, np.int64) or host.shape[-1:] != (4,):
@@ -1719,8 +1821,8 @@ class MatchState:
     episode: Episode
     episode_start: int
     history_start: int
-    history: list[SimFrame]
-    queues: tuple[list[Tensor], list[Tensor]]
+    history: FrameHistory
+    queues: tuple[QueueView, QueueView]
     returns: tuple[float, float] = (0.0, 0.0)
     end_clock: int | None = None
 
@@ -1749,7 +1851,7 @@ class DecisionRecord:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Rollout:
-    records: tuple[DecisionRecord, ...]
+    records: Sequence[DecisionRecord | DecisionRecordView]
     group: int
     update: int
     frames: int
@@ -1760,9 +1862,37 @@ class Rollout:
     idle_frames: int = 0
 
 
-def _decision_batch(records: Sequence[DecisionRecord], device: torch.device) -> DecisionBatch:
+def _decision_batch(records: Sequence[DecisionRecord | DecisionRecordView], device: torch.device) -> DecisionBatch:
     if not records:
         raise ValueError("rollout has no student decisions")
+    if isinstance(records, DecisionRecords):
+        states = records.states
+        meta = states.tensor(states.table.integers)
+        ids = states.ids
+
+        def integers_column(values: NDArray[np.int64]) -> Tensor:
+            return torch.from_numpy(values).to(device)
+
+        delay, replan = meta[:, DELAY].contiguous(), meta[:, REPLAN].contiguous()
+        remaining = integers_column(states.table.remaining[ids])
+        remaining = torch.where(remaining < 0, delay + replan, remaining)
+        return DecisionBatch(
+            observation_frame_J=meta[:, CLOCK].contiguous(),
+            decision_frame_J=meta[:, CLOCK].contiguous(),
+            sampled_indices_JF=states.tensor(states.table.actions)[..., DECODE_GROUP_INDICES].flatten(1),
+            committed_prefix_JD4=states.tensor(states.table.prefix)[..., DECODE_GROUP_INDICES],
+            behavior_log_probs_JF=states.tensor(states.table.behavior),
+            executed_factors_JF=executed_factor_mask(delay, replan, remaining),
+            duration_J=integers_column(states.table.duration[ids]),
+            bootstrap_mask_J=torch.from_numpy(~states.table.terminal[ids]).to(device),
+            trace_mask_J=torch.from_numpy(~states.table.boundary[ids]).to(device),
+            kl_coefficient_J=states.tensor(states.table.coefficients),
+            delay_J=delay,
+            replan_J=replan,
+            policy_version_J=meta[:, UPDATE].contiguous(),
+            episode_id_J=meta[:, EPISODE].contiguous(),
+            segment_id_J=meta[:, EPISODE].contiguous(),
+        )
 
     def integers(values: Sequence[int]) -> Tensor:
         return torch.tensor(values, dtype=torch.long, device=device)
@@ -1801,6 +1931,534 @@ def _decision_batch(records: Sequence[DecisionRecord], device: torch.device) -> 
     )
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class FrameBatch(Sequence[SimFrame]):
+    records: Tensor  # [lanes, bytes]
+    actions: Tensor  # processed readback [lanes, 2, ACTION_DIM]
+    columns: NDArray[np.uint32]
+    rewards: NDArray[np.float32]
+    terminal: NDArray[np.bool_]
+    timeout: NDArray[np.bool_]
+    host_actions: NDArray[np.float32]
+
+    def __post_init__(self) -> None:
+        count = len(self.rewards)
+        if (
+            self.records.shape != (count, native.FRAME_DTYPE.itemsize)
+            or self.records.dtype != torch.uint8
+            or self.actions.shape != (count, 2, ACTION_DIM)
+            or self.actions.dtype != torch.float32
+            or self.host_actions.shape != (count, 2, ACTION_DIM)
+            or self.host_actions.dtype != np.float32
+            or self.columns.shape != (count, len(native.OBSERVATION_FIELDS))
+            or self.columns.dtype != np.uint32
+            or self.columns.flags.writeable
+            or self.rewards.shape != (count, 2)
+            or self.rewards.dtype != np.float32
+            or self.terminal.shape != (count,)
+            or self.timeout.shape != (count,)
+            or self.terminal.dtype != np.bool_
+            or self.timeout.dtype != np.bool_
+        ):
+            raise ValueError("native frame batch schema mismatch")
+        if not np.isfinite(self.host_actions).all() or not np.isfinite(self.rewards).all():
+            raise ValueError("simulator actions and rewards must be finite")
+        if np.any(self.terminal & self.timeout):
+            raise ValueError("a match end cannot also be a time-out")
+
+    def __len__(self) -> int:
+        return len(self.rewards)
+
+    @overload
+    def __getitem__(self, index: int) -> SimFrame: ...
+    @overload
+    def __getitem__(self, index: slice) -> tuple[SimFrame, ...]: ...
+    def __getitem__(self, index: int | slice) -> SimFrame | tuple[SimFrame, ...]:
+        if isinstance(index, slice):
+            return tuple(self[lane] for lane in range(*index.indices(len(self))))
+        return SimFrame(
+            NativeColumns(self.columns[index]),
+            self.host_actions[index],
+            (float(self.rewards[index, 0]), float(self.rewards[index, 1])),
+            bool(self.terminal[index]),
+            bool(self.timeout[index]),
+            self.records[index],
+            self.actions[index],
+        )
+
+
+class FrameStore:
+    """Own contiguous observations. Only diagnostic views decode Python frames."""
+
+    def __init__(self, capacity: int, matches: int, device: torch.device, fields: tuple[str, ...]) -> None:
+        self.records = torch.zeros(capacity, matches, native.FRAME_DTYPE.itemsize, dtype=torch.uint8, device=device)
+        self.actions = torch.zeros(capacity, matches, 2, ACTION_DIM, device=device)
+        self.rewards = torch.zeros(capacity, matches, 2, device=device)
+        self.flags = torch.zeros(capacity, matches, 2, device=device, dtype=torch.bool)
+        self.fields = fields
+        self.extra = {
+            name: torch.zeros(capacity, matches, dtype=torch.float64, device=device)
+            for name in fields
+            if name not in NATIVE_COLUMN_LAYOUT
+        }
+        self._host: tuple[NDArray, NDArray, NDArray, NDArray, dict[str, NDArray]] | None = None
+        self._views: dict[tuple[int, int], SimFrame] = {}
+
+    def write(self, positions: Tensor, lanes: Tensor, batch: FrameBatch, source: Tensor) -> None:
+        self._host = None
+        self._views.clear()
+        self.records[positions, lanes] = batch.records.index_select(0, source)
+        self.actions[positions, lanes] = batch.actions.index_select(0, source)
+        selected = batch.records.index_select(0, source)
+        fields = native.FRAME_DTYPE.fields
+        if fields is None:
+            raise RuntimeError("native records must have a structured dtype")
+        reward_offset = fields["reward"][1]
+        flag_offset = fields["terminated"][1]
+        self.rewards[positions, lanes] = (
+            selected[:, reward_offset : reward_offset + 8].contiguous().view(torch.float32)
+        )
+        self.flags[positions, lanes] = selected[:, flag_offset : flag_offset + 2].bool()
+
+    def write_frame(self, position: int, lane: int, frame: SimFrame) -> None:
+        self._host = None
+        self._views.clear()
+        if tuple(frame.columns) != self.fields:
+            raise ValueError("simulator observation schema changed within the pool")
+        packed = np.zeros(1, dtype=native.FRAME_DTYPE)
+        for name, value in frame.columns.items():
+            if name in NATIVE_COLUMN_LAYOUT:
+                index, _ = NATIVE_COLUMN_LAYOUT[name]
+                packed["columns"][0, index] = np.array([value], dtype=MDS_PER_FRAME_DTYPES[name]).view(np.uint32)[0]
+            else:
+                self.extra[name][position, lane] = value
+        packed["applied_action"][0] = frame.applied_actions
+        packed["reward"][0] = frame.rewards
+        packed["terminated"][0] = frame.terminal
+        packed["truncated"][0] = frame.timeout
+        device = self.records.device
+        source = (
+            torch.from_numpy(packed.view(np.uint8)).to(device) if frame.device_record is None else frame.device_record
+        )
+        self.records[position, lane].copy_(source)
+        self.actions[position, lane].copy_(torch.from_numpy(frame.applied_actions).to(device))
+        self.rewards[position, lane] = torch.tensor(frame.rewards, device=device)
+        self.flags[position, lane] = torch.tensor((frame.terminal, frame.timeout), device=device)
+
+    def frame(self, position: int, lane: int) -> SimFrame:
+        cached = self._views.get((position, lane))
+        if cached is not None:
+            return cached
+        if self._host is None:
+            self._host = (
+                self.records.cpu().numpy().copy(),
+                self.actions.cpu().numpy().copy(),
+                self.rewards.cpu().numpy().copy(),
+                self.flags.cpu().numpy().copy(),
+                {name: value.cpu().numpy().copy() for name, value in self.extra.items()},
+            )
+        packed, actions, rewards, flags, extra = self._host
+        words = packed[position, lane, : 4 * len(native.OBSERVATION_FIELDS)].copy().view(np.uint32)
+        words.flags.writeable = False
+        native_columns = NativeColumns(words)
+        columns = {
+            name: float(extra[name][position, lane]) if name in extra else native_columns[name] for name in self.fields
+        }
+        result = SimFrame(
+            columns,
+            actions[position, lane],
+            (float(rewards[position, lane, 0]), float(rewards[position, lane, 1])),
+            bool(flags[position, lane, 0]),
+            bool(flags[position, lane, 1]),
+            self.records[position, lane],
+            self.actions[position, lane],
+        )
+        self._views[position, lane] = result
+        return result
+
+
+@dataclasses.dataclass(slots=True)
+class FrameHistory(Sequence[SimFrame]):
+    """Track a lane's retained span; decode frames only for diagnostics."""
+
+    store: FrameStore
+    lane: int
+    start: int
+    stop: int
+
+    def __len__(self) -> int:
+        return self.stop - self.start
+
+    @overload
+    def __getitem__(self, index: int) -> SimFrame: ...
+    @overload
+    def __getitem__(self, index: slice) -> FrameHistory: ...
+    def __getitem__(self, index: int | slice) -> SimFrame | FrameHistory:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step != 1:
+                raise ValueError("frame history only supports contiguous slices")
+            return FrameHistory(self.store, self.lane, self.start + start, self.start + stop)
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        return self.store.frame(self.start + index, self.lane)
+
+
+class ActionRing:
+    """Store committed factors and mirror lengths on the host for scheduling."""
+
+    def __init__(self, matches: int, capacity: int, device: torch.device) -> None:
+        self.values = torch.zeros(matches, 2, capacity, 4, dtype=torch.long, device=device)
+        self.head = torch.zeros(matches, 2, dtype=torch.long, device=device)
+        self.length = np.zeros((matches, 2), dtype=np.int64)
+        self.length_device = torch.zeros(matches, 2, dtype=torch.long, device=device)
+        self.capacity = capacity
+        self.offsets = torch.arange(capacity, device=device)
+
+    def reset(self, lane: int, delays: tuple[int, int]) -> None:
+        self.values[lane].zero_()
+        self.head[lane].zero_()
+        self.length[lane] = delays
+        self.length_device[lane] = torch.tensor(delays, device=self.values.device)
+
+    def read(self, lanes: Tensor, sides: Tensor, count: int) -> Tensor:
+        positions = (self.head[lanes, sides, None] + self.offsets[:count]) % self.capacity
+        return self.values[lanes[:, None], sides[:, None], positions]
+
+    def append(
+        self, host_lanes: NDArray[np.int64], host_sides: NDArray[np.int64], actions: Tensor, replans: NDArray[np.int64]
+    ) -> None:
+        lengths = self.length[host_lanes, host_sides]
+        if np.any(lengths + replans > self.capacity):
+            raise ValueError("action queue exceeded its capacity")
+        lanes = torch.from_numpy(host_lanes.copy()).to(self.values.device)
+        sides = torch.from_numpy(host_sides.copy()).to(self.values.device)
+        lengths_device = torch.from_numpy(lengths).to(self.values.device)
+        # Write each cadence together so the two-frame rows do not touch padding.
+        for count in (2, 4):
+            indices = np.flatnonzero(replans == count)
+            if not len(indices):
+                continue
+            at = torch.from_numpy(indices).to(self.values.device)
+            left, side = lanes[at], sides[at]
+            positions = (self.head[left, side, None] + lengths_device[at, None] + self.offsets[:count]) % self.capacity
+            self.values[left[:, None], side[:, None], positions] = actions[at, :count]
+        self.length[host_lanes, host_sides] += replans
+        self.length_device[lanes, sides] += torch.from_numpy(replans.copy()).to(self.values.device)
+
+    def consume(self, host: NDArray[np.int64]) -> None:
+        if np.any(self.length[host] < 1):
+            raise ValueError("simulator step would consume an uncommitted action")
+        lanes = torch.from_numpy(host).to(self.values.device)
+        self.head[lanes] = (self.head[lanes] + 1) % self.capacity
+        self.length[host] -= 1
+        self.length_device[lanes] -= 1
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QueueView(Sequence[Tensor]):
+    ring: ActionRing
+    lane: int
+    side: int
+
+    def __len__(self) -> int:
+        return int(self.ring.length[self.lane, self.side])
+
+    @overload
+    def __getitem__(self, index: int) -> Tensor: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[Tensor]: ...
+    def __getitem__(self, index: int | slice) -> Tensor | list[Tensor]:
+        device = self.ring.values.device
+        values = self.ring.read(
+            torch.tensor([self.lane], device=device), torch.tensor([self.side], device=device), len(self)
+        )[0]
+        if isinstance(index, slice):
+            return list(values[index].unbind())
+        return values[index]
+
+    def clear(self) -> None:
+        self.ring.length[self.lane, self.side] = 0
+        self.ring.length_device[self.lane, self.side] = 0
+
+
+# Integer table columns. The host mirror drives schedules and counter keys;
+# tensor columns drive context and queue gathers without observation readback.
+(
+    STREAM,
+    MATCH,
+    SIDE,
+    CLOCK,
+    UPDATE,
+    BLOCK,
+    EPISODE,
+    LANE,
+    START,
+    LENGTH,
+    IDENTITY,
+    CHARACTER,
+    STAGE,
+    DELAY,
+    REPLAN,
+    OPP_DELAY,
+    OPP_REPLAN,
+    OPP_LENGTH,
+) = range(18)
+
+
+def _window_key(row: NDArray[np.int64]) -> tuple[int, int, int, int]:
+    return int(row[UPDATE]), int(row[STREAM]), int(row[BLOCK]), int(row[EPISODE])
+
+
+class DecisionTable:
+    """Store sampled decisions and bootstrap states; records select student rows."""
+
+    def __init__(self, capacity: int, store: FrameStore) -> None:
+        self.store = store
+        self.device = store.records.device
+        self.meta = np.zeros((capacity, 18), dtype=np.int64)
+        self.integers = torch.zeros(capacity, 18, dtype=torch.long, device=self.device)
+        self.log_lambda = np.zeros((capacity, 2), dtype=np.float64)
+        self.conditions = torch.zeros(capacity, 2, device=self.device)
+        self.coefficients = torch.zeros(capacity, device=self.device)
+        self.prefix = torch.zeros(capacity, 24, 4, dtype=torch.long, device=self.device)
+        self.opponent = torch.zeros_like(self.prefix)
+        self.actions = torch.zeros(capacity, 4, 4, dtype=torch.long, device=self.device)
+        self.behavior = torch.zeros(capacity, 16, device=self.device)
+        self.rewards = torch.zeros(capacity, 4, device=self.device)
+        self.duration = np.zeros(capacity, dtype=np.int64)
+        self.remaining = np.full(capacity, -1, dtype=np.int64)
+        self.terminal = np.zeros(capacity, dtype=np.bool_)
+        self.boundary = np.zeros(capacity, dtype=np.bool_)
+        self.following = np.full(capacity, -1, dtype=np.int64)
+        self.episodes: dict[tuple[int, int], Episode] = {}
+        self.episode_slots = np.zeros(capacity, dtype=np.int64)
+        self.episode_ends = np.full(capacity, -1, dtype=np.int64)
+        self.episode_indices: dict[tuple[int, int], int] = {}
+        self.count = 0
+
+    def rows(self, ids: Sequence[int] | NDArray[np.int64]) -> DecisionRows:
+        return DecisionRows(self, np.asarray(ids, dtype=np.int64))
+
+    def state(self, index: int, metadata: NDArray[np.int64] | None = None) -> DecisionState:
+        row = self.meta[index] if metadata is None else metadata
+        episode = self.episodes[int(row[MATCH]), int(row[EPISODE])]
+        history = FrameHistory(self.store, int(row[LANE]), int(row[START]), int(row[START] + row[LENGTH]))
+        return DecisionState(
+            int(row[STREAM]),
+            int(row[MATCH]),
+            int(row[SIDE]),
+            episode,
+            int(row[CLOCK]),
+            _window_key(row),
+            history,
+            self.prefix[index, : int(row[DELAY])],
+            self.opponent[index, : int(row[OPP_LENGTH])],
+        )
+
+    def add(self, meta: list[list[int]], episodes: list[Episode], ring: ActionRing) -> DecisionRows:
+        end = self.count + len(meta)
+        if end > len(self.meta):
+            raise ValueError("decision table capacity exhausted")
+        ids = np.arange(self.count, end)
+        self.meta[ids] = meta
+        data = self.meta[ids]
+        at = torch.from_numpy(ids).to(self.device)
+        integers = torch.from_numpy(data).to(self.device)
+        self.integers[at] = integers
+        logs = []
+        coefficients = []
+        for index, (row, episode) in enumerate(zip(data, episodes, strict=True)):
+            side = int(row[SIDE])
+            key = (int(row[MATCH]), episode.number)
+            self.episodes[key] = episode
+            self.episode_slots[ids[index]] = self.episode_indices.setdefault(key, len(self.episode_indices))
+            logs.append((episode.players[side].log_lambda, episode.players[1 - side].log_lambda))
+            coefficients.append(math.exp(episode.players[side].log_lambda))
+        self.log_lambda[ids] = logs
+        self.conditions[at] = torch.tensor(logs, device=self.device)
+        self.coefficients[at] = torch.tensor(coefficients, device=self.device)
+        lanes, sides = integers[:, LANE], integers[:, SIDE]
+        offsets = torch.arange(24, device=self.device)[None]
+        count = min(24, ring.capacity)
+        prefix = torch.nn.functional.pad(ring.read(lanes, sides, count), (0, 0, 0, 24 - count))
+        opponent = torch.nn.functional.pad(ring.read(lanes, 1 - sides, count), (0, 0, 0, 24 - count))
+        self.prefix[at] = torch.where((offsets < integers[:, DELAY, None])[..., None], prefix, 0)
+        self.opponent[at] = torch.where((offsets < integers[:, OPP_LENGTH, None])[..., None], opponent, 0)
+        self.count = end
+        return self.rows(ids)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DecisionRows(Sequence[DecisionState]):
+    """Select rows without copying their stored queues or observation histories."""
+
+    table: DecisionTable
+    ids: NDArray[np.int64]
+    metadata: NDArray[np.int64] | None = None
+    device_ids: Tensor = dataclasses.field(init=False, repr=False)
+    device_metadata: Tensor | None = dataclasses.field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "device_ids", torch.from_numpy(self.ids).to(self.table.device, non_blocking=True))
+        object.__setattr__(
+            self,
+            "device_metadata",
+            None
+            if self.metadata is None
+            else torch.from_numpy(self.metadata).to(self.table.device, non_blocking=True),
+        )
+
+    @property
+    def meta(self) -> NDArray[np.int64]:
+        return self.table.meta[self.ids] if self.metadata is None else self.metadata
+
+    def tensor(self, value: Tensor) -> Tensor:
+        if self.device_metadata is not None and value is self.table.integers:
+            return self.device_metadata
+        return value.index_select(0, self.device_ids)
+
+    def take(self, indices: Sequence[int] | NDArray[np.int64]) -> DecisionRows:
+        at = np.asarray(indices, dtype=np.int64)
+        return DecisionRows(self.table, self.ids[at], None if self.metadata is None else self.metadata[at])
+
+    def tail(self, count: int) -> DecisionRows:
+        meta = self.meta.copy()
+        lengths = np.minimum(meta[:, LENGTH], count)
+        meta[:, START] += meta[:, LENGTH] - lengths
+        meta[:, LENGTH] = lengths
+        meta[:, BLOCK] = meta[:, CLOCK]
+        return DecisionRows(self.table, self.ids, meta)
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    @overload
+    def __getitem__(self, index: int) -> DecisionState: ...
+    @overload
+    def __getitem__(self, index: slice) -> DecisionRows: ...
+    def __getitem__(self, index: int | slice) -> DecisionState | DecisionRows:
+        if isinstance(index, slice):
+            return self.take(np.arange(len(self))[index])
+        at = int(self.ids[index])
+        return self.table.state(at, self.meta[index])
+
+    def packed(self, length: int, tail: int | None = None) -> tuple[Tensor, ...]:
+        meta = self.tensor(self.table.integers)
+        lengths = meta[:, LENGTH] if tail is None else meta[:, LENGTH].clamp_max(tail)
+        if np.any(self.meta[:, LENGTH] > length) and tail is None:
+            raise ValueError("context padding is shorter than its history")
+        starts = meta[:, START] + meta[:, LENGTH] - lengths
+        valid = torch.arange(length, device=meta.device)[None] < lengths[:, None]
+        positions = starts[:, None] + torch.arange(length, device=meta.device)[None]
+        # Padding may extend past a lane's allocation at the final boundary.
+        positions = torch.where(valid, positions, 0)
+        flat = (positions * self.table.store.records.shape[1] + meta[:, LANE, None]).flatten()
+        records = self.table.store.records.flatten(0, 1).index_select(0, flat).reshape(len(self), length, -1)
+        actions = (
+            self.table.store.actions.flatten(0, 1).index_select(0, flat).reshape(len(self), length, 2, ACTION_DIM)
+        )
+        records = torch.where(valid[..., None], records, 0)
+        actions = torch.where(valid[..., None, None], actions, 0)
+        return records, actions, meta[:, SIDE], meta[:, IDENTITY], lengths
+
+
+class DecisionRecordView:
+    """Expose diagnostic fields without retaining per-decision Python state."""
+
+    def __init__(self, table: DecisionTable, row: int) -> None:
+        self.table = table
+        self.row = row
+
+    @property
+    def state(self) -> DecisionState:
+        return self.table.state(self.row)
+
+    @property
+    def actions(self) -> Tensor:
+        return self.table.actions[self.row]
+
+    @property
+    def behavior(self) -> Tensor:
+        return self.table.behavior[self.row]
+
+    @property
+    def rewards(self) -> list[float]:
+        return self.table.rewards[self.row, : int(self.table.duration[self.row])].cpu().tolist()
+
+    @property
+    def terminal(self) -> bool:
+        return bool(self.table.terminal[self.row])
+
+    @property
+    def boundary(self) -> bool:
+        return bool(self.table.boundary[self.row])
+
+    @property
+    def frames_remaining(self) -> int | None:
+        value = int(self.table.remaining[self.row])
+        return None if value == -1 else value
+
+    @frames_remaining.setter
+    def frames_remaining(self, value: int) -> None:
+        self.table.remaining[self.row] = value
+
+    @property
+    def next_state(self) -> DecisionState | None:
+        following = int(self.table.following[self.row])
+        return None if following == -1 else self.table.state(following)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DecisionRecords(Sequence[DecisionRecordView]):
+    states: DecisionRows
+
+    def __len__(self) -> int:
+        return len(self.states)
+
+    @overload
+    def __getitem__(self, index: int) -> DecisionRecordView: ...
+    @overload
+    def __getitem__(self, index: slice) -> DecisionRecords: ...
+    def __getitem__(self, index: int | slice) -> DecisionRecordView | DecisionRecords:
+        if isinstance(index, slice):
+            return DecisionRecords(self.states[index])
+        return DecisionRecordView(self.states.table, int(self.states.ids[index]))
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PoolMatchSnapshot:
+    match: int
+    episode: Episode
+    episode_start: int
+    history_start: int
+    history_length: int
+    returns: tuple[float, float]
+    end_clock: int | None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PoolGroupSnapshot:
+    fields: tuple[str, ...]
+    records: Tensor
+    actions: Tensor
+    rewards: Tensor
+    flags: Tensor
+    extra: dict[str, Tensor]
+    queue: Tensor
+    head: Tensor
+    length: Tensor
+    matches: tuple[PoolMatchSnapshot, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PoolSnapshot:
+    format: str
+    groups: tuple[PoolGroupSnapshot, ...]
+
+
 class RolloutEngine:
     def __init__(
         self,
@@ -1833,6 +2491,125 @@ class RolloutEngine:
         self._initialized = False
         self.completed_update = -1
         self.results: list[EpisodeResult] = []
+        self.group_matches = tuple(tuple(match for shard in group for match in shard.match_ids) for group in groups)
+        capacity = max(t.delay + t.replan for t in sampler.schedule.configurations)
+        self.rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
+        self.locations = {
+            match: (group, lane)
+            for group, matches in enumerate(self.group_matches)
+            for lane, match in enumerate(matches)
+        }
+        self.shard_lanes = {
+            id(shard): np.array([self.locations[match][1] for match in shard.match_ids], dtype=np.int64)
+            for group in groups
+            for shard in group
+        }
+        self.stores: list[FrameStore | None] = [None] * len(groups)
+
+    def snapshot(self) -> PoolSnapshot:
+        groups = []
+        for group_id, matches in enumerate(self.group_matches):
+            store = self.stores[group_id]
+            if store is None:
+                raise ValueError("pool has no frame storage")
+            # Checkpoints contain only the retained context, without the rollout's
+            # decision table or diagnostic copies of observations.
+            packed = FrameStore(129, len(matches), self.policy.device, store.fields)
+            metadata = []
+            for lane, match in enumerate(matches):
+                state = self.matches[match]
+                history = state.history
+                length = len(history)
+                span = slice(history.start, history.stop)
+                for target, source in (
+                    (packed.records, store.records),
+                    (packed.actions, store.actions),
+                    (packed.rewards, store.rewards),
+                    (packed.flags, store.flags),
+                ):
+                    target[:length, lane].copy_(source[span, lane])
+                for name in packed.extra:
+                    packed.extra[name][:length, lane].copy_(store.extra[name][span, lane])
+                metadata.append(
+                    PoolMatchSnapshot(
+                        match,
+                        state.episode,
+                        state.episode_start,
+                        state.history_start,
+                        length,
+                        state.returns,
+                        state.end_clock,
+                    )
+                )
+            ring = self.rings[group_id]
+            if not torch.equal(ring.length_device.cpu(), torch.from_numpy(ring.length)):
+                raise ValueError("action queue length mirrors disagree")
+            groups.append(
+                PoolGroupSnapshot(
+                    store.fields,
+                    packed.records.cpu(),
+                    packed.actions.cpu(),
+                    packed.rewards.cpu(),
+                    packed.flags.cpu(),
+                    {name: value.cpu() for name, value in packed.extra.items()},
+                    ring.values.to(device="cpu", copy=True),
+                    ring.head.to(device="cpu", copy=True),
+                    ring.length_device.to(device="cpu", copy=True),
+                    tuple(metadata),
+                )
+            )
+        return PoolSnapshot("hal.o65.rollout_pool.v2", tuple(groups))
+
+    def restore_pool(self, snapshot: PoolSnapshot) -> None:
+        if not isinstance(snapshot, PoolSnapshot) or snapshot.format != "hal.o65.rollout_pool.v2":
+            raise ValueError("unsupported rollout pool snapshot identity")
+        if len(snapshot.groups) != len(self.groups):
+            raise ValueError("rollout pool topology mismatch")
+        restored: dict[int, MatchState] = {}
+        for group_id, (saved, ids) in enumerate(zip(snapshot.groups, self.group_matches, strict=True)):
+            if tuple(match.match for match in saved.matches) != ids or len(set(saved.fields)) != len(saved.fields):
+                raise ValueError("rollout pool match or schema mismatch")
+            store = FrameStore(129, len(ids), self.policy.device, saved.fields)
+            ring = self.rings[group_id]
+            pairs = (
+                (store.records, saved.records),
+                (store.actions, saved.actions),
+                (store.rewards, saved.rewards),
+                (store.flags, saved.flags),
+                (ring.values, saved.queue),
+                (ring.head, saved.head),
+                (ring.length_device, saved.length),
+            )
+            for target, source in pairs:
+                if target.shape != source.shape or target.dtype != source.dtype:
+                    raise ValueError("rollout pool tensor schema mismatch")
+                target.copy_(source)
+            if (
+                bool(((saved.head < 0) | (saved.head >= ring.capacity)).any())
+                or bool(((saved.length < 0) | (saved.length > ring.capacity)).any())
+                or set(saved.extra) != set(store.extra)
+            ):
+                raise ValueError("invalid rollout pool queues or columns")
+            ring.length[:] = saved.length.cpu().numpy()
+            for name, target in store.extra.items():
+                source = saved.extra[name]
+                if target.shape != source.shape or target.dtype != source.dtype:
+                    raise ValueError("rollout pool extra column schema mismatch")
+                target.copy_(source)
+            for lane, match in enumerate(saved.matches):
+                if not 1 <= match.history_length <= 129:
+                    raise ValueError("invalid rollout pool history length")
+                restored[match.match] = MatchState(
+                    match.episode,
+                    match.episode_start,
+                    match.history_start,
+                    FrameHistory(store, lane, 0, match.history_length),
+                    (QueueView(ring, lane, 0), QueueView(ring, lane, 1)),
+                    match.returns,
+                    match.end_clock,
+                )
+            self.stores[group_id] = store
+        self.matches = restored
 
     def initialize(self) -> None:
         if self._initialized:
@@ -1850,148 +2627,234 @@ class RolloutEngine:
         frame = shard.reset(lane, episode)
         if frame.terminal or frame.timeout or bool(frame.applied_actions.any()):
             raise ValueError("reset must return a live initial state with neutral applied inputs")
-        frame = dataclasses.replace(frame, columns=dict(frame.columns), applied_actions=frame.applied_actions.copy())
-        queues: tuple[list[Tensor], list[Tensor]] = ([], [])
-        for side, player in enumerate(episode.players):
-            queues[side].extend(torch.zeros(4, dtype=torch.long) for _ in range(player.timing.delay))
-        self.matches[match] = MatchState(episode, clock, clock, [frame], queues)
+        group, at = self.locations[match]
+        store = self.stores[group]
+        if store is None:
+            store = FrameStore(1, len(self.group_matches[group]), self.policy.device, tuple(frame.columns))
+            self.stores[group] = store
+        previous = self.matches.get(match)
+        position = previous.history.stop if previous is not None else 0
+        if position >= len(store.records):
+            raise ValueError("frame store capacity exhausted during reset")
+        store.write_frame(position, at, frame)
+        ring = self.rings[group]
+        ring.reset(at, (episode.players[0].timing.delay, episode.players[1].timing.delay))
+        self.matches[match] = MatchState(
+            episode,
+            clock,
+            clock,
+            FrameHistory(store, at, position, position + 1),
+            (QueueView(ring, at, 0), QueueView(ring, at, 1)),
+        )
 
-    def _state(self, match: int, side: int, clock: int, update: int, *, bootstrap: bool = False) -> DecisionState:
+    def _metadata(self, match: int, side: int, clock: int, update: int, *, bootstrap: bool = False) -> list[int]:
+        if type(side) is not int or side not in (0, 1):
+            raise ValueError("decision side must be HAL port 1 or 2's zero-based index")
         state = self.matches[match]
         block = (clock // 128) * 128
         if bootstrap and clock % 128 == 0:
             block -= 128
         start = max(state.episode_start, block - 128, clock - 255)
-        frames = tuple(state.history[start - state.history_start : clock - state.history_start + 1])
-        if not frames or len(frames) > 256:
+        history_start = state.history.start + start - state.history_start
+        length = clock - start + 1
+        if (
+            not 1 <= length <= 256
+            or history_start < state.history.start
+            or history_start + length > state.history.stop
+        ):
             raise ValueError("invalid rollout history span")
-        delay = state.episode.players[side].timing.delay
-        if len(state.queues[side]) < delay:
+        group, lane = self.locations[match]
+        player, opponent = state.episode.players[side], state.episode.players[1 - side]
+        if self.rings[group].length[lane, side] < player.timing.delay:
             raise ValueError("committed queue is shorter than D")
-        prefix = torch.stack(state.queues[side][:delay]) if delay else torch.empty(0, 4, dtype=torch.long)
-        other = state.queues[1 - side]
-        opponent = torch.stack(other) if other else torch.empty(0, 4, dtype=torch.long)
-        return DecisionState(
+        return [
             2 * match + side,
             match,
             side,
-            state.episode,
             clock,
-            (update, 2 * match + side, block, state.episode.number),
-            frames,
-            prefix,
-            opponent,
-        )
+            update,
+            block,
+            state.episode.number,
+            lane,
+            history_start,
+            length,
+            player.identity,
+            player.character,
+            state.episode.stage,
+            player.timing.delay,
+            player.timing.replan,
+            opponent.timing.delay,
+            opponent.timing.replan,
+            int(self.rings[group].length[lane, 1 - side]),
+        ]
+
+    def _state(self, match: int, side: int, clock: int, update: int, *, bootstrap: bool = False) -> DecisionState:
+        meta = self._metadata(match, side, clock, update, bootstrap=bootstrap)
+        group, _ = self.locations[match]
+        store = self.stores[group]
+        if store is None:
+            raise ValueError("pool has no frame storage")
+        table = DecisionTable(1, store)
+        return table.add([meta], [self.matches[match].episode], self.rings[group])[0]
 
     def _decide(
         self,
         shards: Sequence[SimulatorShard],
         clock: int,
         update: int,
-        records: list[DecisionRecord],
-        pending: dict[int, DecisionRecord],
+        table: DecisionTable,
+        records: list[int],
+        pending: NDArray[np.int64],
     ) -> None:
-        states: dict[int | None, list[DecisionState]] = defaultdict(list)
+        groups: dict[int | None, tuple[list[list[int]], list[Episode]]] = {}
         for shard in shards:
             for match in shard.match_ids:
                 state = self.matches[match]
                 if state.end_clock is not None:
                     continue
+                group, lane = self.locations[match]
                 for side, player in enumerate(state.episode.players):
                     if clock % player.timing.replan:
                         continue
-                    if len(state.queues[side]) != player.timing.delay:
+                    if self.rings[group].length[lane, side] != player.timing.delay:
                         raise ValueError("decision must see exactly D committed frames")
-                    decision = self._state(match, side, clock, update)
-                    states[player.anchor].append(decision)
-        # Capture both queues before either side samples; the baseline cannot read
-        # an opponent action sampled at the same clock tick.
+                    metadata, episodes = groups.setdefault(player.anchor, ([], []))
+                    metadata.append(self._metadata(match, side, clock, update))
+                    episodes.append(state.episode)
+        # Snapshot both queues before either player samples at this clock tick.
+        states = {
+            anchor: table.add(meta, episodes, self.rings[self.cursor]) for anchor, (meta, episodes) in groups.items()
+        }
         for anchor, decisions in states.items():
             policy = self.policy if anchor is None else self.anchors[anchor]
             with torch.no_grad():
                 output = policy.sample(decisions, self.sampler.rng)
-            sampled_actions = output.actions.detach().cpu()
-            sampled_log_probs = output.log_probs.detach().cpu()
-            for index, decision in enumerate(decisions):
-                actions = sampled_actions[index].clone()
-                self.matches[decision.match].queues[decision.side].extend(
-                    action.clone() for action in actions[: decision.player.timing.replan]
-                )
-                if anchor is not None:
-                    continue
-                previous = pending.pop(decision.stream, None)
-                if previous is not None:
-                    previous.next_state = decision
-                record = DecisionRecord(decision, actions, sampled_log_probs[index].clone(), [])
-                records.append(record)
-                pending[decision.stream] = record
-
-    def _inputs(self, shard: SimulatorShard, count: int) -> NDArray[np.float32]:
-        indices = torch.zeros(count, len(shard.match_ids), 2, 4, dtype=torch.long)
-        for lane, match in enumerate(shard.match_ids):
-            if self.matches[match].end_clock is not None:
+            meta = decisions.meta
+            self.rings[self.cursor].append(meta[:, LANE], meta[:, SIDE], output.actions.detach(), meta[:, REPLAN])
+            at = torch.from_numpy(decisions.ids).to(self.policy.device)
+            table.actions[at] = output.actions.detach()
+            table.behavior[at] = output.log_probs.detach()
+            if anchor is not None:
                 continue
-            for side in range(2):
-                queue = self.matches[match].queues[side]
-                if len(queue) < count:
-                    raise ValueError("simulator step would consume an uncommitted action")
-                indices[:, lane, side] = torch.stack(queue[:count])
-        return self.policy.wire_actions(indices)
+            previous = pending[meta[:, LANE], meta[:, SIDE]]
+            valid = previous >= 0
+            table.following[previous[valid]] = decisions.ids[valid]
+            pending[meta[:, LANE], meta[:, SIDE]] = decisions.ids
+            records.extend(int(row) for row in decisions.ids)
+
+    def _inputs(self, shard: SimulatorShard, count: int) -> Tensor:
+        lanes_host = self.shard_lanes[id(shard)]
+        group = self.locations[shard.match_ids[0]][0]
+        ring = self.rings[group]
+        active = self._active(shard)
+        if np.any(ring.length[lanes_host[active]] < count):
+            raise ValueError("simulator step would consume an uncommitted action")
+        lanes = torch.from_numpy(lanes_host).to(self.policy.device)
+        indices = torch.stack([ring.read(lanes, torch.full_like(lanes, side), count) for side in range(2)], dim=2)
+        indices = indices.permute(1, 0, 2, 3)
+        indices = torch.where(torch.from_numpy(active).to(self.policy.device)[None, :, None, None], indices, 0)
+        if isinstance(self.policy, TransformerPolicy):
+            return self.policy.device_wire_actions(indices)
+        return torch.from_numpy(self.policy.wire_actions(indices)).to(self.policy.device)
 
     def _accept(
         self,
         shard: SimulatorShard,
-        rows: tuple[tuple[SimFrame, ...], ...],
+        rows: Sequence[Sequence[SimFrame]],
         clock: int,
         update: int,
-        records: list[DecisionRecord],
-        pending: dict[int, DecisionRecord],
+        table: DecisionTable,
+        pending: NDArray[np.int64],
     ) -> tuple[int, int]:
         frames_stepped = timeouts = 0
-        for at, frames in enumerate(rows, start=1):
+        lanes_host = self.shard_lanes[id(shard)]
+        ring = self.rings[self.cursor]
+        for offset, frames in enumerate(rows, start=1):
             if len(frames) != len(shard.match_ids):
                 raise ValueError("simulator returned the wrong lane count")
-            for match, frame in zip(shard.match_ids, frames, strict=True):
-                if not isinstance(shard, NativeSimulatorShard):
-                    frame = dataclasses.replace(
-                        frame, columns=dict(frame.columns), applied_actions=frame.applied_actions.copy()
-                    )
+            active = self._active(shard)
+            sources_host = np.flatnonzero(active)
+            lanes_active = lanes_host[active]
+            lanes = torch.from_numpy(lanes_active).to(self.policy.device)
+            positions_host = np.array([self.matches[shard.match_ids[source]].history.stop for source in sources_host])
+            if np.any(positions_host >= len(table.store.records)):
+                raise ValueError("frame store capacity exhausted")
+            positions = torch.from_numpy(positions_host).to(self.policy.device)
+            if isinstance(frames, FrameBatch):
+                table.store.write(positions, lanes, frames, torch.from_numpy(sources_host).to(self.policy.device))
+                rewards, terminals, truncations = frames.rewards, frames.terminal, frames.timeout
+            else:
+                rewards = np.array([frame.rewards for frame in frames], dtype=np.float32)
+                terminals = np.array([frame.terminal for frame in frames], dtype=np.bool_)
+                truncations = np.array([frame.timeout for frame in frames], dtype=np.bool_)
+                for source, lane, position in zip(sources_host, lanes_active, positions_host, strict=True):
+                    table.store.write_frame(int(position), int(lane), frames[int(source)])
+            ring.consume(lanes_active)
+            frames_stepped += len(sources_host)
+            record_ids = pending[lanes_active].reshape(-1)
+            valid = record_ids >= 0
+            ids = record_ids[valid]
+            at = torch.from_numpy(ids).to(self.policy.device)
+            side = torch.from_numpy(np.tile(np.arange(2), len(lanes_active))[valid]).to(self.policy.device)
+            frame_lanes = torch.from_numpy(np.repeat(lanes_active, 2)[valid]).to(self.policy.device)
+            frame_positions = torch.from_numpy(np.repeat(positions_host, 2)[valid]).to(self.policy.device)
+            duration = torch.from_numpy(table.duration[ids]).to(self.policy.device)
+            table.rewards[at, duration] = table.store.rewards[frame_positions, frame_lanes, side]
+            table.duration[ids] += 1
+            for source in sources_host:
+                match = shard.match_ids[int(source)]
                 state = self.matches[match]
-                if state.end_clock is not None:
+                state.history.stop += 1
+                state.returns = (
+                    state.returns[0] + float(rewards[source, 0]),
+                    state.returns[1] + float(rewards[source, 1]),
+                )
+                if not (terminals[source] or truncations[source]):
                     continue
-                frames_stepped += 1
-                state.history.append(frame)
-                state.returns = (state.returns[0] + frame.rewards[0], state.returns[1] + frame.rewards[1])
-                for side in range(2):
-                    state.queues[side].pop(0)
-                    record = pending.get(2 * match + side)
-                    if record is not None:
-                        record.rewards.append(frame.rewards[side])
-                if not (frame.terminal or frame.timeout):
-                    continue
-                if at != len(rows):
+                if offset != len(rows):
                     raise ValueError("simulator stepped beyond an episode boundary")
-                end_clock = clock + at
-                stocks = None
-                if "p1_stock" in frame.columns and "p2_stock" in frame.columns:
-                    stocks = (int(frame.columns["p1_stock"]), int(frame.columns["p2_stock"]))
+                end_clock = clock + offset
+                if isinstance(frames, FrameBatch):
+                    stocks = (
+                        int(frames.columns[source, NATIVE_COLUMN_LAYOUT["p1_stock"][0]].view(np.int32)),
+                        int(frames.columns[source, NATIVE_COLUMN_LAYOUT["p2_stock"][0]].view(np.int32)),
+                    )
+                else:
+                    columns = frames[int(source)].columns
+                    stocks = (
+                        (int(columns["p1_stock"]), int(columns["p2_stock"]))
+                        if "p1_stock" in columns and "p2_stock" in columns
+                        else None
+                    )
                 self.results.append(
                     EpisodeResult(
-                        match, state.episode, end_clock - state.episode_start, state.returns, frame.timeout, stocks
+                        match,
+                        state.episode,
+                        end_clock - state.episode_start,
+                        state.returns,
+                        bool(truncations[source]),
+                        stocks,
                     )
                 )
-                for record in records:
-                    if record.state.match == match and record.state.episode.number == state.episode.number:
-                        record.frames_remaining = end_clock - record.state.clock
-                for side in range(2):
-                    record = pending.pop(2 * match + side, None)
-                    if record is not None:
-                        record.boundary = True
-                        record.terminal = frame.terminal
-                        if frame.timeout:
-                            record.next_state = self._state(match, side, end_clock, update, bootstrap=True)
+                # All decisions in an episode share this execution boundary.
+                table.episode_ends[table.episode_indices[match, state.episode.number]] = end_clock
+                lane = self.locations[match][1]
+                for side_index in range(2):
+                    record = int(pending[lane, side_index])
+                    if record < 0:
+                        continue
+                    pending[lane, side_index] = -1
+                    table.boundary[record] = True
+                    table.terminal[record] = terminals[source]
+                    if truncations[source]:
+                        following = table.add(
+                            [self._metadata(match, side_index, end_clock, update, bootstrap=True)],
+                            [state.episode],
+                            ring,
+                        )
+                        table.following[record] = following.ids[0]
                 state.end_clock = end_clock
-                timeouts += int(frame.timeout)
+                timeouts += int(truncations[source])
         return frames_stepped, timeouts
 
     def _reset_waiting(self, shards: Sequence[SimulatorShard], clock: int) -> int:
@@ -2020,11 +2883,30 @@ class RolloutEngine:
         count = self.sampler.schedule.rollout_frames
         if count % 128:
             raise ValueError("rollouts must end on a 128-frame block boundary")
+        previous_store = self.stores[group_id]
+        if previous_store is None:
+            raise ValueError("pool has no frame storage")
+        matches = self.group_matches[group_id]
+        store = FrameStore(129 + count + count // 128 + 1, len(matches), self.policy.device, previous_store.fields)
+        for lane, match in enumerate(matches):
+            state = self.matches[match]
+            history = state.history
+            source = slice(history.start, history.stop)
+            length = len(history)
+            store.records[:length, lane].copy_(history.store.records[source, lane])
+            store.actions[:length, lane].copy_(history.store.actions[source, lane])
+            store.rewards[:length, lane].copy_(history.store.rewards[source, lane])
+            store.flags[:length, lane].copy_(history.store.flags[source, lane])
+            for name in store.extra:
+                store.extra[name][:length, lane].copy_(history.store.extra[name][source, lane])
+            state.history = FrameHistory(store, lane, 0, length)
+        self.stores[group_id] = store
+        table = DecisionTable(len(matches) * (count + 2 * (count // 128 + 2)), store)
         self.policy.clear_caches()
         for anchor in self.anchors.values():
             anchor.clear_caches()
-        records: list[DecisionRecord] = []
-        pending: dict[int, DecisionRecord] = {}
+        records: list[int] = []
+        pending = np.full((len(matches), 2), -1, dtype=np.int64)
         resets = timeouts = frames_stepped = 0
         split = (len(shards) + 1) // 2
         with ThreadPoolExecutor(max_workers=len(shards)) as workers:
@@ -2032,44 +2914,55 @@ class RolloutEngine:
                 resets += self._reset_waiting(shards, clock)
                 futures = []
                 for half in (shards[:split], shards[split:]):
-                    self._decide(half, clock, update, records, pending)
+                    self._decide(half, clock, update, table, records, pending)
                     for shard in half:
                         active = self._active(shard)
                         if active.any():
-                            futures.append((shard, workers.submit(shard.step, self._inputs(shard, 2), active)))
+                            inputs = self._inputs(shard, 2)
+                            futures.append((shard, workers.submit(_step_shard, shard, inputs, active)))
                 for shard, future in futures:
                     rows = future.result()
                     if not 1 <= len(rows) <= 2:
                         raise ValueError("simulator must return between one and two frames")
-                    stepped, ended_timeouts = self._accept(shard, rows, clock, update, records, pending)
+                    stepped, ended_timeouts = self._accept(shard, rows, clock, update, table, pending)
                     frames_stepped += stepped
                     timeouts += ended_timeouts
                     if len(rows) == 1:
                         active = self._active(shard)
                         if not active.any():
                             continue
-                        rest = shard.step(self._inputs(shard, 1), active)
+                        inputs = self._inputs(shard, 1)
+                        rest = _step_shard(shard, inputs, active)
                         if len(rest) != 1:
                             raise ValueError("one-frame step returned the wrong duration")
-                        stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, records, pending)
+                        stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, table, pending)
                         frames_stepped += stepped
                         timeouts += ended_timeouts
         end = start + count
         resets += self._reset_waiting(shards, end)
-        for record in pending.values():
-            record.boundary = True
-            record.next_state = self._state(record.state.match, record.state.side, end, update, bootstrap=True)
-        for shard in shards:
-            for match in shard.match_ids:
-                state = self.matches[match]
-                # The current observation is separate from the previous 128 frames.
-                state.history = state.history[-129:]
-                state.history_start = end - len(state.history) + 1
+        for lane, side in zip(*np.nonzero(pending >= 0), strict=True):
+            record = int(pending[lane, side])
+            match = matches[lane]
+            table.boundary[record] = True
+            following = table.add(
+                [self._metadata(match, int(side), end, update, bootstrap=True)],
+                [self.matches[match].episode],
+                self.rings[group_id],
+            )
+            table.following[record] = following.ids[0]
+        for match in matches:
+            state = self.matches[match]
+            state.history = state.history[-129:]
+            state.history_start = end - len(state.history) + 1
+        episode_ends = table.episode_ends[table.episode_slots[: table.count]]
+        table.remaining[: table.count] = np.where(
+            episode_ends >= 0, episode_ends - table.meta[: table.count, CLOCK], -1
+        )
         self.clocks[group_id] = end
         self.cursor = (group_id + 1) % len(self.groups)
         self.completed_update = update
         return Rollout(
-            tuple(records),
+            DecisionRecords(table.rows(records)),
             group_id,
             update,
             frames_stepped,
@@ -2077,7 +2970,7 @@ class RolloutEngine:
             timeouts,
             time.perf_counter() - started,
             tuple(self.results),
-            count * sum(len(s.match_ids) for s in shards) - frames_stepped,
+            count * len(matches) - frames_stepped,
         )
 
 
@@ -2219,7 +3112,7 @@ class PreparedUpdate:
 
 
 def select_decisions(
-    records: Sequence[DecisionRecord],
+    records: Sequence[DecisionRecord | DecisionRecordView],
     eligible: Tensor,
     rng: CounterRng,
     update: int,
@@ -2227,8 +3120,13 @@ def select_decisions(
     windows_per_step: int,
 ) -> tuple[Tensor, tuple[tuple[int, ...], ...]]:
     windows: dict[tuple[int, int, int], list[int]] = defaultdict(list)
-    for index, record in enumerate(records):
-        windows[record.state.window[:3]].append(index)
+    metadata = records.states.meta if isinstance(records, DecisionRecords) else None
+    if metadata is not None:
+        for index, row in enumerate(metadata):
+            windows[int(row[UPDATE]), int(row[STREAM]), int(row[BLOCK])].append(index)
+    else:
+        for index, record in enumerate(records):
+            windows[record.state.window[:3]].append(index)
     selected = torch.zeros_like(eligible)
     eligible_host = eligible.cpu().tolist()
     chosen: list[int] = []
@@ -2237,12 +3135,16 @@ def select_decisions(
         candidates = [index for index in indices if eligible_host[index]]
         candidates.sort(
             key=lambda j: rng.uniform(
-                "decision_subsample", records[j].state.stream, records[j].state.episode.number, records[j].state.clock
+                "decision_subsample",
+                int(metadata[j, STREAM]) if metadata is not None else records[j].state.stream,
+                int(metadata[j, EPISODE]) if metadata is not None else records[j].state.episode.number,
+                int(metadata[j, CLOCK]) if metadata is not None else records[j].state.clock,
             )
         )
         chosen.extend(candidates[:count])
         if candidates:
-            by_match[records[indices[0]].state.match].append(indices)
+            match = int(metadata[indices[0], MATCH]) if metadata is not None else records[indices[0]].state.match
+            by_match[match].append(indices)
     selected[chosen] = True
     if not by_match:
         return selected, ()
@@ -2299,13 +3201,21 @@ class Trainer:
         device = self.policy.device
         records = rollout.records
         decisions = _decision_batch(records, device)
-        states = [r.state for r in records]
-        actions = torch.stack([r.actions for r in records]).to(device)
+        states = records.states if isinstance(records, DecisionRecords) else [r.state for r in records]
+        actions = (
+            states.tensor(states.table.actions)
+            if isinstance(states, DecisionRows)
+            else torch.stack([r.actions for r in records]).to(device)
+        )
         old = self.policy.evaluate(states, actions)
         reference = self.reference.evaluate(states, actions)
         kl = factor_kl(old, reference)
-        frame_rewards = torch.tensor(
-            [record.rewards + [0.0] * (4 - len(record.rewards)) for record in records], device=device
+        frame_rewards = (
+            states.tensor(states.table.rewards)
+            if isinstance(states, DecisionRows)
+            else torch.tensor(
+                [record.rewards + [0.0] * (4 - len(record.rewards)) for record in records], device=device
+            )
         )
         rewards = regularized_reward(decisions, frame_rewards, kl if not self.warming else torch.zeros_like(kl))
         values = self.policy.values(old.features)
@@ -2313,28 +3223,59 @@ class Trainer:
         # Bootstrap from the next decision inside an episode, or from the final
         # pre-reset observation at a timeout.
         streams: dict[int, list[int]] = defaultdict(list)
-        for index, record in enumerate(records):
-            streams[record.state.stream].append(index)
         boundary_indices: list[int] = []
-        boundary_states: list[DecisionState] = []
+        boundary_states: Sequence[DecisionState]
         interior_indices: list[int] = []
         following_indices: list[int] = []
-        for indices in streams.values():
-            for position, index in enumerate(indices):
-                record = records[index]
-                if record.terminal:
+        if isinstance(states, DecisionRows):
+            table = states.table
+            positions = np.full(table.count, -1, dtype=np.int64)
+            positions[states.ids] = np.arange(len(states))
+            boundary_rows = []
+            for index, row in enumerate(states.meta):
+                streams[int(row[STREAM])].append(index)
+                at = states.ids[index]
+                if table.terminal[at]:
                     continue
-                if record.boundary:
-                    if record.next_state is None:
-                        raise ValueError("nonterminal boundary is missing its bootstrap state")
+                following = int(table.following[at])
+                if following < 0:
+                    raise ValueError("nonterminal boundary is missing its bootstrap state")
+                if table.boundary[at]:
                     boundary_indices.append(index)
-                    boundary_states.append(record.next_state)
+                    boundary_rows.append(following)
                 else:
-                    following = indices[position + 1]
-                    if records[following].state.episode.number != record.state.episode.number:
+                    if positions[following] < 0 or table.meta[following, EPISODE] != row[EPISODE]:
                         raise ValueError("GAE trace crossed an episode reset")
                     interior_indices.append(index)
-                    following_indices.append(following)
+                    following_indices.append(int(positions[following]))
+            order = {stream: index for index, stream in enumerate(streams)}
+            permutation = sorted(
+                range(len(boundary_indices)),
+                key=lambda i: (order[int(states.meta[boundary_indices[i], STREAM])], boundary_indices[i]),
+            )
+            boundary_indices = [boundary_indices[i] for i in permutation]
+            boundary_states = table.rows([boundary_rows[i] for i in permutation])
+        else:
+            for index, record in enumerate(records):
+                streams[record.state.stream].append(index)
+            legacy_boundaries = []
+            for indices in streams.values():
+                for position, index in enumerate(indices):
+                    record = records[index]
+                    if record.terminal:
+                        continue
+                    if record.boundary:
+                        if record.next_state is None:
+                            raise ValueError("nonterminal boundary is missing its bootstrap state")
+                        boundary_indices.append(index)
+                        legacy_boundaries.append(record.next_state)
+                    else:
+                        following = indices[position + 1]
+                        if records[following].state.episode.number != record.state.episode.number:
+                            raise ValueError("GAE trace crossed an episode reset")
+                        interior_indices.append(index)
+                        following_indices.append(following)
+            boundary_states = legacy_boundaries
         next_values[interior_indices] = values[following_indices]
         if boundary_states:
             neutral = torch.zeros(len(boundary_states), 4, 4, dtype=torch.long, device=device)
@@ -2402,34 +3343,41 @@ class Trainer:
                 metrics[f"critic/explained_variance_position{position}"] = explained_variance(
                     values[mask], targets[mask]
                 )
-        for name, getter in (
-            ("identity", lambda r: r.state.player.identity),
-            ("character", lambda r: r.state.player.character),
-            ("stage", lambda r: r.state.episode.stage),
-        ):
-            counts: dict[int, int] = defaultdict(int)
-            for record in records:
-                counts[getter(record)] += 1
-            for key, value in counts.items():
-                metrics[f"data/{name}_{key}"] = float(value)
-        final_indices = []
-        for j in boundary_indices:
-            state = records[j].next_state
-            if state is not None and state.clock % 256 == 0:
-                final_indices.append(j)
-        if final_indices:
-            shorter = []
-            for j in final_indices:
-                state = records[j].next_state
-                if state is None:
-                    raise ValueError("missing rollout bootstrap state")
-                shorter.append(
-                    dataclasses.replace(
-                        state,
-                        frames=state.frames[-129:],
-                        window=(state.window[0], state.stream, state.clock, state.episode.number),
+        for name, column in (("identity", IDENTITY), ("character", CHARACTER), ("stage", STAGE)):
+            if isinstance(states, DecisionRows):
+                keys, counts_array = np.unique(states.meta[:, column], return_counts=True)
+                for key, value in zip(keys, counts_array, strict=True):
+                    metrics[f"data/{name}_{key}"] = float(value)
+            else:
+                counts: dict[int, int] = defaultdict(int)
+                for record in records:
+                    value = {
+                        "identity": record.state.player.identity,
+                        "character": record.state.player.character,
+                        "stage": record.state.episode.stage,
+                    }[name]
+                    counts[value] += 1
+                for key, value in counts.items():
+                    metrics[f"data/{name}_{key}"] = float(value)
+        if isinstance(boundary_states, DecisionRows):
+            final_positions = np.flatnonzero(boundary_states.meta[:, CLOCK] % 256 == 0)
+            final_indices = [boundary_indices[int(i)] for i in final_positions]
+            shorter: Sequence[DecisionState] = boundary_states.take(final_positions).tail(129)
+        else:
+            final_indices = []
+            shorter_list = []
+            for index, state in zip(boundary_indices, boundary_states, strict=True):
+                if state.clock % 256 == 0:
+                    final_indices.append(index)
+                    shorter_list.append(
+                        dataclasses.replace(
+                            state,
+                            frames=state.frames[-129:],
+                            window=(state.window[0], state.stream, state.clock, state.episode.number),
+                        )
                     )
-                )
+            shorter = shorter_list
+        if final_indices:
             replay = self.policy.evaluate(shorter, torch.zeros(len(shorter), 4, 4, dtype=torch.long, device=device))
             metrics["critic/bootstrap_context_gap"] = float(
                 (self.policy.values(replay.features) - next_values[final_indices]).abs().mean()
@@ -2457,13 +3405,17 @@ class Trainer:
         started = time.perf_counter()
         features = batch.old.features.detached()
         count = len(batch.values)
+        states = batch.rollout.records.states if isinstance(batch.rollout.records, DecisionRecords) else None
+        metadata = states.meta if states is not None else None
         for epoch in range(cfg.critic_epochs):
             order = sorted(
                 range(count),
                 key=lambda j: self.engine.sampler.rng.uniform(
                     "critic_shuffle",
-                    batch.rollout.records[j].state.stream,
-                    batch.rollout.records[j].state.episode.number,
+                    int(metadata[j, STREAM]) if metadata is not None else batch.rollout.records[j].state.stream,
+                    int(metadata[j, EPISODE])
+                    if metadata is not None
+                    else batch.rollout.records[j].state.episode.number,
                     batch.rollout.update,
                     epoch,
                     j,
@@ -2500,9 +3452,13 @@ class Trainer:
             decisions = _take_decisions(batch.decisions, at)
             selected = batch.selected[at]
             statistics = advantage_statistics(advantage_moments(batch.advantages[at], selected))
-            records = [batch.rollout.records[index] for index in indices]
+            step_states = (
+                states.take(indices)
+                if states is not None
+                else [batch.rollout.records[index].state for index in indices]
+            )
             self.actor_optimizer.zero_grad(set_to_none=True)
-            new = self.policy.evaluate([record.state for record in records], batch.old.actions[at])
+            new = self.policy.evaluate(step_states, batch.old.actions[at])
             reference = _take_evaluation(batch.reference, at)
             policy_loss = ppo_loss(
                 decisions,
@@ -2685,7 +3641,7 @@ def _configuration_digest(trainer: Trainer) -> str:
             [s.max_frame if isinstance(s, NativeSimulatorShard) else None for s in group] for group in engine.groups
         ],
         "episode_reset": "shared_stocks_block_wait_v1",
-        "rollout_storage": "owned_columns_write_once_device_blocks_v1",
+        "rollout_storage": "tensor_windows_action_ring_v2",
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["compiled"] = trainer.policy.compiled
@@ -2721,7 +3677,7 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "reference": trainer.reference.model.state_dict(),
         "anchors": {key: value.model.state_dict() for key, value in engine.anchors.items()},
         "anchor_candidates": engine.anchor_candidates,
-        "matches": engine.matches,
+        "pool": engine.snapshot(),
         "clocks": engine.clocks,
         "cursor": engine.cursor,
         "sampler_cursor": engine.sampler.cursor,
@@ -2837,7 +3793,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     for group_id, group in enumerate(engine.groups):
         for shard_id, shard in enumerate(group):
             shard.restore(zlib.decompress(paths[f"simulator_{group_id}_{shard_id}"].read_bytes()))
-    engine.matches = saved["matches"]
+    engine.restore_pool(saved["pool"])
     engine.clocks = saved["clocks"]
     engine.cursor = saved["cursor"]
     engine.anchor_candidates = saved["anchor_candidates"]
@@ -3313,7 +4269,10 @@ class EvaluationConfig:
 
 @torch.no_grad()
 def _episode_diagnostics(
-    policy: LoopPolicy, reference: LoopPolicy, records: Sequence[DecisionRecord], results: dict[int, EpisodeResult]
+    policy: LoopPolicy,
+    reference: LoopPolicy,
+    records: Sequence[DecisionRecord | DecisionRecordView],
+    results: dict[int, EpisodeResult],
 ) -> dict[str, float]:
     for record in records:
         record.frames_remaining = results[record.state.match].duration - record.state.clock
@@ -3381,7 +4340,7 @@ def evaluate_anchors(
                 engine = RolloutEngine((shards,), policy, sampling, anchors)
                 engine.initialize()
                 results: dict[int, EpisodeResult] = {}
-                records: list[DecisionRecord] = []
+                records: list[DecisionRecord | DecisionRecordView] = []
                 for update in range(config.max_rollouts):
                     rollout = engine.collect(update)
                     records.extend(

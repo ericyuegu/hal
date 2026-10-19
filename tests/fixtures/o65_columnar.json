@@ -2,6 +2,161 @@
   "16": {
     "adapter": "e9e2bf2ee60a3cf31034f65a12505f29e06af010971d20d569c44b2849c5feb2",
     "checkpoint": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "configuration": {
+      "compiled": true,
+      "cpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "groups": [
+        [
+          [
+            0,
+            1,
+            2,
+            3
+          ],
+          [
+            4,
+            5,
+            6,
+            7
+          ],
+          [
+            8,
+            9,
+            10,
+            11
+          ],
+          [
+            12,
+            13,
+            14,
+            15
+          ]
+        ]
+      ],
+      "max_frame": 0,
+      "sampling": {
+        "anchor_rate": 0.15,
+        "data_floor": 100,
+        "deployment_identity": 3,
+        "deployment_rate": 0.225,
+        "identities": [
+          {
+            "character": 1,
+            "count": 22172,
+            "identity": 1
+          },
+          {
+            "character": 22,
+            "count": 21118,
+            "identity": 1
+          },
+          {
+            "character": 1,
+            "count": 13481,
+            "identity": 2
+          },
+          {
+            "character": 22,
+            "count": 13761,
+            "identity": 2
+          },
+          {
+            "character": 1,
+            "count": 18152,
+            "identity": 3
+          },
+          {
+            "character": 22,
+            "count": 11536,
+            "identity": 3
+          }
+        ],
+        "lambda_max": 100.0,
+        "lambda_min": 0.01,
+        "masked_rate": 0.1,
+        "matchups": [
+          {
+            "characters": [
+              1,
+              22
+            ],
+            "weight": 1.0
+          }
+        ],
+        "percents": [
+          0.0,
+          30.0,
+          60.0,
+          90.0
+        ],
+        "stages": [
+          25
+        ],
+        "stocks": [
+          4
+        ],
+        "tempering": 0.5
+      },
+      "schedule": {
+        "configurations": [
+          {
+            "delay": 8,
+            "replan": 4
+          },
+          {
+            "delay": 10,
+            "replan": 2
+          }
+        ],
+        "rollout_frames": 256,
+        "supervised_offsets": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          16,
+          20,
+          24,
+          28
+        ]
+      },
+      "training": {
+        "actor_lr": 1e-05,
+        "actor_optimizer": "muon",
+        "checkpoint_interval": 32,
+        "clip_epsilon": 0.2,
+        "critic_epochs": 4,
+        "critic_lr": 0.0003,
+        "critic_warmup_updates": 0,
+        "decisions_per_window": 16,
+        "deterministic": true,
+        "gradient_clip": 1.0,
+        "importance_cap": 2.0,
+        "lambda_spread_multiplier": 3.0,
+        "plateau_patience": 8,
+        "plateau_tolerance": 0.01,
+        "seed": 65,
+        "snapshot_capacity": 3,
+        "snapshot_interval": 256,
+        "value_scale": 150.0,
+        "warmup_match_frames": 11008,
+        "warmup_steps": 32,
+        "windows_per_step": 32
+      }
+    },
     "environment": {
       "cuda": "13.0",
       "device": "NVIDIA GeForce RTX 3060",
@@ -51,11 +206,215 @@
     ],
     "sampler": "c5ffb1b5f75aa0d9245192304871c2979de9a3e59ddf0c5d55e6877994ab661e",
     "simulator": "9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a",
-    "source": "e6d768d5a811ebd3fa12cb53b67347fae6b47a31"
+    "source": "e6d768d5a811ebd3fa12cb53b67347fae6b47a31",
+    "source_file_sha256": "385071d29e9cfdc1cfcb5c432b62a61a747b5449d24b2e4d4ff17debbec45337"
   },
   "64": {
     "adapter": "e9e2bf2ee60a3cf31034f65a12505f29e06af010971d20d569c44b2849c5feb2",
     "checkpoint": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "configuration": {
+      "compiled": true,
+      "cpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "groups": [
+        [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15
+          ],
+          [
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31
+          ],
+          [
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47
+          ],
+          [
+            48,
+            49,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61,
+            62,
+            63
+          ]
+        ]
+      ],
+      "max_frame": 0,
+      "sampling": {
+        "anchor_rate": 0.15,
+        "data_floor": 100,
+        "deployment_identity": 3,
+        "deployment_rate": 0.225,
+        "identities": [
+          {
+            "character": 1,
+            "count": 22172,
+            "identity": 1
+          },
+          {
+            "character": 22,
+            "count": 21118,
+            "identity": 1
+          },
+          {
+            "character": 1,
+            "count": 13481,
+            "identity": 2
+          },
+          {
+            "character": 22,
+            "count": 13761,
+            "identity": 2
+          },
+          {
+            "character": 1,
+            "count": 18152,
+            "identity": 3
+          },
+          {
+            "character": 22,
+            "count": 11536,
+            "identity": 3
+          }
+        ],
+        "lambda_max": 100.0,
+        "lambda_min": 0.01,
+        "masked_rate": 0.1,
+        "matchups": [
+          {
+            "characters": [
+              1,
+              22
+            ],
+            "weight": 1.0
+          }
+        ],
+        "percents": [
+          0.0,
+          30.0,
+          60.0,
+          90.0
+        ],
+        "stages": [
+          25
+        ],
+        "stocks": [
+          4
+        ],
+        "tempering": 0.5
+      },
+      "schedule": {
+        "configurations": [
+          {
+            "delay": 8,
+            "replan": 4
+          },
+          {
+            "delay": 10,
+            "replan": 2
+          }
+        ],
+        "rollout_frames": 256,
+        "supervised_offsets": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          16,
+          20,
+          24,
+          28
+        ]
+      },
+      "training": {
+        "actor_lr": 1e-05,
+        "actor_optimizer": "muon",
+        "checkpoint_interval": 32,
+        "clip_epsilon": 0.2,
+        "critic_epochs": 4,
+        "critic_lr": 0.0003,
+        "critic_warmup_updates": 0,
+        "decisions_per_window": 16,
+        "deterministic": true,
+        "gradient_clip": 1.0,
+        "importance_cap": 2.0,
+        "lambda_spread_multiplier": 3.0,
+        "plateau_patience": 8,
+        "plateau_tolerance": 0.01,
+        "seed": 65,
+        "snapshot_capacity": 3,
+        "snapshot_interval": 256,
+        "value_scale": 150.0,
+        "warmup_match_frames": 11008,
+        "warmup_steps": 32,
+        "windows_per_step": 32
+      }
+    },
     "environment": {
       "cuda": "13.0",
       "device": "NVIDIA GeForce RTX 3060",
@@ -105,6 +464,7 @@
     ],
     "sampler": "c5ffb1b5f75aa0d9245192304871c2979de9a3e59ddf0c5d55e6877994ab661e",
     "simulator": "9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a",
-    "source": "e6d768d5a811ebd3fa12cb53b67347fae6b47a31"
+    "source": "e6d768d5a811ebd3fa12cb53b67347fae6b47a31",
+    "source_file_sha256": "385071d29e9cfdc1cfcb5c432b62a61a747b5449d24b2e4d4ff17debbec45337"
   }
 }
