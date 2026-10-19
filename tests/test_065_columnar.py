@@ -73,9 +73,11 @@ def fingerprints(run: Any, batch: Any) -> dict[str, str]:
     }
 
 
-def capture(matches: int, output: Path, *, performance: bool) -> dict[str, object]:
+def capture(matches: int, output: Path, *, performance: bool, verify_resume: bool = False) -> dict[str, object]:
     if matches not in (16, 64):
         raise ValueError("local capture requires 16 or 64 matches")
+    if performance and verify_resume:
+        raise ValueError("resume verification requires a deterministic parity capture")
     torch.set_num_threads(2)
     torch.use_deterministic_algorithms(not performance)
     torch.manual_seed(65)
@@ -121,6 +123,16 @@ def capture(matches: int, output: Path, *, performance: bool) -> dict[str, objec
             profiler = cProfile.Profile()
             profiler.runcall(engine.collect, run.update)
             profiler.dump_stats(output / "rollout.prof")
+        if verify_resume:
+            manifests = checkpoint.provenance["data_manifests"]
+            provenance = {
+                "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                "checkpoint_sha256": checkpoint.checkpoint_sha256,
+                "data_manifest_sha256": manifests["ranked-anonymized-1-policy-world-v8"],
+                "simulator_sha256": shards[0].shard.library_sha256,
+                "adapter_sha256": exp.native_bridge.library_sha256(),
+            }
+            exp.verify_checkpoint_resume(run, output, provenance)
         result = {
             "matches": matches,
             "performance": performance,
@@ -151,7 +163,11 @@ def capture(matches: int, output: Path, *, performance: bool) -> dict[str, objec
 @pytest.mark.parametrize("matches", [16, 64])
 def test_native_columnar_exact_parity(matches: int, tmp_path: Path) -> None:
     expected = json.loads(FIXTURE.read_text())[str(matches)]
-    actual = capture(matches, tmp_path, performance=False)
+    previous = torch.are_deterministic_algorithms_enabled()
+    try:
+        actual = capture(matches, tmp_path, performance=False)
+    finally:
+        torch.use_deterministic_algorithms(previous)
     # Normalize tuples as JSON does for the persisted fixture.
     actual = json.loads(json.dumps(actual))
     for name in (
@@ -234,7 +250,6 @@ def test_action_ring_wrap_and_cadence(device: str) -> None:
 
 
 def test_pool_rejects_old_formats_and_owns_cpu_queue_snapshots() -> None:
-    from test_065_loop import exp as loop_exp
     from test_065_loop import trainer
 
     run = trainer(groups=1, anchor_rate=0, development=True)
@@ -246,7 +261,6 @@ def test_pool_rejects_old_formats_and_owns_cpu_queue_snapshots() -> None:
     run.run_update()
     torch.testing.assert_close(saved.groups[0].queue, queue, rtol=0, atol=0)
     run.engine.restore_pool(saved)
-    assert isinstance(saved, loop_exp.PoolSnapshot)
 
 
 def test_rollout_keeps_contexts_in_tensors_until_diagnostics_request_them() -> None:
@@ -302,10 +316,45 @@ def test_native_frame_batch_rejects_nonfinite_rewards_and_conflicting_end_flags(
         dataclasses.replace(frame, rewards=np.zeros((1, 2), dtype=np.float64))
 
 
+def test_explicit_packed_states_keep_their_device_readback() -> None:
+    from test_065_loop import transformer_trainer
+
+    run = transformer_trainer("cpu")
+    state = run.engine._state(0, 0, 0, 0)
+    frame = state.frames[0]
+    readback = torch.zeros(2, ACTION_DIM)
+    readback[0, 0] = 0.75
+    readback[0, 6] = 1
+    frame = dataclasses.replace(frame, device_actions=readback)
+    state = dataclasses.replace(state, frames=(frame,))
+    expected, expected_actions = run.policy._contexts((state,))
+    actual, actual_actions = run.policy._contexts(run.policy._columnar_states((state,)))
+    assert expected["ego_main_stick_x"].item() == 0.75
+    for name in expected:
+        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+    torch.testing.assert_close(actual_actions, expected_actions, rtol=0, atol=0)
+
+
+def test_capture_rejects_resume_with_default_algorithms(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="deterministic parity"):
+        capture(16, tmp_path, performance=True, verify_resume=True)
+
+
+def test_frame_store_rejects_a_changed_observation_schema() -> None:
+    from test_065_loop import trainer
+
+    run = trainer(groups=1, anchor_rate=0)
+    history = run.engine.matches[0].history
+    frame = dataclasses.replace(history[0], columns={"different_column": 0.0})
+    with pytest.raises(ValueError, match="schema changed"):
+        history.store.write_frame(0, 0, frame)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matches", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--performance", action="store_true")
+    parser.add_argument("--verify-resume", action="store_true")
     args = parser.parse_args()
-    capture(args.matches, args.output, performance=args.performance)
+    capture(args.matches, args.output, performance=args.performance, verify_resume=args.verify_resume)

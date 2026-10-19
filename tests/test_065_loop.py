@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import struct
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -820,6 +821,13 @@ def test_native_pool_snapshot_restores_all_lanes_and_rejects_corruption(native_r
         for malformed in (saved[:3], saved[:-1], saved + b"trailing"):
             with pytest.raises(ValueError, match="snapshot"):
                 shard.restore(malformed)
+        header_length = struct.unpack_from("<I", saved)[0]
+        header = json.loads(saved[4 : 4 + header_length])
+        header["format"] = "hal.o65.native_pool.v1"
+        old_header = json.dumps(header).encode()
+        old_snapshot = struct.pack("<I", len(old_header)) + old_header + saved[4 + header_length :]
+        with pytest.raises(ValueError, match="snapshot identity"):
+            shard.restore(old_snapshot)
         with pytest.raises(ValueError, match="distinct lanes"):
             shard.shard.save_many((0, 0)).result()
     finally:

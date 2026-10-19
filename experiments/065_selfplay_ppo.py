@@ -1501,10 +1501,18 @@ class TransformerPolicy:
         records = np.zeros((length, len(states)), dtype=native.FRAME_DTYPE)
         applied = np.zeros((length, len(states), 2, ACTION_DIM), dtype=np.float32)
         encoded: dict[int, NDArray] = {}
+        packed_inputs = all(
+            frame.device_record is not None and frame.device_actions is not None
+            for state in states
+            for frame in state.frames
+        )
         for lane, state in enumerate(states):
             for position, frame in enumerate(state.frames):
-                if frame.device_record is not None:
-                    records[position : position + 1, lane] = frame.device_record.cpu().numpy().view(native.FRAME_DTYPE)
+                if packed_inputs:
+                    records[position : position + 1, lane] = (
+                        cast(Tensor, frame.device_record).cpu().numpy().view(native.FRAME_DTYPE)
+                    )
+                    applied[position, lane] = cast(Tensor, frame.device_actions).detach().cpu().numpy()
                 else:
                     packed = encoded.get(id(frame))
                     if packed is None:
@@ -1517,7 +1525,7 @@ class TransformerPolicy:
                                 )[0]
                         encoded[id(frame)] = packed
                     records[position, lane] = packed[0]
-                applied[position, lane] = frame.applied_actions
+                    applied[position, lane] = frame.applied_actions
         store.records.copy_(torch.from_numpy(records.view(np.uint8).reshape(length, len(states), -1)).to(self.device))
         store.actions.copy_(torch.from_numpy(applied).to(self.device))
         table = DecisionTable(len(states), store)
