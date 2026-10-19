@@ -1,0 +1,110 @@
+{
+  "16": {
+    "adapter": "e9e2bf2ee60a3cf31034f65a12505f29e06af010971d20d569c44b2849c5feb2",
+    "checkpoint": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "environment": {
+      "cuda": "13.0",
+      "device": "NVIDIA GeForce RTX 3060",
+      "numpy": "2.1.3",
+      "python": "3.14.4",
+      "tf32_cudnn": "True",
+      "tf32_matmul": "False",
+      "torch": "2.11.0+cu130",
+      "world_size": "1"
+    },
+    "matches": 16,
+    "native_data": "4c2b074e872a7ad55176b63a3971fd6a3bbf09dd1988240d1dbdaf61a63616cb",
+    "performance": false,
+    "rows": [
+      {
+        "actor": "236e106cebf28e92ff8c11bb6b2af0d3077403410d88c724673c1635c843b904",
+        "advantages": "c6eedbbe071308074a1cc951c9e32ccee21d37266fe81d76271a7cf5aad811b2",
+        "all_frame_records": "a4bee63ec23b6defac8a9173b0982ffcf4b018a58727ac2e1a2d9bcfdf937dc6",
+        "all_processed_actions": "158748d728497891dde2ba6483cee4e7c7a2583dc0e55f5237911df1c5df81d3",
+        "batch": "0bfb368c1be984abc8e18b089ce4f58daacd42b4d6f5822bd672b13afc79a411",
+        "behavior_log_probs": "7ad64eb27bcfa398a52d1717edc0db31d6f567334fe5dd16b9d5e442dc5e091e",
+        "critic": "0eb437fd83d1239a5684e4649cf13f1645f015f08a74e93e9863f5153a75b7a7",
+        "old_log_probs": "c931f49548ffb56e46d9680b5af4ef3c6d4a12bfdf65d9aca0ac434b81887a7e",
+        "processed_actions": "d5955b2495b2ddeadd43cf23469f27c26463ef03e9a585023272482d7aa1abc1",
+        "records": "a66a75a501457615508707490b096379d28ffad446edd8b7a16199150d667302",
+        "reference_log_probs": "c931f49548ffb56e46d9680b5af4ef3c6d4a12bfdf65d9aca0ac434b81887a7e",
+        "rewards": "c66b1cf2d9ef2f302fea260c54fbd891ab0388df46e1b16279fbb0e058311206",
+        "sampled_factors": "d63e1e99431aa18e6938a603cd8dbd56d287f7a0dc8e44ee67f458beb4907c0b",
+        "values": "bfa7ba6373072508fa928134b4ab6a9c53de564478d1728a34f93c6c0f1c0cef"
+      },
+      {
+        "actor": "ab99340dfb69b6238bcc9e16d7631ede37dc213755bcf6002b7b483e11756ecd",
+        "advantages": "575b9b2ccd426e370b3674cd879dc68349cc64982a6d7373afb5eca0ce01eb25",
+        "all_frame_records": "1cf198147164dd5c9b819e58acad78ce8f559eeb684f4e7386ef09cc2044b1a3",
+        "all_processed_actions": "88e573c1c693e4fb04db84faef3c503d668c4db06a2803df54c15f9830d288a4",
+        "batch": "b7cf85c55ef29ca88b1b3c578e63ee97f7e9fbd49658c290bf8808ca3c6ce107",
+        "behavior_log_probs": "0942f7ea24e2405e6e69a24e1e6d287312138afbd361787e77822d53736e3e9b",
+        "critic": "747f20f6f1bf67d6b51ad26a8d2563a4e862e25ea3c6a8fc6a06e4cf7ede928d",
+        "old_log_probs": "323958c70f11f7abaefcadf01c5fe9b081a551c4747bf79926d2b2bca7dd81c1",
+        "processed_actions": "8f2a4683841fbcabe41ae65d150027e9343ae996df25164954e6f0cdb670d4a0",
+        "records": "6f90b36d83fd38afd579549ba9e4dfb7f09715aa4c9a94c645dba222ad6c1ef0",
+        "reference_log_probs": "a8a5b363167aa8df5e957804cc20b4baeafa7129f1073a458121a99b5f1b37ee",
+        "rewards": "ae419f36f525df17573a9f1240d88d02654fba4fb2c094654b45debf8463d818",
+        "sampled_factors": "b3f7948ce58fcb7418e7e146950f8440135fc2a541c88e3b0701a104bbaf382c",
+        "values": "b362ed17aa91a2e9b3eea6b175726f19b027a5b08ce7fa10d4e8d00639d8903e"
+      }
+    ],
+    "sampler": "c5ffb1b5f75aa0d9245192304871c2979de9a3e59ddf0c5d55e6877994ab661e",
+    "simulator": "9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a",
+    "source": "e6d768d5a811ebd3fa12cb53b67347fae6b47a31"
+  },
+  "64": {
+    "adapter": "e9e2bf2ee60a3cf31034f65a12505f29e06af010971d20d569c44b2849c5feb2",
+    "checkpoint": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "environment": {
+      "cuda": "13.0",
+      "device": "NVIDIA GeForce RTX 3060",
+      "numpy": "2.1.3",
+      "python": "3.14.4",
+      "tf32_cudnn": "True",
+      "tf32_matmul": "False",
+      "torch": "2.11.0+cu130",
+      "world_size": "1"
+    },
+    "matches": 64,
+    "native_data": "4c2b074e872a7ad55176b63a3971fd6a3bbf09dd1988240d1dbdaf61a63616cb",
+    "performance": false,
+    "rows": [
+      {
+        "actor": "2039c703ef991334560bb3664d364b0569c234a58d140d62b65db285da0dce38",
+        "advantages": "f0671eaf6926b9663ec346254c20f85f7b9a0ed0e41ea6b513fe491847a5f5b0",
+        "all_frame_records": "777f4077c6249509bb752dad8f6b247c5c5def9367ffc41d650160e4a80f2b80",
+        "all_processed_actions": "d31eb9fcef0f8a9b6b05bbd2ec0624d05b75012a6d05da0745559f06e31ff030",
+        "batch": "52233222a57c86bb45039d4305aa97de070df73519a9dd808c000e278f944351",
+        "behavior_log_probs": "f43e34ef1a7a93b12974d0a8927c1745bad3e2af4ac0f90eceeb2e08bc94db90",
+        "critic": "ce0547c8f9893ba2a29aaf7b562066cb6d1480e53dcc90517891312232e89cd2",
+        "old_log_probs": "15f171acab02f96c77597fdea9fd80c0c3b8ccbc063f7ef3166548d46d7b2dab",
+        "processed_actions": "80e270d9f858c700bb1d6ac6210563b1847095e4272caae3fa9b4b55ff649461",
+        "records": "95416647722a06e8e8df5059e35608da172a2a9e7decd023d442372b0a02f7fa",
+        "reference_log_probs": "15f171acab02f96c77597fdea9fd80c0c3b8ccbc063f7ef3166548d46d7b2dab",
+        "rewards": "476732757a48e959b9257475e1e3a645a9a6d564683ece448ebb0cb951e0007e",
+        "sampled_factors": "88467ae7c2e7819cb2f274e4af28d50c5b70d6acbc846c7a9a7a391569d0d944",
+        "values": "0e20aa5a018098aa939b1830d937221ac57182c25b28dbbbd9ccf429b6198f12"
+      },
+      {
+        "actor": "e17470125924375c988417da5bfd959befd0d5010b2f55ce5c66aa0f343dacd5",
+        "advantages": "daa0ba810b2d2fe88097bdaf9cb4ede75ff4419e60c34512a2f3e9c705505fd7",
+        "all_frame_records": "68260357aa7bf691f46d6a23ee8f6a2f2a37a3ac52df61b123a172c02e9cf68f",
+        "all_processed_actions": "5ac4d4e05a100ff5b0250725ead82f9d9c48dc6569b38c7315a1e4560595bc18",
+        "batch": "ee936bf47ac8610035c91e316e429ec80a352936f17ad360761875a6f6624c54",
+        "behavior_log_probs": "45ff541bb59f1c7c6f0ac59adca7967cc377fbcc722ece793e816fb48be9cdd0",
+        "critic": "fbc4534a9aa95bae3c76f761909a0f5cb4c07c76da99aca1ad1e57a01df0ab21",
+        "old_log_probs": "167d39a72819513a4672d701347fa61bcbe1e3e81140b30492eb5bf9798ff924",
+        "processed_actions": "3b0425c73697aafd56c274431ef905fd7d15c79d9bac1d52212783328f61599c",
+        "records": "965c9f96fd7f6aa2ed4dd3e5df0ecc74796f0e7cecd60c65705dd244337d490b",
+        "reference_log_probs": "964747ac0bafae70cf49549e55fa6e12c1e56e5c824c845847a6830eab3f9be2",
+        "rewards": "d2b11320b45a6dbc322fe99a51f95f1f33688169f0ffd8cf979bfcfd6307d3ff",
+        "sampled_factors": "58ce2241328df5c9821ca51d064e76ddeee1c0f239236897d595827524daa026",
+        "values": "63f729f74e770b94add1b5fdba658c49db4683d1436c022b128dcf7b9a9aea50"
+      }
+    ],
+    "sampler": "c5ffb1b5f75aa0d9245192304871c2979de9a3e59ddf0c5d55e6877994ab661e",
+    "simulator": "9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a",
+    "source": "e6d768d5a811ebd3fa12cb53b67347fae6b47a31"
+  }
+}
