@@ -48,6 +48,7 @@ factor log-probs, raw advantages, selection, lambda, reference probabilities,
 the common advantage mean/sigma, and a scalar denominator. Use the local
 selected decision count on one device. With DDP, use global count / world
 size, because DDP averages gradients. This boundary has no importance weight.
+An empty local rank contributes zero loss when the global count is positive.
 The PPO clip is 0.2 and direct KL is weighted by lambda / sigma.
 
 `hal.inference.graphed_actor.GraphedActorStep` takes a forward callback, a tuple

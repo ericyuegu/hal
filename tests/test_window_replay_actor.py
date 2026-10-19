@@ -145,7 +145,9 @@ def test_actor_rejects_invalid_targets(case: str) -> None:
     elif case == "reference":
         targets.reference_distributions[0][0, 0, 0] = 0
     elif case == "empty":
-        targets = dataclasses.replace(targets, selected_WK=torch.zeros_like(targets.selected_WK))
+        targets = dataclasses.replace(
+            targets, selected_WK=torch.zeros_like(targets.selected_WK), denominator=torch.tensor(0.0)
+        )
     elif case == "invalid_slot":
         targets.selected_WK[0, 2] = True
     elif case == "behavior":
@@ -156,6 +158,26 @@ def test_actor_rejects_invalid_targets(case: str) -> None:
         targets = dataclasses.replace(targets, advantages_WK=targets.advantages_WK.double())
     with pytest.raises(ValueError):
         validate_actor_targets(output, targets)
+
+
+def test_empty_local_rank_has_zero_loss_and_gradients_with_positive_global_count() -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    output = replay_windows(policy, hidden, observed, slots, grad=True)
+    targets = targets_for(output)
+    targets = dataclasses.replace(
+        targets, selected_WK=torch.zeros_like(targets.selected_WK), denominator=torch.tensor(1.0)
+    )
+    targets.advantages_WK.fill_(torch.nan)
+    targets.behavior_log_probs_WKF.fill_(torch.nan)
+    targets.kl_coefficient_WK.fill_(torch.nan)
+    for q in targets.reference_distributions:
+        q.fill_(torch.nan)
+    validate_actor_targets(output, targets)
+    loss = actor_loss(output, targets)
+    assert float(loss.loss.detach()) == 0
+    loss.loss.backward()
+    assert all(p.grad is None or not bool(p.grad.any()) for p in policy.parameters())
 
 
 def test_fullgraph_capture_has_no_breaks() -> None:

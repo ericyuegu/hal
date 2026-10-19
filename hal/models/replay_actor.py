@@ -32,7 +32,7 @@ class ActorLoss:
 
 
 def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
-    """Validate once outside graph capture; no fallback for an empty actor batch."""
+    """Validate before capture; an empty local rank needs a positive global count."""
     shape = tuple(output.log_probs_WKF.shape[:2])
     device = output.log_probs_WKF.device
     tensors = (
@@ -48,7 +48,7 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
         if tuple(value.shape) != expected or value.dtype != dtype or value.device != device:
             raise ValueError("actor target shape, dtype or device mismatch")
     selected = targets.selected_WK
-    if not bool(selected.any()) or bool((selected & ~output.factor_mask_WKF.any(-1)).any()):
+    if bool((selected & ~output.factor_mask_WKF.any(-1)).any()):
         raise ValueError("selected actor decisions need executed factors")
     if not bool(torch.isfinite(targets.advantage_mean)) or not bool(
         torch.isfinite(targets.advantage_sigma) & (targets.advantage_sigma > 0)
