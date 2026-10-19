@@ -200,7 +200,7 @@ L_\pi &= -\frac{1}{J} \sum_{j} \min\big(\rho_j\,\hat A_j,\; \operatorname{clip}(
 \end{aligned}
 $$
 
-- $\rho_j$ is the joint ratio of the chunk, 16 to 24 factors.
+- $\rho_j$ is the joint ratio of the chunk, 8 or 16 factors.
 - $\epsilon$ starts at 0.2, and the pilot tunes it to a clip fraction of roughly
   10 to 20%.
 - $\pi_{\text{old}} = \mu$: the rollout's stored behavior log-probabilities

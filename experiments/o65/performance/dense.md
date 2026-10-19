@@ -49,8 +49,41 @@ the next step moves those writes and scheduling into the tick graph.
 
 Validation: initial focused run: 152 passed, 6 failed, 1 skipped (the six
 failures were stale KL callers). Focused retry: all six passed. The skip is
-the test requiring the proxy artifact at an optional alternate location;
+the test requiring HAL_O65_PROXY_CHECKPOINT to identify the local artifact;
 full handoff and final qualification are recorded after the complete rewrite.
 Two profile launches failed before rollout because melee_sim was absent from
 PYTHONPATH; setting it to the MSL source root fixed the environment. Both
 16- and 64-match profile runs then completed.
+
+
+## Step 2: dense ticks and storage
+
+The rollout uses fixed tick/player row IDs and device episode settings. Its
+compiled tick graph appends the trunk, samples, updates queues, computes values,
+and writes behavior distributions and critic features. Dense GAE skips empty
+ticks without changing the decision discount. Both CPU tests and CUDA use the
+same tick operation. The tensor RNG now uses full 63-bit counters and a
+resumable seed-derived key; the interrupted 32-bit counter aliases are removed.
+
+Preliminary local profiles give the following results. These runs precede the
+final layout cache fix; source-verified reruns follow before the overlap step.
+
+| Matches | Rollout wall s | Rollout main CPU s | GPU-tick main CPU ms | Launches, estimated | Kernel executions, estimated |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 2.400 | 2.196 | 2.281 | 81,154 | 436,464 |
+| 64 | 3.351 | 3.050 | 2.956 | 81,106 | 434,564 |
+
+Counts are almost flat with match count. Using 14 us per eager launch and
+5 us per graph kernel gives a **projection** of about 2.9 s for rollout at
+1,024 matches, before untraced work and overlap. Reference and actor remain
+eager and scale with data; they await the replay integration. Other preparation
+is 0.101 s at 16 matches and 0.270 s at 64. Its bootstrap replay still uses the
+old evaluator and misses the projected 0.5 s target at 1,024; the local bounded
+traces identify those chunks before further work.
+
+Focused checks found and fixed missing queue validation, a bootstrap after a
+final reset, padded writes into capacity-2 queues, stale borrowed evaluation
+records, and a Torch compiler rejection of dataclass-class inspection. The
+GPU graph test passes on CPU and CUDA. The current CPU-focused run passes
+127 tests; CUDA-only cases and the unset proxy-path environment were skipped
+in that diagnostic run. Full validation remains required.

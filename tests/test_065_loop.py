@@ -327,20 +327,19 @@ def test_stock_count_is_sampled_once_per_match() -> None:
 @pytest.mark.parametrize("timeout", [False, True])
 def test_finished_matches_wait_without_records_or_steps(length: int, timeout: bool) -> None:
     run = trainer(groups=1, length=length, timeout=timeout, anchor_rate=0)
-    records = []
     frames = idle = 0
+    period = ((length + 127) // 128) * 128
     for update in range(3):
         rollout = run.engine.collect(update)
-        records.extend(rollout.records)
         frames += rollout.frames
         idle += rollout.idle_frames
+        # Group storage is reused by the next collection.
+        for record in rollout.records:
+            start = record.state.episode.number * period
+            assert start <= record.state.clock < start + length
+            assert record.state.frames[-1].columns["state"] == record.state.clock - start
+            assert record.state.window[2] - start == ((record.state.clock - start) // 128) * 128
     assert frames + idle == 2 * 3 * 256
-    period = ((length + 127) // 128) * 128
-    for record in records:
-        start = record.state.episode.number * period
-        assert start <= record.state.clock < start + length
-        assert record.state.frames[-1].columns["state"] == record.state.clock - start
-        assert record.state.window[2] - start == ((record.state.clock - start) // 128) * 128
     for shard in run.engine.groups[0]:
         # Idle lanes never enter a native step, including the odd terminal frame.
         assert len(shard.trace) == frames // 2
@@ -371,7 +370,7 @@ def test_training_and_deployment_blocks_share_episode_frames_after_reset() -> No
     run.engine.groups[0][0].length = 301
     records = []
     for update in range(4):
-        records.extend(run.engine.collect(update).records)
+        records.extend(copy.deepcopy(run.engine.collect(update)).records)
     by_episode: dict[int, dict[int, list[Any]]] = {}
     for record in records:
         episode_frames = by_episode.setdefault(record.state.episode.number, {})

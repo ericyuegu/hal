@@ -2,6 +2,7 @@
 
 import dataclasses
 from collections import Counter
+from collections.abc import Sequence
 
 import numpy as np
 import pytest
@@ -65,7 +66,7 @@ def test_prepare_uses_behavior_outputs_without_student_scoring() -> None:
     original = run.policy.evaluate
     calls = []
 
-    def bootstrap_only(states: object, actions: torch.Tensor) -> object:
+    def bootstrap_only(states: Sequence[object], actions: torch.Tensor) -> object:
         calls.append(len(states))
         return original(states, actions)
 
@@ -87,6 +88,9 @@ def test_tensor_counter_domains_keys_and_cpu_cuda_parity() -> None:
     assert abs(float(draws.mean()) - 0.5) < 0.02
     assert not torch.equal(draws, rng.tensor_uniform(2, streams, episodes, frames))
     assert not torch.equal(draws, exp.CounterRng(66).tensor_uniform(1, streams, episodes, frames))
+    assert not torch.equal(draws, exp.CounterRng(65 + 2**32).tensor_uniform(1, streams, episodes, frames))
+    assert not torch.equal(draws, rng.tensor_uniform(1, streams + 2**32, episodes, frames))
+    assert not torch.equal(draws, rng.tensor_uniform(1, streams, episodes, frames + 2**32))
     at = torch.tensor([17, 0, 83])
     torch.testing.assert_close(draws[at], rng.tensor_uniform(1, streams[at], episodes[at], frames[at]), rtol=0, atol=0)
     if torch.cuda.is_available():
@@ -108,3 +112,117 @@ def test_ppo_uses_detached_behavior_logs_as_old_policy() -> None:
     result.loss.backward()
     assert behavior.grad is None
     assert new.grad is not None
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_dense_slots_keep_cadence_and_episode_execution_masks(timeout: bool) -> None:
+    run = trainer(groups=1, length=13, timeout=timeout, delay=8, anchor_rate=0)
+    rollout = run.engine.collect(0)
+    table = rollout.records.states.table
+    players = 4
+    valid = table.valid[: 128 * players].reshape(128, players)
+    meta = table.integers[: 128 * players].reshape(128, players, 18)
+    expected = meta[..., exp.CLOCK] % meta[..., exp.REPLAN] == 0
+    expected &= (meta[..., exp.CLOCK] % 128) < 13
+    torch.testing.assert_close(valid, expected)
+    for record in rollout.records:
+        assert record.frames_remaining == 13 - record.state.clock % 128
+        assert len(record.rewards) == min(record.state.player.timing.replan, record.frames_remaining)
+    batch = run.prepare(rollout)
+    expected_frames = (
+        batch.decisions.duration_J * 0 + 13 - batch.decisions.decision_frame_J % 128 - batch.decisions.delay_J
+    ).clamp_min(0)
+    expected_frames = torch.minimum(expected_frames, batch.decisions.replan_J)
+    torch.testing.assert_close(batch.decisions.executed_factors_JF.sum(-1), 4 * expected_frames)
+
+
+def test_final_timeout_bootstrap_precedes_reset() -> None:
+    run = trainer(groups=1, length=256, timeout=True, delay=8, anchor_rate=0)
+    rollout = run.engine.collect(0)
+    for stream in range(4):
+        record = next(row for row in reversed(rollout.records) if row.state.stream == stream)
+        assert record.boundary and not record.terminal
+        assert record.next_state.episode.number == 0
+        assert record.next_state.frames[-1].columns["state"] == 256
+        assert run.engine.matches[stream // 2].episode.number == 1
+        assert run.engine.matches[stream // 2].history[-1].columns["state"] == 0
+
+
+def test_dense_gae_matches_decision_grid_with_mixed_cadences_and_boundaries() -> None:
+    torch.manual_seed(65)
+    ticks, players = 8, 3
+    decided = torch.ones(ticks, players, dtype=torch.bool)
+    decided[1::2, 0] = False
+    decided[2:4, 1] = False
+    duration = torch.where(decided, 2, 0)
+    duration[::2, 0] = 4
+    duration[1, 1] = 1
+    rewards = torch.randn(ticks, players, dtype=torch.float64)
+    values = torch.randn_like(rewards)
+    following = torch.randn_like(rewards)
+    bootstrap = torch.ones_like(decided)
+    bootstrap[1, 1] = False
+    trace = decided.clone()
+    trace[1, 1] = False
+    trace[-1] = False
+    trace[-2, 0] = False
+    result = exp.dense_advantages(rewards, values, following, duration, bootstrap, trace, decided)
+    for player in range(players):
+        at = torch.nonzero(decided[:, player]).flatten()
+        reference = exp.generalized_advantage(
+            rewards[at, player],
+            values[at, player],
+            following[at, player],
+            duration[at, player],
+            bootstrap[at, player],
+            trace[at, player],
+        )
+        torch.testing.assert_close(result.advantages[at, player], reference.advantages, rtol=0, atol=0)
+        torch.testing.assert_close(result.value_targets[at, player], reference.value_targets, rtol=0, atol=0)
+
+
+def test_two_frame_queue_does_not_overwrite_actions_with_padding() -> None:
+    from test_065_loop import transformer_trainer
+
+    base = transformer_trainer("cpu")
+    base.engine.groups[0][0].length = 1000000
+    schedule = dataclasses.replace(base.engine.sampler.schedule, configurations=(exp.DelayReplan(0, 2),))
+    sampling = exp.EpisodeSampler(base.engine.sampler.config, schedule, exp.CounterRng(65))
+    policy = exp.TransformerPolicy(base.policy.model, schedule, base.policy.statistics)
+    engine = exp.RolloutEngine(base.engine.groups, policy, sampling, {0: policy.frozen_copy()})
+    engine.initialize()
+    rollout = engine.collect(0)
+    assert engine.rings[0].capacity == 2
+    shard = engine.groups[0][0]
+    for record in rollout.records:
+        expected = policy.device_wire_actions(record.actions[:2]).numpy()
+        actual = np.stack(shard.trace[record.state.clock : record.state.clock + 2])[:, 0, record.state.side]
+        np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("field", ["identity", "conditioning", "configuration"])
+def test_reset_rejects_episode_settings_before_mutating_simulator(field: str) -> None:
+    from test_065_loop import transformer_trainer
+
+    run = transformer_trainer("cpu")
+    shard = run.engine.groups[0][0]
+    before = shard.save()
+    if field == "identity":
+        identity = run.policy.model.cfg.player_vocab_size
+        run.engine.sampler.config = dataclasses.replace(
+            run.engine.sampler.config,
+            identities=(exp.IdentityCount(identity, 1, 400),),
+            deployment_identity=identity,
+            masked_rate=0,
+            deployment_rate=1,
+        )
+    elif field == "conditioning":
+        run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_min=1, lambda_max=1)
+        run.engine.sampler.lambda_max = 1
+    else:
+        run.engine.sampler.schedule = dataclasses.replace(
+            run.engine.sampler.schedule, configurations=(exp.DelayReplan(8, 4),)
+        )
+    with pytest.raises(ValueError, match=field):
+        run.engine._reset(shard, 0, 0, 0, 1)
+    assert shard.save() == before

@@ -48,6 +48,8 @@ class QueueResidualHead(nn.Module):
         opponent_condition: Tensor,
         queue_embeddings: Tensor,
         queue_lengths: Tensor,
+        *,
+        validate: bool = True,
     ) -> Tensor:
         batch = decoder_state.shape[0]
         if condition.shape != (batch, 3) or opponent_condition.shape != condition.shape:
@@ -56,7 +58,11 @@ class QueueResidualHead(nn.Module):
             raise ValueError("opponent queue must match the critic capacity")
         if queue_lengths.shape != (batch,) or queue_lengths.dtype not in (torch.int32, torch.int64):
             raise ValueError("opponent queue lengths must be integer [B]")
-        if not torch.compiler.is_compiling() and bool(((queue_lengths < 0) | (queue_lengths > self.max_queue)).any()):
+        if (
+            validate
+            and not torch.compiler.is_compiling()
+            and bool(((queue_lengths < 0) | (queue_lengths > self.max_queue)).any())
+        ):
             raise ValueError("opponent queue length is outside its capacity")
         offsets = torch.arange(self.max_queue, device=decoder_state.device)
         embedded_offsets = self.offset_embedding(offsets).expand(batch, -1, -1)
@@ -134,6 +140,8 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         opponent_condition: Tensor,
         opponent_queue: Tensor,
         opponent_queue_lengths: Tensor,
+        *,
+        validate: bool = True,
     ) -> Tensor:
         if trunk_state.ndim != 2 or trunk_state.shape[1] != self.cfg.d_model:
             raise ValueError("critic trunk state must be [B, d_model]")
@@ -153,6 +161,7 @@ class SelfPlayTransformer(ActionSequenceTransformer):
                 opponent_condition.to(features.dtype),
                 queue,
                 opponent_queue_lengths,
+                validate=validate,
             )
         return base + residual
 
