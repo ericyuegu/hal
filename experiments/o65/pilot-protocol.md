@@ -327,3 +327,11 @@ default-path error plus a reported small absolute floor for factor log-probs,
 KL, values, and actor and critic gradients. Statistical comparisons with
 `aacdfee0` at 64 matches use match-level confidence intervals. These systems
 comparisons do not select a policy or establish gameplay improvement.
+
+
+Dense execution uses training checkpoint format v5 and pool snapshot format v3.
+The device RNG key is part of the resume identity. The deterministic verifier
+uses the training graphs and checks the next batch, optimizer, parameters and
+all RNG states. Earlier persisted formats are rejected. Numerical qualification
+and statistical comparison with Git commit `aacdfee0` remain required before a
+learning run.

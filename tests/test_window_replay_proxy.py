@@ -22,8 +22,8 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from test_065_columnar import ROOT
-from test_065_columnar import exp
+from o65_reference import ROOT
+from o65_reference import load_control
 from torch import Tensor
 
 from hal.inference.cuda_graph import CapturedCall
@@ -39,6 +39,8 @@ from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
 from hal.models.window_replay import validate_replay_inputs
+
+exp = load_control()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

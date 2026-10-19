@@ -109,9 +109,10 @@ straddles the end of a rollout. Within a rollout:
   only gains noise;
 - a reset discards the queue, so the new episode begins with neutral actions.
 
-Each decision record holds the observation frame, the decision frame, the
-sampled indices, the committed prefix, $\log\mu$ for the executed factors, the
-actual duration $\Delta_j$, the policy version, and the episode and segment ids.
+Dense tick/player tensors hold the observation and decision frame, sampled
+indices, committed prefix, behavior log-probs, critic features and values,
+actual duration $\Delta_j$, policy version, episode and segment ids, and the
+decided, terminal and boundary masks. Each player keeps its slot across resets.
 
 ### Reward and KL
 
@@ -127,8 +128,8 @@ damage taken, 120 per stock difference, and 50 more on the deciding stock. The
 context $c_i$ holds the history $h_j$, the forced prefix, the earlier sampled
 factors and $u^*$. Both models apply the same button mask. $\mathrm{KL}_j$ sums
 exact per-factor KLs along the sampled path, which makes it an unbiased estimate
-of the KL of the whole chunk. The no-grad pass computes it under
-$\pi_{\text{old}}$. $\mathrm{KL}_j$ and the frame rewards both accrue per frame,
+of the KL of the whole chunk. The rollout stores the student distributions under
+$\pi_{\text{old}}$; the reference pass scores the same actions. $\mathrm{KL}_j$ and the frame rewards both accrue per frame,
 so $\lambda$ keeps its meaning across $R$.
 
 ### KL gradient
@@ -595,8 +596,8 @@ stays out of the checkpoint. Each rank writes a shard holding:
 
 1. the model, both optimizers and the scheduler (rank 0 only);
 2. every pool match's simulator state from the adapter's save path, compressed;
-3. each match's last 128 `HalFrame` records, both players' committed queues and
-   the group's decision clock;
+3. each match's last 129 `HalFrame` records (the current observation and up to
+   128 prior frames), both players' committed queues and the group's decision clock;
 4. episode metadata: $\lambda$, $D$, $R$, identities, characters, anchor
    assignments, episode counters and stable logical stream ids;
 5. the pool schedule position, the evaluation schedule position and the anchor
@@ -609,6 +610,12 @@ checkpoints with a manifest.
 `hal_native_restore` re-projects the whole batch for every lane it restores, so
 restoring a full batch lane by lane costs quadratic work. The adapter needs a
 batch restore that projects once.
+
+Training format v5 stores dense pool format v3 and the seed-derived device
+counter key. Earlier training and pool formats are rejected. Snapshot tensors
+own their storage. Restore clears all execution caches before the next prefill.
+The deterministic verifier uses the same tick, reference and actor graph paths
+as training and compares the next batch, optimizer state, parameters and RNGs.
 
 ### Random numbers
 
@@ -737,7 +744,7 @@ about production gameplay.
 | Policy | KL per frame to $\pi_{\text{ref}}$ by $D$, $R$ and $\lambda$ bin, KL to $\pi_{\text{old}}$ across the steps of an update, clip fraction, ratio quantiles, entropy per controller factor, $L_{\text{KL}}$ |
 | Return and KL | return against KL by $\lambda$ bin, cumulative KL cost per match |
 | Critic | explained variance on fresh features before fitting, by $R$ and by position in the block; value against Monte Carlo returns; value loss; advantage mean and standard deviation by $D$ and $R$; end-of-rollout bootstrap gap |
-| Numerics | $\log(\mu/\pi_{\text{old}})$ per decision, its quantiles by $D$ and $R$, fraction of truncated weights |
+| Numerics | joint log-ratio against stored behavior across actor steps; common-input errors against the all-FP32 reference |
 | Gameplay | net stocks, damage, win rate and match length against each anchor, by $\lambda$ bin, $D$ and $R$, in MSL and Dolphin |
 | Systems | time per phase, decode and training utilization, decode batch sizes, simulator frames/s per shard, reset wait time, host-to-device bytes, peak HBM per phase, per-rank rollout time |
 | Data | identity, character, stage and matchup counts, anchor share, time-outs, resets per update |

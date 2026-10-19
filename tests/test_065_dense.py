@@ -17,7 +17,7 @@ from test_065_loop import trainer
 def test_device_selection_places_each_window_once_and_separates_matches(device: str, windows_per_step: int) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    store = exp.FrameStore(1, 1, torch.device(device), exp.native.OBSERVATION_FIELDS)
+    store = exp.FrameStore(1, 6, torch.device(device))
     metadata = []
     for match, windows in enumerate((4, 1, 3, 2, 4, 1)):
         for window in range(windows):
@@ -36,11 +36,11 @@ def test_device_selection_places_each_window_once_and_separates_matches(device: 
             metadata.append(window_rows)
     meta = torch.tensor(metadata, device=device)
     rows = torch.arange(meta.shape[0] * 16, device=device).reshape(-1, 16)
-    table = exp.DecisionTable(rows.numel(), store)
-    table.integers.copy_(meta.flatten(0, 1))
+    table = exp.DenseRollout(128, store)
+    table.integers[: rows.numel()].copy_(meta.flatten(0, 1))
     eligible = rows % 5 != 0
     eligible[1] = False
-    table.valid.copy_(eligible.flatten())
+    table.valid[: rows.numel()].copy_(eligible.flatten())
     batch = exp.replay_batch(trainer().policy, table, rows, eligible)
     placement = exp.place_windows(batch, exp.CounterRng(65), 7, 5, windows_per_step)
     assert not bool((placement.selected & ~eligible).any())
@@ -71,11 +71,15 @@ def test_prepare_uses_behavior_outputs_without_student_scoring() -> None:
         calls.append(batch.slots.valid_WK.shape[1])
         return original(batch)
 
+    def reject_student_scoring(batch: Any) -> Any:
+        raise AssertionError("preparation must use the stored behavior evaluation")
+
     run.policy.evaluate_values = bootstrap_only
+    run.policy.evaluate_windows = reject_student_scoring
     batch = run.prepare(rollout)
     assert calls and all(slots == 1 for slots in calls)
     torch.testing.assert_close(batch.old.log_probs, batch.decisions.behavior_log_probs_JF, rtol=0, atol=0)
-    assert batch.metrics["numerics/mu_old_gap_max"] == 0
+    assert "numerics/mu_old_gap_max" not in batch.metrics
 
 
 def test_tensor_counter_domains_keys_and_cpu_cuda_parity() -> None:
@@ -119,16 +123,17 @@ def test_ppo_uses_detached_behavior_logs_as_old_policy() -> None:
 def test_dense_slots_keep_cadence_and_episode_execution_masks(timeout: bool) -> None:
     run = trainer(groups=1, length=13, timeout=timeout, delay=8, anchor_rate=0)
     rollout = run.engine.collect(0)
-    table = rollout.records.states.table
+    table = rollout.table
     players = 4
     valid = table.valid[: 128 * players].reshape(128, players)
     meta = table.integers[: 128 * players].reshape(128, players, 18)
     expected = meta[..., exp.CLOCK] % meta[..., exp.REPLAN] == 0
     expected &= (meta[..., exp.CLOCK] % 128) < 13
     torch.testing.assert_close(valid, expected)
-    for record in rollout.records:
-        assert record.frames_remaining == 13 - record.state.clock % 128
-        assert len(record.rewards) == min(record.state.player.timing.replan, record.frames_remaining)
+    ids = rollout.ids
+    remaining = 13 - table.integers[ids, exp.CLOCK] % 128
+    torch.testing.assert_close(table.remaining[ids], remaining)
+    torch.testing.assert_close(table.duration[ids], torch.minimum(table.integers[ids, exp.REPLAN], remaining))
     batch = run.prepare(rollout)
     expected_frames = (
         batch.decisions.duration_J * 0 + 13 - batch.decisions.decision_frame_J % 128 - batch.decisions.delay_J
@@ -140,13 +145,18 @@ def test_dense_slots_keep_cadence_and_episode_execution_masks(timeout: bool) -> 
 def test_final_timeout_bootstrap_precedes_reset() -> None:
     run = trainer(groups=1, length=256, timeout=True, delay=8, anchor_rate=0)
     rollout = run.engine.collect(0)
+    table = rollout.table
     for stream in range(4):
-        record = next(row for row in reversed(rollout.records) if row.state.stream == stream)
-        assert record.boundary and not record.terminal
-        assert record.next_state.episode.number == 0
-        assert record.next_state.frames[-1].columns["state"] == 256
+        ids = rollout.ids[table.integers[rollout.ids, exp.STREAM] == stream]
+        row = ids[-1]
+        next_row = table.following[row]
+        assert table.boundary[row] and not table.terminal[row]
+        assert table.integers[next_row, exp.EPISODE] == 0
+        packed = exp.TickInputs(table, next_row.reshape(1)).packed(256)
+        raw = packed[0].cpu().numpy().reshape(-1).view(exp.native.FRAME_DTYPE)
+        assert raw[255]["frame_id"] == 256
         assert run.engine.matches[stream // 2].episode.number == 1
-        assert run.engine.matches[stream // 2].history[-1].columns["state"] == 0
+        assert run.engine.observed_clocks[0][stream // 2] == 256
 
 
 def test_dense_gae_matches_decision_grid_with_mixed_cadences_and_boundaries() -> None:
@@ -195,10 +205,12 @@ def test_two_frame_queue_does_not_overwrite_actions_with_padding() -> None:
     rollout = engine.collect(0)
     assert engine.rings[0].capacity == 2
     shard = engine.groups[0][0]
-    for record in rollout.records:
-        expected = policy.device_wire_actions(record.actions[:2]).numpy()
-        actual = np.stack(shard.trace[record.state.clock : record.state.clock + 2])[:, 0, record.state.side]
-        np.testing.assert_array_equal(actual, expected)
+    table = rollout.table
+    trace = np.stack(shard.trace)
+    for row in rollout.ids.tolist():
+        clock, side = table.integers[row, [exp.CLOCK, exp.SIDE]].tolist()
+        expected = policy.device_wire_actions(table.actions[row, :2]).numpy()
+        np.testing.assert_array_equal(trace[clock : clock + 2, 0, side], expected)
 
 
 @pytest.mark.parametrize("field", ["identity", "conditioning", "configuration"])
@@ -240,7 +252,7 @@ def test_shards_step_while_the_other_buffer_samples() -> None:
     second_buffer_sampled = threading.Event()
 
     class WaitingShard(FakeShard):
-        def step(self, inputs: NDArray[np.float32], active: NDArray[np.bool_]) -> tuple[tuple[Any, ...], ...]:
+        def step(self, inputs: torch.Tensor, active: NDArray[np.bool_]) -> tuple[tuple[Any, ...], ...]:
             if self.ticks[0] == 0:
                 simulation_started.set()
                 if not second_buffer_sampled.wait(5):
@@ -248,12 +260,15 @@ def test_shards_step_while_the_other_buffer_samples() -> None:
             return super().step(inputs, active)
 
     class CheckingPolicy(ToyPolicy):
-        def sample(self, states: Any, rng: Any) -> Any:
-            if int(states.meta[0, exp.LANE]) == 1 and int(states.meta[0, exp.CLOCK]) == 0:
+        def sample_tick(self, states: Any, rng: Any, layout: Any, ring: Any, *, clock: int = 0) -> None:
+            if (
+                int(states.table.integers[states.ids[0], exp.LANE]) == 1
+                and int(states.table.integers[states.ids[0], exp.CLOCK]) == 0
+            ):
                 if not simulation_started.wait(5):
                     raise RuntimeError("first shard did not start before second-buffer inference")
                 second_buffer_sampled.set()
-            return super().sample(states, rng)
+            super().sample_tick(states, rng, layout, ring, clock=clock)
 
         def frozen_copy(self) -> Any:
             frozen = ToyPolicy()
@@ -274,9 +289,12 @@ def test_two_stream_resets_preserve_both_matches_and_resume(tmp_path: Path) -> N
     from test_065_loop import PROVENANCE
     from test_065_loop import transformer_trainer
 
-    base = transformer_trainer("cuda", development=True, compiled=True)
+    base = transformer_trainer("cuda", development=True)
     shard_type = type(base.engine.groups[0][0])
-    shards = (shard_type((0,), length=67, timeout=True), shard_type((1,), length=67, timeout=True))
+    shards = (
+        shard_type((0,), length=67, timeout=True, device="cuda"),
+        shard_type((1,), length=67, timeout=True, device="cuda"),
+    )
     base.engine.sampler.config = dataclasses.replace(base.engine.sampler.config, anchor_rate=1)
     engine = exp.RolloutEngine((shards,), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()})
     engine.initialize()
@@ -285,8 +303,8 @@ def test_two_stream_resets_preserve_both_matches_and_resume(tmp_path: Path) -> N
     assert len(buffers) == 2 and buffers[0].stream != buffers[1].stream
     batch, _ = run.run_update()
     assert batch.rollout.timeouts == 4
-    for record in batch.rollout.records:
-        assert record.frames_remaining == 67 - record.state.clock % 128
+    table, ids = batch.rollout.table, batch.rollout.ids
+    torch.testing.assert_close(table.remaining[ids], 67 - table.integers[ids, exp.CLOCK] % 128)
     with pytest.raises(ValueError, match="clip epsilon"):
         run.policy.actor_step(batch.windows, None, clip_epsilon=0.3)
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
@@ -307,3 +325,43 @@ def test_bootstrap_only_runs_occupied_boundary_roles(timeout: bool) -> None:
     run.policy.evaluate_values = values
     run.prepare(rollout)
     assert calls == ([(4, 1), (4, 1)] if timeout else [])
+
+
+@pytest.mark.parametrize("field", ["stream", "episode", "clock", "written"])
+def test_prepare_rejects_invalid_next_state(field: str) -> None:
+    run = trainer(groups=1, anchor_rate=0, length=1000000)
+    rollout = run.engine.collect(0)
+    table = rollout.table
+    row = rollout.ids[0]
+    following = table.following[row]
+    if field == "written":
+        table.valid[following] = False
+    else:
+        column = {"stream": exp.STREAM, "episode": exp.EPISODE, "clock": exp.CLOCK}[field]
+        table.integers[following, column] += 1
+    with pytest.raises(ValueError, match="decision transition"):
+        run.prepare(rollout)
+
+
+@pytest.mark.parametrize("field", ["counter_rng", "clocks", "cursor", "sampler_cursor"])
+def test_restore_rejects_invalid_progress_before_model_mutation(field: str, tmp_path: Path) -> None:
+    import io
+    import json
+
+    from test_065_loop import PROVENANCE
+
+    run = trainer(groups=1, anchor_rate=0)
+    run.run_update()
+    manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+    raw = json.loads(manifest.read_text())
+    shard = next(shard for shard in raw["shards"] if shard["role"] == "training")
+    saved = torch.load(tmp_path / shard["name"], weights_only=False)
+    saved[field] = {"seed": 65, "key": 0} if field == "counter_rng" else ([0] if field == "clocks" else True)
+    payload = io.BytesIO()
+    torch.save(saved, payload)
+    shard["name"], shard["sha256"] = exp._durable_file(tmp_path, payload.getvalue(), "rank0.pt")
+    manifest.write_text(json.dumps(raw))
+    before = exp._state_hash(run.policy.model.state_dict())
+    with pytest.raises(ValueError, match="RNG key|progress"):
+        exp.restore_checkpoint(run, manifest, PROVENANCE)
+    assert exp._state_hash(run.policy.model.state_dict()) == before

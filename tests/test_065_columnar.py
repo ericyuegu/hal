@@ -1,30 +1,19 @@
-"""Native proxy parity fixture and bounded complete-update measurements.
+"""Packed frame storage, queue and checkpoint identity contracts."""
 
-Run this module under the shared GPU lock. Recording requires an explicit output;
-the checked-in fixture is never updated by pytest.
-"""
-
-import argparse
-import contextlib
-import cProfile
 import dataclasses
 import hashlib
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 import torch
 
-from hal.models.self_play import DecoderPrecision
 from hal.wire import ACTION_DIM
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = Path(__file__).with_name("fixtures") / "o65_columnar.json"
 _SPEC = importlib.util.spec_from_file_location(
     "hal_o65_columnar_capture", os.environ.get("HAL_O65_CAPTURE_SOURCE", str(ROOT / "experiments/065_selfplay_ppo.py"))
 )
@@ -35,205 +24,34 @@ sys.modules[_SPEC.name] = exp
 _SPEC.loader.exec_module(exp)
 
 
-class CaptureShard(exp.NativeSimulatorShard):
-    def __init__(
-        self, data_dir: Path, match_ids: tuple[int, ...], *, cpu: int, device: torch.device, max_frame: int
-    ) -> None:
-        super().__init__(data_dir, match_ids, cpu=cpu, device=device, max_frame=max_frame)
-        self.record_digest = hashlib.sha256()
-        self.action_digest = hashlib.sha256()
-
-    def _frames(self, frame: Any) -> Any:
-        self.record_digest.update(frame.records.tobytes())
-        self.action_digest.update(exp.native_controller_readback(frame.applied_action).tobytes())
-        return super()._frames(frame)
-
-
-def tensor_hash(value: torch.Tensor) -> str:
-    return hashlib.sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
-
-
-def fingerprints(run: Any, batch: Any) -> dict[str, str]:
-    # Hash frames once per decision's last observation, in decision order. This
-    # includes both sides and catches padding, stale storage, and reset readback.
-    records = torch.stack([r.state.frames[-1].device_record for r in batch.rollout.records])
-    actions = torch.stack([r.state.frames[-1].device_actions for r in batch.rollout.records])
-    return {
-        "records": tensor_hash(records),
-        "processed_actions": tensor_hash(actions),
-        "sampled_factors": tensor_hash(batch.decisions.sampled_indices_JF),
-        "behavior_log_probs": tensor_hash(batch.decisions.behavior_log_probs_JF),
-        "rewards": exp._state_hash([r.rewards for r in batch.rollout.records]),
-        "batch": exp._batch_hash(batch),
-        "advantages": tensor_hash(batch.advantages),
-        "values": tensor_hash(batch.values),
-        "old_log_probs": tensor_hash(batch.old.log_probs),
-        "reference_log_probs": tensor_hash(batch.reference.log_probs),
-        "actor": exp._state_hash(tuple(run.policy.actor_parameters())),
-        "critic": exp._state_hash(tuple(run.policy.critic_parameters())),
-    }
-
-
-def capture(
-    matches: int,
-    output: Path,
-    *,
-    performance: bool,
-    verify_resume: bool = False,
-    warmup: bool = False,
-    fixed_anchor_lanes: bool = False,
-    decoder_precision: DecoderPrecision = "fp32",
-) -> dict[str, object]:
-    if matches not in (16, 64):
-        raise ValueError("local capture requires 16 or 64 matches")
-    if performance and verify_resume:
-        raise ValueError("resume verification requires a deterministic parity capture")
-    if warmup and not performance:
-        raise ValueError("warmup measurement requires performance mode")
-    torch.set_num_threads(2)
-    torch.use_deterministic_algorithms(not performance)
-    torch.manual_seed(65)
-    checkpoint = exp.load_evaluation_checkpoint(
-        ROOT / "runs/proxy/final.pt", device=torch.device("cuda"), decoder_precision=decoder_precision
-    )
-    checkpoint.model.requires_grad_(True)
-    checkpoint.model.percentile_head.requires_grad_(False)
-    schedule = exp.development_config(checkpoint.model.head_offsets)
-    policy = exp.TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics, compiled=True)
-    sampling = exp.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json")
-    training = exp.TrainConfig(critic_warmup_updates=10000 if warmup else 0, deterministic=not performance)
-    source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
-    output.mkdir(parents=True, exist_ok=True)
-    with contextlib.ExitStack() as resources:
-        shards = []
-        cpus = sorted(os.sched_getaffinity(0))[:4]
-        for index, cpu in enumerate(cpus):
-            ids = tuple(range(index * matches // 4, (index + 1) * matches // 4))
-            shard = (exp.NativeSimulatorShard if performance else CaptureShard)(
-                source / "data", ids, cpu=cpu, device=policy.device, max_frame=28800 if performance else 0
-            )
-            resources.callback(shard.close)
-            shards.append(shard)
-        sampler = exp.EpisodeSampler(sampling, schedule, exp.CounterRng(65))
-        anchors = {0: policy.frozen_copy()}
-        if fixed_anchor_lanes:
-            engine = exp.RolloutEngine((tuple(shards),), policy, sampler, anchors, fixed_anchor_lanes=True)
-        else:
-            engine = exp.RolloutEngine((tuple(shards),), policy, sampler, anchors)
-        engine.initialize()
-        run = exp.Trainer(engine, training)
-        rows = []
-        for _ in range(3 if performance else 2):
-            policies = (policy, *engine.anchors.values())
-            before = sum(sum(size * count for size, count in p.sample_group_counts.items()) for p in policies)
-            batch, metrics = run.run_update()
-            after = sum(sum(size * count for size, count in p.sample_group_counts.items()) for p in policies)
-            metrics["systems/decode_calls_per_tick"] = (after - before) / (schedule.rollout_frames / 2)
-            row = metrics if performance else fingerprints(run, batch)
-            if not performance:
-                row["all_frame_records"] = exp._state_hash([s.record_digest.hexdigest() for s in shards])
-                row["all_processed_actions"] = exp._state_hash([s.action_digest.hexdigest() for s in shards])
-            rows.append(row)
-            if not performance:
-                assert batch.rollout.resets > 0 and batch.rollout.timeouts > 0
-            del batch
-        if performance:
-            profiler = cProfile.Profile()
-            profiler.runcall(engine.collect, run.update)
-            profiler.dump_stats(output / "rollout.prof")
-        if verify_resume:
-            manifests = checkpoint.provenance["data_manifests"]
-            provenance = {
-                "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-                "checkpoint_sha256": checkpoint.checkpoint_sha256,
-                "data_manifest_sha256": manifests["ranked-anonymized-1-policy-world-v8"],
-                "simulator_sha256": shards[0].shard.library_sha256,
-                "adapter_sha256": exp.native_bridge.library_sha256(),
-            }
-            exp.verify_checkpoint_resume(run, output, provenance)
-        result = {
-            "matches": matches,
-            "performance": performance,
-            "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-            "source_file_sha256": SOURCE_SHA256,
-            "configuration": {
-                "training": dataclasses.asdict(training),
-                "sampling": dataclasses.asdict(sampling),
-                "schedule": dataclasses.asdict(schedule),
-                "cpus": cpus,
-                "groups": [[shard.match_ids for shard in shards]],
-                "max_frame": shards[0].max_frame,
-                "compiled": True,
-            },
-            "environment": exp._environment(),
-            "checkpoint": checkpoint.checkpoint_sha256,
-            "sampler": exp.sha256(ROOT / "experiments/o65/pilot-sampler.json"),
-            "native_data": exp.sha256(source / "data/raw/manifest.json"),
-            "simulator": shards[0].shard.library_sha256,
-            "adapter": exp.native_bridge.library_sha256(),
-            "rows": rows,
-        }
-        if fixed_anchor_lanes:
-            result["configuration"]["fixed_anchor_lanes"] = True
-            result["configuration"]["anchor_counts"] = list(engine.anchor_counts)
-        if performance:
-            result["configuration"]["decoder_precision"] = decoder_precision
-        (output / "capture.json").write_text(json.dumps(result, indent=2, sort_keys=True))
-        return result
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("matches", [16, 64])
-def test_native_columnar_exact_parity(matches: int, tmp_path: Path) -> None:
-    expected = json.loads(FIXTURE.read_text())[str(matches)]
-    previous = torch.are_deterministic_algorithms_enabled()
-    try:
-        actual = capture(matches, tmp_path, performance=False, decoder_precision="fp32")
-    finally:
-        torch.use_deterministic_algorithms(previous)
-    # Normalize tuples as JSON does for the persisted fixture.
-    actual = json.loads(json.dumps(actual))
-    for name in (
-        "configuration",
-        "environment",
-        "checkpoint",
-        "sampler",
-        "native_data",
-        "simulator",
-        "adapter",
-        "rows",
-    ):
-        assert actual[name] == expected[name], name
-
-
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_tensor_windows_gather_ragged_histories_and_tails(device: str) -> None:
     import numpy as np
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    store = exp.FrameStore(8, 3, torch.device(device), exp.native.OBSERVATION_FIELDS)
+    store = exp.FrameStore(8, 3, torch.device(device))
     generator = torch.Generator().manual_seed(65)
     store.records.copy_(torch.randint(0, 256, store.records.shape, dtype=torch.uint8, generator=generator).to(device))
     store.actions.copy_(torch.rand(store.actions.shape, generator=generator).to(device))
-    table = exp.DecisionTable(3, store)
-    table.count = 3
-    table.meta[:, exp.LANE] = [2, 0, 1]
-    table.meta[:, exp.START] = [3, 0, 5]
-    table.meta[:, exp.LENGTH] = [4, 2, 3]
-    table.meta[:, exp.SIDE] = [1, 0, 1]
-    table.meta[:, exp.IDENTITY] = [8, 9, 10]
-    table.integers.copy_(torch.from_numpy(table.meta).to(device))
-    rows = table.rows([2, 0, 1])
+    table = exp.DenseRollout(64, store)
+    meta = table.integers[:3]
+    meta[:, exp.LANE] = torch.tensor([2, 0, 1], device=device)
+    meta[:, exp.START] = torch.tensor([3, 0, 5], device=device)
+    meta[:, exp.LENGTH] = torch.tensor([4, 2, 3], device=device)
+    meta[:, exp.SIDE] = torch.tensor([1, 0, 1], device=device)
+    meta[:, exp.IDENTITY] = torch.tensor([8, 9, 10], device=device)
+    ids = torch.tensor([2, 0, 1], device=device)
+    rows = exp.TickInputs(table, ids)
     for tail in (None, 2):
         actual = rows.packed(5, tail)
         expected_records = torch.zeros(3, 5, store.records.shape[-1], device=device, dtype=torch.uint8)
         expected_actions = torch.zeros(3, 5, 2, ACTION_DIM, device=device)
         lengths = []
-        for index, meta in enumerate(rows.meta):
-            length = int(meta[exp.LENGTH]) if tail is None else min(tail, int(meta[exp.LENGTH]))
-            start = int(meta[exp.START] + meta[exp.LENGTH] - length)
-            lane = int(meta[exp.LANE])
+        for index, row in enumerate(meta[ids]):
+            length = int(row[exp.LENGTH]) if tail is None else min(tail, int(row[exp.LENGTH]))
+            start = int(row[exp.START] + row[exp.LENGTH] - length)
+            lane = int(row[exp.LANE])
             expected_records[index, :length] = store.records[start : start + length, lane]
             expected_actions[index, :length] = store.actions[start : start + length, lane]
             lengths.append(length)
@@ -258,7 +76,7 @@ def test_native_scatter_uses_batched_strided_coordinates(device: str) -> None:
     raw["truncated"] = [True, False, False]
     columns = raw["columns"].copy()
     columns.flags.writeable = False
-    batch = exp.FrameBatch(
+    batch = exp.ShardFrames(
         torch.from_numpy(raw.view(np.uint8).reshape(3, -1).copy()).to(device),
         torch.from_numpy(raw["applied_action"].copy()).to(device),
         columns,
@@ -267,7 +85,7 @@ def test_native_scatter_uses_batched_strided_coordinates(device: str) -> None:
         raw["truncated"].copy(),
         raw["applied_action"].copy(),
     )
-    store = exp.FrameStore(5, 3, torch.device(device), exp.native.OBSERVATION_FIELDS)
+    store = exp.FrameStore(5, 3, torch.device(device))
     coordinates = torch.tensor([[1, 2, 1], [4, 0, 2], [2, 1, 0]], device=device)
     positions, lanes, sources = coordinates.unbind(1)
     actual_rewards = store.write(positions, lanes, batch, sources)
@@ -288,30 +106,24 @@ def test_native_scatter_uses_batched_strided_coordinates(device: str) -> None:
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_action_ring_wrap_and_cadence(device: str) -> None:
-    import numpy as np
-
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     ring = exp.ActionRing(1, 6, torch.device(device))
     ring.reset(0, (2, 2))
-    lanes = np.array([0, 0], dtype=np.int64)
-    sides = np.array([0, 1], dtype=np.int64)
+    meta = torch.zeros(2, 18, device=device, dtype=torch.long)
+    meta[:, exp.SIDE] = torch.tensor([0, 1], device=device)
+    meta[:, exp.REPLAN] = torch.tensor([4, 2], device=device)
     actions = torch.arange(32, device=device).reshape(2, 4, 4)
-    ring.append(lanes, sides, actions, np.array([4, 2], dtype=np.int64))
+    controllers = torch.zeros(2, 4, ACTION_DIM, device=device)
+    ring.commit(meta, torch.ones(2, device=device, dtype=torch.bool), actions, controllers, count=4)
+    ring.head += 2
+    ring.length_device -= 2
+    meta[:, exp.REPLAN] = 2
+    ring.commit(meta, torch.ones(2, device=device, dtype=torch.bool), actions + 100, controllers, count=2)
     left = torch.tensor([0], device=device)
-    for _ in range(2):
-        ring.consume(np.array([0], dtype=np.int64))
-    ring.append(lanes, sides, actions + 100, np.array([2, 2], dtype=np.int64))
     expected = torch.cat((actions[0], actions[0, :2] + 100))
     torch.testing.assert_close(ring.read(left, left, 6)[0], expected, rtol=0, atol=0)
-    np.testing.assert_array_equal(ring.length, [[6, 4]])
-    np.testing.assert_array_equal(ring.length_device.cpu(), ring.length)
-    with pytest.raises(ValueError, match="capacity"):
-        ring.append(lanes, sides, actions, np.array([2, 2], dtype=np.int64))
-    for _ in range(4):
-        ring.consume(np.array([0], dtype=np.int64))
-    with pytest.raises(ValueError, match="uncommitted"):
-        ring.consume(np.array([0], dtype=np.int64))
+    torch.testing.assert_close(ring.length_device.cpu(), torch.tensor([[6, 4]]))
 
 
 def test_pool_rejects_old_formats_and_owns_cpu_queue_snapshots() -> None:
@@ -321,37 +133,14 @@ def test_pool_rejects_old_formats_and_owns_cpu_queue_snapshots() -> None:
     run.run_update()
     saved = run.engine.snapshot()
     with pytest.raises(ValueError, match="snapshot identity"):
-        run.engine.restore_pool(dataclasses.replace(saved, format="hal.o65.rollout_pool.v1"))
+        run.engine.restore_pool(dataclasses.replace(saved, format="hal.o65.rollout_pool.v2"))
     queue = saved.groups[0].queue.clone()
     run.run_update()
     torch.testing.assert_close(saved.groups[0].queue, queue, rtol=0, atol=0)
     run.engine.restore_pool(saved)
 
 
-def test_rollout_keeps_contexts_in_tensors_until_diagnostics_request_them() -> None:
-    from test_065_loop import exp as loop_exp
-    from test_065_loop import transformer_trainer
-
-    run = transformer_trainer("cpu", development=True)
-    rollout = run.engine.collect(0)
-    assert isinstance(rollout.records, loop_exp.DecisionRecords)
-    table = rollout.records.states.table
-    store = table.store
-    assert store._host is None and not store._views
-    for host, device in (
-        (table.duration, table.duration_device),
-        (table.remaining, table.remaining_device),
-        (table.terminal, table.terminal_device),
-        (table.boundary, table.boundary_device),
-        (table.following, table.following_device),
-    ):
-        torch.testing.assert_close(device[: table.count].cpu(), torch.from_numpy(host[: table.count]), rtol=0, atol=0)
-    batch = run.prepare(rollout)
-    run.fit(batch)
-    assert store._host is None and not store._views
-
-
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
 def test_old_training_checkpoint_is_rejected_before_loading(version: int, tmp_path: Path) -> None:
     from test_065_loop import PROVENANCE
     from test_065_loop import exp as loop_exp
@@ -373,7 +162,7 @@ def test_native_frame_batch_rejects_nonfinite_rewards_and_conflicting_end_flags(
 
     columns = np.zeros((1, len(exp.native.OBSERVATION_FIELDS)), dtype=np.uint32)
     columns.flags.writeable = False
-    frame = exp.FrameBatch(
+    frame = exp.ShardFrames(
         torch.zeros(1, exp.native.FRAME_DTYPE.itemsize, dtype=torch.uint8),
         torch.zeros(1, 2, ACTION_DIM),
         columns,
@@ -390,61 +179,12 @@ def test_native_frame_batch_rejects_nonfinite_rewards_and_conflicting_end_flags(
         dataclasses.replace(frame, rewards=np.zeros((1, 2), dtype=np.float64))
 
 
-def test_explicit_packed_states_keep_their_device_readback() -> None:
-    from test_065_loop import transformer_trainer
-
-    run = transformer_trainer("cpu")
-    state = run.engine._state(0, 0, 0, 0)
-    frame = state.frames[0]
-    readback = torch.zeros(2, ACTION_DIM)
-    readback[0, 0] = 0.75
-    readback[0, 6] = 1
-    frame = dataclasses.replace(frame, device_actions=readback)
-    state = dataclasses.replace(state, frames=(frame,))
-    expected, expected_actions = run.policy._contexts((state,))
-    actual, actual_actions = run.policy._contexts(run.policy._columnar_states((state,)))
-    assert expected["ego_main_stick_x"].item() == 0.75
-    for name in expected:
-        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
-    torch.testing.assert_close(actual_actions, expected_actions, rtol=0, atol=0)
-
-
-def test_capture_rejects_resume_with_default_algorithms(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="deterministic parity"):
-        capture(16, tmp_path, performance=True, verify_resume=True)
-
-
-def test_capture_rejects_warmup_in_golden_parity_mode(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="requires performance mode"):
-        capture(16, tmp_path, performance=False, warmup=True)
-
-
-def test_frame_store_rejects_a_changed_observation_schema() -> None:
+def test_pool_rejects_changed_observation_identity() -> None:
     from test_065_loop import trainer
 
-    run = trainer(groups=1, anchor_rate=0)
-    history = run.engine.matches[0].history
-    frame = dataclasses.replace(history[0], columns={"different_column": 0.0})
-    with pytest.raises(ValueError, match="schema changed"):
-        history.store.write_frame(0, 0, frame)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--matches", type=int, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--performance", action="store_true")
-    parser.add_argument("--verify-resume", action="store_true")
-    parser.add_argument("--warmup", action="store_true")
-    parser.add_argument("--fixed-anchor-lanes", action="store_true")
-    parser.add_argument("--decoder-precision", choices=("bf16", "fp32"), default="fp32")
-    args = parser.parse_args()
-    capture(
-        args.matches,
-        args.output,
-        performance=args.performance,
-        verify_resume=args.verify_resume,
-        warmup=args.warmup,
-        fixed_anchor_lanes=args.fixed_anchor_lanes,
-        decoder_precision=args.decoder_precision,
-    )
+    run = trainer(groups=1)
+    saved = run.engine.snapshot()
+    with pytest.raises(ValueError, match="schema mismatch"):
+        run.engine.restore_pool(
+            dataclasses.replace(saved, groups=(dataclasses.replace(saved.groups[0], fields=("wrong",)),))
+        )
