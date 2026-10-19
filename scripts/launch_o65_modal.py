@@ -193,6 +193,7 @@ def build_image(sha: str, secret: modal.Secret) -> modal.Image:
         .env({"PYTHONPATH": root, "UV_PROJECT_ENVIRONMENT": "/opt/venv"})
         .workdir(root)
         .run_commands(commands, secrets=[secret])
+        .env({"PYTHONPATH": f"{root}:{root}/delivery/msl"})
     )
 
 
