@@ -709,7 +709,8 @@ def transformer_trainer(
 def test_transformer_fake_simulator_checkpoint_and_kernel_parity(
     tmp_path: Path, device: str, deterministic_execution: None
 ) -> None:
-    run = transformer_trainer(device, deterministic=True)
+    precision = "fp32" if device == "cpu" else "bf16"
+    run = transformer_trainer(device, deterministic=True, decoder_precision=precision)
     first, metrics = run.run_update()
     assert metrics["numerics/mu_old_gap_p99"] < (0.15 if device == "cuda" else 1e-4)
     assert first.old.features.trunk.requires_grad is False
@@ -718,7 +719,7 @@ def test_transformer_fake_simulator_checkpoint_and_kernel_parity(
     manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     expected, _ = run.run_update()
     weights = copy.deepcopy(run.policy.model.state_dict())
-    resumed = transformer_trainer(device, deterministic=True)
+    resumed = transformer_trainer(device, deterministic=True, decoder_precision=precision)
     exp.restore_checkpoint(resumed, manifest, PROVENANCE)
     actual, _ = resumed.run_update()
     assert_batch_equal(expected, actual)
@@ -1409,7 +1410,7 @@ def test_subsampled_window_preserves_old_policy_trunk_shape(device: str) -> None
 
 
 def test_batched_replay_preserves_row_order_and_actor_gradients() -> None:
-    run = transformer_trainer("cpu", development=True)
+    run = transformer_trainer("cpu", development=True, decoder_precision="fp32")
     match = run.engine.matches[0]
     states = []
     for stream, side, clock in ((1, 1, 16), (0, 0, 0), (1, 1, 4), (2, 0, 8)):
@@ -1536,7 +1537,7 @@ def test_mixed_development_delays_resume_when_execution_masks_are_known(tmp_path
 )
 @torch.no_grad()
 def test_transformer_development_queues_factor_order_and_pre_action_critic(device: str) -> None:
-    run = transformer_trainer(device, development=True)
+    run = transformer_trainer(device, development=True, decoder_precision="fp32" if device == "cpu" else "bf16")
     match = run.engine.matches[0]
     players = (
         dataclasses.replace(match.episode.players[0], timing=exp.DelayReplan(8, 4)),

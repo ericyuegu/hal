@@ -913,6 +913,10 @@ def test_widened_live_policy_uses_saved_decoder_precision(precision: DecoderPrec
     handle = cast(TemporalBlock, model.temporal.blocks[0]).qkv.register_forward_hook(record_dtype)
     try:
         request = replace(_request(candidate, 42, 3, 4, 0), fixed_actions=(NEUTRAL_CONTROLLER_ACTION,) * 8)
+        request = replace(
+            request,
+            observations=tuple(replace(item, desired_return=108.0, temperature=1.0) for item in request.observations),
+        )
         candidate.predict((request,))
     finally:
         handle.remove()
