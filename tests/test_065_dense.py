@@ -3,10 +3,13 @@
 import dataclasses
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 import torch
+from numpy.typing import NDArray
 from test_065_loop import exp
 from test_065_loop import trainer
 
@@ -226,3 +229,65 @@ def test_reset_rejects_episode_settings_before_mutating_simulator(field: str) ->
     with pytest.raises(ValueError, match=field):
         run.engine._reset(shard, 0, 0, 0, 1)
     assert shard.save() == before
+
+
+def test_shards_step_while_the_other_buffer_samples() -> None:
+    import threading
+
+    from test_065_loop import FakeShard
+    from test_065_loop import ToyPolicy
+    from test_065_loop import sampler
+
+    simulation_started = threading.Event()
+    second_buffer_sampled = threading.Event()
+
+    class WaitingShard(FakeShard):
+        def step(self, inputs: NDArray[np.float32], active: NDArray[np.bool_]) -> tuple[tuple[Any, ...], ...]:
+            if self.ticks[0] == 0:
+                simulation_started.set()
+                if not second_buffer_sampled.wait(5):
+                    raise RuntimeError("second buffer did not sample while the first shard waited")
+            return super().step(inputs, active)
+
+    class CheckingPolicy(ToyPolicy):
+        def sample(self, states: Any, rng: Any) -> Any:
+            if int(states.meta[0, exp.LANE]) == 1 and int(states.meta[0, exp.CLOCK]) == 0:
+                if not simulation_started.wait(5):
+                    raise RuntimeError("first shard did not start before second-buffer inference")
+                second_buffer_sampled.set()
+            return super().sample(states, rng)
+
+        def frozen_copy(self) -> Any:
+            frozen = ToyPolicy()
+            frozen.model.load_state_dict(self.model.state_dict())
+            return frozen.frozen_copy()
+
+    policy = CheckingPolicy()
+    shards = (WaitingShard((0,)), FakeShard((1,)))
+    engine = exp.RolloutEngine((shards,), policy, sampler(anchor_rate=0), {0: policy.frozen_copy()})
+    engine.initialize()
+    engine.collect(0)
+    assert simulation_started.is_set() and second_buffer_sampled.is_set()
+    assert len(engine.buffers[0]) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_two_stream_resets_preserve_both_matches_and_resume(tmp_path: Path) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import transformer_trainer
+
+    base = transformer_trainer("cuda", development=True, compiled=True)
+    shard_type = type(base.engine.groups[0][0])
+    shards = (shard_type((0,), length=67, timeout=True), shard_type((1,), length=67, timeout=True))
+    base.engine.sampler.config = dataclasses.replace(base.engine.sampler.config, anchor_rate=1)
+    engine = exp.RolloutEngine((shards,), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()})
+    engine.initialize()
+    run = exp.Trainer(engine, base.config)
+    buffers = engine.buffers[0]
+    assert len(buffers) == 2 and buffers[0].stream != buffers[1].stream
+    batch, _ = run.run_update()
+    assert batch.rollout.timeouts == 4
+    for record in batch.rollout.records:
+        assert record.frames_remaining == 67 - record.state.clock % 128
+    exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+    assert run.update == 1

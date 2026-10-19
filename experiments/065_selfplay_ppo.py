@@ -22,6 +22,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
@@ -1517,10 +1518,16 @@ class NativeSimulatorShard:
             self.shard.close()
 
 
-def _step_shard(shard: SimulatorShard, inputs: Tensor, active: NDArray[np.bool_]) -> Sequence[Sequence[SimFrame]]:
-    if isinstance(shard, NativeSimulatorShard):
-        return shard.step(inputs, active)
-    return shard.step(inputs.cpu().numpy(), active)
+def _step_shard(
+    shard: SimulatorShard,
+    inputs: Tensor,
+    active: NDArray[np.bool_],
+    stream: torch.cuda.Stream | None = None,
+) -> Sequence[Sequence[SimFrame]]:
+    with torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
+        if isinstance(shard, NativeSimulatorShard):
+            return shard.step(inputs, active)
+        return shard.step(inputs.cpu().numpy(), active)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1631,6 +1638,17 @@ class TickLayout:
             self.streams
         ):
             raise ValueError("tick layout streams must own distinct queues")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RolloutBuffer:
+    index: int
+    shards: tuple[SimulatorShard, ...]
+    lanes: NDArray[np.int64]
+    stream: torch.cuda.Stream | None
+
+
+type PendingStep = tuple[RolloutBuffer, SimulatorShard, Future[Sequence[Sequence[SimFrame]]]]
 
 
 class TransformerPolicy:
@@ -2947,7 +2965,8 @@ class DecisionTable:
         for target, source in zip(self.evaluation.distributions, output.distributions, strict=True):
             target[ids] = source
         for name in CRITIC_FEATURE_NAMES:
-            getattr(self.evaluation.features, name)[ids] = getattr(output.features, name)
+            target = getattr(self.evaluation.features, name)
+            target[ids] = getattr(output.features, name).to(target.dtype)
 
     def rows(self, ids: Sequence[int] | NDArray[np.int64]) -> DecisionRows:
         return DecisionRows(self, np.asarray(ids, dtype=np.int64))
@@ -3211,8 +3230,8 @@ class RolloutEngine:
         self.sampler = sampler
         self.anchors = anchors
         self.fixed_anchor_lanes = fixed_anchor_lanes
-        self.tick_layouts: dict[int | None, TickLayout] = {}
-        self.group_layouts: list[dict[int | None, TickLayout]] = [{} for _ in groups]
+        self.tick_layouts: dict[tuple[int, int | None], TickLayout] = {}
+        self.group_layouts: list[dict[tuple[int, int | None], TickLayout]] = [{} for _ in groups]
         self.tick_layout_clock: tuple[int, int] | None = None
         self.anchor_candidates = tuple(sorted(anchors))
         self.clocks = [0] * len(groups)
@@ -3240,6 +3259,20 @@ class RolloutEngine:
             for group in groups
             for shard in group
         }
+        buffers: list[tuple[RolloutBuffer, ...]] = []
+        for shards in groups:
+            split = (len(shards) + 1) // 2
+            prepared: list[RolloutBuffer] = []
+            for index, half in enumerate((shards[:split], shards[split:])):
+                if not half:
+                    continue
+                lanes = np.concatenate([self.shard_lanes[id(shard)] for shard in half])
+                lanes.flags.writeable = False
+                stream = torch.cuda.Stream(device=policy.device) if policy.device.type == "cuda" else None
+                prepared.append(RolloutBuffer(index, half, lanes, stream))
+            buffers.append(tuple(prepared))
+        self.buffers = tuple(buffers)
+        self.group_slots: list[dict[tuple[int, int | None], NDArray[np.int64]]] = [{} for _ in groups]
         self.stores: list[FrameStore | None] = [None] * len(groups)
         self.dense_meta = [
             torch.zeros(2 * len(ids), 18, dtype=torch.long, device=policy.device) for ids in self.group_matches
@@ -3557,14 +3590,13 @@ class RolloutEngine:
         table = DecisionTable(1, store)
         return table.add([meta], [self.matches[match].episode], self.rings[group])[0]
 
-    def _decide(
+    def _stage_tick(
         self,
-        shards: Sequence[SimulatorShard],
         clock: int,
         update: int,
         table: DecisionTable,
         pending: Tensor,
-    ) -> None:
+    ) -> tuple[NDArray[np.int64], Tensor, Tensor]:
         group = self.cursor
         players = len(self.dense_meta[group])
         tick = (clock - self.clocks[group]) // 2
@@ -3596,21 +3628,41 @@ class RolloutEngine:
         pending.copy_(torch.where(due & student, at, pending))
         if clock % 128 == 0 and not np.array_equal(assignments, self.layout_assignments[group]):
             self.tick_layouts.clear()
+            self.group_slots[group].clear()
             self.layout_assignments[group][:] = assignments
-            for owner in np.unique(assignments):
-                selected = np.flatnonzero(assignments == owner)
-                logical = np.asarray(self.group_matches[group], dtype=np.int64).repeat(2) * 2 + np.tile(
-                    (0, 1), len(self.group_matches[group])
-                )
-                streams = tuple(logical[selected].tolist())
-                self.tick_layouts[None if owner < 0 else int(owner)] = TickLayout(
-                    streams,
-                    tuple((selected // 2).tolist()),
-                )
-        for anchor, previous_layout in self.tick_layouts.items():
-            layout = previous_layout
-            owner = -1 if anchor is None else anchor
-            slots = np.flatnonzero(assignments == owner)
+            logical = np.asarray(self.group_matches[group], dtype=np.int64).repeat(2) * 2 + np.tile(
+                (0, 1), len(self.group_matches[group])
+            )
+            for buffer in self.buffers[group]:
+                in_buffer = np.isin(np.arange(players) // 2, buffer.lanes)
+                for owner in np.unique(assignments[in_buffer]):
+                    selected = np.flatnonzero(in_buffer & (assignments == owner))
+                    anchor = None if owner < 0 else int(owner)
+                    key = buffer.index, anchor
+                    self.group_slots[group][key] = selected
+                    self.tick_layouts[key] = TickLayout(
+                        tuple(logical[selected].tolist()),
+                        tuple((selected // 2).tolist()),
+                        buffer.index,
+                    )
+        return ids, meta, due
+
+    def _sample_buffer(
+        self,
+        buffer: RolloutBuffer,
+        clock: int,
+        table: DecisionTable,
+        ids: NDArray[np.int64],
+        meta: Tensor,
+        due: Tensor,
+    ) -> None:
+        group = self.cursor
+        ring = self.rings[group]
+        for key, layout in self.tick_layouts.items():
+            buffer_index, anchor = key
+            if buffer_index != buffer.index:
+                continue
+            slots = self.group_slots[group][key]
             rows = table.rows(ids[slots])
             policy = self.policy if anchor is None else self.anchors[anchor]
             with torch.no_grad():
@@ -3646,6 +3698,31 @@ class RolloutEngine:
                     raise ValueError("tick graph did not produce critic values")
                 if not isinstance(policy, TransformerPolicy):
                     table.record_evaluation(rows.device_ids, output, values)
+
+    def _tick_ready(self, buffer: RolloutBuffer, clock: int) -> bool:
+        if self.policy.device.type != "cuda":
+            return True
+        ring = self.rings[self.cursor]
+        for (buffer_index, anchor), layout in self.tick_layouts.items():
+            if buffer_index != buffer.index:
+                continue
+            policy = self.policy if anchor is None else self.anchors[anchor]
+            if not isinstance(policy, TransformerPolicy):
+                continue
+            key = ring, (buffer.index, len(layout.streams))
+            graph_key = key, (1 if clock % 128 == 0 else 2), (4 if clock % 4 == 0 else 2)
+            if graph_key not in policy.tick_graphs:
+                return False
+        return True
+
+    def _submit_buffer(self, workers: ThreadPoolExecutor, buffer: RolloutBuffer) -> list[PendingStep]:
+        pending: list[PendingStep] = []
+        for shard in buffer.shards:
+            active = self._active(shard)
+            if active.any():
+                inputs = self._inputs(shard, 2)
+                pending.append((buffer, shard, workers.submit(_step_shard, shard, inputs, active, buffer.stream)))
+        return pending
 
     def _inputs(self, shard: SimulatorShard, count: int) -> Tensor:
         lanes = torch.from_numpy(self.shard_lanes[id(shard)]).to(self.policy.device)
@@ -3747,9 +3824,9 @@ class RolloutEngine:
                 episode_rows = (table.integers[:, MATCH] == match) & (
                     table.integers[:, EPISODE] == state.episode.number
                 )
-                table.remaining_device.copy_(
-                    torch.where(episode_rows, end_clock - table.integers[:, CLOCK], table.remaining_device)
-                )
+                episode_rows &= table.valid
+                ended_rows = torch.nonzero(episode_rows).flatten()
+                table.remaining_device[ended_rows] = end_clock - table.integers[ended_rows, CLOCK]
                 if truncations[source]:
                     boot = (
                         self.sampler.schedule.rollout_frames // 2 + (end_clock - self.clocks[group] - 1) // 128
@@ -3848,6 +3925,8 @@ class RolloutEngine:
             anchor.clear_caches()
         pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
         resets = timeouts = frames_stepped = 0
+        buffers = self.buffers[group_id]
+        default_stream = torch.cuda.current_stream(self.policy.device) if self.policy.device.type == "cuda" else None
         with ThreadPoolExecutor(max_workers=len(shards)) as workers:
             for clock in range(start, start + count, 2):
                 boundary = clock % 128 == 0
@@ -3858,28 +3937,58 @@ class RolloutEngine:
                     limit=2 if boundary else 4,
                     skip=0 if boundary else 16,
                 ):
+                    if default_stream is not None:
+                        for buffer in buffers:
+                            default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
                     resets += self._reset_waiting(shards, clock)
-                    with sample(self.profile, "gpu_tick", work=float(len(matches)), limit=0):
-                        self._decide(shards, clock, update, table, pending)
-                    futures = [
-                        (shard, workers.submit(_step_shard, shard, self._inputs(shard, 2), self._active(shard)))
-                        for shard in shards
-                        if self._active(shard).any()
-                    ]
-                    for shard, future in futures:
+                    with sample(self.profile, "tick_state", work=float(len(matches)), limit=0):
+                        ids, meta, due = self._stage_tick(clock, update, table, pending)
+                    ready = all(self._tick_ready(buffer, clock) for buffer in buffers)
+                    futures: list[PendingStep] = []
+                    for buffer in buffers:
+                        inference_stream = buffer.stream if ready else default_stream
+                        if ready and buffer.stream is not None:
+                            buffer.stream.wait_stream(cast(torch.cuda.Stream, default_stream))
+                        with (
+                            torch.cuda.stream(inference_stream)
+                            if inference_stream is not None
+                            else contextlib.nullcontext()
+                        ):
+                            with sample(self.profile, "gpu_tick", work=float(len(buffer.lanes)), limit=0):
+                                self._sample_buffer(buffer, clock, table, ids, meta, due)
+                            if ready:
+                                futures.extend(self._submit_buffer(workers, buffer))
+                    if not ready:
+                        # Cold captures restore the shared ring; serialize them before workers issue CUDA calls.
+                        for buffer in buffers:
+                            if buffer.stream is not None:
+                                buffer.stream.wait_stream(cast(torch.cuda.Stream, default_stream))
+                            with (
+                                torch.cuda.stream(buffer.stream)
+                                if buffer.stream is not None
+                                else contextlib.nullcontext()
+                            ):
+                                futures.extend(self._submit_buffer(workers, buffer))
+                    for buffer, shard, future in futures:
                         rows = future.result()
                         if not 1 <= len(rows) <= 2:
                             raise ValueError("simulator must return between one and two frames")
-                        stepped, ended_timeouts = self._accept(shard, rows, clock, update, table, pending)
-                        frames_stepped += stepped
-                        timeouts += ended_timeouts
-                        if len(rows) == 1 and self._active(shard).any():
-                            rest = _step_shard(shard, self._inputs(shard, 1), self._active(shard))
-                            if len(rest) != 1:
-                                raise ValueError("one-frame step returned the wrong duration")
-                            stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, table, pending)
+                        with (
+                            torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext()
+                        ):
+                            stepped, ended_timeouts = self._accept(shard, rows, clock, update, table, pending)
                             frames_stepped += stepped
                             timeouts += ended_timeouts
+                            if len(rows) == 1 and self._active(shard).any():
+                                rest = _step_shard(shard, self._inputs(shard, 1), self._active(shard), buffer.stream)
+                                if len(rest) != 1:
+                                    raise ValueError("one-frame step returned the wrong duration")
+                                stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, table, pending)
+                                frames_stepped += stepped
+                                timeouts += ended_timeouts
+                    if default_stream is not None:
+                        for buffer in buffers:
+                            default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
         end = start + count
         live_slots = torch.nonzero(pending >= 0).flatten()
         pending_ids = pending[live_slots]
@@ -4730,6 +4839,8 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
             not torch.equal(value, saved["model"][name]) for name, value in actor.items()
         ):
             raise ValueError("checkpoint training state and evaluation actor disagree")
+    if trainer.policy.device.type == "cuda":
+        torch.cuda.synchronize(trainer.policy.device)
     trainer.policy.model.load_state_dict(saved["model"], strict=True)
     trainer.actor_optimizer.load_state_dict(saved["actor_optimizer"])
     trainer.critic_optimizer.load_state_dict(saved["critic_optimizer"])
