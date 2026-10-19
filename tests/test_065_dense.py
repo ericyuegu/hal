@@ -291,3 +291,19 @@ def test_two_stream_resets_preserve_both_matches_and_resume(tmp_path: Path) -> N
         run.policy.actor_step(batch.windows, None, clip_epsilon=0.3)
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     assert run.update == 1
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_bootstrap_only_runs_occupied_boundary_roles(timeout: bool) -> None:
+    run = trainer(groups=1, anchor_rate=0, length=67, timeout=timeout, delay=8)
+    rollout = run.engine.collect(0)
+    original = run.policy.evaluate_values
+    calls: list[tuple[int, int]] = []
+
+    def values(batch: Any) -> Any:
+        calls.append(tuple(batch.slots.valid_WK.shape))
+        return original(batch)
+
+    run.policy.evaluate_values = values
+    run.prepare(rollout)
+    assert calls == ([(4, 1), (4, 1)] if timeout else [])

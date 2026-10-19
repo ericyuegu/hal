@@ -4589,13 +4589,16 @@ class Trainer:
         boundary_mask = boundary & ~terminal
         boundary_at = torch.nonzero(boundary_mask).flatten()
         all_values = table.values.clone()
-        bootstrap_rows = torch.arange(size, len(table.values), device=device)[:, None]
         bootstrap_valid = torch.zeros_like(table.valid)
         bootstrap_valid[following[boundary_at]] = True
-        if len(boundary_at):
-            with sample(self.profile, "bootstrap", work=float(len(bootstrap_rows))):
-                bootstrap_batch = replay_batch(self.policy, table, bootstrap_rows, bootstrap_valid[bootstrap_rows])
-                all_values[size:] = self.policy.evaluate_values(bootstrap_batch).flatten()
+        for role in range(ticks // 64 + 1):
+            rows = torch.arange(size + role * players, size + (role + 1) * players, device=device)[:, None]
+            valid = bootstrap_valid[rows]
+            if not bool(valid.any()):
+                continue
+            with sample(self.profile, "bootstrap", work=float(players)):
+                bootstrap_batch = replay_batch(self.policy, table, rows, valid)
+                all_values[rows[:, 0]] = self.policy.evaluate_values(bootstrap_batch).flatten()
         next_values = torch.where(terminal, 0, all_values[following.clamp_min(0)])
         dense_rewards = torch.zeros_like(table.values)
         dense_next = torch.zeros_like(table.values)
