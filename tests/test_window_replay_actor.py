@@ -12,6 +12,7 @@ from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
+from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import replay_windows
@@ -193,7 +194,8 @@ def test_fullgraph_capture_has_no_breaks() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights() -> None:
+@pytest.mark.parametrize("precision", ["fp32", "bf16"])
+def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precision: DecoderPrecision) -> None:
     torch.manual_seed(8)
     base = model()
     policy = (
@@ -202,7 +204,7 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights() -> N
             base.ranges,
             max_opponent_queue=14,
             critic_hidden_dim=16,
-            decoder_precision="fp32",
+            decoder_precision=precision,
         )
         .cuda()
         .eval()
@@ -225,7 +227,12 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights() -> N
     targets = targets_for(output)
     del output
     parameters = policy.actor_parameters()
-    compiled = torch.compile(forward, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
+    compiled = torch.compile(
+        forward,
+        fullgraph=True,
+        dynamic=False,
+        options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+    )
     with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
         GraphedActorStep(compiled, values, targets, parameters)
     graph = GraphedActorStep(compiled, values, targets, parameters)
@@ -233,7 +240,7 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights() -> N
     for step in range(3):
         current = (values[0] + step * 0.05, values[1])
         policy.zero_grad(set_to_none=False)
-        expected = actor_loss(forward(current), targets)
+        expected = actor_loss((compiled if precision == "bf16" else forward)(current), targets)
         expected.loss.backward()
         gradients = tuple(p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in parameters)
         actual = graph.backward(current, targets)
