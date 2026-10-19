@@ -226,7 +226,12 @@ def quantities(
     policy: Any, reference: Any, batch: ProxyBatch, behavior: Tensor, *, window: bool, fp32: bool
 ) -> dict[str, Tensor]:
     forward = (
-        torch.compile(window_forward, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
+        torch.compile(
+            window_forward,
+            fullgraph=True,
+            dynamic=False,
+            options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+        )
         if window
         else old_forward
     )
@@ -422,6 +427,7 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                 "W": len(keys),
                 "K": 64,
                 "tf32": False,
+                "compiler_options": {"triton.cudagraphs": False, "emulate_precision_casts": True},
                 "bias_shift": [-0.1, 0.1],
                 "critic_residual_down_std": 0.005,
                 "advantages": "fixed linspace(-2,2)",
@@ -497,13 +503,13 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                             partial(forward_inputs, model, tuple(measured.features)),
                             fullgraph=True,
                             dynamic=False,
-                            options={"triton.cudagraphs": False},
+                            options={"triton.cudagraphs": False, "emulate_precision_casts": True},
                         )
                         compiled_no_grad = torch.compile(
                             partial(forward_inputs, model, tuple(measured.features), grad=False),
                             fullgraph=True,
                             dynamic=False,
-                            options={"triton.cudagraphs": False},
+                            options={"triton.cudagraphs": False, "emulate_precision_casts": True},
                         )
                         row: dict[str, Any] = {"W": w, "K": k}
                         for name, operation in (
