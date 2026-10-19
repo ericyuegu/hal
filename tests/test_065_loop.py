@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 import importlib.util
+import io
 import json
 import math
 import os
@@ -1032,6 +1033,62 @@ def test_checkpoint_rejects_changed_decode_compilation(tmp_path: Path) -> None:
         exp.restore_checkpoint(resumed, manifest, PROVENANCE)
 
 
+@pytest.mark.parametrize("saved_mode", [False, True])
+def test_resume_allows_execution_mode_change_and_records_the_original_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_mode: bool
+) -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    run.run_update()
+    initial_mode = torch.are_deterministic_algorithms_enabled()
+    try:
+        run.config = dataclasses.replace(run.config, deterministic=saved_mode)
+        torch.use_deterministic_algorithms(saved_mode)
+        monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        digest = exp._configuration_digest(run)
+        manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+        raw = json.loads(manifest.read_text())
+        shard = next(row for row in raw["shards"] if row["role"] == "training")
+        saved = torch.load(tmp_path / shard["name"], weights_only=False)
+        assert saved["execution"] == {"deterministic": saved_mode, "cublas_workspace_config": ":4096:8"}
+        run.config = dataclasses.replace(run.config, deterministic=not saved_mode)
+        torch.use_deterministic_algorithms(not saved_mode)
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG")
+        assert exp._configuration_digest(run) == digest
+        exp.restore_checkpoint(run, manifest, PROVENANCE)
+        assert run.config.deterministic is not saved_mode
+        run.config = dataclasses.replace(run.config, actor_lr=run.config.actor_lr * 2)
+        with pytest.raises(ValueError, match="configuration mismatch"):
+            exp.restore_checkpoint(run, manifest, PROVENANCE)
+    finally:
+        torch.use_deterministic_algorithms(initial_mode)
+
+
+@pytest.mark.parametrize(
+    "execution",
+    [
+        None,
+        {"deterministic": 1, "cublas_workspace_config": None},
+        {"deterministic": False, "cublas_workspace_config": False},
+    ],
+)
+def test_resume_rejects_invalid_execution_metadata_before_model_mutation(tmp_path: Path, execution: object) -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    run.run_update()
+    manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+    raw = json.loads(manifest.read_text())
+    shard = next(row for row in raw["shards"] if row["role"] == "training")
+    state = torch.load(tmp_path / shard["name"], weights_only=False)
+    state["execution"] = execution
+    buffer = io.BytesIO()
+    torch.save(state, buffer)
+    shard["name"], shard["sha256"] = exp._durable_file(tmp_path, buffer.getvalue(), "rank0.pt")
+    manifest.write_text(json.dumps(raw))
+    before = exp._state_hash(run.policy.model.state_dict())
+    with pytest.raises(ValueError, match="execution mode"):
+        exp.restore_checkpoint(run, manifest, PROVENANCE)
+    assert exp._state_hash(run.policy.model.state_dict()) == before
+
+
 def test_native_defaults_reserve_deterministic_algorithms_for_resume_verification(tmp_path: Path) -> None:
     config = exp.NativeCli(
         checkpoint=tmp_path / "proxy.pt",
@@ -1042,12 +1099,8 @@ def test_native_defaults_reserve_deterministic_algorithms_for_resume_verificatio
         updates=1,
     )
     assert not config.training.deterministic
-    with pytest.raises(ValueError, match="exact resume verification requires"):
-        dataclasses.replace(config, verify_resume=True)
-    checked = dataclasses.replace(
-        config, verify_resume=True, training=dataclasses.replace(config.training, deterministic=True)
-    )
-    assert checked.verify_resume and checked.training.deterministic
+    checked = dataclasses.replace(config, verify_resume=True)
+    assert checked.verify_resume and not checked.training.deterministic
 
 
 @pytest.mark.parametrize(
@@ -1097,6 +1150,9 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
     assert result["next_batch_expected_sha256"] == result["next_batch_actual_sha256"]
     assert result["optimizer_expected_sha256"] == result["optimizer_actual_sha256"]
     assert result["maximum_parameter_error"] == 0
+    assert result["deterministic"] is True
+    assert not run.config.deterministic
+    assert not torch.are_deterministic_algorithms_enabled()
     assert run.update == 1
     if warmup == 1:
         assert run.warming

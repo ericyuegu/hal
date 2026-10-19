@@ -140,7 +140,7 @@ def training_command(
         "--evaluation-every",
         "0",
     ]
-    if deterministic or verify:
+    if deterministic:
         command.append("--training.deterministic")
     if verify:
         command.append("--verify-resume")
@@ -330,8 +330,6 @@ def main(args: Args) -> None:
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 172,
         verify=False,
-        # Resume identity includes the execution mode at every boundary.
-        deterministic=True,
     )
     if args.wandb:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()

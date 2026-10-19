@@ -26,3 +26,19 @@ Every GPU command holds `/home/ericgu/data/scratch/o65-tmp/gpu.lock`, uses a
 systemd scope with `MemoryMax=10G`, and sets `OMP_NUM_THREADS=2`. Local jobs
 use only 16 or 64 matches. Logs and pytest basetemps stay under `runs/vectorize`
 and `$TMPDIR`; jobs run serially.
+
+## Execution mode and resume
+
+Training and the pilot's connected segments use default algorithms. Format
+`hal.o65.training.v4` records deterministic mode and the cuBLAS workspace in
+the training shard, separately from configuration identity. Old formats are
+rejected. All other configuration, environment and artifact checks remain.
+The verifier first restores a default-mode checkpoint, runs two deterministic
+next updates from that boundary, then restores the boundary and training mode.
+Graphs from the other execution mode are discarded.
+
+Focused CPU checks pass: 14 tests for mode changes, pilot commands, retention
+and old-format rejection; another 8 cover both resume directions, malformed
+execution metadata and the verifier in warmup, at warmup exit and during PPO.
+Both directions retain strict rejection of a changed actor learning rate.
+The native default-mode checkpoint verification is also scheduled locally.

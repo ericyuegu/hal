@@ -81,7 +81,7 @@ def test_pilot_reserves_determinism_for_resume_segments(tmp_path: Path, verify: 
         deterministic=deterministic,
     )
     assert command[command.index("--evaluation-every") + 1] == "0"
-    assert ("--training.deterministic" in command) == (verify or deterministic)
+    assert ("--training.deterministic" in command) == deterministic
     assert ("--verify-resume" in command) == verify
     evaluation = _MODULE.evaluation_command(
         tmp_path, tmp_path / "model", tmp_path / "protocol", tmp_path / "eval", held_out=False, simulators=("msl",)
@@ -136,8 +136,8 @@ def write_boundary(directory: Path, update: int) -> Path:
     path.write_text(
         json.dumps(
             {
-                "format": "hal.o65.training.v3",
-                "version": 3,
+                "format": "hal.o65.training.v4",
+                "version": 4,
                 "experiment": "065_selfplay_ppo",
                 "update": update,
                 "configuration_sha256": "c" * 64,

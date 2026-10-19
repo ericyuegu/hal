@@ -328,7 +328,7 @@ def test_rollout_keeps_contexts_in_tensors_until_diagnostics_request_them() -> N
     assert store._host is None and not store._views
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_old_training_checkpoint_is_rejected_before_loading(version: int, tmp_path: Path) -> None:
     from test_065_loop import PROVENANCE
     from test_065_loop import exp as loop_exp

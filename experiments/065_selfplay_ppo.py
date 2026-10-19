@@ -3647,15 +3647,16 @@ def _configuration_digest(trainer: Trainer) -> str:
     engine = trainer.engine
     model = trainer.policy.model
     schema = [(name, tuple(value.shape), str(value.dtype)) for name, value in model.state_dict().items()]
+    training = dataclasses.asdict(trainer.config)
+    del training["deterministic"]
     identity = {
-        "train": dataclasses.asdict(trainer.config),
+        "train": training,
         "sampler": dataclasses.asdict(engine.sampler.config),
         "schedule": dataclasses.asdict(engine.sampler.schedule),
         "seed": engine.sampler.rng.seed,
         "schema": schema,
         "execution_device": str(trainer.policy.device),
-        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
-        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "resume_contract": "execution_mode_independent_v1",
         "groups": [[s.match_ids for s in group] for group in engine.groups],
         "native_limits": [
             [s.max_frame if isinstance(s, NativeSimulatorShard) else None for s in group] for group in engine.groups
@@ -3681,6 +3682,8 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
     """
     import io
 
+    if torch.are_deterministic_algorithms_enabled() != trainer.config.deterministic:
+        raise ValueError("checkpoint execution mode differs from the trainer configuration")
     if not trainer.engine._initialized or trainer.updating or trainer.engine.completed_update != trainer.update - 1:
         raise ValueError("checkpoint requires a complete update boundary")
     required = {"git_sha", "checkpoint_sha256", "data_manifest_sha256", "simulator_sha256", "adapter_sha256"}
@@ -3690,6 +3693,10 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
     engine = trainer.engine
     state = {
         "version": CHECKPOINT_VERSION,
+        "execution": {
+            "deterministic": trainer.config.deterministic,
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        },
         "model": trainer.policy.model.state_dict(),
         "actor_optimizer": trainer.actor_optimizer.state_dict(),
         "critic_optimizer": trainer.critic_optimizer.state_dict(),
@@ -3790,6 +3797,17 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     saved = torch.load(paths["training"], map_location="cpu", weights_only=False)
     if saved["version"] != CHECKPOINT_VERSION or saved["update"] != manifest["update"]:
         raise ValueError("checkpoint shard identity mismatch")
+    execution = saved.get("execution")
+    if (
+        not isinstance(execution, dict)
+        or set(execution) != {"deterministic", "cublas_workspace_config"}
+        or type(execution["deterministic"]) is not bool
+        or (
+            execution["cublas_workspace_config"] is not None
+            and not isinstance(execution["cublas_workspace_config"], str)
+        )
+    ):
+        raise ValueError("invalid checkpoint execution mode")
     if "actor" in paths:
         actor = torch.load(paths["actor"], map_location="cpu", weights_only=False)["model"]
         if actor.keys() != saved["model"].keys() or any(
@@ -4020,8 +4038,6 @@ class NativeCli:
             raise ValueError("evaluation interval must be nonnegative")
         if self.max_frame != -1 and (type(self.max_frame) is not int or self.max_frame < 0):
             raise ValueError("max frame must be -1 or nonnegative")
-        if self.verify_resume and not self.training.deterministic:
-            raise ValueError("exact resume verification requires training.deterministic=True")
 
 
 def read_native_sampler(path: Path) -> SamplerConfig:
@@ -4050,7 +4066,7 @@ def read_native_sampler(path: Path) -> SamplerConfig:
 
 def train_native(config: NativeCli) -> None:
     torch.set_num_threads(2)
-    if config.training.deterministic:
+    if config.training.deterministic or config.verify_resume:
         workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
         if workspace not in (None, ":4096:8"):
             raise ValueError("deterministic native runs require CUBLAS_WORKSPACE_CONFIG=:4096:8")
@@ -4206,8 +4222,37 @@ def _batch_hash(batch: PreparedUpdate) -> str:
 
 
 def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str]) -> None:
-    """Run the next native batch and update twice from one published boundary."""
+    """Compare two deterministic next updates, then restore the training boundary."""
+    if trainer.policy.device.type == "cuda" and os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
+        raise ValueError("configure CUBLAS_WORKSPACE_CONFIG=:4096:8 before CUDA resume verification")
     manifest = save_checkpoint(trainer, output / "checkpoints", provenance)
+    config = trainer.config
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    trainer.config = dataclasses.replace(config, deterministic=True)
+    torch.use_deterministic_algorithms(True)
+    _clear_execution_caches(trainer)
+    try:
+        restore_checkpoint(trainer, manifest, provenance)
+        _verify_checkpoint_resume(trainer, output, provenance, manifest)
+    finally:
+        try:
+            restore_checkpoint(trainer, manifest, provenance)
+        finally:
+            trainer.config = config
+            torch.use_deterministic_algorithms(deterministic)
+            _clear_execution_caches(trainer)
+
+
+def _clear_execution_caches(trainer: Trainer) -> None:
+    # A graph retains the algorithms selected during capture.
+    for policy in (trainer.policy, *trainer.engine.anchors.values()):
+        policy.clear_caches()
+        if isinstance(policy, TransformerPolicy):
+            policy.rollout_caches.clear()
+            policy.decoder.graphs.clear()
+
+
+def _verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str], manifest: Path) -> None:
     boundary_optimizer = _state_hash(
         (trainer.actor_optimizer.state_dict(), trainer.critic_optimizer.state_dict(), trainer.scheduler.state_dict())
     )
@@ -4237,6 +4282,7 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
     )
     report = {
         "format": "hal.o65.resume-check.v1",
+        "deterministic": torch.are_deterministic_algorithms_enabled(),
         "manifest": str(manifest),
         "next_batch_expected_sha256": expected_batch,
         "next_batch_actual_sha256": actual_batch,
@@ -4252,7 +4298,6 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
     (output / "resume-check.json").write_text(json.dumps(report, indent=2, sort_keys=True))
     if expected_batch != actual_batch or expected_optimizer != actual_optimizer or maximum != 0:
         raise ValueError(f"exact native resume failed; see {output / 'resume-check.json'}")
-    restore_checkpoint(trainer, manifest, provenance)
 
 
 def qualify_development(config: ProxyCli) -> None:

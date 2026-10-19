@@ -86,7 +86,7 @@ evaluation and startup separately because update throughput excludes them.
    protocol. This establishes each simulator's baseline; it cannot establish
    simulator correctness for distinct policies. The native replay and
    controller parity gates remain required evidence.
-3. Train through 512 updates with deterministic algorithms. Each update collects
+3. Train through 512 updates with default Torch algorithms. Each update collects
    256 frames per active match. Critic warmup requires at least 172 updates,
    at least 11,008 frames in every group, and a fresh-feature explained-variance
    plateau (eight observations, tolerance 0.01). Only critic heads train then.
@@ -114,12 +114,12 @@ evaluation and startup separately because update throughput excludes them.
    restore. Require identical batch hashes, optimizer/scheduler hashes and
    zero model parameter error. Restore the 288 boundary after the check.
    Continue through 512 with the same configuration and run id.
-   Deterministic mode and the cuBLAS workspace setting are part of the strict
-   checkpoint configuration identity. All connected training segments therefore
-   keep deterministic execution. Limiting it to the verification segment needs
-   an explicit change to the resume contract; this protocol does not permit an
-   implicit mode change. The verifier compares two next updates from the same
-   boundary, so its numerical claim concerns those updates, not the earlier run.
+   Checkpoints record deterministic mode and the cuBLAS workspace setting, but
+   these execution settings do not bind resume identity. The verifier restores
+   the boundary before each of its two comparison updates and runs both with
+   deterministic algorithms. It discards graphs captured in the other mode,
+   then restores the boundary and default training mode after the check.
+   Its exact claim concerns those two updates, not the earlier training run.
 6. Evaluate only the final checkpoint once on the held-out grid in both
    simulators, with a 28,924-frame budget. Keep the held-out claim and every
    partial result, including on failure. No held-out retry or selection is
