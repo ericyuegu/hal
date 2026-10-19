@@ -154,3 +154,47 @@ large enough to change importance weights materially. Task 3 stops at its
 specified gate: no stored-value approximation replaces pi_old, and no factor
 or critic-feature cache is added. The FP32 trial remains only as local evidence;
 production code retains BF16 rollouts and the student scoring pass.
+
+
+## Task 4: reference batching reverted
+
+The reference prototype uses vectorized window/decision gathers and CUDA graphs
+for full-window encoding and teacher-forced replay. The student keeps its
+existing pass. On a fixed 64-match rollout, after preparation, three scoring
+repeats give:
+
+| Reference path | Mean seconds | Peak reserved GiB |
+| --- | ---: | ---: |
+| Existing 16 windows / 128 decisions, eager | 1.077 | 2.723 |
+| 32 windows / 256 decisions, graphed | 0.825 | 3.010 |
+| 64 windows / 512 decisions, graphed | 0.809 | 3.703 |
+| 128 windows / 1,024 decisions, graphed | 0.817 | 4.873 |
+| Teacher-forced scoring per tick | 2.621 | 5.004 |
+
+Thus prepare-time scoring at 64/512 wins this local comparison. At 16 matches,
+its 0.209 s beats eager's 0.274 s and per-tick scoring's 2.357 s. These are
+fixed-input scoring measurements, not complete updates; peak reserved memory
+includes resident rollout storage and graphs for that arm.
+
+The complete 64-match comparison runs three PPO updates per arm. At updates
+2 and 3, mean no-grad time falls from 2.344 to 2.099 s, but complete time falls
+only from 12.396 to 12.152 s (1.97%). Peak reserved memory rises from 4.572 to
+5.428 GiB. The candidate adds graph ownership and padding code, so it fails the
+5% stop rule and is reverted. The shipped reference keeps its 16/128 eager path.
+
+The 16-match common-rollout check passes: max/p99 factor log-probability error
+0.059958/0.009307 nats, unused reference value error 2.494663/1.157320 reward
+units, and decision KL error 0.000681/0.000249 nats. Actor gradient cosine is
+0.999987 with relative difference norm 0.005088; critic cosine is 0.999996 with
+relative difference norm 0.003734. That comparison propagates the changed KL
+reward through GAE before checking both gradients. Limits were max/p99
+0.1/0.03 nats for log-probability, 5/2 reward units for unused reference values,
+0.02/0.005 nats for KL, cosine >0.999 and relative norm <0.03. The initial
+64-match benchmark failed only its provisional 0.5-unit unused-value bound;
+the retained 16-match diagnostic uses the same 150-unit scale rationale as
+task 2. No numerical failure caused the revert.
+
+The rejected source and driver remain in local `runs/vectorize/score-treatment.py`
+and `score-qualification.py`; their tests are not kept as maintained tests for a
+path that is no longer present. Committed raw records retain the source checksum,
+environment, timings and parity results.
