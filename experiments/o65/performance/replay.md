@@ -130,12 +130,13 @@ configuration and environment are retained under `runs/window-replay/scoped-grap
 The implementation history starts at `aacdfee0`. The interface was committed
 first in `972742da`; shared-history replay is `e3778bd3`; actor capture is
 `be0c553d`. Later commits add validation and regression coverage, qualify BF16
-compilation, and record the measurement harness and evidence. Use
+compilation, and record the measurement harness and evidence. Final captured qualification
+and six-case timing evidence are committed in `bafb2c60`. Use
 `git log --oneline aacdfee0..HEAD` for the complete small-commit history.
 
 ## Tests run
 
-Final captured-path suite and performance results are pending. All GPU jobs
+Final captured-path suite and performance checks are complete. All GPU jobs
 use the shared `flock` and `systemd-run --user --scope -p MemoryMax=10G`.
 `OMP_NUM_THREADS=2`; compiler runs also use
 `TORCHINDUCTOR_COMPILE_THREADS=1`. Pytest basetemps are under `$TMPDIR`.
@@ -145,9 +146,11 @@ use the shared `flock` and `systemd-run --user --scope -p MemoryMax=10G`.
 | `uv run ruff format --check .` | Pass; 389 files already formatted. |
 | `uv run ruff check .` | Pass. |
 | `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts tests/test_window_replay_model.py tests/test_window_replay_actor.py tests/test_window_replay_proxy.py` | Pass; zero diagnostics. |
-| `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/handoff-final"` | Before the last captured-output accessor: 2,624 passed, 8 skipped, 91 deselected. |
-| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra tests/test_roundtrip.py tests/test_session_cleanup.py -m integration --basetemp "$TMPDIR/roundtrip"` | 8 passed, 6 deselected; no skips. |
-| Focused model/actor/proxy tests with required native integration | Before the last captured-output accessor: 27 passed. |
+| `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/hf"` | Final: 2,624 passed, 8 skipped, 91 deselected, 26 warnings in 344.26 s. |
+| Earlier full suite under `$TMPDIR/handoff-final` | Before the last captured-output accessor: 2,624 passed, 8 skipped, 91 deselected. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra tests/test_roundtrip.py tests/test_session_cleanup.py -m integration --basetemp "$TMPDIR/roundtrip-final"` | Final rerun: 8 passed, 6 deselected; no skips (57.74 s). |
+| Focused model/actor/proxy tests with required native integration | Before the last captured-output accessor: 27 passed. The final suite covers all 26 model/actor cases; the final CLI covers the native proxy gate. |
+| Three stream tests rerun under `--basetemp "$TMPDIR/sf"` | 3 passed in 0.33 s; original failures were AF_UNIX path length. |
 | `HAL_REQUIRE_INTEGRATION=1 uv run python tests/test_window_replay_proxy.py --output runs/window-replay/scoped-graphs --performance` | Pass on final implementation: all 10 precision quantities and all 6 timing cases. |
 
 The full suite uses `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
@@ -166,7 +169,9 @@ Failed and interrupted attempts, all retained under `runs/window-replay/`:
 - The final captured-output suite initially had 3 unrelated stream-test
   failures, 2,621 passes, 8 skips and 91 deselections. Its longer basetemp
   exceeded the AF_UNIX socket path limit. Rerunning under `$TMPDIR/hf` keeps
-  socket paths below that limit; no stream code changed.
+  socket paths below that limit; no stream code changed. The three failing
+  tests pass in isolation under `$TMPDIR/sf` (3 passed in 0.33 s), and the
+  complete short-path suite passes all runnable tests.
 - Initial full suite: 1 failed, 2,612 passed, 8 skipped, 91 deselected.
   Exact-resume verification required the omitted `CUBLAS_WORKSPACE_CONFIG`.
   The corrected full suite passed all runnable tests. An intermediate corrected
@@ -202,7 +207,8 @@ Failed and interrupted attempts, all retained under `runs/window-replay/`:
 
 Review used `git diff o65-selfplay-ppo-plan...HEAD`, the plan's objective and
 offset definitions, and its failure modes. Substantial findings received a
-second review and focused reruns.
+second review and focused reruns. The second pass found no further model or
+objective defects.
 
 - Preserve BF16 casts and keep the trunk eager inside capture. The stronger
   real-target FP32 gate caught whole-trunk compilation errors missed by fixed
