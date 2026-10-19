@@ -122,7 +122,7 @@ class DecisionDecoder:
         # Own the precision boundary even when evaluation has no outer autocast.
         # Disable weight caching: rollout graphs must read updated actor weights.
         with torch.autocast(hidden.device.type, dtype=torch.bfloat16, enabled=bf16, cache_enabled=False):
-            hidden = hidden.to(dtype)
+            hidden = hidden.float()
             if history is not None:
                 history = KVMemory(history.kv.to(dtype), history.positions, history.query_position, history.window)
             if self.compiled and hidden.is_cuda and sampled_actions is None:

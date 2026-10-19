@@ -619,7 +619,12 @@ class CausalTemporalDecoder(nn.Module):
         action_weight = weight[:, self.trunk_width : self.trunk_width + self.controller_width]
         offset_weight = weight[:, self.trunk_width + self.controller_width :]
         action = F.linear(self.codec.embed_frame(previous) if embedded is None else embedded, action_weight)
-        return action + F.linear(self.offset_embedding(offsets), offset_weight)
+        offset = F.linear(self.offset_embedding(offsets), offset_weight)
+        if self.return_conditioner.ranges is not None:
+            # Keep the self-play residual stream and its norms in FP32 while
+            # attention and linear projections use the decoder's compute dtype.
+            return action.float() + offset.float()
+        return action + offset
 
     def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
         """Compute context-only logits once for all decoded offsets."""

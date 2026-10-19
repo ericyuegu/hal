@@ -382,6 +382,7 @@ def test_decoder_owns_compute_precision_and_keeps_probabilities_and_critic_in_fp
     finally:
         handle.remove()
     assert actual.log_probs.dtype == torch.float32
+    assert actual.decoder_state.dtype == torch.float32
     assert all(probability.dtype == torch.float32 for probability in actual.distributions)
     torch.testing.assert_close(actual.log_probs, expected.log_probs, rtol=0, atol=0)
     (-actual.log_probs.sum()).backward()

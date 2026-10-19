@@ -322,7 +322,7 @@ class ActionSequencePolicy:
         ):
             if precision is not None:
                 dtype = torch.bfloat16 if precision == "bf16" else torch.float32
-                hidden = hidden.to(dtype)
+                hidden = hidden.float()
                 memory = KVMemory(memory.kv.to(dtype), memory.positions, memory.query_position, memory.window)
             indices = self.model.temporal.sample_indices(
                 hidden,
