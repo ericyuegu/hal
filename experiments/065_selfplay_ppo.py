@@ -1323,6 +1323,7 @@ class DenseRollout:
         self.bootstrap.zero_()
         self.active.zero_()
         self.duration.zero_()
+        self.rewards.zero_()
         self.remaining.fill_(-1)
         self.terminal.zero_()
         self.boundary.zero_()

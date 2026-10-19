@@ -365,3 +365,16 @@ def test_restore_rejects_invalid_progress_before_model_mutation(field: str, tmp_
     with pytest.raises(ValueError, match="RNG key|progress"):
         exp.restore_checkpoint(run, manifest, PROVENANCE)
     assert exp._state_hash(run.policy.model.state_dict()) == before
+
+
+def test_reused_rollout_clears_reward_padding_before_metrics() -> None:
+    run = trainer(groups=1, anchor_rate=0, length=13)
+    first = run.engine.collect(0)
+    first.table.rewards.fill_(123)
+    following = run.engine.collect(1)
+    table, ids = following.table, following.ids
+    live = torch.arange(4)[None] < table.duration[ids, None]
+    assert not bool(table.rewards[ids][~live].any())
+    prepared = run.prepare(following)
+    expected = torch.where(live, table.rewards[ids], 0).sum(-1).mean()
+    assert prepared.metrics["return/interval_reward"] == pytest.approx(float(expected))
