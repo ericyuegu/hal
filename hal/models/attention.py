@@ -90,9 +90,9 @@ class Rotary(nn.Module):
         """
         output_dtype = self.inv_freq.dtype if dtype is None else dtype
         key = (length, device, output_dtype)
-        if torch.compiler.is_compiling():
-            # Compute factors inside the graph. A module cache would retain
-            # captured output storage after the next replay overwrites it.
+        if torch.compiler.is_compiling() or (device.type == "cuda" and torch.cuda.is_current_stream_capturing()):
+            # Graphs must own these calculations. Another sequence length can
+            # replace eager cached storage between replays.
             inv_freq = self.inv_freq
             if inv_freq.dtype != torch.float32:
                 inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))

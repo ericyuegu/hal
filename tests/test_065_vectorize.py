@@ -153,6 +153,32 @@ def test_wire_tables_keep_the_addresses_used_by_tick_graphs(device: str) -> None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.no_grad()
+def test_rotary_graph_owns_factors_after_the_eager_cache_changes(dtype: torch.dtype) -> None:
+    from hal.inference.cuda_graph import CapturedCall
+    from hal.models.attention import Rotary
+    from hal.models.attention import apply_rotary_emb
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    rotary = Rotary(32).to(device)
+    inputs = torch.randn(2, 14, 2, 32, dtype=dtype, device=device)
+    old_cos, old_sin = rotary.at(14, device, dtype)
+
+    def rotate() -> Tensor:
+        cosine, sine = rotary.at(14, device, dtype)
+        return apply_rotary_emb(inputs, cosine, sine)
+
+    expected = rotate().clone()
+    captured = CapturedCall(rotate, (inputs,), device=device)
+    rotary.at(37, device, dtype)
+    # Simulate reuse of constants released when the eager cache changes length.
+    old_cos.zero_()
+    old_sin.zero_()
+    torch.testing.assert_close(captured((inputs,)), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_tick_queues_and_resume_through_odd_resets_and_unsorted_streams(tmp_path: Path) -> None:
     from test_065_loop import PROVENANCE
     from test_065_loop import exp as loop_exp

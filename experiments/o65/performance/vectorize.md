@@ -198,3 +198,44 @@ The rejected source and driver remain in local `runs/vectorize/score-treatment.p
 and `score-qualification.py`; their tests are not kept as maintained tests for a
 path that is no longer present. Committed raw records retain the source checksum,
 environment, timings and parity results.
+
+
+## Task 5: static actor graph reverted
+
+The actor prototype pads to 32 windows and 512 selected decisions, masks padding
+from normalization and both losses, and captures forward, joint PPO, direct KL
+and backward together. Optimizer steps stay outside the graph. Its tensor loss
+matches the checked loss and stop-gradient behavior in focused FP32/FP64 tests
+at 1e-6/1e-12 tolerance. Every update still uses the recorded window placement.
+
+The three-update complete-path comparison gives these means at updates 2 and 3:
+
+| Matches | Arm | Actor s | Update s | Peak reserved GiB |
+| ---: | --- | ---: | ---: | ---: |
+| 16 | Eager | 0.505 | 5.520 | 2.170 |
+| 16 | Static graph | 0.734 | 5.724 | 4.484 |
+| 64 | Eager | 1.797 | 12.396 | 4.572 |
+| 64 | Static graph | 1.461 | 12.074 | 6.303 |
+
+The 64-match actor phase improves 18.7%, but the complete update improves only
+2.6%. At 16 matches, padding about 16 real windows to 32 makes the actor slower.
+This candidate adds a second loss path and graph lifecycle code, so it fails
+the 5% stop rule and is reverted. No static actor or duplicate loss is shipped.
+
+The 16-match diagnostic checks all four minibatches at common weights. Across
+those steps, maximum/p99 log-probability errors reach 0.059480/0.015757 nats;
+unused cached value errors reach 1.945038/1.537816 reward units; decision KL
+errors reach 0.000838/0.000443 nats. The largest policy-loss difference is
+0.0010715 and direct-KL-loss difference is 0.00003257. The worst actor-gradient
+cosine is 0.999578 and relative difference norm is 0.030145. Critic gradients
+match exactly. One step exceeds the predeclared 0.03 norm bound; that bound was
+not relaxed. The qualification command reports 1 failure, 4 passes and
+5 deselections. Two of its passes test the tensor loss; two test RoPE ownership.
+The rejected source and diagnostic remain in local `runs/vectorize/`.
+
+Review found an independent graph lifetime defect in `Rotary.at`: a capture
+could read an eager cache whose storage another sequence length later replaces.
+RoPE factors now compute inside explicit CUDA capture, as they already do under
+Torch compilation. The focused FP32/BF16 tests overwrite the old eager factors
+and require unchanged graph outputs. This small correctness fix is retained;
+its graph replay adds no training alternative or loss implementation.
