@@ -1071,9 +1071,13 @@ def test_manifest_metadata_is_validated_by_resume_and_evaluation(tmp_path: Path,
         load_evaluation_checkpoint(manifest, device=torch.device("cpu"))
 
 
-@pytest.mark.parametrize("warmup", [0, 100])
+@pytest.mark.parametrize("warmup", [0, 100, 1])
 def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path, warmup: int) -> None:
     run = trainer(groups=1, development=True, anchor_rate=0, warmup=warmup)
+    if warmup == 1:
+        run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
+        run.engine.sampler.lambda_max = 100
+        run.config = dataclasses.replace(run.config, plateau_patience=2, warmup_match_frames=0)
     run.run_update()
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     result = json.loads((tmp_path / "resume-check.json").read_text())
@@ -1081,6 +1085,10 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
     assert result["optimizer_expected_sha256"] == result["optimizer_actual_sha256"]
     assert result["maximum_parameter_error"] == 0
     assert run.update == 1
+    if warmup == 1:
+        assert run.warming
+        assert result["uninterrupted_metrics"]["train/warming"] == 0
+        assert result["uninterrupted_metrics"]["train/actor_steps"] == 0
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
