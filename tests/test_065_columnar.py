@@ -188,7 +188,7 @@ def test_native_columnar_exact_parity(matches: int, tmp_path: Path) -> None:
     expected = json.loads(FIXTURE.read_text())[str(matches)]
     previous = torch.are_deterministic_algorithms_enabled()
     try:
-        actual = capture(matches, tmp_path, performance=False)
+        actual = capture(matches, tmp_path, performance=False, decoder_precision="fp32")
     finally:
         torch.use_deterministic_algorithms(previous)
     # Normalize tuples as JSON does for the persisted fixture.
