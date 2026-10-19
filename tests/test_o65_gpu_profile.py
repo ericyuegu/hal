@@ -1,0 +1,197 @@
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+import torch
+from test_065_loop import exp as gpu_profile
+
+
+def test_trace_counts_device_work_once_and_merges_overlap(tmp_path: Path) -> None:
+    path = tmp_path / "trace.json"
+    path.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "user_annotation", "name": "o65_profile/test", "ts": 0, "dur": 200},
+                    {"cat": "kernel", "name": "gemm", "ts": 10, "dur": 10},
+                    {"cat": "kernel", "name": "gemm", "ts": 15, "dur": 10},
+                    {
+                        "cat": "gpu_memcpy",
+                        "name": "Memcpy HtoD (Pinned -> Device)",
+                        "ts": 30,
+                        "dur": 5,
+                        "args": {"bytes": 64},
+                    },
+                    {
+                        "cat": "gpu_memcpy",
+                        "name": "Memcpy DtoH (Device -> Pinned)",
+                        "ts": 30,
+                        "dur": 3,
+                        "args": {"bytes": 4},
+                    },
+                    {"cat": "cpu_op", "name": "aten::matmul", "ts": 0, "dur": 100},
+                    {"cat": "cuda_runtime", "name": "cudaLaunchKernel", "ts": 2, "dur": 1},
+                    {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "ts": 3, "dur": 1},
+                    {"cat": "cuda_runtime", "name": "cudaEventSynchronize", "ts": 4, "dur": 1},
+                ]
+            }
+        )
+    )
+    result = gpu_profile.summarize_trace(path)
+    assert result["device_busy_seconds"] == pytest.approx(20e-6)
+    assert result["kernel_seconds"] == pytest.approx(20e-6)
+    assert result["kernel_count"] == 2
+    assert result["runtime_launch_count"] == 2
+    assert result["top15_kernel_share"] == 1
+    assert result["copies"] == {"h2d_count": 1, "h2d_bytes": 64, "d2h_count": 1, "d2h_bytes": 4}
+    assert result["synchronizations"] == {"cudaEventSynchronize": 1}
+
+
+def test_copy_without_bytes_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "trace.json"
+    path.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "user_annotation", "name": "o65_profile/test", "ts": 0, "dur": 200},
+                    {"cat": "gpu_memcpy", "name": "Memcpy HtoD", "ts": 0},
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="byte count"):
+        gpu_profile.summarize_trace(path)
+
+
+def test_sample_counts_calls_and_work_without_cuda(tmp_path: Path) -> None:
+    recorder = gpu_profile.UpdateProfile(tmp_path, torch.device("cpu"), traces=False)
+    for count in (4, 2, 1):
+        with recorder.sample("chunk", work=count):
+            pass
+    assert recorder.calls == {"outside/chunk": 3}
+    assert recorder.work == {"outside/chunk": 7}
+    assert recorder.samples == []
+    recorder.write({"test": 1})
+    assert json.loads((tmp_path / "timed.json").read_text())["calls"] == {"outside/chunk": 3}
+
+
+@pytest.mark.parametrize("count", [0, -1, True, 1.5])
+def test_invalid_warm_count_is_rejected(count: int) -> None:
+    with pytest.raises(ValueError, match="warm update"):
+        gpu_profile.ProfileConfig(count)
+
+
+def test_profile_cli_uses_pilot_layout_and_rejects_training_side_effects(tmp_path: Path) -> None:
+    import dataclasses
+
+    from test_065_loop import exp
+
+    cli = exp.GpuProfileCli(tmp_path / "final.pt", tmp_path / "data", tmp_path / "output", cpus=(0,))
+    native = cli.native()
+    assert native.groups == 4 and native.matches_per_shard == 64
+    assert native.training.critic_warmup_updates == 0 and native.compiled
+    assert native.training.windows_per_step == 32 and native.updates == 6
+    for change in ({"wandb_project": "oops"}, {"evaluation_every": 1}, {"resume": tmp_path}):
+        with pytest.raises(ValueError, match="profiling requires"):
+            dataclasses.replace(native, **change)
+
+
+def test_measurement_syncs_are_excluded_by_annotations(tmp_path: Path) -> None:
+    path = tmp_path / "syncs.json"
+    path.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "user_annotation", "name": "o65_profile/test", "ts": 10, "dur": 100},
+                    {"cat": "kernel", "name": "gemm", "ts": 40, "dur": 1},
+                    {"cat": "user_annotation", "name": "o65_profile_sync", "ts": 20, "dur": 10},
+                    {"cat": "cuda_runtime", "name": "cudaDeviceSynchronize", "ts": 21, "dur": 5},
+                    {"cat": "cuda_runtime", "name": "cudaStreamSynchronize", "ts": 50, "dur": 5},
+                    {"cat": "cuda_runtime", "name": "cudaDeviceSynchronize", "ts": 120, "dur": 5},
+                ]
+            }
+        )
+    )
+    result = gpu_profile.summarize_trace(path)
+    assert result["synchronizations"] == {"cudaStreamSynchronize": 1}
+    assert result["measurement_synchronizations_excluded"] == {"cudaDeviceSynchronize": 2}
+
+
+def test_estimates_scale_by_work_and_recompute_top_kernels(tmp_path: Path) -> None:
+    timed = gpu_profile.UpdateProfile(tmp_path, torch.device("cpu"), traces=False)
+    traced = gpu_profile.UpdateProfile(tmp_path, torch.device("cpu"), traces=True)
+    timed.calls["student/trunk_chunk"] = 3
+    timed.work["student/trunk_chunk"] = 40
+    timed.work["student/trunk_tokens"] = 40
+    timed.phases["student"] = {"wall_seconds": 2}
+    traced.samples = [
+        {
+            "site": "student/trunk_chunk",
+            "work": 10,
+            "device_busy_seconds": 0.1,
+            "kernel_seconds_by_name": {"gemm": 0.1},
+            "kernel_count": 2,
+            "runtime_launch_count": 2,
+            "copies": {"h2d_count": 1, "h2d_bytes": 4},
+            "synchronizations": {"cudaStreamSynchronize": 1},
+        }
+    ]
+    estimate = gpu_profile.estimate_profile(timed, traced)
+    site = estimate["sites"]["student/trunk_chunk"]
+    assert site["scale"] == 4 and site["kernel_count"] == 6
+    assert site["device_busy_seconds"] == pytest.approx(0.4)
+    assert site["synchronizations_excluding_injected"] == {"cudaStreamSynchronize": 3}
+    assert site["copies"] == {"h2d_count": 3, "h2d_bytes": 16}
+    assert estimate["flops"]["student"] == 2 * 9_400_000 * 40
+
+
+def test_profile_disabled_preserves_next_batch_and_update(tmp_path: Path) -> None:
+    import contextlib
+
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    class HostOnlyProfile(gpu_profile.UpdateProfile):
+        @contextlib.contextmanager
+        def phase(self, name: str) -> Iterator[None]:
+            previous = self.phase_name
+            self.phase_name = name
+            try:
+                yield
+            finally:
+                self.phase_name = previous
+
+    control = trainer(groups=1, anchor_rate=0)
+    treatment = trainer(groups=1, anchor_rate=0)
+    recorder = HostOnlyProfile(tmp_path, torch.device("cpu"), traces=False)
+    treatment.profile = treatment.engine.profile = recorder
+    for _ in range(2):
+        control_batch, _ = control.run_update()
+        treatment_batch, _ = treatment.run_update()
+        assert exp._batch_hash(control_batch) == exp._batch_hash(treatment_batch)
+        assert exp._state_hash(control.policy.model.state_dict()) == exp._state_hash(
+            treatment.policy.model.state_dict()
+        )
+        assert exp._state_hash(control.actor_optimizer.state_dict()) == exp._state_hash(
+            treatment.actor_optimizer.state_dict()
+        )
+        assert exp._state_hash(control.critic_optimizer.state_dict()) == exp._state_hash(
+            treatment.critic_optimizer.state_dict()
+        )
+    assert recorder.calls["actor/step"] > 0
+
+
+def test_missing_device_activity_is_an_error(tmp_path: Path) -> None:
+    path = tmp_path / "empty.json"
+    path.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "user_annotation", "name": "o65_profile/test", "ts": 0, "dur": 1},
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="no CUDA kernels"):
+        gpu_profile.summarize_trace(path)

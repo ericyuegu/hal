@@ -15,6 +15,7 @@ import os
 import random
 import struct
 import subprocess
+import threading
 import time
 import zlib
 from collections import defaultdict
@@ -25,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 from typing import Protocol
+from typing import Self
+from typing import TypedDict
 from typing import cast
 from typing import overload
 
@@ -68,6 +71,333 @@ FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
 MAX_REPLAN = 4
 GAMMA = 0.99855
 GAE_LAMBDA = 0.99
+
+
+class TraceEvent(TypedDict, total=False):
+    cat: str
+    name: str
+    ts: float
+    dur: float
+    args: dict[str, str | int | float]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProfileConfig:
+    warm_updates: int = 4
+
+    def __post_init__(self) -> None:
+        if type(self.warm_updates) is not int or self.warm_updates < 1:
+            raise ValueError("profiling requires at least one warm update")
+
+
+def interval_union(intervals: list[tuple[float, float]]) -> float:
+    end = total = 0.0
+    for start, stop in sorted(intervals):
+        total += max(0.0, stop - max(start, end))
+        end = max(end, stop)
+    return total
+
+
+def summarize_trace(path: Path) -> dict[str, object]:
+    """Count device activities, not CPU operators that launch those activities."""
+    events = cast(list[TraceEvent], json.loads(path.read_text())["traceEvents"])
+    roots = [
+        (event["ts"], event["ts"] + event["dur"])
+        for event in events
+        if event.get("cat") == "user_annotation" and event.get("name", "").startswith("o65_profile/")
+    ]
+    markers = [
+        (event["ts"], event["ts"] + event["dur"])
+        for event in events
+        if event.get("cat") == "user_annotation" and event.get("name") == "o65_profile_sync"
+    ]
+    if len(roots) != 1:
+        raise ValueError("trace requires exactly one O65 profile annotation")
+    root_start, root_stop = roots[0]
+    kernels: dict[str, float] = defaultdict(float)
+    copies: dict[str, int] = defaultdict(int)
+    syncs: dict[str, int] = defaultdict(int)
+    measurement_syncs: dict[str, int] = defaultdict(int)
+    intervals: list[tuple[float, float]] = []
+    kernel_count = launches = 0
+    for event in events:
+        category = event.get("cat", "")
+        name = event.get("name", "")
+        duration = event.get("dur", 0.0)
+        timestamp = event.get("ts", -1.0)
+        in_root = root_start <= timestamp <= root_stop
+        if category == "cuda_runtime" and "Synchronize" in name:
+            measurement = not in_root or any(start <= timestamp <= stop for start, stop in markers)
+            if measurement:
+                measurement_syncs[name] += 1
+            else:
+                syncs[name] += 1
+        if not in_root:
+            continue
+        if category in ("kernel", "gpu_memcpy", "gpu_memset"):
+            start = event["ts"]
+            intervals.append((start, start + duration))
+        if category == "kernel":
+            kernels[name] += duration
+            kernel_count += 1
+        if category == "cuda_runtime" and ("LaunchKernel" in name or "GraphLaunch" in name):
+            launches += 1
+        if category == "gpu_memcpy":
+            if "HtoD" in name:
+                direction = "h2d"
+            elif "DtoH" in name:
+                direction = "d2h"
+            else:
+                direction = "other"
+            args = event.get("args", {})
+            if "bytes" not in args:
+                raise ValueError(f"copy event has no byte count: {name}")
+            copies[f"{direction}_count"] += 1
+            copies[f"{direction}_bytes"] += int(args["bytes"])
+    if not kernel_count:
+        raise ValueError("profile captured no CUDA kernels; check CUPTI availability")
+    total = sum(kernels.values())
+    top = sorted(kernels.items(), key=lambda item: item[1], reverse=True)[:15]
+    return {
+        "device_busy_seconds": interval_union(intervals) / 1e6,
+        "kernel_seconds": total / 1e6,
+        "kernel_count": kernel_count,
+        "runtime_launch_count": launches,
+        "kernel_seconds_by_name": {name: value / 1e6 for name, value in kernels.items()},
+        "top15_kernel_share": sum(value for _, value in top) / total if total else 0.0,
+        "top15_kernels": [{"name": name, "seconds": value / 1e6} for name, value in top],
+        "copies": dict(copies),
+        "synchronizations": dict(syncs),
+        "measurement_synchronizations_excluded": dict(measurement_syncs),
+    }
+
+
+class UpdateProfile:
+    """Measure one update, then trace bounded samples in a separate update.
+
+    CUDA event spans contain idle gaps. Only trace interval unions measure busy
+    time. Extrapolated samples remain estimates and are stored separately.
+    """
+
+    def __init__(self, output: Path, device: torch.device, *, traces: bool) -> None:
+        self.output = output
+        self.device = device
+        self.traces = traces
+        self.phase_name = "outside"
+        self.active_trace = False
+        self.phases: dict[str, dict[str, float]] = {}
+        self.calls: dict[str, int] = defaultdict(int)
+        self.work: dict[str, float] = defaultdict(float)
+        self.samples: list[dict[str, object]] = []
+        self.host_seconds: dict[str, float] = defaultdict(float)
+
+    @contextlib.contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        previous = self.phase_name
+        self.phase_name = name
+        torch.cuda.synchronize(self.device)
+        start_event = torch.cuda.Event(enable_timing=True)
+        stop_event = torch.cuda.Event(enable_timing=True)
+        started = time.perf_counter()
+        started_unix = time.time()
+        start_event.record()
+        try:
+            yield
+        finally:
+            stop_event.record()
+            stop_event.synchronize()
+            self.phases[name] = {
+                "started_unix": started_unix,
+                "finished_unix": time.time(),
+                "wall_seconds": time.perf_counter() - started,
+                "cuda_span_seconds": start_event.elapsed_time(stop_event) / 1000,
+            }
+            self.phase_name = previous
+
+    @contextlib.contextmanager
+    def sample(self, name: str, *, work: float = 0.0, limit: int = 1, skip: int = 0) -> Iterator[None]:
+        started = time.perf_counter()
+        key = f"{self.phase_name}/{name}"
+        try:
+            with self._sample(name, work=work, limit=limit, skip=skip):
+                yield
+        finally:
+            self.host_seconds[key] += time.perf_counter() - started
+
+    @contextlib.contextmanager
+    def _sample(self, name: str, *, work: float, limit: int, skip: int) -> Iterator[None]:
+        key = f"{self.phase_name}/{name}"
+        index = self.calls[key]
+        self.calls[key] += 1
+        self.work[key] += work
+        if not self.traces or self.active_trace or not skip <= index < skip + limit:
+            yield
+            return
+        self.active_trace = True
+        try:
+            torch.cuda.synchronize(self.device)
+            started = time.perf_counter()
+            with (
+                torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                ) as profiler,
+                torch.profiler.record_function(f"o65_profile/{key}"),
+            ):
+                with torch.profiler.record_function("o65_profile_sync"):
+                    torch.cuda.synchronize(self.device)
+                yield
+                with torch.profiler.record_function("o65_profile_sync"):
+                    torch.cuda.synchronize(self.device)
+            path = self.output / f"{key.replace('/', '-')}-{index}.json"
+            profiler.export_chrome_trace(str(path))
+            self.samples.append(
+                {
+                    "site": key,
+                    "index": index,
+                    "work": work,
+                    "instrumented_seconds_including_export": time.perf_counter() - started,
+                    "trace": path.name,
+                    **summarize_trace(path),
+                }
+            )
+        finally:
+            self.active_trace = False
+
+    def write(self, metrics: dict[str, float]) -> None:
+        name = "traced" if self.traces else "timed"
+        payload = {
+            "format": "hal.o65.gpu-profile.v1",
+            "mode": name,
+            "phases": self.phases,
+            "calls": dict(self.calls),
+            "work": dict(self.work),
+            "site_host_seconds": dict(self.host_seconds),
+            "samples": self.samples,
+            "metrics": metrics,
+        }
+        (self.output / f"{name}.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def estimate_profile(timed: UpdateProfile, traced: UpdateProfile) -> dict[str, object]:
+    """Scale bounded samples by timed work; preserve the coverage limitation."""
+    estimates: dict[str, dict[str, object]] = {}
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in traced.samples:
+        grouped[cast(str, row["site"])].append(row)
+    for site, rows in grouped.items():
+        sample_work = sum(cast(float, row["work"]) for row in rows)
+        if sample_work <= 0 or site not in timed.work:
+            raise ValueError(f"missing timed work for trace site {site}")
+        scale = timed.work[site] / sample_work
+        call_scale = timed.calls[site] / len(rows)
+        kernels: dict[str, float] = defaultdict(float)
+        copies: dict[str, float] = defaultdict(float)
+        syncs: dict[str, float] = defaultdict(float)
+        for row in rows:
+            for name, duration in cast(dict[str, float], row["kernel_seconds_by_name"]).items():
+                kernels[name] += duration * scale
+            for name, count in cast(dict[str, int], row["copies"]).items():
+                copies[name] += count * (call_scale if name.endswith("_count") else scale)
+            for name, count in cast(dict[str, int], row["synchronizations"]).items():
+                syncs[name] += count * call_scale
+        total = sum(kernels.values())
+        top = sorted(kernels.items(), key=lambda item: item[1], reverse=True)[:15]
+        estimates[site] = {
+            "scale": scale,
+            "call_scale": call_scale,
+            "timed_calls": timed.calls[site],
+            "sampled_calls": len(rows),
+            "device_busy_seconds": sum(cast(float, row["device_busy_seconds"]) for row in rows) * scale,
+            "kernel_seconds": total,
+            "kernel_count": sum(cast(int, row["kernel_count"]) for row in rows) * call_scale,
+            "runtime_launch_count": sum(cast(int, row["runtime_launch_count"]) for row in rows) * call_scale,
+            "copies": dict(copies),
+            "synchronizations_excluding_injected": dict(syncs),
+            "top15_kernel_share": sum(value for _, value in top) / total if total else 0,
+            "top15_kernels": [{"name": name, "seconds": value} for name, value in top],
+        }
+    flops: dict[str, float] = {}
+    for name in timed.phases:
+        forward = 2 * (
+            9_400_000 * timed.work.get(f"{name}/trunk_tokens", 0)
+            + 6_700_000 * timed.work.get(f"{name}/decoder_tokens", 0)
+        )
+        flops[name] = forward * (3 if name == "actor" else 1)
+    return {
+        "format": "hal.o65.gpu-profile-estimates.v1",
+        "sites": estimates,
+        "coverage": "sampled sites only; gaps between chunks and rollout setup are untraced",
+        "flops": flops,
+        "tflops_per_wall_second": {
+            name: value / timed.phases[name]["wall_seconds"] / 1e12 for name, value in flops.items()
+        },
+    }
+
+
+@contextlib.contextmanager
+def phase(profile: UpdateProfile | None, name: str) -> Iterator[None]:
+    with profile.phase(name) if profile is not None else contextlib.nullcontext():
+        yield
+
+
+@contextlib.contextmanager
+def sample(
+    profile: UpdateProfile | None,
+    name: str,
+    *,
+    work: float = 0.0,
+    limit: int = 1,
+    skip: int = 0,
+) -> Iterator[None]:
+    with profile.sample(name, work=work, limit=limit, skip=skip) if profile is not None else contextlib.nullcontext():
+        yield
+
+
+class HostSampler:
+    """Sample per-core and per-thread CPU ticks and GPU use during timing only."""
+
+    def __init__(self, output: Path) -> None:
+        self.output = output
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="o65-host-sampler")
+        self.failure: OSError | subprocess.SubprocessError | None = None
+
+    def _run(self) -> None:
+        try:
+            with (self.output / "host.jsonl").open("x") as log:
+                while not self.stop.is_set():
+                    threads: dict[str, list[int]] = {}
+                    for path in Path(f"/proc/{os.getpid()}/task").glob("*/stat"):
+                        try:
+                            fields = path.read_text().rsplit(")", 1)[1].split()
+                        except FileNotFoundError:
+                            continue
+                        threads[path.parent.name] = [int(fields[11]), int(fields[12])]
+                    cores = [line for line in Path("/proc/stat").read_text().splitlines() if line.startswith("cpu")]
+                    gpu = subprocess.check_output(
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=utilization.gpu,utilization.memory,power.draw,memory.used",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        text=True,
+                        timeout=10,
+                    ).strip()
+                    log.write(json.dumps({"time": time.time(), "threads": threads, "cores": cores, "gpu": gpu}) + "\n")
+                    log.flush()
+                    self.stop.wait(0.5)
+        except (OSError, subprocess.SubprocessError) as error:
+            self.failure = error
+
+    def __enter__(self) -> Self:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop.set()
+        self.thread.join()
+        if self.failure is not None:
+            raise RuntimeError("host sampling failed") from self.failure
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1229,6 +1559,7 @@ class TransformerPolicy:
         *,
         compiled: bool = False,
     ) -> None:
+        self.profile: UpdateProfile | None = None
         self.model = model.eval()
         self.compiled = compiled
         self.schedule = schedule
@@ -1708,6 +2039,11 @@ class TransformerPolicy:
         for (_, seen), indices in groups.items():
             batch = states.take(indices)
             self.sample_batch_counts[len(batch)] += 1
+            if self.profile is not None:
+                self.profile.work["rollout/trunk_tokens"] += len(batch) * (int(batch.meta[0, LENGTH]) - seen)
+                self.profile.work["rollout/decoder_tokens"] += len(batch) * (
+                    self.decoder.max_delay + (4 if meta[indices[0], CLOCK] % 4 == 0 else 2)
+                )
             hidden, last_observed, cache = self._advance_rollout_cache(batch, seen)
             uniforms = self._action_uniforms(batch, rng)
             count = 4 if meta[indices[0], CLOCK] % 4 == 0 else 2
@@ -1861,6 +2197,9 @@ class TransformerPolicy:
                     device=self.device,
                 )
                 self.tick_graphs[graph_key] = captured
+            if self.profile is not None:
+                self.profile.work["rollout/trunk_tokens"] += len(streams) * (appended + (128 if restart else 0))
+                self.profile.work["rollout/decoder_tokens"] += len(streams) * (self.tick_decoder.max_delay + count)
             output = captured(tuple(padded_inputs))
         due = clock % meta[:, REPLAN] == 0
         ring.length[meta[due, LANE], meta[due, SIDE]] += meta[due, REPLAN]
@@ -1960,40 +2299,48 @@ class TransformerPolicy:
         encoded: dict[tuple[int, int, int, int], tuple[Tensor, Tensor, Tensor]] = {}
         for start in range(0, len(window_states), 16):
             batch = window_states[start : start + 16]
-            features, observed = self._contexts(batch, length=256)
-            hidden = self.model(features, torch.zeros(len(batch), dtype=torch.long, device=self.device), observed)
-            keys, values = self.model.temporal.history_attention.project_memory(hidden)
-            memory = torch.stack((keys, values))
-            for row, data in enumerate(batch.meta):
-                encoded[_window_key(data)] = (hidden[row], observed[row], memory[:, row])
+            if self.profile is not None:
+                self.profile.work[f"{self.profile.phase_name}/trunk_tokens"] += len(batch) * 256
+            with sample(self.profile, "trunk_chunk", work=float(len(batch) * 256)):
+                features, observed = self._contexts(batch, length=256)
+                hidden = self.model(features, torch.zeros(len(batch), dtype=torch.long, device=self.device), observed)
+                keys, values = self.model.temporal.history_attention.project_memory(hidden)
+                memory = torch.stack((keys, values))
+                for row, data in enumerate(batch.meta):
+                    encoded[_window_key(data)] = (hidden[row], observed[row], memory[:, row])
         outputs: list[PolicyEvaluation] = []
         for start in range(0, len(states), 128):
             batch = states[start : start + 128]
-            keys = row_windows[start : start + len(batch)]
-            positions_host = batch.meta[:, LENGTH] - 1
-            hidden = torch.stack(
-                [encoded[key][0][int(position)] for key, position in zip(keys, positions_host, strict=True)]
-            )[:, None]
-            observed = torch.stack(
-                [encoded[key][1][int(position)] for key, position in zip(keys, positions_host, strict=True)]
-            )
-            memory = KVMemory(
-                torch.stack([encoded[key][2] for key in keys], dim=1),
-                torch.arange(256, device=self.device)[None].expand(len(batch), -1),
-                torch.from_numpy(positions_host.copy()).to(self.device),
-                256,
-            )
-            outputs.append(
-                self._decode(
-                    batch,
-                    hidden,
-                    observed,
-                    torch.full((4, 4, len(batch)), 0.5, device=self.device),
-                    actions[start : start + len(batch)],
-                    history=memory,
-                    count=4,
+            if self.profile is not None:
+                self.profile.work[f"{self.profile.phase_name}/decoder_tokens"] += len(batch) * (
+                    self.decoder.max_delay + 4
                 )
-            )
+            with sample(self.profile, "decoder_chunk", work=float(len(batch))):
+                keys = row_windows[start : start + len(batch)]
+                positions_host = batch.meta[:, LENGTH] - 1
+                hidden = torch.stack(
+                    [encoded[key][0][int(position)] for key, position in zip(keys, positions_host, strict=True)]
+                )[:, None]
+                observed = torch.stack(
+                    [encoded[key][1][int(position)] for key, position in zip(keys, positions_host, strict=True)]
+                )
+                memory = KVMemory(
+                    torch.stack([encoded[key][2] for key in keys], dim=1),
+                    torch.arange(256, device=self.device)[None].expand(len(batch), -1),
+                    torch.from_numpy(positions_host.copy()).to(self.device),
+                    256,
+                )
+                outputs.append(
+                    self._decode(
+                        batch,
+                        hidden,
+                        observed,
+                        torch.full((4, 4, len(batch)), 0.5, device=self.device),
+                        actions[start : start + len(batch)],
+                        history=memory,
+                        count=4,
+                    )
+                )
         return _concatenate_evaluations(outputs)
 
     def values(self, features: CriticFeatures) -> Tensor:
@@ -2716,6 +3063,7 @@ class RolloutEngine:
                 id(parameter) in student_parameters for parameter in anchor.model.parameters()
             ):
                 raise ValueError("anchors must be frozen and have independent parameters")
+        self.profile: UpdateProfile | None = None
         self.groups = groups
         self.policy = policy
         self.sampler = sampler
@@ -3241,33 +3589,47 @@ class RolloutEngine:
         halves = (shards,) if tick else (shards[:split], shards[split:])
         with ThreadPoolExecutor(max_workers=len(shards)) as workers:
             for clock in range(start, start + count, 2):
-                resets += self._reset_waiting(shards, clock)
-                futures = []
-                for half in halves:
-                    self._decide(half, clock, update, table, records, pending)
-                    for shard in half:
-                        active = self._active(shard)
-                        if active.any():
-                            inputs = self._inputs(shard, 2)
-                            futures.append((shard, workers.submit(_step_shard, shard, inputs, active)))
-                for shard, future in futures:
-                    rows = future.result()
-                    if not 1 <= len(rows) <= 2:
-                        raise ValueError("simulator must return between one and two frames")
-                    stepped, ended_timeouts = self._accept(shard, rows, clock, update, table, pending)
-                    frames_stepped += stepped
-                    timeouts += ended_timeouts
-                    if len(rows) == 1:
-                        active = self._active(shard)
-                        if not active.any():
-                            continue
-                        inputs = self._inputs(shard, 1)
-                        rest = _step_shard(shard, inputs, active)
-                        if len(rest) != 1:
-                            raise ValueError("one-frame step returned the wrong duration")
-                        stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, table, pending)
+                boundary = clock % 128 == 0
+                with sample(
+                    self.profile,
+                    "boundary_tick" if boundary else "tick",
+                    work=float(len(matches)),
+                    limit=2 if boundary else 4,
+                    skip=0 if boundary else 16,
+                ):
+                    resets += self._reset_waiting(shards, clock)
+                    futures = []
+                    for half in halves:
+                        with sample(
+                            self.profile,
+                            "gpu_tick",
+                            work=float(sum(len(shard.match_ids) for shard in half)),
+                            limit=0,
+                        ):
+                            self._decide(half, clock, update, table, records, pending)
+                        for shard in half:
+                            active = self._active(shard)
+                            if active.any():
+                                inputs = self._inputs(shard, 2)
+                                futures.append((shard, workers.submit(_step_shard, shard, inputs, active)))
+                    for shard, future in futures:
+                        rows = future.result()
+                        if not 1 <= len(rows) <= 2:
+                            raise ValueError("simulator must return between one and two frames")
+                        stepped, ended_timeouts = self._accept(shard, rows, clock, update, table, pending)
                         frames_stepped += stepped
                         timeouts += ended_timeouts
+                        if len(rows) == 1:
+                            active = self._active(shard)
+                            if not active.any():
+                                continue
+                            inputs = self._inputs(shard, 1)
+                            rest = _step_shard(shard, inputs, active)
+                            if len(rest) != 1:
+                                raise ValueError("one-frame step returned the wrong duration")
+                            stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, table, pending)
+                            frames_stepped += stepped
+                            timeouts += ended_timeouts
         end = start + count
         resets += self._reset_waiting(shards, end)
         for lane, side in zip(*np.nonzero(pending >= 0), strict=True):
@@ -3500,6 +3862,7 @@ class Trainer:
             raise ValueError("trainer determinism differs from the configured execution mode")
         if engine.sampler.rng.seed != config.seed:
             raise ValueError("trainer and counter RNG seeds must agree")
+        self.profile: UpdateProfile | None = None
         self.engine = engine
         self.policy = engine.policy
         self.reference = engine.anchors[0]
@@ -3534,8 +3897,10 @@ class Trainer:
             if isinstance(states, DecisionRows)
             else torch.stack([r.actions for r in records]).to(device)
         )
-        old = self.policy.evaluate(states, actions)
-        reference = None if self.warming else self.reference.evaluate(states, actions)
+        with phase(self.profile, "student"):
+            old = self.policy.evaluate(states, actions)
+        with phase(self.profile, "reference"):
+            reference = None if self.warming else self.reference.evaluate(states, actions)
         kl = torch.zeros_like(old.log_probs) if reference is None else factor_kl(old, reference)
         frame_rewards = (
             states.tensor(states.table.rewards)
@@ -3732,23 +4097,29 @@ class Trainer:
         cfg = self.config
         metrics = dict(batch.metrics)
         started = time.perf_counter()
-        features = batch.old.features.detached()
-        count = len(batch.values)
-        states = batch.rollout.records.states if isinstance(batch.rollout.records, DecisionRecords) else None
-        selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
-        for _ in range(cfg.critic_epochs):
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            loss = critic_loss(
-                self.policy.values(features),
-                batch.targets,
-                selected,
-                value_scale=cfg.value_scale,
-            )
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True)
-            self.critic_optimizer.step()
-        metrics["critic/loss"] = float(loss.detach())
-        metrics["systems/critic_seconds"] = time.perf_counter() - started
+        with (
+            phase(self.profile, "critic"),
+            sample(self.profile, "fit", work=float(len(batch.values))),
+        ):
+            features = batch.old.features.detached()
+            count = len(batch.values)
+            states = batch.rollout.records.states if isinstance(batch.rollout.records, DecisionRecords) else None
+            selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
+            for _ in range(cfg.critic_epochs):
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                loss = critic_loss(
+                    self.policy.values(features),
+                    batch.targets,
+                    selected,
+                    value_scale=cfg.value_scale,
+                )
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True
+                )
+                self.critic_optimizer.step()
+            metrics["critic/loss"] = float(loss.detach())
+            metrics["systems/critic_seconds"] = time.perf_counter() - started
         if self.warming:
             self._warmup(batch)
             return metrics
@@ -3762,50 +4133,55 @@ class Trainer:
         ratios: list[Tensor] = []
         old_log_ratios: list[Tensor] = []
         selected_host = batch.selected.cpu().tolist()
-        for step, indices in enumerate(batch.steps):
-            indices = tuple(index for index in indices if selected_host[index])
-            at = torch.tensor(indices, device=self.policy.device)
-            decisions = _take_decisions(batch.decisions, at)
-            selected = batch.selected[at]
-            statistics = advantage_statistics(advantage_moments(batch.advantages[at], selected))
-            step_states = (
-                states.take(indices)
-                if states is not None
-                else [batch.rollout.records[index].state for index in indices]
-            )
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            new = self.policy.evaluate(step_states, batch.old.actions[at])
-            reference = _take_evaluation(batch.reference, at)
-            policy_loss = ppo_loss(
-                decisions,
-                new.log_probs,
-                batch.old.log_probs[at],
-                batch.advantages[at],
-                selected,
-                statistics,
-                clip_epsilon=cfg.clip_epsilon,
-                importance_cap=cfg.importance_cap,
-            )
-            kl_loss = differentiable_kl_loss(decisions, factor_kl(new, reference), selected, statistics)
-            loss = policy_loss.loss + kl_loss
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True)
-            self.actor_optimizer.step()
-            self.scheduler.step()
-            self.actor_steps += 1
-            policy_losses.append(float(policy_loss.loss.detach()))
-            kl_losses.append(float(kl_loss.detach()))
-            ratios.append(policy_loss.joint_ratio_J[selected].detach())
-            old_gap = torch.where(
-                decisions.executed_factors_JF, new.log_probs.detach() - batch.old.log_probs[at], 0
-            ).sum(-1)
-            old_log_ratios.append(old_gap[selected])
-            metrics[f"policy/old_log_ratio_step{step}"] = float(old_gap[selected].mean())
-            old_policy = _take_evaluation(batch.old, at)
-            old_kl = factor_kl(new, old_policy).detach()
-            metrics[f"policy/old_kl_step{step}"] = float(
-                torch.where(decisions.executed_factors_JF & selected[:, None], old_kl, 0).sum() / selected.sum()
-            )
+        with phase(self.profile, "actor"):
+            for step, indices in enumerate(batch.steps):
+                with sample(self.profile, "step", work=float(len(indices)), limit=2):
+                    indices = tuple(index for index in indices if selected_host[index])
+                    at = torch.tensor(indices, device=self.policy.device)
+                    decisions = _take_decisions(batch.decisions, at)
+                    selected = batch.selected[at]
+                    statistics = advantage_statistics(advantage_moments(batch.advantages[at], selected))
+                    step_states = (
+                        states.take(indices)
+                        if states is not None
+                        else [batch.rollout.records[index].state for index in indices]
+                    )
+                    self.actor_optimizer.zero_grad(set_to_none=True)
+                    new = self.policy.evaluate(step_states, batch.old.actions[at])
+                    reference = _take_evaluation(batch.reference, at)
+                    policy_loss = ppo_loss(
+                        decisions,
+                        new.log_probs,
+                        batch.old.log_probs[at],
+                        batch.advantages[at],
+                        selected,
+                        statistics,
+                        clip_epsilon=cfg.clip_epsilon,
+                        importance_cap=cfg.importance_cap,
+                    )
+                    kl_loss = differentiable_kl_loss(decisions, factor_kl(new, reference), selected, statistics)
+                    loss = policy_loss.loss + kl_loss
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
+                    )
+                    self.actor_optimizer.step()
+                    self.scheduler.step()
+                    self.actor_steps += 1
+                    policy_losses.append(float(policy_loss.loss.detach()))
+                    kl_losses.append(float(kl_loss.detach()))
+                    ratios.append(policy_loss.joint_ratio_J[selected].detach())
+                    old_gap = torch.where(
+                        decisions.executed_factors_JF, new.log_probs.detach() - batch.old.log_probs[at], 0
+                    ).sum(-1)
+                    old_log_ratios.append(old_gap[selected])
+                    metrics[f"policy/old_log_ratio_step{step}"] = float(old_gap[selected].mean())
+                    old_policy = _take_evaluation(batch.old, at)
+                    old_kl = factor_kl(new, old_policy).detach()
+                    metrics[f"policy/old_kl_step{step}"] = float(
+                        torch.where(decisions.executed_factors_JF & selected[:, None], old_kl, 0).sum()
+                        / selected.sum()
+                    )
         ratio = torch.cat(ratios)
         metrics.update(
             {
@@ -3866,11 +4242,13 @@ class Trainer:
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
             torch.cuda.reset_peak_memory_stats(self.policy.device)
-        rollout = self.engine.collect(self.update)
+        with phase(self.profile, "rollout"):
+            rollout = self.engine.collect(self.update)
         self.policy.clear_caches()
         for anchor in self.engine.anchors.values():
             anchor.clear_caches()
-        batch = self.prepare(rollout)
+        with phase(self.profile, "preparation"):
+            batch = self.prepare(rollout)
         metrics = self.fit(batch)
         for index, (shard, previous) in enumerate(zip(native_shards, before, strict=True)):
             elapsed = shard.step_seconds - previous[0]
@@ -4332,8 +4710,20 @@ class NativeCli:
     verify_resume: bool = False
     fixed_anchor_lanes: bool = True
     wandb_project: str | None = None
+    profiling: ProfileConfig | None = None
 
     def __post_init__(self) -> None:
+        if self.profiling is not None and (
+            self.device != "cuda"
+            or self.training.critic_warmup_updates
+            or self.resume is not None
+            or self.evaluation_every
+            or self.wandb_project is not None
+            or self.verify_resume
+        ):
+            raise ValueError(
+                "profiling requires CUDA, warmup off, fresh state, no evaluation, no uploads, and no resume check"
+            )
         if type(self.fixed_anchor_lanes) is not bool:
             raise ValueError("fixed_anchor_lanes must be a boolean")
         if (
@@ -4460,6 +4850,9 @@ def train_native(config: NativeCli) -> None:
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
+        if config.profiling is not None:
+            profile_native(trainer, config, provenance, native_config)
+            return
         run_training(
             trainer,
             config.updates,
@@ -4471,6 +4864,126 @@ def train_native(config: NativeCli) -> None:
         )
         if config.verify_resume:
             verify_checkpoint_resume(trainer, config.output, provenance)
+
+
+def profile_native(
+    trainer: Trainer,
+    config: NativeCli,
+    provenance: dict[str, str],
+    native_config: dict[str, object],
+) -> None:
+    if config.profiling is None:
+        raise ValueError("missing profile configuration")
+    config.output.mkdir(parents=True, exist_ok=False)
+    (config.output / "resolved.json").write_text(
+        json.dumps(
+            {
+                "format": "hal.o65.gpu-profile-inputs.v1",
+                "provenance": provenance,
+                "trainer_source_sha256": sha256(Path(__file__)),
+                "configuration": native_config,
+                "environment": _environment(),
+                "treatment": "bounded profiler instrumentation",
+                "control": "same configuration without tracing",
+                "invariants": "checkpoint, sampler, seed, representation, reward, optimizer, simulator and adapter",
+                "gpu": torch.cuda.get_device_name(),
+                "cpu_affinity": sorted(os.sched_getaffinity(0)),
+                "clock_ticks_per_second": os.sysconf("SC_CLK_TCK"),
+                "flop_model": {
+                    "multiply_add_flops": 2,
+                    "trunk_parameter_equivalent": 9_400_000,
+                    "decoder_parameter_equivalent": 6_700_000,
+                    "actor_forward_backward_factor": 3,
+                    "critic_parameters": sum(p.numel() for p in trainer.policy.critic_parameters()),
+                    "formula": "2*9.4e6*trunk_tokens + 2*6.7e6*decoder_tokens; actor times 3; critic 6*parameters*rows*epochs",
+                    "excludes": "attention score/value products, nonlinearities, feature building, optimizer, copies",
+                    "decoder_precision": "FP32",
+                    "trunk_precision": "BF16",
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    with (config.output / "warm.jsonl").open("x") as log:
+        for _ in range(config.profiling.warm_updates):
+            batch, metrics = trainer.run_update()
+            del batch
+            log.write(json.dumps(metrics) + "\n")
+            log.flush()
+    recorders: list[UpdateProfile] = []
+    try:
+        for traces in (False, True):
+            recorder = UpdateProfile(config.output, trainer.policy.device, traces=traces)
+            recorders.append(recorder)
+            trainer.profile = trainer.engine.profile = recorder
+            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+                if not isinstance(policy, TransformerPolicy):
+                    raise TypeError("profiling requires TransformerPolicy")
+                policy.profile = recorder
+            sampler = contextlib.nullcontext() if traces else HostSampler(config.output)
+            with sampler:
+                batch, metrics = trainer.run_update()
+            del batch
+            recorder.write(metrics)
+        estimates = estimate_profile(*recorders)
+        required = {
+            "rollout/tick",
+            "rollout/boundary_tick",
+            "student/trunk_chunk",
+            "student/decoder_chunk",
+            "reference/trunk_chunk",
+            "reference/decoder_chunk",
+            "critic/fit",
+            "actor/step",
+        }
+        missing = required - set(cast(dict[str, object], estimates["sites"]))
+        if missing:
+            raise ValueError(f"profile is missing required sites: {sorted(missing)}")
+        critic_flops = (
+            6
+            * sum(p.numel() for p in trainer.policy.critic_parameters())
+            * recorders[0].work["critic/fit"]
+            * trainer.config.critic_epochs
+        )
+        cast(dict[str, float], estimates["flops"])["critic"] = critic_flops
+        cast(dict[str, float], estimates["tflops_per_wall_second"])["critic"] = (
+            critic_flops / recorders[0].phases["critic"]["wall_seconds"] / 1e12
+        )
+        (config.output / "estimates.json").write_text(json.dumps(estimates, indent=2, sort_keys=True))
+    finally:
+        trainer.profile = trainer.engine.profile = None
+        for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            if isinstance(policy, TransformerPolicy):
+                policy.profile = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class GpuProfileCli:
+    checkpoint: Path
+    data_dir: Path
+    output: Path
+    sampler: Path = Path("experiments/o65/pilot-sampler.json")
+    cpus: tuple[int, ...] = tuple(range(16))
+    matches_per_shard: int = 64
+    groups: int = 4
+    warm_updates: int = 4
+
+    def native(self) -> NativeCli:
+        return NativeCli(
+            self.checkpoint,
+            self.sampler,
+            self.output,
+            self.data_dir,
+            self.cpus,
+            updates=self.warm_updates + 2,
+            groups=self.groups,
+            matches_per_shard=self.matches_per_shard,
+            compiled=True,
+            training=TrainConfig(critic_warmup_updates=0, windows_per_step=32),
+            evaluation_every=0,
+            profiling=ProfileConfig(self.warm_updates),
+        )
 
 
 def _state_hash(value: object) -> str:
@@ -4774,9 +5287,12 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("train", add_help=False)
     commands.add_parser("qualify", add_help=False)
+    commands.add_parser("profile", add_help=False)
     args, remaining = parser.parse_known_args()
     if args.command == "train":
         train_native(tyro.cli(NativeCli, args=remaining))
+    elif args.command == "profile":
+        train_native(tyro.cli(GpuProfileCli, args=remaining).native())
     else:
         qualify_development(tyro.cli(ProxyCli, args=remaining))
 
