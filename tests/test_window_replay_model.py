@@ -106,6 +106,8 @@ def test_window_replay_matches_individual_outputs_features_and_gradients() -> No
             torch.testing.assert_close(actual, expected, atol=4e-6, rtol=4e-4)
     assert all(not getattr(result.features, field.name).requires_grad for field in dataclasses.fields(result.features))
     assert not replay_windows(policy, hidden, observed, slots, grad=False).log_probs_WKF.requires_grad
+    with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
+        replay_windows(policy, hidden, observed, slots, grad=True)
 
 
 def test_padding_is_ignored_and_history_does_not_cross_resets() -> None:

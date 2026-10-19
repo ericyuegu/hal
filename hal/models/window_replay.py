@@ -192,6 +192,8 @@ def replay_windows(
     remove it only after the proxy FP32-reference gate passes without it.
     Critic features never carry actor gradients.
     """
+    if grad and not torch.compiler.is_compiling() and torch.is_inference_mode_enabled():
+        raise ValueError("gradient replay requires autograd outside inference_mode")
     _check_shapes(model, hidden_WLd, observed_WL4, slots)
     valid = slots.valid_WK
     position = torch.where(valid, slots.positions_WK, 0)
