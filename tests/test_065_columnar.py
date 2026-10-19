@@ -222,6 +222,48 @@ def test_tensor_windows_gather_ragged_histories_and_tails(device: str) -> None:
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_native_scatter_uses_batched_strided_coordinates(device: str) -> None:
+    import numpy as np
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    raw = np.zeros(3, dtype=exp.native.FRAME_DTYPE)
+    raw["frame_id"] = [-123, 1, 257]
+    raw["applied_action"][:, 0, 0] = [0.25, -0.5, 0.75]
+    raw["reward"] = [[1.25, -2.5], [2.75, -3.5], [4.25, -6.0]]
+    raw["terminated"] = [False, True, False]
+    raw["truncated"] = [True, False, False]
+    columns = raw["columns"].copy()
+    columns.flags.writeable = False
+    batch = exp.FrameBatch(
+        torch.from_numpy(raw.view(np.uint8).reshape(3, -1).copy()).to(device),
+        torch.from_numpy(raw["applied_action"].copy()).to(device),
+        columns,
+        raw["reward"].copy(),
+        raw["terminated"].copy(),
+        raw["truncated"].copy(),
+        raw["applied_action"].copy(),
+    )
+    store = exp.FrameStore(5, 3, torch.device(device), exp.native.OBSERVATION_FIELDS)
+    coordinates = torch.tensor([[1, 2, 1], [4, 0, 2], [2, 1, 0]], device=device)
+    positions, lanes, sources = coordinates.unbind(1)
+    actual_rewards = store.write(positions, lanes, batch, sources)
+    for position, lane, source in ((1, 2, 1), (4, 0, 2), (2, 1, 0)):
+        torch.testing.assert_close(
+            store.records[position, lane].cpu(),
+            torch.from_numpy(raw[source : source + 1].view(np.uint8)),
+            rtol=0,
+            atol=0,
+        )
+        np.testing.assert_array_equal(store.actions[position, lane].cpu(), raw["applied_action"][source])
+        np.testing.assert_array_equal(store.rewards[position, lane].cpu(), raw["reward"][source])
+        np.testing.assert_array_equal(
+            store.flags[position, lane].cpu(), [raw["terminated"][source], raw["truncated"][source]]
+        )
+    np.testing.assert_array_equal(actual_rewards.cpu(), raw["reward"][[1, 2, 0]])
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_action_ring_wrap_and_cadence(device: str) -> None:
     import numpy as np
 

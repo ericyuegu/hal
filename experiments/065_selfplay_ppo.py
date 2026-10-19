@@ -1291,8 +1291,8 @@ class TransformerPolicy:
                 raise ValueError("episode conditioning is outside its declared range")
             if np.any((meta[:, OPP_LENGTH] < 0) | (meta[:, OPP_LENGTH] > self.model.critic_residual.max_queue)):
                 raise ValueError("opponent queue exceeds the critic capacity or has the wrong shape")
-            self._validate_actions(states.tensor(states.table.prefix))
-            self._validate_actions(states.tensor(states.table.opponent))
+            queues = torch.cat((states.tensor(states.table.prefix), states.tensor(states.table.opponent)), dim=1)
+            self._validate_actions(queues.flatten(0, 1))
             if actions is not None:
                 self._validate_actions(actions)
             return
@@ -2007,21 +2007,21 @@ class FrameStore:
         self._host: tuple[NDArray, NDArray, NDArray, NDArray, dict[str, NDArray]] | None = None
         self._views: dict[tuple[int, int], SimFrame] = {}
 
-    def write(self, positions: Tensor, lanes: Tensor, batch: FrameBatch, source: Tensor) -> None:
+    def write(self, positions: Tensor, lanes: Tensor, batch: FrameBatch, source: Tensor) -> Tensor:
         self._host = None
         self._views.clear()
-        self.records[positions, lanes] = batch.records.index_select(0, source)
-        self.actions[positions, lanes] = batch.actions.index_select(0, source)
         selected = batch.records.index_select(0, source)
+        self.records[positions, lanes] = selected
+        self.actions[positions, lanes] = batch.actions.index_select(0, source)
         fields = native.FRAME_DTYPE.fields
         if fields is None:
             raise RuntimeError("native records must have a structured dtype")
         reward_offset = fields["reward"][1]
         flag_offset = fields["terminated"][1]
-        self.rewards[positions, lanes] = (
-            selected[:, reward_offset : reward_offset + 8].contiguous().view(torch.float32)
-        )
+        rewards = selected[:, reward_offset : reward_offset + 8].contiguous().view(torch.float32)
+        self.rewards[positions, lanes] = rewards
         self.flags[positions, lanes] = selected[:, flag_offset : flag_offset + 2].bool()
+        return rewards
 
     def write_frame(self, position: int, lane: int, frame: SimFrame) -> None:
         self._host = None
@@ -2151,10 +2151,10 @@ class ActionRing:
         self.length[host_lanes, host_sides] += replans
         self.length_device[lanes, sides] += torch.from_numpy(replans.copy()).to(self.values.device)
 
-    def consume(self, host: NDArray[np.int64]) -> None:
+    def consume(self, host: NDArray[np.int64], *, device_lanes: Tensor | None = None) -> None:
         if np.any(self.length[host] < 1):
             raise ValueError("simulator step would consume an uncommitted action")
-        lanes = torch.from_numpy(host).to(self.values.device)
+        lanes = torch.from_numpy(host).to(self.values.device) if device_lanes is None else device_lanes
         self.head[lanes] = (self.head[lanes] + 1) % self.capacity
         self.length[host] -= 1
         self.length_device[lanes] -= 1
@@ -2798,13 +2798,31 @@ class RolloutEngine:
             active = self._active(shard)
             sources_host = np.flatnonzero(active)
             lanes_active = lanes_host[active]
-            lanes = torch.from_numpy(lanes_active).to(self.policy.device)
             positions_host = np.array([self.matches[shard.match_ids[source]].history.stop for source in sources_host])
             if np.any(positions_host >= len(table.store.records)):
                 raise ValueError("frame store capacity exhausted")
-            positions = torch.from_numpy(positions_host).to(self.policy.device)
+            record_ids = pending[lanes_active].reshape(-1)
+            valid = record_ids >= 0
+            ids = record_ids[valid]
+            frame_coordinates = np.stack((positions_host, lanes_active, sources_host), axis=1)
+            reward_coordinates = np.stack(
+                (
+                    ids,
+                    table.duration[ids],
+                    np.repeat(np.arange(len(lanes_active)), 2)[valid],
+                    np.tile(np.arange(2), len(lanes_active))[valid],
+                ),
+                axis=1,
+            )
+            # One transfer carries both frame destinations and reward destinations.
+            coordinates = torch.from_numpy(
+                np.concatenate((frame_coordinates.reshape(-1), reward_coordinates.reshape(-1)))
+            ).to(self.policy.device)
+            frame_at = coordinates[: frame_coordinates.size].reshape(-1, 3)
+            reward_at = coordinates[frame_coordinates.size :].reshape(-1, 4)
+            positions, lanes, sources = frame_at.unbind(1)
             if isinstance(frames, FrameBatch):
-                table.store.write(positions, lanes, frames, torch.from_numpy(sources_host).to(self.policy.device))
+                reward_values = table.store.write(positions, lanes, frames, sources)
                 rewards, terminals, truncations = frames.rewards, frames.terminal, frames.timeout
             else:
                 rewards = np.array([frame.rewards for frame in frames], dtype=np.float32)
@@ -2812,17 +2830,10 @@ class RolloutEngine:
                 truncations = np.array([frame.timeout for frame in frames], dtype=np.bool_)
                 for source, lane, position in zip(sources_host, lanes_active, positions_host, strict=True):
                     table.store.write_frame(int(position), int(lane), frames[int(source)])
-            ring.consume(lanes_active)
+                reward_values = table.store.rewards[positions, lanes]
+            ring.consume(lanes_active, device_lanes=lanes)
             frames_stepped += len(sources_host)
-            record_ids = pending[lanes_active].reshape(-1)
-            valid = record_ids >= 0
-            ids = record_ids[valid]
-            at = torch.from_numpy(ids).to(self.policy.device)
-            side = torch.from_numpy(np.tile(np.arange(2), len(lanes_active))[valid]).to(self.policy.device)
-            frame_lanes = torch.from_numpy(np.repeat(lanes_active, 2)[valid]).to(self.policy.device)
-            frame_positions = torch.from_numpy(np.repeat(positions_host, 2)[valid]).to(self.policy.device)
-            duration = torch.from_numpy(table.duration[ids]).to(self.policy.device)
-            table.rewards[at, duration] = table.store.rewards[frame_positions, frame_lanes, side]
+            table.rewards[reward_at[:, 0], reward_at[:, 1]] = reward_values[reward_at[:, 2], reward_at[:, 3]]
             table.duration[ids] += 1
             for source in sources_host:
                 match = shard.match_ids[int(source)]
