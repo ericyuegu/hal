@@ -43,6 +43,7 @@ def test_trace_counts_device_work_once_and_merges_overlap(tmp_path: Path) -> Non
     assert result["kernel_seconds"] == pytest.approx(20e-6)
     assert result["kernel_count"] == 2
     assert result["runtime_launch_count"] == 2
+    assert result["runtime_launch_seconds"] == pytest.approx(2e-6)
     assert result["top15_kernel_share"] == 1
     assert result["copies"] == {"h2d_count": 1, "h2d_bytes": 64, "d2h_count": 1, "d2h_bytes": 4}
     assert result["synchronizations"] == {"cudaEventSynchronize": 1}
@@ -133,6 +134,7 @@ def test_estimates_scale_by_work_and_recompute_top_kernels(tmp_path: Path) -> No
             "kernel_seconds_by_name": {"gemm": 0.1},
             "kernel_count": 2,
             "runtime_launch_count": 2,
+            "runtime_launch_seconds": 0.002,
             "copies": {"h2d_count": 1, "h2d_bytes": 4},
             "synchronizations": {"cudaStreamSynchronize": 1},
         }
@@ -140,6 +142,7 @@ def test_estimates_scale_by_work_and_recompute_top_kernels(tmp_path: Path) -> No
     estimate = gpu_profile.estimate_profile(timed, traced)
     site = estimate["sites"]["student/trunk_chunk"]
     assert site["scale"] == 4 and site["kernel_count"] == 6
+    assert site["runtime_launch_seconds"] == pytest.approx(0.006)
     assert site["device_busy_seconds"] == pytest.approx(0.4)
     assert site["synchronizations_excluding_injected"] == {"cudaStreamSynchronize": 3}
     assert site["copies"] == {"h2d_count": 3, "h2d_bytes": 16}
