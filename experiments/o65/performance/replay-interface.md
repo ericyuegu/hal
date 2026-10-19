@@ -1,12 +1,12 @@
 # Window replay interface
 
-Final graph qualification is in progress. Compile only `replay_windows`; keep
-its caller's trunk eager inside the CUDA graph. Whole-trunk compilation failed
+The captured proxy path passes the FP32-reference gate. Compile only
+`replay_windows`; keep its caller's trunk eager inside the CUDA graph. Whole-trunk compilation failed
 the real-rollout GAE precision gate on Torch 2.11. Decoder-only compilation
 with `options={"triton.cudagraphs": False, "emulate_precision_casts": True}`
-passes that gate functionally. The final check also measures the actual actor
-and reference CUDA graphs. Keep the trainer on its current path until the
-replay report records that result.
+passes that gate with the actual actor and reference CUDA graphs, using real
+16-match rollout inputs and GAE targets. See [replay.md](replay.md) for errors,
+compiler scope, validation and timing evidence.
 
 The replay stream owns `hal.models.window_replay`. The interface commit defines
 `ReplaySlots`, `ReplayCriticFeatures`, and `ReplayOutput`. All are frozen, slotted
@@ -70,7 +70,9 @@ attention requires head width at least 16; the proxy uses 64.
 
 Release earlier eager autograd graphs before constructing capture buckets.
 Torch 2.11 retains the original stream on their leaf gradient nodes. Capture
-owns fixed gradient storage and rejects replacement of that storage. Run
+owns fixed gradient storage and rejects replacement of that storage. One
+active helper owns a parameter set's gradient buffers. A fixed padded K=64
+shape can hold either cadence, or mixed windows, without a second helper. Run
 `step.backward(inputs, targets)`, then clipping and Muon outside the graph.
 Do not call `zero_grad(set_to_none=True)` after preparation. Backward clears
 the captured gradients itself. Returned loss tensors are copies, so later
