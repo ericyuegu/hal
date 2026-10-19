@@ -263,7 +263,6 @@ def main(args: Args) -> None:
         gpu="RTX-PRO-6000",
         cpu=(17.0, 17.0),
         memory=(MEMORY_MIB, MEMORY_MIB),
-        ephemeral_disk=131072,
         volumes={str(RESULTS): volume},
         timeout=request.timeout_seconds,
         startup_timeout=300,
