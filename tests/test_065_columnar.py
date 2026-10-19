@@ -74,7 +74,13 @@ def fingerprints(run: Any, batch: Any) -> dict[str, str]:
 
 
 def capture(
-    matches: int, output: Path, *, performance: bool, verify_resume: bool = False, warmup: bool = False
+    matches: int,
+    output: Path,
+    *,
+    performance: bool,
+    verify_resume: bool = False,
+    warmup: bool = False,
+    fixed_anchor_lanes: bool = False,
 ) -> dict[str, object]:
     if matches not in (16, 64):
         raise ValueError("local capture requires 16 or 64 matches")
@@ -104,12 +110,12 @@ def capture(
             )
             resources.callback(shard.close)
             shards.append(shard)
-        engine = exp.RolloutEngine(
-            (tuple(shards),),
-            policy,
-            exp.EpisodeSampler(sampling, schedule, exp.CounterRng(65)),
-            {0: policy.frozen_copy()},
-        )
+        sampler = exp.EpisodeSampler(sampling, schedule, exp.CounterRng(65))
+        anchors = {0: policy.frozen_copy()}
+        if fixed_anchor_lanes:
+            engine = exp.RolloutEngine((tuple(shards),), policy, sampler, anchors, fixed_anchor_lanes=True)
+        else:
+            engine = exp.RolloutEngine((tuple(shards),), policy, sampler, anchors)
         engine.initialize()
         run = exp.Trainer(engine, training)
         rows = []
@@ -163,6 +169,9 @@ def capture(
             "adapter": exp.native_bridge.library_sha256(),
             "rows": rows,
         }
+        if fixed_anchor_lanes:
+            result["configuration"]["fixed_anchor_lanes"] = True
+            result["configuration"]["anchor_counts"] = list(engine.anchor_counts)
         (output / "capture.json").write_text(json.dumps(result, indent=2, sort_keys=True))
         return result
 
@@ -421,7 +430,13 @@ if __name__ == "__main__":
     parser.add_argument("--performance", action="store_true")
     parser.add_argument("--verify-resume", action="store_true")
     parser.add_argument("--warmup", action="store_true")
+    parser.add_argument("--fixed-anchor-lanes", action="store_true")
     args = parser.parse_args()
     capture(
-        args.matches, args.output, performance=args.performance, verify_resume=args.verify_resume, warmup=args.warmup
+        args.matches,
+        args.output,
+        performance=args.performance,
+        verify_resume=args.verify_resume,
+        warmup=args.warmup,
+        fixed_anchor_lanes=args.fixed_anchor_lanes,
     )

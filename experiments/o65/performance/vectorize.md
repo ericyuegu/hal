@@ -239,3 +239,85 @@ RoPE factors now compute inside explicit CUDA capture, as they already do under
 Torch compilation. The focused FP32/BF16 tests overwrite the old eager factors
 and require unchanged graph outputs. This small correctness fix is retained;
 its graph replay adds no training alternative or loss implementation.
+
+
+## Task 6: fixed anchor matches and policy buffers
+
+The native training configuration now enables `fixed_anchor_lanes`. A group
+reserves `floor(matches * anchor_rate + 0.5)` leading simulator matches for
+anchors, with alternating anchor ports. This is an explicit treatment change
+requested by task 6, not a numerically exact refactor. The 16/64-match trials
+use 2/10 anchor matches (12.5%/15.625%); the sampled control had 3/11 under seed
+65. At 1,024 matches the quota is 154 (15.04%). Other episode draws and logical
+RNG keys keep their definitions. The resolved native configuration and resume
+digest bind this choice. Golden qualification explicitly uses the prior sampled
+layout, while real resume keeps its fixed-layout setting in both execution modes.
+
+Each model owns a contiguous static compute buffer: `2M-C` student rows and up
+to `C` rows for each anchor generation. Block-boundary gathers fill those buffers
+without changing logical stream ids. A generation can occupy several simulator
+lanes; its **compute** range and graph shape stay fixed. No active episode changes
+opponent. A retired model is reused by loading new weights in place only when
+no episode owns that generation. Frozen reference zero is never reused.
+
+Graph ownership now includes the action-ring object, so a policy reused by
+another engine cannot replay writes into the previous engine's storage. Keeping
+the object in the key also keeps its referenced buffers alive. Focused tests
+cover quota/port invariants through resets, release before snapshot reuse,
+parameter addresses across the swap, strict resume-layout identity, odd resets,
+unsorted stream ids and separate engines. Final focused qualification has
+11 passes and no skips.
+
+The final 16-match common-input comparison has max/p99 log-probability error
+0.069510/0.012662 nats, unused cached value error 2.603963/1.440185 reward units,
+and decision KL error 0.001665/0.000332 nats. Actor-gradient cosine is 0.999769
+and relative difference norm is 0.021527. Critic gradients match exactly. It
+uses task 2's unchanged bounds. These tests qualify numerical changes on common
+inputs; they do not claim that changing anchor match allocation preserves a
+whole training trajectory.
+
+## Final complete-update measurements
+
+All runs use the RTX 3060, the hash-pinned O63 proxy, seed 65, default algorithms,
+four native shards on CPUs 0–3, one active group and 256 frames per rollout.
+Both development cadences remain mixed. Three updates run per arm; the table
+averages updates 2 and 3. Startup, evaluation and checkpoints are outside timing.
+No timed run has an episode end or idle frame. Raw records retain allocated
+and reserved peaks for every update; the table reports the reserved maximum.
+
+| Matches | Phase | Rollout s | No-grad s | Actor s | Critic s | Update s | Match-frames/s | Peak reserved GiB | Decode calls/tick |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | PPO | 3.725 | 0.637 | 0.508 | 0.017 | 4.930 | 830.902 | 2.098 | 2.00 |
+| 16 | WARMUP | 3.718 | 0.344 | 0.000 | 0.017 | 4.122 | 993.653 | 1.006 | 2.00 |
+| 64 | PPO | 5.739 | 2.380 | 1.825 | 0.045 | 10.109 | 1620.820 | 3.932 | 2.00 |
+| 64 | WARMUP | 5.718 | 1.268 | 0.000 | 0.045 | 7.150 | 2291.383 | 2.201 | 2.00 |
+
+Compared with the merged control, complete PPO updates improve 44.7% at 16
+matches and 30.6% at 64. Warmup improves 49.5% and 38.7%. The final task alone
+improves 64-match PPO by 18.5% and warmup by 25.1% relative to task 2, passing
+the stop rule. The shipped changes keep the student scoring pass, eager
+reference scoring and eager actor steps.
+
+From 16 to 64 matches, final PPO rollout time grows 1.54x, no-grad time 3.74x,
+actor time 3.59x, critic time 2.71x and total time 2.05x. Warmup rollout grows
+1.54x, no-grad time 3.69x, critic time 2.63x and total time 1.73x. Thus rollout
+still has a large fixed cost; scoring and training scale close to the amount of
+data. Phase times are the trainer's existing wall-clock metrics, and diagnostics
+outside their timers remain part of the complete update.
+
+## Projection to 1,024 matches on RTX PRO 6000
+
+**Projection only; no 1,024-match or remote job ran.** Fit a straight line to
+complete local update times at 16 and 64 matches, separately for control and
+final code. Their 1,024-match RTX 3060 extrapolations are 127.8/113.7 s for PPO
+and 81.6/67.7 s for warmup. Apply each final/control ratio to the supplied RTX
+PRO 6000 observations of 97/73 s. This gives approximately **86 s per PPO
+update (3,037 match-frames/s)** and **61 s per warmup update (4,330 match-frames/s)**.
+
+This assumes the relative local gain transfers and per-match work stays linear.
+The provided PRO 6000 observations predate this merge, so this calibration also
+mixes source revisions. GPU kernels, 16 server shard threads, four resident
+groups, graph memory and snapshot generations are not measured by these local
+runs. The numbers are planning estimates, not a qualified production rate or
+memory fit. The smaller projected gain is consistent with amortizing away much
+of the fixed launch cost at larger batches.

@@ -61,6 +61,12 @@ warmup and default Torch algorithms; they do not select optimizer settings or
 learning checkpoints.
 
 The planned training pool has 1,024 active and 4,096 resident matches.
+Each group reserves its first 154 matches for anchors, with alternating anchor
+ports. This is the fixed-lane treatment: 15.04% of matches have one frozen
+opponent. All other matches use two student players. A policy receives a fixed
+contiguous compute buffer; block-boundary gathers preserve logical stream ids.
+Snapshot weights stay fixed for an episode. Retired model storage is reused
+only after no episode owns that snapshot.
 The [local report](performance/report.md) measured 1,592 match-frames/s at
 256 and 1,839 at 512, with 8.04 and 11.12 GiB peak reserved, on a 12 GB RTX
 3060 with 12 shards. Native-only scaling measured 27,296, 131,713 and 166,045

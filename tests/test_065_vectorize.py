@@ -59,8 +59,8 @@ class ComparisonPolicy(exp.TransformerPolicy):
         super().clear_caches()
         self.control.clear_caches()
 
-    def sample_tick(self, states: Any, rng: Any, streams: tuple[int, ...], ring: Any) -> Any:
-        actual = super().sample_tick(states, rng, streams, ring)
+    def sample_tick(self, states: Any, rng: Any, layout: Any, ring: Any) -> Any:
+        actual = super().sample_tick(states, rng, layout, ring)
         due = np.flatnonzero(states.meta[:, exp.CLOCK] % states.meta[:, exp.REPLAN] == 0)
         if len(due):
             selected = exp._take_evaluation(actual, torch.from_numpy(due).to(self.device))
@@ -94,6 +94,7 @@ def gradient_comparison(actual: tuple[Tensor | None, ...], expected: tuple[Tenso
     return {
         "cosine": float(torch.nn.functional.cosine_similarity(left, right, dim=0)),
         "relative_norm": float((left - right).norm() / right.norm().clamp_min(1e-12)),
+        "norm_ratio": float(left.norm() / right.norm().clamp_min(1e-12)),
     }
 
 
@@ -129,15 +130,18 @@ def actor_gradients(run: Any, batch: Any) -> tuple[Tensor | None, ...]:
 
 
 def test_tick_rejects_unknown_and_duplicate_streams_before_compute() -> None:
+    from test_065_loop import exp as loop_exp
     from test_065_loop import transformer_trainer
 
     run = transformer_trainer("cpu", development=True)
     state = run.engine._state(0, 0, 0, 0)
     rows = run.policy._columnar_states((state,))
     with pytest.raises(ValueError, match="unknown stream"):
-        run.policy.sample_tick(rows, run.engine.sampler.rng, (100, 101), run.engine.rings[0])
+        run.policy.sample_tick(
+            rows, run.engine.sampler.rng, loop_exp.TickLayout((100, 101), (0, 0)), run.engine.rings[0]
+        )
     with pytest.raises(ValueError, match="distinct"):
-        run.policy.sample_tick(rows, run.engine.sampler.rng, (0, 0), run.engine.rings[0])
+        run.policy.sample_tick(rows, run.engine.sampler.rng, loop_exp.TickLayout((0, 0), (0, 0)), run.engine.rings[0])
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -237,6 +241,7 @@ def test_proxy_tick_numerics_and_update_gradients(tmp_path: Path) -> None:
                 policy,
                 exp.EpisodeSampler(sampling, schedule, exp.CounterRng(65)),
                 {0: policy.frozen_copy()},
+                fixed_anchor_lanes=True,
             )
             engine.initialize()
             run = exp.Trainer(engine, exp.TrainConfig(critic_warmup_updates=0))
@@ -290,3 +295,114 @@ def test_proxy_tick_numerics_and_update_gradients(tmp_path: Path) -> None:
                 assert report[name]["relative_norm"] < 0.03
     finally:
         torch.use_deterministic_algorithms(previous)
+
+
+def test_fixed_anchor_lanes_keep_counts_and_ports_through_resets() -> None:
+    from test_065_loop import FakeShard
+    from test_065_loop import exp as loop_exp
+    from test_065_loop import trainer
+
+    base = trainer(groups=1, development=True)
+    shard = FakeShard(tuple(range(16)), length=13, timeout=True)
+    anchors = {index: base.policy.frozen_copy() for index in range(3)}
+    engine = loop_exp.RolloutEngine(((shard,),), base.policy, base.engine.sampler, anchors, fixed_anchor_lanes=True)
+    engine.initialize()
+    assert engine.anchor_counts == (2,)
+    rollout = engine.collect(0)
+    assert rollout.resets > 0
+    for (match, _), episode in rollout.records.states.table.episodes.items():
+        assigned = [side for side, player in enumerate(episode.players) if player.anchor is not None]
+        assert assigned == ([match % 2] if match < 2 else [])
+    assert sum(player.anchor is not None for state in engine.matches.values() for player in state.episode.players) == 2
+
+
+def test_snapshot_weights_reuse_storage_only_after_the_last_episode_releases_it() -> None:
+    from test_065_loop import trainer
+
+    run = trainer(groups=1, anchor_rate=1)
+    run.config = dataclasses.replace(run.config, snapshot_interval=1, snapshot_capacity=1)
+    run.run_update()
+    first = run.engine.anchors[1]
+    addresses = tuple(parameter.data_ptr() for parameter in first.model.parameters())
+    weights = {name: value.detach().clone() for name, value in first.model.state_dict().items()}
+
+    def reset_with(anchor: int) -> None:
+        run.engine.anchor_candidates = (anchor,)
+        for shard in run.engine.groups[0]:
+            for lane, match in enumerate(shard.match_ids):
+                episode = run.engine.matches[match].episode.number + 1
+                run.engine._reset(shard, lane, match, run.engine.clocks[0], episode)
+
+    reset_with(1)
+    run.run_update()
+    assert run.engine.anchors[1] is first
+    assert run.engine.anchors[2] is not first
+    for name, value in weights.items():
+        torch.testing.assert_close(first.model.state_dict()[name], value, rtol=0, atol=0)
+    reset_with(2)
+    run.run_update()
+    assert 1 not in run.engine.anchors
+    assert run.engine.anchors[3] is first
+    assert tuple(parameter.data_ptr() for parameter in first.model.parameters()) == addresses
+    for name, value in run.policy.model.state_dict().items():
+        torch.testing.assert_close(first.model.state_dict()[name], value, rtol=0, atol=0)
+
+
+def test_resume_rejects_a_changed_opponent_layout(tmp_path: Path) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import exp as loop_exp
+    from test_065_loop import trainer
+
+    run = trainer(groups=1, anchor_rate=0)
+    run.run_update()
+    manifest = loop_exp.save_checkpoint(run, tmp_path, PROVENANCE)
+    run.engine.fixed_anchor_lanes = True
+    with pytest.raises(ValueError, match="configuration mismatch"):
+        loop_exp.restore_checkpoint(run, manifest, PROVENANCE)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_tick_graphs_keep_each_engines_queue_storage_separate() -> None:
+    from test_065_loop import exp as loop_exp
+    from test_065_loop import transformer_trainer
+
+    run = transformer_trainer("cuda", development=True, compiled=True)
+    run.engine.collect(0)
+    previous = run.engine.rings[0]
+    saved = previous.values.clone()
+    shard = type(run.engine.groups[0][0])((0,), length=67, timeout=True)
+    engine = loop_exp.RolloutEngine(((shard,),), run.policy, run.engine.sampler, {0: run.policy.frozen_copy()})
+    engine.initialize()
+    engine.collect(0)
+    torch.testing.assert_close(previous.values, saved, rtol=0, atol=0)
+    current = engine.rings[0]
+    torch.testing.assert_close(current.controllers, run.policy.device_wire_actions(current.values), rtol=0, atol=0)
+
+
+def test_verifier_restores_execution_mode_if_graph_cleanup_fails(tmp_path: Path) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import ToyPolicy
+    from test_065_loop import exp as loop_exp
+    from test_065_loop import trainer
+
+    class FailOncePolicy(ToyPolicy):
+        fail_clear = False
+
+        def clear_caches(self) -> None:
+            if self.fail_clear:
+                self.fail_clear = False
+                raise RuntimeError("graph cleanup failed")
+            super().clear_caches()
+
+    base = trainer(groups=1, anchor_rate=0)
+    policy = FailOncePolicy("cpu")
+    policy.model.load_state_dict(base.policy.model.state_dict())
+    engine = loop_exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})
+    engine.initialize()
+    run = loop_exp.Trainer(engine, base.config)
+    run.run_update()
+    policy.fail_clear = True
+    with pytest.raises(RuntimeError, match="graph cleanup failed"):
+        loop_exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+    assert not torch.are_deterministic_algorithms_enabled() and not run.config.deterministic
+    assert run.update == 1

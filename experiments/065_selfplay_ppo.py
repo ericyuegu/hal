@@ -1196,6 +1196,24 @@ def _take_evaluation(evaluation: PolicyEvaluation, indices: Tensor) -> PolicyEva
     )
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class TickLayout:
+    streams: tuple[int, ...]
+    lanes: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not self.streams or len(self.streams) != len(self.lanes):
+            raise ValueError("tick layout lanes must match nonempty streams")
+        if len(set(self.streams)) != len(self.streams):
+            raise ValueError("tick layout streams must be distinct")
+        if any(type(value) is not int or value < 0 for value in (*self.streams, *self.lanes)):
+            raise ValueError("tick layout coordinates must be nonnegative integers")
+        if len({(lane, stream % 2) for lane, stream in zip(self.lanes, self.streams, strict=True)}) != len(
+            self.streams
+        ):
+            raise ValueError("tick layout streams must own distinct queues")
+
+
 class TransformerPolicy:
     """Single-device correctness path; each training window encodes once.
 
@@ -1233,9 +1251,9 @@ class TransformerPolicy:
         self.packed_builder = PackedColumnContextBuilder(statistics, native.OBSERVATION_FIELDS, self.device)
         self.decode_order = torch.tensor(DECODE_GROUP_INDICES, device=self.device)
         self.tick_decoder = DecisionDecoder(model, configurations, compiled=False)
-        self.tick_caches: dict[tuple[int, ...], BlockRestartCache] = {}
-        self.tick_graphs: dict[tuple[tuple[int, ...], int, int], CapturedCall[PolicyEvaluation]] = {}
-        self.tick_windows: dict[tuple[int, ...], tuple[int, int]] = {}
+        self.tick_caches: dict[tuple[ActionRing, int], BlockRestartCache] = {}
+        self.tick_graphs: dict[tuple[tuple[ActionRing, int], int, int], CapturedCall[PolicyEvaluation]] = {}
+        self.tick_windows: dict[tuple[ActionRing, int], tuple[int, int]] = {}
         self.caches: dict[int, CachedStream] = {}
         self.rollout_caches: dict[tuple[int, ...], BlockRestartCache] = {}
         self.used_cache_keys: set[tuple[int, ...]] = set()
@@ -1706,9 +1724,15 @@ class TransformerPolicy:
         self,
         states: DecisionRows,
         rng: CounterRng,
-        streams: tuple[int, ...],
+        layout: TickLayout,
         ring: ActionRing,
     ) -> PolicyEvaluation:
+        streams = layout.streams
+        if len(layout.lanes) != len(streams):
+            raise ValueError("tick layout lanes must match its streams")
+        if any(lane >= ring.values.shape[0] for lane in layout.lanes):
+            raise ValueError("tick layout lane exceeds the action ring")
+        key = ring, len(streams)
         meta = states.meta
         clock = int(meta[0, CLOCK])
         if np.any(meta[:, CLOCK] != clock):
@@ -1720,13 +1744,15 @@ class TransformerPolicy:
             slots = np.array([slots_by_stream[int(stream)] for stream in meta[:, STREAM]], dtype=np.int64)
         except KeyError as error:
             raise ValueError("rollout tick contains an unknown stream") from error
-        cache = self.tick_caches.get(streams)
+        if np.any(meta[:, LANE] != np.asarray(layout.lanes)[slots]):
+            raise ValueError("rollout tick metadata disagrees with its lane layout")
+        cache = self.tick_caches.get(key)
         if cache is None:
             cache = BlockRestartCache(self.model, len(streams), self.device, dtype=torch.bfloat16)
-            self.tick_caches[streams] = cache
+            self.tick_caches[key] = cache
         at = torch.from_numpy(slots).to(self.device)
         window = int(meta[0, UPDATE]), clock // 128
-        restart = self.tick_windows.get(streams) != window
+        restart = self.tick_windows.get(key) != window
         if restart and clock % 128:
             raise ValueError("rollout tick cache must start at a block boundary")
         with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
@@ -1742,7 +1768,7 @@ class TransformerPolicy:
                 padded_lengths = torch.zeros(len(streams), device=self.device, dtype=torch.long)
                 padded_lengths.index_copy_(0, at, lengths)
                 cache.restart(padded, padded_lengths)
-                self.tick_windows[streams] = window
+                self.tick_windows[key] = window
             appended = 1 if restart else 2
             inputs = (
                 *states.packed(appended, tail=appended),
@@ -1765,8 +1791,7 @@ class TransformerPolicy:
                 padded_inputs.append(padded_value)
             integers = padded_inputs[5]
             # Each static row owns a distinct queue, including absent anchor rows.
-            base_lane = int(meta[0, LANE]) - streams.index(int(meta[0, STREAM])) // 2
-            lanes = torch.tensor([base_lane + index // 2 for index in range(len(streams))], device=self.device)
+            lanes = torch.tensor(layout.lanes, device=self.device)
             sides = torch.tensor([stream % 2 for stream in streams], device=self.device)
             integers[:, LANE] = lanes
             integers[:, SIDE] = sides
@@ -1774,8 +1799,8 @@ class TransformerPolicy:
             active[at] = True
             padded_inputs.append(active)
             count = 4 if clock % 4 == 0 else 2
-            key = streams, appended, count
-            captured = self.tick_graphs.get(key)
+            graph_key = key, appended, count
+            captured = self.tick_graphs.get(graph_key)
             if captured is None:
                 static = tuple(value.clone() for value in padded_inputs)
 
@@ -1835,7 +1860,7 @@ class TransformerPolicy:
                     ),
                     device=self.device,
                 )
-                self.tick_graphs[key] = captured
+                self.tick_graphs[graph_key] = captured
             output = captured(tuple(padded_inputs))
         due = clock % meta[:, REPLAN] == 0
         ring.length[meta[due, LANE], meta[due, SIDE]] += meta[due, REPLAN]
@@ -2673,9 +2698,13 @@ class RolloutEngine:
         policy: LoopPolicy,
         sampler: EpisodeSampler,
         anchors: dict[int, LoopPolicy],
+        *,
+        fixed_anchor_lanes: bool = False,
     ) -> None:
         if not groups or any(not group for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
+        if type(fixed_anchor_lanes) is not bool:
+            raise ValueError("fixed_anchor_lanes must be a boolean")
         ids = [match for group in groups for shard in group for match in shard.match_ids]
         if not ids or len(set(ids)) != len(ids) or min(ids) < 0:
             raise ValueError("logical match ids must be nonempty, nonnegative, and globally unique")
@@ -2691,6 +2720,9 @@ class RolloutEngine:
         self.policy = policy
         self.sampler = sampler
         self.anchors = anchors
+        self.fixed_anchor_lanes = fixed_anchor_lanes
+        self.tick_layouts: dict[int | None, TickLayout] = {}
+        self.tick_layout_clock: tuple[int, int] | None = None
         self.anchor_candidates = tuple(sorted(anchors))
         self.clocks = [0] * len(groups)
         self.cursor = 0
@@ -2704,6 +2736,9 @@ class RolloutEngine:
         if isinstance(policy, TransformerPolicy) and policy.compiled and policy.device.type == "cuda":
             for ring in self.rings:
                 ring.controllers = policy.device_wire_actions(ring.values)
+        self.anchor_counts = tuple(
+            math.floor(len(matches) * sampler.config.anchor_rate + 0.5) for matches in self.group_matches
+        )
         self.locations = {
             match: (group, lane)
             for group, matches in enumerate(self.group_matches)
@@ -2838,6 +2873,18 @@ class RolloutEngine:
         if clock % 128:
             raise ValueError("episodes must start on a block boundary")
         episode = self.sampler.sample(match, number, self.anchor_candidates)
+        if self.fixed_anchor_lanes:
+            group, lane_index = self.locations[match]
+            side = lane_index % 2 if lane_index < self.anchor_counts[group] else None
+            players = []
+            for player_side, player in enumerate(episode.players):
+                anchor = None
+                if player_side == side:
+                    stream = 2 * match + player_side
+                    choice = self.sampler.rng.choice([1.0] * len(self.anchor_candidates), "anchor", stream, number, 0)
+                    anchor = self.anchor_candidates[choice]
+                players.append(dataclasses.replace(player, anchor=anchor))
+            episode = dataclasses.replace(episode, players=(players[0], players[1]))
         frame = shard.reset(lane, episode)
         if frame.terminal or frame.timeout or bool(frame.applied_actions.any()):
             raise ValueError("reset must return a live initial state with neutral applied inputs")
@@ -2931,6 +2978,22 @@ class RolloutEngine:
             and not torch.are_deterministic_algorithms_enabled()
         )
         streams = tuple(2 * match + side for shard in shards for match in shard.match_ids for side in (0, 1))
+        if tick and self.fixed_anchor_lanes and self.tick_layout_clock != (self.cursor, clock // 128):
+            self.tick_layout_clock = self.cursor, clock // 128
+            self.tick_layouts.clear()
+            assigned: dict[int | None, list[int]] = defaultdict(list)
+            for match in self.group_matches[self.cursor]:
+                for side, player in enumerate(self.matches[match].episode.players):
+                    assigned[player.anchor].append(2 * match + side)
+            anchor_count = self.anchor_counts[self.cursor]
+            for anchor, owned in assigned.items():
+                capacity = len(streams) - anchor_count if anchor is None else anchor_count
+                if not 0 < len(owned) <= capacity:
+                    raise ValueError("opponent assignment exceeds its fixed lane range")
+                used = set(owned)
+                padded = (*owned, *(stream for stream in streams if stream not in used))[:capacity]
+                lanes = tuple(self.locations[stream // 2][1] for stream in padded)
+                self.tick_layouts[anchor] = TickLayout(padded, lanes)
         groups: dict[int | None, tuple[list[list[int]], list[Episode]]] = {}
         for shard in shards:
             for match in shard.match_ids:
@@ -2957,7 +3020,12 @@ class RolloutEngine:
                 if tick:
                     if not isinstance(policy, TransformerPolicy):
                         raise ValueError("batched rollout requires transformer anchors")
-                    output = policy.sample_tick(decisions, self.sampler.rng, streams, self.rings[self.cursor])
+                    layout = (
+                        self.tick_layouts[anchor]
+                        if self.fixed_anchor_lanes
+                        else TickLayout(streams, tuple(self.locations[stream // 2][1] for stream in streams))
+                    )
+                    output = policy.sample_tick(decisions, self.sampler.rng, layout, self.rings[self.cursor])
                     due = np.flatnonzero(clock % decisions.meta[:, REPLAN] == 0)
                     decisions = decisions.take(due)
                     output = _take_evaluation(output, torch.from_numpy(due).to(self.policy.device))
@@ -3136,6 +3204,8 @@ class RolloutEngine:
         count = self.sampler.schedule.rollout_frames
         if count % 128:
             raise ValueError("rollouts must end on a 128-frame block boundary")
+        self.tick_layout_clock = None
+        self.tick_layouts.clear()
         previous_store = self.stores[group_id]
         if previous_store is None:
             raise ValueError("pool has no frame storage")
@@ -3818,7 +3888,17 @@ class Trainer:
             },
         )
         if not self.warming and self.update % self.config.snapshot_interval == 0:
-            self.engine.anchors[self.next_anchor] = self.policy.frozen_copy()
+            assigned = {p.anchor for m in self.engine.matches.values() for p in m.episode.players}
+            snapshots = sorted(key for key in self.engine.anchors if key)
+            retired = snapshots[: max(0, len(snapshots) - self.config.snapshot_capacity + 1)]
+            available = [key for key in retired if key not in assigned]
+            if available:
+                anchor = self.engine.anchors.pop(available[0])
+                anchor.model.load_state_dict(self.policy.model.state_dict(), strict=True)
+                anchor.clear_caches()
+            else:
+                anchor = self.policy.frozen_copy()
+            self.engine.anchors[self.next_anchor] = anchor
             self.next_anchor += 1
             self.engine.anchor_candidates = (
                 0,
@@ -3889,6 +3969,7 @@ def _configuration_digest(trainer: Trainer) -> str:
         ],
         "episode_reset": "shared_stocks_block_wait_v1",
         "rollout_storage": "tensor_windows_action_ring_v2",
+        "opponent_layout": "fixed_anchor_ranges_v1" if engine.fixed_anchor_lanes else "sampled_anchor_lanes_v1",
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["compiled"] = trainer.policy.compiled
@@ -4249,9 +4330,12 @@ class NativeCli:
     evaluation_simulators: tuple[Literal["msl", "dolphin"], ...] = ("msl", "dolphin")
     evaluation_device: str = "cpu"
     verify_resume: bool = False
+    fixed_anchor_lanes: bool = True
     wandb_project: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.fixed_anchor_lanes) is not bool:
+            raise ValueError("fixed_anchor_lanes must be a boolean")
         if (
             not self.cpus
             or len(set(self.cpus)) != len(self.cpus)
@@ -4344,6 +4428,7 @@ def train_native(config: NativeCli) -> None:
             policy,
             EpisodeSampler(sampling, schedule, CounterRng(config.training.seed)),
             {0: policy.frozen_copy()},
+            fixed_anchor_lanes=config.fixed_anchor_lanes,
         )
         trainer = Trainer(engine, config.training)
         if config.resume is None:
@@ -4455,9 +4540,9 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
     config = trainer.config
     deterministic = torch.are_deterministic_algorithms_enabled()
     trainer.config = dataclasses.replace(config, deterministic=True)
-    torch.use_deterministic_algorithms(True)
-    _clear_execution_caches(trainer)
     try:
+        torch.use_deterministic_algorithms(True)
+        _clear_execution_caches(trainer)
         restore_checkpoint(trainer, manifest, provenance)
         _verify_checkpoint_resume(trainer, output, provenance, manifest)
     finally:
