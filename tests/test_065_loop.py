@@ -1580,10 +1580,12 @@ def test_wire_lookup_matches_codec_bits_and_rejects_invalid_factors(device: str)
     indices = torch.stack([torch.arange(count) % size for size in policy.model.codec.group_vocabs], dim=-1)
     expected = policy.model.codec.dequantize(indices.to(device)).cpu().numpy()
     np.testing.assert_array_equal(policy.wire_actions(indices), expected)
+    np.testing.assert_array_equal(policy.device_wire_actions(indices.to(device)).cpu().numpy(), expected)
     policy.model.codec.main_centers = policy.model.codec.main_centers * 0.5
     policy.clear_caches()
     expected = policy.model.codec.dequantize(indices.to(device)).cpu().numpy()
     np.testing.assert_array_equal(policy.wire_actions(indices), expected)
+    np.testing.assert_array_equal(policy.device_wire_actions(indices.to(device)).cpu().numpy(), expected)
     indices[0, 0] = -1
     with pytest.raises(ValueError, match="invalid controller"):
         policy.wire_actions(indices)
