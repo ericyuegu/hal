@@ -1390,6 +1390,85 @@ class CausalTemporalDecoder(nn.Module):
             state[rows, delay],
         )
 
+    def replay_window_decisions(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        prefix_positions: Tensor,
+        history_starts: Tensor,
+        forced_queue: Tensor,
+        delay: Tensor,
+        replan: Tensor,
+        policy_condition: Tensor,
+        sampled_actions: Tensor,
+    ) -> DecisionOutput:
+        """Replay [W,K] decisions, sharing one projected history per window.
+
+        Temporal attention stays independent for each slot. History attention
+        packs K offset chains into queries against [W,H,L,d] K/V, as BC does.
+        Inputs must pass window_replay.validate_replay_inputs before capture.
+        """
+        windows, slots = prefix_positions.shape
+        max_delay = forced_queue.shape[2]
+        count = max_delay + 4
+        depth = torch.arange(count, device=hidden.device)
+        window_rows = torch.arange(windows, device=hidden.device)[:, None]
+        slot_rows = torch.arange(windows * slots, device=hidden.device)[:, None]
+        relative = (depth - delay[..., None]).clamp(0, 3)
+        sampled = sampled_actions.gather(2, relative[..., None].expand(-1, -1, -1, 4))
+        forced = forced_queue[:, :, depth.clamp(max=max_delay - 1)] if max_delay else sampled
+        targets = torch.where((depth < delay[..., None])[..., None], forced, sampled)
+        previous = torch.cat((observed[window_rows, prefix_positions][:, :, None], targets[:, :, :-1]), dim=2)
+        raw_trunk = hidden[window_rows, prefix_positions]
+        bias = self._state_bias(decoder_rmsnorm(raw_trunk))
+        state = decoder_rmsnorm(bias[:, :, None] + self._step_features(previous, depth + 1))
+        state = state.reshape(windows * slots, count, self.d_model)
+        conditioning = self.return_conditioner(
+            torch.full((windows, slots), 0.9 * RETURN_SCALE, device=hidden.device),
+            torch.ones((windows, slots), dtype=torch.bool, device=hidden.device),
+            policy_condition,
+        )
+        for index, module in enumerate(self.blocks):
+            block = cast(TemporalBlock, module)
+            modulation = None if conditioning is None else conditioning[index].reshape(-1, 1, 4, self.d_model)
+            state, _ = block.prefill(state, modulation)
+            if index == 0:
+                key, value = self.history_attention.project_memory(hidden)
+                state = self.history_attention.forward_projected(
+                    state.reshape(windows, slots * count, self.d_model),
+                    key,
+                    value,
+                    history_starts,
+                    prefix_positions,
+                    offsets_per_prefix=count,
+                ).reshape(windows * slots, count, self.d_model)
+        state = decoder_rmsnorm(state)
+        indices = delay.reshape(-1, 1) + torch.arange(4, device=hidden.device)
+        selected = state[slot_rows, indices].reshape(windows, slots, 4, self.d_model)
+        embedded = self.codec.embed_groups(sampled_actions)
+        skips = self._trunk_skip_logits(raw_trunk)
+        distributions: list[Tensor] = []
+        log_probs: list[Tensor] = []
+        for group, name in enumerate(CONTROLLER_GROUP_NAMES):
+            head = cast(NonlinearActionHead, self.outputs[name])
+            logits = self._center(
+                self._project_action_head(head, self.group_features(selected, name, embedded))
+                + skips[name][:, :, None]
+            )
+            if name == "buttons":
+                logits = logits.masked_fill(self.codec.button_mask(sampled_actions[..., TRIGGERS_GROUP]), -torch.inf)
+            logs = F.log_softmax(logits.float(), dim=-1)
+            distributions.append(logs.exp())
+            log_probs.append(logs.gather(-1, sampled_actions[..., group, None]).squeeze(-1))
+        valid = torch.arange(4, device=hidden.device) < replan[..., None]
+        return DecisionOutput(
+            sampled_actions,
+            valid,
+            torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
+            tuple(distributions),
+            state[slot_rows[:, 0], delay.reshape(-1)].reshape(windows, slots, self.d_model),
+        )
+
     def rollout_conditioned_logits(
         self,
         hidden: Tensor,
