@@ -108,7 +108,8 @@ def test_actor_ignores_nan_padding_and_matches_enumerated_objective() -> None:
     assert q.grad is None
 
 
-def test_joint_ppo_clips_both_advantage_signs() -> None:
+@pytest.mark.parametrize("clip_epsilon", [0.05, 0.2, 0.4])
+def test_joint_ppo_clips_both_advantage_signs(clip_epsilon: float) -> None:
     policy = model()
     hidden, observed, slots = inputs(policy)
     output = replay_windows(policy, hidden, observed, slots, grad=False)
@@ -127,8 +128,10 @@ def test_joint_ppo_clips_both_advantage_signs() -> None:
         torch.tensor(1.0),
         torch.tensor(6.0),
     )
-    loss = actor_loss(output, target)
-    torch.testing.assert_close(loss.policy_loss, torch.tensor(-(1.2 + 0.5 - 1.5 - 0.8) / 6))
+    loss = actor_loss(output, target, clip_epsilon=clip_epsilon)
+    torch.testing.assert_close(
+        loss.policy_loss, torch.tensor(-((1 + clip_epsilon) + 0.5 - 1.5 - (1 - clip_epsilon)) / 6)
+    )
     loss.loss.backward()
     assert logs.grad is not None
     assert not bool(logs.grad[0, 0].any()) and not bool(logs.grad[1, 0].any())
@@ -235,13 +238,13 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
     parameters = policy.actor_parameters()
     with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
         GraphedActorStep(forward, values, targets, parameters)
-    graph = GraphedActorStep(forward, values, targets, parameters)
+    graph = GraphedActorStep(forward, values, targets, parameters, clip_epsilon=0.07)
     saved: tuple[Tensor, Tensor] | None = None
     saved_evaluation: tuple[Tensor, Tensor] | None = None
     for step in range(3):
         current = (values[0] + step * 0.05, values[1])
         policy.zero_grad(set_to_none=False)
-        expected = actor_loss(forward(current), targets)
+        expected = actor_loss(forward(current), targets, clip_epsilon=0.07)
         expected.loss.backward()
         gradients = tuple(p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in parameters)
         actual = graph.backward(current, targets)
@@ -266,3 +269,26 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
     policy.zero_grad(set_to_none=True)
     with pytest.raises(ValueError, match="storage changed"):
         graph.backward(values, targets)
+
+
+@pytest.mark.parametrize("clip_epsilon", [0.0, 1.0, float("nan"), float("inf")])
+def test_actor_rejects_invalid_clip_before_capture(clip_epsilon: float) -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    output = replay_windows(policy, hidden, observed, slots, grad=False)
+    targets = targets_for(output)
+    with pytest.raises(ValueError, match="clip epsilon"):
+        actor_loss(output, targets, clip_epsilon=clip_epsilon)
+    with pytest.raises(ValueError, match="clip epsilon"):
+        GraphedActorStep(lambda _: output, (), targets, (), clip_epsilon=clip_epsilon)
+
+
+def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    output = replay_windows(policy, hidden, observed, slots, grad=False)
+    target = targets_for(output)
+    probabilities = output.distributions[0]
+    positive = torch.nonzero((probabilities > 0) & output.factor_mask_WKF[..., 0::4, None])[0]
+    target.reference_distributions[0][tuple(positive)] = 0
+    assert bool(torch.isinf(actor_loss(output, target).kl_loss))

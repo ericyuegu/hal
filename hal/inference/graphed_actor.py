@@ -58,7 +58,11 @@ class GraphedActorStep:
         inputs: tuple[Tensor, ...],
         targets: ActorTargets,
         parameters: tuple[nn.Parameter, ...],
+        *,
+        clip_epsilon: float = 0.2,
     ) -> None:
+        if not 0 < clip_epsilon < 1:
+            raise ValueError("clip epsilon must be finite and between zero and one")
         if torch.is_inference_mode_enabled():
             raise ValueError("actor capture requires autograd outside inference_mode")
         if not inputs or not inputs[0].is_cuda or not parameters:
@@ -86,7 +90,7 @@ class GraphedActorStep:
                 gradient.zero_()
             with torch.enable_grad():
                 output = forward(static[: self.input_count])
-                result = actor_loss(output, _targets(static[self.input_count :]))
+                result = actor_loss(output, _targets(static[self.input_count :]), clip_epsilon=clip_epsilon)
                 result.loss.backward()
             detached = ReplayOutput(
                 output.log_probs_WKF.detach(),

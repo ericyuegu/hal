@@ -82,13 +82,15 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
             raise ValueError("reference distributions must be normalized on identical support")
 
 
-def actor_loss(output: ReplayOutput, targets: ActorTargets) -> ActorLoss:
-    """Joint ratio against stored behavior, clip=0.2, and lambda/sigma direct KL.
+def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: float = 0.2) -> ActorLoss:
+    """Joint ratio against stored behavior and lambda/sigma direct KL.
 
     This small objective duplicates the experiment math for a graphable model
     boundary. Inputs must pass validate_actor_targets before capture. Every
     target is detached; only current policy probabilities receive gradients.
     """
+    if not 0 < clip_epsilon < 1:
+        raise ValueError("clip epsilon must be finite and between zero and one")
     selected = targets.selected_WK & output.factor_mask_WKF.any(-1)
     mask = output.factor_mask_WKF & selected[..., None]
     new = torch.where(mask, output.log_probs_WKF, 0)
@@ -96,7 +98,7 @@ def actor_loss(output: ReplayOutput, targets: ActorTargets) -> ActorLoss:
     ratio = (new - old).sum(-1).exp()
     advantages = torch.where(selected, targets.advantages_WK.detach(), 0)
     normalized = (advantages - targets.advantage_mean.detach()) / targets.advantage_sigma.detach()
-    surrogate = torch.minimum(ratio * normalized, ratio.clamp(0.8, 1.2) * normalized)
+    surrogate = torch.minimum(ratio * normalized, ratio.clamp(1 - clip_epsilon, 1 + clip_epsilon) * normalized)
     policy = torch.where(selected, -surrogate, 0).sum() / targets.denominator.detach()
     kls: list[Tensor] = []
     frame_mask = mask.reshape(*mask.shape[:2], 4, 4)
@@ -106,7 +108,7 @@ def actor_loss(output: ReplayOutput, targets: ActorTargets) -> ActorLoss:
         active = frame_mask[..., group, None]
         p = torch.where(active, probabilities, 0)
         q = torch.where(active, reference.detach(), 1)
-        positive = (p > 0) & (q > 0)
+        positive = p > 0
         log_p = torch.where(positive, p, 1).log()
         log_q = torch.where(positive, q, 1).log()
         kls.append((p * (log_p - log_q)).sum(-1))
