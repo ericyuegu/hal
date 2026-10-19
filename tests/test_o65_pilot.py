@@ -66,13 +66,23 @@ def test_qualification_rejects_bad_scaling_and_memory() -> None:
         _MODULE.qualify_pool([row(3000), [], row(5000)])
 
 
-def test_pilot_uses_separate_evaluation_and_deterministic_training(tmp_path: Path) -> None:
+@pytest.mark.parametrize("verify,deterministic", [(False, False), (False, True), (True, False)])
+def test_pilot_reserves_determinism_for_resume_segments(tmp_path: Path, verify: bool, deterministic: bool) -> None:
     command = _MODULE.training_command(
-        tmp_path, tmp_path / "run", (0, 1), matches=1, groups=2, updates=4, checkpoint_every=1, warmup=0, verify=True
+        tmp_path,
+        tmp_path / "run",
+        (0, 1),
+        matches=1,
+        groups=2,
+        updates=4,
+        checkpoint_every=1,
+        warmup=0,
+        verify=verify,
+        deterministic=deterministic,
     )
     assert command[command.index("--evaluation-every") + 1] == "0"
-    assert "--training.deterministic" in command
-    assert "--verify-resume" in command
+    assert ("--training.deterministic" in command) == (verify or deterministic)
+    assert ("--verify-resume" in command) == verify
     evaluation = _MODULE.evaluation_command(
         tmp_path, tmp_path / "model", tmp_path / "protocol", tmp_path / "eval", held_out=False, simulators=("msl",)
     )
@@ -80,12 +90,13 @@ def test_pilot_uses_separate_evaluation_and_deterministic_training(tmp_path: Pat
     assert evaluation[evaluation.index("--anchors") + 1] == str(tmp_path / "payloads/final.pt")
 
 
-def test_pilot_logs_existing_interval_names(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_pilot_logs_existing_interval_names(tmp_path: Path, version: int) -> None:
     interval = {"mean": 0.6, "low": 0.5, "high": 0.7}
     (tmp_path / "results.json").write_text(
         json.dumps(
             {
-                "format": "hal.o65.evaluation-results.v1",
+                "format": f"hal.o65.evaluation-results.v{version}",
                 "split": "selection",
                 "groups": [
                     {

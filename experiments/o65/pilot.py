@@ -106,6 +106,7 @@ def training_command(
     checkpoint_every: int,
     warmup: int,
     verify: bool,
+    deterministic: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -128,7 +129,6 @@ def training_command(
         "--updates",
         str(updates),
         "--compiled",
-        "--training.deterministic",
         "--training.windows-per-step",
         "32",
         "--training.seed",
@@ -140,6 +140,8 @@ def training_command(
         "--evaluation-every",
         "0",
     ]
+    if deterministic or verify:
+        command.append("--training.deterministic")
     if verify:
         command.append("--verify-resume")
     return command
@@ -203,7 +205,9 @@ def evaluation_command(
 
 def log_evaluation(path: Path, update: int, environment: dict[str, str], *, online: bool) -> None:
     result = json.loads((path / "results.json").read_text())
-    if result["format"] != "hal.o65.evaluation-results.v1" or result["split"] not in ("selection", "held_out"):
+    if result["format"] not in ("hal.o65.evaluation-results.v1", "hal.o65.evaluation-results.v2") or result[
+        "split"
+    ] not in ("selection", "held_out"):
         raise ValueError("unexpected pilot evaluation result")
     metrics: dict[str, float] = {"global_step": float(update)}
     for index, group in enumerate(result["groups"]):
@@ -326,6 +330,8 @@ def main(args: Args) -> None:
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 172,
         verify=False,
+        # Resume identity includes the execution mode at every boundary.
+        deterministic=True,
     )
     if args.wandb:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()

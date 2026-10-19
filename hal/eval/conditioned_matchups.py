@@ -23,6 +23,10 @@ from peppi_py.game import EndMethod
 
 from hal.data.behavior import EDGE_X
 from hal.data.behavior import onsets
+from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.eval.batched_self_play import BatchedSelfPlayModel
+from hal.eval.batched_self_play import BatchedSelfPlayPolicy
+from hal.eval.batched_self_play import EvaluationStream
 from hal.eval.h2h import stamp_replay_identity
 from hal.eval.harness import SessionConfig
 from hal.eval.harness import default_session_cfg
@@ -37,6 +41,8 @@ from hal.eval.self_play_policy import SelfPlayPlayer
 from hal.eval.self_play_policy import SelfPlayPolicy
 from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import native_controller_readback
+from hal.sim.native import FRAME_DTYPE
+from hal.sim.native import OBSERVATION_FIELDS
 from hal.sim.native import NativeFrameBatch
 from hal.sim.native import NativeMatch
 from hal.sim.native import NativePlayer
@@ -352,6 +358,42 @@ def build_policy(
     return SelfPlayPolicy(players)
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduledMatch:
+    start: EvaluationStart
+    seed: int
+    focal_port: int
+    pair: str
+
+    @property
+    def characters(self) -> tuple[int, int]:
+        return self.start.characters if self.focal_port == 1 else self.start.characters[::-1]
+
+
+def build_batched_policy(
+    checkpoints: tuple[EvaluationCheckpoint, EvaluationCheckpoint],
+    conditions: tuple[PlayerCondition, PlayerCondition],
+    schedule: Sequence[ScheduledMatch],
+) -> BatchedSelfPlayPolicy:
+    groups: dict[str, tuple[EvaluationCheckpoint, list[EvaluationStream]]] = {}
+    for match, game in enumerate(schedule):
+        for role, (checkpoint, condition) in enumerate(zip(checkpoints, conditions, strict=True)):
+            group = groups.setdefault(checkpoint.policy_sha256, (checkpoint, []))
+            port = game.focal_port if role == 0 else 3 - game.focal_port
+            group[1].append(EvaluationStream(Slot(match, port), condition, game.seed, role))
+    return BatchedSelfPlayPolicy(
+        tuple(
+            BatchedSelfPlayModel(
+                checkpoint.model,
+                checkpoint.statistics,
+                tuple(streams),
+                compiled=next(checkpoint.model.parameters()).is_cuda,
+            )
+            for checkpoint, streams in groups.values()
+        )
+    )
+
+
 def native_observation_rows(frame: NativeFrameBatch) -> dict[Slot, list[ObservationRow]]:
     """Match Dolphin's processed readback while queues retain submitted factors."""
     if frame.frame_id.shape != (1,):
@@ -406,6 +448,59 @@ def run_msl_match(
     return trajectory, reason, time.perf_counter() - started
 
 
+def run_msl_matches(
+    simulator: NativeRolloutBatch,
+    policy: BatchedSelfPlayPolicy,
+    matches: tuple[NativeMatch, ...],
+    *,
+    max_frames: int,
+) -> list[tuple[Trajectory, str, float]]:
+    if max_frames < 1 or len(matches) != simulator.batch_size:
+        raise ValueError("MSL evaluation needs a positive frame budget and one match per lane")
+    started = time.perf_counter()
+    active = np.ones(len(matches), dtype=np.bool_)
+    frame = simulator.reset(matches, active)
+    if frame.records is None:
+        raise ValueError("batched evaluation requires native frame records")
+    records = np.empty((max_frames, len(matches)), dtype=FRAME_DTYPE)
+    lengths = np.full(len(matches), max_frames, dtype=np.int64)
+    reasons = ["frame_budget"] * len(matches)
+    for at in range(max_frames):
+        records[at] = frame.records
+        ended = active & (frame.terminated | frame.truncated)
+        for lane in np.flatnonzero(ended):
+            lengths[lane] = at + 1
+            reasons[lane] = "terminal" if frame.terminated[lane] else "timeout"
+        active &= ~ended
+        if not active.any() or at == max_frames - 1:
+            break
+        frame = simulator.step(policy.plan_native(frame, active), active)
+    result = []
+    for lane, length in enumerate(lengths):
+        trace = records[:length, lane]
+        columns = {
+            name: trace["columns"][:, index].view(MDS_PER_FRAME_DTYPES[name])
+            for index, name in enumerate(OBSERVATION_FIELDS)
+        }
+        trajectory = Trajectory(
+            trace["frame_id"].copy(),
+            {
+                port: {
+                    suffix: columns[f"p{port}_{suffix}"].astype(
+                        np.float64 if columns[f"p{port}_{suffix}"].dtype.kind == "f" else np.int64
+                    )
+                    for suffix in POST_FIELD_SUFFIXES
+                    if f"p{port}_{suffix}" in columns
+                }
+                for port in (1, 2)
+            },
+            np.zeros(length, dtype=np.uint32),
+        )
+        result.append((trajectory, reasons[lane]))
+    seconds = (time.perf_counter() - started) / len(matches)
+    return [(trajectory, reason, seconds) for trajectory, reason in result]
+
+
 def dolphin_stop_reason(method: EndMethod | None, *, captured_frames: int, max_frames: int) -> str:
     """A short match must have a valid game-end record; it is not a budget stop."""
     if not 0 < captured_frames <= max_frames:
@@ -456,10 +551,164 @@ def run_dolphin_match(
     return boots[0][0], reason, time.perf_counter() - started, replay
 
 
+def run_dolphin_matches(
+    policy: BatchedSelfPlayPolicy,
+    schedule: Sequence[ScheduledMatch],
+    *,
+    max_frames: int,
+    replay_dir: Path,
+    labels: Sequence[dict[int, str]],
+    session: SessionConfig,
+) -> list[tuple[Trajectory, str, float, Path]]:
+    if not schedule or len(labels) != len(schedule) or session.instant_match_restart:
+        raise ValueError("Dolphin evaluation requires labeled single-match workers")
+    matchups = [
+        VecMatch(
+            Matchup(
+                melee.Stage(game.start.stage),
+                tuple(PlayerSetup(port, melee.Character(game.characters[port - 1])) for port in (1, 2)),
+            ),
+            (1, 2),
+        )
+        for game in schedule
+    ]
+    started = time.perf_counter()
+    boots = run_matches_vec(
+        replace(session, replay_dir=replay_dir),
+        matchups,
+        lambda: policy,
+        max_frames=max_frames,
+        max_parallel=len(schedule),
+        start_retries=0,
+    )
+    if len(boots) != len(schedule) or any(len(boot) != 1 for boot in boots):
+        raise RuntimeError("Dolphin evaluation failed; no match may be dropped")
+    results = []
+    for index, (boot, scheduled, label) in enumerate(zip(boots, schedule, labels, strict=True)):
+        replay_files = list((replay_dir / f"boot_{index:03d}").rglob("*.slp"))
+        if len(replay_files) != 1:
+            raise RuntimeError("Dolphin evaluation must produce exactly one replay per worker")
+        replay = replay_files[0]
+        stamp_replay_identity(replay, label)
+        game = peppi_py.read_slippi(str(replay), skip_frames=True)
+        method = None if game.end is None else EndMethod(int(game.end.method))
+        reason = dolphin_stop_reason(method, captured_frames=len(boot[0]), max_frames=max_frames)
+        if scheduled.start.stage == melee.Stage.POKEMON_STADIUM.value and game.start.is_frozen_ps is not True:
+            raise ValueError("Dolphin evaluation requires frozen Stadium")
+        results.append((boot[0], reason, replay))
+    seconds = (time.perf_counter() - started) / len(schedule)
+    return [(trajectory, reason, seconds, replay) for trajectory, reason, replay in results]
+
+
 def write_json(path: Path, value: object) -> None:
     temporary = path.with_suffix(path.suffix + ".partial")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n")
     temporary.replace(path)
+
+
+def _replay_labels(
+    checkpoints: tuple[EvaluationCheckpoint, EvaluationCheckpoint],
+    conditions: tuple[PlayerCondition, PlayerCondition],
+    focal_port: int,
+) -> dict[int, str]:
+    labels = {}
+    for role, (checkpoint, condition) in enumerate(zip(checkpoints, conditions, strict=True)):
+        port = focal_port if role == 0 else 3 - focal_port
+        condition_hash = hashlib.sha256(json.dumps(asdict(condition), sort_keys=True).encode()).hexdigest()[:6]
+        labels[port] = f"{'RL' if role == 0 else 'REF'}-{checkpoint.checkpoint_sha256[:8]}-{condition_hash}"
+    return labels
+
+
+def _run_cell(
+    checkpoints: tuple[EvaluationCheckpoint, EvaluationCheckpoint],
+    conditions: tuple[PlayerCondition, PlayerCondition],
+    schedule: tuple[ScheduledMatch, ...],
+    *,
+    native: NativeRolloutBatch | None,
+    session: SessionConfig | None,
+    execution: Literal["serial", "batched"],
+    history_mode: Literal["block", "sliding"],
+    max_frames: int,
+    dolphin_workers: int,
+    output: Path,
+) -> list[EvaluationMatch]:
+    results: list[tuple[Trajectory, str, float, Path | None]] = []
+    if execution == "batched" and native is not None:
+        policy = build_batched_policy(checkpoints, conditions, schedule)
+        configs = tuple(
+            NativeMatch(
+                game.start.stage,
+                (NativePlayer(1, game.characters[0]), NativePlayer(2, game.characters[1])),
+                game.seed,
+                max_frame=28800,
+            )
+            for game in schedule
+        )
+        results.extend(
+            (trajectory, reason, seconds, None)
+            for trajectory, reason, seconds in run_msl_matches(native, policy, configs, max_frames=max_frames)
+        )
+    elif execution == "batched":
+        if session is None:
+            raise RuntimeError("Dolphin session is absent")
+        for first in range(0, len(schedule), dolphin_workers):
+            wave = schedule[first : first + dolphin_workers]
+            results.extend(
+                run_dolphin_matches(
+                    build_batched_policy(checkpoints, conditions, wave),
+                    wave,
+                    max_frames=max_frames,
+                    replay_dir=output / f"wave-{first:04d}",
+                    labels=[_replay_labels(checkpoints, conditions, game.focal_port) for game in wave],
+                    session=session,
+                )
+            )
+    else:
+        for game in schedule:
+            serial_policy = build_policy(
+                checkpoints, conditions, seed=game.seed, focal_port=game.focal_port, history_mode=history_mode
+            )
+            if native is not None:
+                trajectory, reason, seconds = run_msl_match(
+                    native,
+                    serial_policy,
+                    NativeMatch(
+                        game.start.stage,
+                        (NativePlayer(1, game.characters[0]), NativePlayer(2, game.characters[1])),
+                        game.seed,
+                        max_frame=28800,
+                    ),
+                    max_frames=max_frames,
+                )
+                results.append((trajectory, reason, seconds, None))
+            else:
+                if session is None:
+                    raise RuntimeError("Dolphin session is absent")
+                results.append(
+                    run_dolphin_match(
+                        serial_policy,
+                        game.start,
+                        game.characters,
+                        max_frames=max_frames,
+                        replay_dir=output / game.start.name / f"{game.seed}-p{game.focal_port}",
+                        labels=_replay_labels(checkpoints, conditions, game.focal_port),
+                        session=session,
+                    )
+                )
+    return [
+        score_match(
+            trajectory,
+            simulator="msl" if native is not None else "dolphin",
+            pair=game.pair,
+            seed=game.seed,
+            start=game.start,
+            focal_port=game.focal_port,
+            stop_reason=reason,
+            wall_seconds=seconds,
+            replay=replay,
+        )
+        for game, (trajectory, reason, seconds, replay) in zip(schedule, results, strict=True)
+    ]
 
 
 def evaluate(
@@ -477,6 +726,8 @@ def evaluate(
     condition_grid: tuple[tuple[PlayerCondition, PlayerCondition], ...] | None = None,
     compare_events: bool = False,
     session: SessionConfig | None = None,
+    execution: Literal["serial", "batched"] = "batched",
+    dolphin_workers: int = 8,
 ) -> dict[str, object]:
     if (
         not anchors
@@ -491,6 +742,12 @@ def evaluate(
         raise ValueError("MSL evaluation requires its data directory")
     if compare_events and set(simulators) != {"msl", "dolphin"}:
         raise ValueError("event validation requires both simulators")
+    if execution not in ("serial", "batched"):
+        raise ValueError("unknown evaluation execution mode")
+    if type(dolphin_workers) is not int or dolphin_workers < 1:
+        raise ValueError("Dolphin worker count must be a positive integer")
+    if history_mode not in ("block", "sliding") or (execution == "batched" and history_mode != "block"):
+        raise ValueError("batched evaluation requires block history; use serial execution for sliding history")
     output.mkdir(parents=True, exist_ok=False)
     focal = load_evaluation_checkpoint(checkpoint, device=torch.device(device))
     frozen = [load_evaluation_checkpoint(anchor, device=torch.device(device)) for anchor in anchors]
@@ -519,7 +776,7 @@ def evaluate(
     selected = protocol.selection if split == "selection" else protocol.held_out
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     record: dict[str, object] = {
-        "format": "hal.o65.evaluation-results.v1",
+        "format": "hal.o65.evaluation-results.v2",
         "checkpoint_sha256": focal.checkpoint_sha256,
         "policy_sha256": focal.policy_sha256,
         "anchor_policy_sha256": [anchor.policy_sha256 for anchor in frozen],
@@ -528,6 +785,8 @@ def evaluate(
         "split": split,
         "condition_grid": [[asdict(condition) for condition in pair] for pair in grid],
         "history_mode": history_mode,
+        "execution": execution,
+        "dolphin_workers": dolphin_workers,
         "u_star": 0.95,
         "treatment": "current snapshot at the declared identity, lambda, D, R and history mode",
         "control": "frozen anchor snapshots at their declared conditioning",
@@ -559,6 +818,7 @@ def evaluate(
             "intervals": "two-sided 95% normal intervals over paired units; fewer than two units gives null bounds",
             "net_stock_lcb": "one-sided 95% normal lower bound over paired units",
             "offstage": "fraction of active frames past the walkable stage edge",
+            "wall_seconds": "batch wall time divided equally among its matches; summed shares measure throughput",
         },
         "rng_note": "Seeds control policy draws and MSL reset. Dolphin game RNG is recorded, not injected.",
         "groups": [],
@@ -568,11 +828,21 @@ def evaluate(
     write_json(output / "protocol.json", record)
     groups: list[dict[str, object]] = []
     for cell_index, anchor_index, conditions, anchor in cells:
+        schedule = tuple(
+            ScheduledMatch(start, seed, port, f"c{cell_index}/a{anchor_index}/{start.name}/{seed}")
+            for start in selected.starts
+            for seed in selected.seeds
+            for port in (1, 2)
+        )
         by_simulator: dict[str, list[EvaluationMatch]] = {}
         for simulator_name in simulators:
             matches: list[EvaluationMatch] = []
             session_cfg = (session or default_session_cfg()) if simulator_name == "dolphin" else None
-            native = NativeRolloutBatch(data_dir, 1) if simulator_name == "msl" and data_dir is not None else None
+            native = (
+                NativeRolloutBatch(data_dir, len(schedule) if execution == "batched" else 1)
+                if simulator_name == "msl" and data_dir is not None
+                else None
+            )
             try:
                 if native is not None:
                     record["msl"] = {
@@ -593,75 +863,22 @@ def evaluate(
                         else sha256(Path(session_cfg.dolphin_path)),
                     }
                 write_json(output / "protocol.json", record)
-                for start in selected.starts:
-                    for seed in selected.seeds:
-                        for focal_port in (1, 2):
-                            policy = build_policy(
-                                (focal, anchor),
-                                conditions,
-                                seed=seed,
-                                focal_port=focal_port,
-                                history_mode=history_mode,
-                            )
-                            characters = (
-                                start.characters if focal_port == 1 else (start.characters[1], start.characters[0])
-                            )
-                            pair = f"c{cell_index}/a{anchor_index}/{start.name}/{seed}"
-                            replay = None
-                            if native is not None:
-                                match = NativeMatch(
-                                    start.stage,
-                                    (NativePlayer(1, characters[0]), NativePlayer(2, characters[1])),
-                                    seed,
-                                    max_frame=28800,
-                                )
-                                trajectory, reason, seconds = run_msl_match(
-                                    native, policy, match, max_frames=protocol.max_frames
-                                )
-                            else:
-                                if session_cfg is None:
-                                    raise RuntimeError("Dolphin session is absent")
-                                labels = {
-                                    port: f"{'RL' if port == focal_port else 'REF'}-{(focal if port == focal_port else anchor).checkpoint_sha256[:8]}-"
-                                    + hashlib.sha256(
-                                        json.dumps(
-                                            asdict(conditions[0 if port == focal_port else 1]), sort_keys=True
-                                        ).encode()
-                                    ).hexdigest()[:6]
-                                    for port in (1, 2)
-                                }
-                                directory = (
-                                    output
-                                    / f"cell-{cell_index}-anchor-{anchor_index}"
-                                    / start.name
-                                    / f"{seed}-p{focal_port}"
-                                )
-                                trajectory, reason, seconds, replay = run_dolphin_match(
-                                    policy,
-                                    start,
-                                    characters,
-                                    max_frames=protocol.max_frames,
-                                    replay_dir=directory,
-                                    labels=labels,
-                                    session=session_cfg,
-                                )
-                            matches.append(
-                                score_match(
-                                    trajectory,
-                                    simulator=simulator_name,
-                                    pair=pair,
-                                    seed=seed,
-                                    start=start,
-                                    focal_port=focal_port,
-                                    stop_reason=reason,
-                                    wall_seconds=seconds,
-                                    replay=replay,
-                                )
-                            )
-                            write_json(
-                                output / f"matches-{cell_index}-{anchor_index}-{simulator_name}.json",
-                                [asdict(match) for match in matches],
-                            )
+                matches = _run_cell(
+                    (focal, anchor),
+                    conditions,
+                    schedule,
+                    native=native,
+                    session=session_cfg,
+                    execution=execution,
+                    history_mode=history_mode,
+                    max_frames=protocol.max_frames,
+                    dolphin_workers=dolphin_workers,
+                    output=output / f"cell-{cell_index}-anchor-{anchor_index}",
+                )
+                write_json(
+                    output / f"matches-{cell_index}-{anchor_index}-{simulator_name}.json",
+                    [asdict(match) for match in matches],
+                )
             finally:
                 if native is not None:
                     native.close()

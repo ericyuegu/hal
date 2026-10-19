@@ -41,6 +41,8 @@ class Args:
     compare_events: bool = False
     max_frames: int = 28924
     device: str = "cuda"
+    execution: Literal["serial", "batched"] = "batched"
+    dolphin_workers: int = 8
 
 
 def main(args: Args) -> None:
@@ -74,6 +76,8 @@ def main(args: Args) -> None:
         history_mode=args.history_mode,
         compare_events=args.compare_events,
         condition_grid=grid,
+        execution=args.execution,
+        dolphin_workers=args.dolphin_workers,
     )
 
 

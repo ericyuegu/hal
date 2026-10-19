@@ -519,6 +519,100 @@ def test_critic_only_warmup_does_not_step_actor() -> None:
     assert not torch.equal(before["value_head.bias"], run.policy.model.value_head.bias)
 
 
+def test_warmup_skips_reference_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = trainer(groups=1, warmup=100, anchor_rate=0)
+
+    def fail_evaluation(states: Any, actions: torch.Tensor) -> Any:
+        raise AssertionError("warmup must not evaluate the reference")
+
+    monkeypatch.setattr(run.reference, "evaluate", fail_evaluation)
+    batch, metrics = run.run_update()
+    assert batch.reference is None
+    assert metrics["policy/kl_per_frame"] == 0
+    assert all(value == 0 for key, value in metrics.items() if key.startswith("policy/kl_per_frame_lambda"))
+    assert run.actor_steps == 0
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"))],
+)
+def test_student_and_reference_evaluations_are_identical_before_first_actor_step(device: str) -> None:
+    run = transformer_trainer(device, development=True)
+    run = exp.Trainer(run.engine, dataclasses.replace(run.config, critic_warmup_updates=100))
+    match = run.engine.matches[0]
+    players = tuple(
+        dataclasses.replace(player, timing=timing)
+        for player, timing in zip(match.episode.players, run.engine.sampler.schedule.configurations, strict=True)
+    )
+    episode = dataclasses.replace(match.episode, players=players)
+    states = tuple(
+        exp.DecisionState(
+            side,
+            0,
+            side,
+            episode,
+            128,
+            (0, side, 128, 0),
+            tuple(match.history) * 129,
+            torch.zeros(players[side].timing.delay, 4, dtype=torch.long),
+            torch.zeros(players[1 - side].timing.delay, 4, dtype=torch.long),
+        )
+        for side in range(2)
+    )
+    actions = torch.zeros(2, 4, 4, dtype=torch.long, device=device)
+
+    def compare() -> None:
+        with torch.no_grad():
+            student = run.policy.evaluate(states, actions)
+            reference = run.reference.evaluate(states, actions)
+        torch.testing.assert_close(student.log_probs, reference.log_probs, atol=0, rtol=0)
+        for actual, expected in zip(student.distributions, reference.distributions, strict=True):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        torch.testing.assert_close(
+            exp.factor_kl(student, reference), torch.zeros_like(student.log_probs), atol=0, rtol=0
+        )
+
+    compare()
+    run.run_update()
+    assert run.actor_steps == 0
+    assert not run.actor_optimizer.state
+    compare()
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"))],
+)
+def test_full_batch_critic_loss_and_gradient_match_shuffled_order(device: str) -> None:
+    run = transformer_trainer(device, development=True)
+    policy = run.policy
+    count = 257
+    with torch.no_grad():
+        policy.model.critic_residual.residual.down.weight.fill_(0.03)
+    features = exp.CriticFeatures(
+        torch.randn(count, 16, device=device),
+        torch.randn(count, 16, device=device),
+        torch.randn(count, 3, device=device),
+        torch.randn(count, 3, device=device),
+        torch.zeros(count, 14, 4, dtype=torch.long, device=device),
+        torch.arange(count, device=device) % 15,
+    )
+    targets = torch.randn(count, device=device) * 100
+    selected = torch.ones(count, dtype=torch.bool, device=device)
+    order = sorted(range(count), key=lambda j: run.engine.sampler.rng.uniform("critic_shuffle", j % 2, 0, 0, 0, j))
+    at = torch.tensor(order, device=device)
+    loss = exp.critic_loss(policy.values(features), targets, selected, value_scale=run.config.value_scale)
+    gradients = torch.autograd.grad(loss, policy.critic_parameters())
+    shuffled_loss = exp.critic_loss(
+        policy.values(exp._take_features(features, at)), targets[at], selected[at], value_scale=run.config.value_scale
+    )
+    shuffled_gradients = torch.autograd.grad(shuffled_loss, policy.critic_parameters())
+    torch.testing.assert_close(loss, shuffled_loss, rtol=1e-6, atol=1e-7)
+    for actual, expected in zip(gradients, shuffled_gradients, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-7)
+
+
 def transformer_trainer(
     device: str, *, development: bool = False, deterministic: bool = False, compiled: bool = False
 ) -> Any:
@@ -653,7 +747,51 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
     assert run.engine.sampler.lambda_max == pytest.approx(expected)
     assert not run.warming
     assert run.actor_steps == 0
+    assert batch.reference is None
     torch.testing.assert_close(before, run.policy.model.logits, rtol=0, atol=0)
+    first_actor, metrics = run.run_update()
+    assert first_actor.reference is not None
+    assert metrics["policy/kl_per_frame"] == 0
+    assert run.actor_steps > 0
+    rollout = run.engine.collect(run.update)
+    following = run.prepare(rollout)
+    assert following.reference is not None
+    kl = exp.factor_kl(following.old, following.reference)
+    assert float(kl.max()) > 0
+    executed = following.decisions.executed_factors_JF
+    expected_kl = torch.where(executed, kl, 0).sum() / following.decisions.replan_J.sum()
+    assert following.metrics["policy/kl_per_frame"] == pytest.approx(float(expected_kl))
+    run.warming = True
+    unregularized = run.prepare(rollout)
+    run.warming = False
+    streams: dict[int, list[int]] = {}
+    for index, record in enumerate(rollout.records):
+        streams.setdefault(record.state.stream, []).append(index)
+    zeros = torch.zeros_like(following.values)
+    penalty = -following.decisions.kl_coefficient_J * torch.where(executed, kl, 0).sum(-1)
+    effect = exp.stream_advantages(
+        penalty,
+        zeros,
+        zeros,
+        following.decisions.duration_J,
+        following.decisions.bootstrap_mask_J,
+        following.decisions.trace_mask_J,
+        list(streams.values()),
+    )
+    torch.testing.assert_close(following.advantages, unregularized.advantages + effect.advantages)
+    torch.testing.assert_close(following.targets, unregularized.targets + effect.advantages)
+
+
+def test_actor_fit_rejects_missing_reference() -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    batch = run.prepare(run.engine.collect(0))
+    before = copy.deepcopy(run.policy.model.state_dict())
+    with pytest.raises(ValueError, match="actor update requires a reference evaluation"):
+        run.fit(dataclasses.replace(batch, reference=None))
+    assert not run.actor_optimizer.state
+    assert not run.critic_optimizer.state
+    for name, value in before.items():
+        torch.testing.assert_close(run.policy.model.state_dict()[name], value, rtol=0, atol=0)
 
 
 def test_unfinished_update_cannot_be_checkpointed(tmp_path: Path) -> None:
@@ -946,8 +1084,13 @@ def test_manifest_metadata_is_validated_by_resume_and_evaluation(tmp_path: Path,
         load_evaluation_checkpoint(manifest, device=torch.device("cpu"))
 
 
-def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path) -> None:
-    run = trainer(groups=1, development=True, anchor_rate=0)
+@pytest.mark.parametrize("warmup", [0, 100, 1])
+def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path, warmup: int) -> None:
+    run = trainer(groups=1, development=True, anchor_rate=0, warmup=warmup)
+    if warmup == 1:
+        run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
+        run.engine.sampler.lambda_max = 100
+        run.config = dataclasses.replace(run.config, plateau_patience=2, warmup_match_frames=0)
     run.run_update()
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     result = json.loads((tmp_path / "resume-check.json").read_text())
@@ -955,6 +1098,10 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path)
     assert result["optimizer_expected_sha256"] == result["optimizer_actual_sha256"]
     assert result["maximum_parameter_error"] == 0
     assert run.update == 1
+    if warmup == 1:
+        assert run.warming
+        assert result["uninterrupted_metrics"]["train/warming"] == 0
+        assert result["uninterrupted_metrics"]["train/actor_steps"] == 0
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -1069,12 +1216,13 @@ def test_proxy_muon_repeated_fit_on_long_history(deterministic_execution: None) 
         torch.testing.assert_close(policy.model.state_dict()[name].cpu(), value, rtol=0, atol=0, msg=name)
 
 
-def test_periodic_metrics_preserve_unscored_budget_matches(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_periodic_metrics_preserve_unscored_budget_matches(tmp_path: Path, version: int) -> None:
     result = tmp_path / "results.json"
     result.write_text(
         json.dumps(
             {
-                "format": "hal.o65.evaluation-results.v1",
+                "format": f"hal.o65.evaluation-results.v{version}",
                 "split": "selection",
                 "checkpoint_provenance": {"update": 2},
                 "groups": [

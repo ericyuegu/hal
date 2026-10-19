@@ -15,10 +15,14 @@ import torch
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import consolidate_key
 from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.eval.batched_self_play import BatchedSelfPlayModel
+from hal.eval.batched_self_play import BatchedSelfPlayPolicy
+from hal.eval.batched_self_play import EvaluationStream
 from hal.eval.conditioned_matchups import EvaluationMatch
 from hal.eval.conditioned_matchups import EvaluationSet
 from hal.eval.conditioned_matchups import EvaluationStart
 from hal.eval.conditioned_matchups import compare_simulators
+from hal.eval.conditioned_matchups import evaluate
 from hal.eval.conditioned_matchups import native_observation_rows
 from hal.eval.conditioned_matchups import pilot_protocol
 from hal.eval.conditioned_matchups import score_match
@@ -163,6 +167,127 @@ def test_counter_rng_separates_roles_and_preserves_shared_offsets() -> None:
     a = evaluation_uniforms(17, 0, 128, 4)
     np.testing.assert_array_equal(a[:2], evaluation_uniforms(17, 0, 128, 2))
     assert not np.array_equal(a, evaluation_uniforms(17, 1, 128, 4))
+
+
+def test_batched_actions_match_serial_through_handoffs_and_partial_resets() -> None:
+    torch.manual_seed(71)
+    model = small_model()
+    streams = tuple(
+        EvaluationStream(
+            Slot(match, port),
+            PlayerCondition(delay=8 if role == 0 else 10, replan=4 if role == 0 else 2),
+            seed,
+            role,
+        )
+        for match, (seed, focal_port) in enumerate(((17, 1), (17, 2), (29, 1), (29, 2)))
+        for role, port in enumerate((focal_port, 3 - focal_port))
+    )
+    batched = BatchedSelfPlayPolicy((BatchedSelfPlayModel(model, stats(), streams, compiled=False),))
+    serial = {
+        stream.slot: SelfPlayPlayer(
+            model,
+            stats(),
+            stream.condition,
+            port=stream.slot.port,
+            seed=stream.seed,
+            logical_player=stream.logical_player,
+        )
+        for stream in streams
+    }
+    for at in range(270):
+        rows = {stream.slot: [row(at, reset=at == 253 and stream.slot.match % 2 == 0)] for stream in streams}
+        # Non-neutral observed inputs exercise the feature and decoder boundaries.
+        for slot, values in rows.items():
+            action = np.zeros(ACTION_DIM, dtype=np.float32)
+            action[:2] = [0.975, -0.3]
+            rows[slot] = [replace(values[0], action=action)]
+        actual = batched.plan_rows(dict(reversed(tuple(rows.items()))))
+        for slot, values in rows.items():
+            expected = serial[slot].step(values[0])
+            np.testing.assert_array_equal(actual[slot][0], expected)
+            torch.testing.assert_close(batched.models[0].last_sampled[slot], serial[slot].last_sampled, rtol=0, atol=0)
+
+
+def test_batched_stream_validation_and_missing_stream_return() -> None:
+    model = small_model()
+    slot = Slot(0, 1)
+    stream = EvaluationStream(slot, PlayerCondition(), 17, 0)
+    with pytest.raises(ValueError, match="unsupervised"):
+        BatchedSelfPlayModel(
+            model, stats(), (replace(stream, condition=PlayerCondition(delay=10, replan=4)),), compiled=False
+        )
+    batched = BatchedSelfPlayPolicy(
+        (BatchedSelfPlayModel(model, stats(), (stream, replace(stream, slot=Slot(1, 1))), compiled=False),)
+    )
+    batched.plan_rows({slot: [row(0)], Slot(1, 1): [row(0)]})
+    batched.plan_rows({slot: [row(1)]})
+    with pytest.raises(ValueError, match="must reset"):
+        batched.plan_rows({slot: [row(2)], Slot(1, 1): [row(1)]})
+    batched.plan_rows({slot: [row(2)], Slot(1, 1): [row(0, reset=True)]})
+    with pytest.raises(ValueError, match="consecutive"):
+        batched.plan_rows({slot: [row(4)]})
+
+
+def test_batched_policy_keeps_distinct_model_weights_and_cadences() -> None:
+    torch.manual_seed(13)
+    models = (small_model(), small_model())
+    groups = []
+    serial = {}
+    for role, model in enumerate(models):
+        streams = tuple(
+            EvaluationStream(
+                Slot(match, port),
+                PlayerCondition(delay=8 if role == 0 else 10, replan=4 if role == 0 else 2),
+                17,
+                role,
+            )
+            for match, port in enumerate((1 + role, 2 - role))
+        )
+        groups.append(BatchedSelfPlayModel(model, stats(), streams, compiled=False))
+        for stream in streams:
+            serial[stream.slot] = SelfPlayPlayer(
+                model,
+                stats(),
+                stream.condition,
+                port=stream.slot.port,
+                seed=stream.seed,
+                logical_player=role,
+            )
+    batched = BatchedSelfPlayPolicy(tuple(groups))
+    for at in range(24):
+        rows = {slot: [row(at)] for slot in serial}
+        actual = batched.plan_rows(rows)
+        for slot, player in serial.items():
+            np.testing.assert_array_equal(actual[slot][0], player.step(rows[slot][0]))
+
+
+def test_batched_evaluation_rejects_sliding_history_and_invalid_workers(tmp_path: Path) -> None:
+    missing = tmp_path / "absent.pt"
+    conditions = (PlayerCondition(), PlayerCondition())
+    with pytest.raises(ValueError, match="requires block history"):
+        evaluate(
+            missing,
+            (missing,),
+            tmp_path / "sliding",
+            protocol=pilot_protocol(),
+            split="selection",
+            conditions=conditions,
+            simulators=("dolphin",),
+            history_mode="sliding",
+        )
+    with pytest.raises(ValueError, match="worker count"):
+        evaluate(
+            missing,
+            (missing,),
+            tmp_path / "workers",
+            protocol=pilot_protocol(),
+            split="selection",
+            conditions=conditions,
+            simulators=("dolphin",),
+            dolphin_workers=0,
+        )
+    assert not (tmp_path / "sliding").exists()
+    assert not (tmp_path / "workers").exists()
 
 
 def test_selection_and_held_out_reject_seed_and_start_overlap() -> None:
