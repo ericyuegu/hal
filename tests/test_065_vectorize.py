@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,18 @@ import torch
 from test_065_columnar import ROOT
 from test_065_columnar import exp
 from torch import Tensor
+
+
+def sequential_replay(policy: Any) -> None:
+    # A rollout oracle must force common actions through sampling's sequential
+    # kernels. Parallel training replay measures mu/pi_old kernel differences.
+    for count in (2, 4):
+        policy.decoder.replay_variants[count] = partial(
+            policy.model.temporal.decode_decisions,
+            max_delay=policy.decoder.max_delay,
+            sampled_offsets=count,
+            forced_prefix_length=min(delay for delay, _ in policy.decoder.configurations),
+        )
 
 
 @torch.no_grad()
@@ -52,6 +65,7 @@ class ComparisonPolicy(exp.TransformerPolicy):
     def __init__(self, model: Any, schedule: Any, statistics: Any) -> None:
         super().__init__(model, schedule, statistics, compiled=True)
         self.control = exp.TransformerPolicy(model, schedule, statistics, compiled=True)
+        sequential_replay(self.control)
         self.actual_outputs: list[Any] = []
         self.expected_outputs: list[Any] = []
 
