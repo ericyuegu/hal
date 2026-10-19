@@ -57,7 +57,8 @@ Use 16 native shard threads, two Torch CPU threads, and four groups. Begin
 with three separate, three-update qualifications at 256, 512 and 1,024 active
 matches (16, 32 and 64 lanes per shard), one group each. Exclude the first
 update from steady throughput. These are disposable timing runs with no
-warmup; they do not select optimizer settings or learning checkpoints.
+warmup and default Torch algorithms; they do not select optimizer settings or
+learning checkpoints.
 
 The planned training pool has 1,024 active and 4,096 resident matches.
 The [local report](performance/report.md) measured 1,592 match-frames/s at
@@ -113,6 +114,12 @@ evaluation and startup separately because update throughput excludes them.
    restore. Require identical batch hashes, optimizer/scheduler hashes and
    zero model parameter error. Restore the 288 boundary after the check.
    Continue through 512 with the same configuration and run id.
+   Deterministic mode and the cuBLAS workspace setting are part of the strict
+   checkpoint configuration identity. All connected training segments therefore
+   keep deterministic execution. Limiting it to the verification segment needs
+   an explicit change to the resume contract; this protocol does not permit an
+   implicit mode change. The verifier compares two next updates from the same
+   boundary, so its numerical claim concerns those updates, not the earlier run.
 6. Evaluate only the final checkpoint once on the held-out grid in both
    simulators, with a 28,924-frame budget. Keep the held-out claim and every
    partial result, including on failure. No held-out retry or selection is

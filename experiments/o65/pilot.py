@@ -106,6 +106,7 @@ def training_command(
     checkpoint_every: int,
     warmup: int,
     verify: bool,
+    deterministic: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -128,7 +129,6 @@ def training_command(
         "--updates",
         str(updates),
         "--compiled",
-        "--training.deterministic",
         "--training.windows-per-step",
         "32",
         "--training.seed",
@@ -140,6 +140,8 @@ def training_command(
         "--evaluation-every",
         "0",
     ]
+    if deterministic or verify:
+        command.append("--training.deterministic")
     if verify:
         command.append("--verify-resume")
     return command
@@ -328,6 +330,8 @@ def main(args: Args) -> None:
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 172,
         verify=False,
+        # Resume identity includes the execution mode at every boundary.
+        deterministic=True,
     )
     if args.wandb:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
