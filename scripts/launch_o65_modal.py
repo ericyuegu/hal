@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from datetime import UTC
@@ -21,6 +22,7 @@ from modal.types import FileEntryType
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = Path("/opt/o65-hal")
 RESULTS = Path("/o65-results")
+WORK = Path("/opt/o65-work")
 VOLUME = "hal-o65-profile"
 IMAGE = "ghcr.io/ericyuegu/hal@sha256:c9160a7bb2dc0aa3eb6dc583b1c4753ff98d9a40f802512ca402e2b93a3a7413"
 AWS_KEYS = ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET")
@@ -76,7 +78,7 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         "--sampler",
         "experiments/o65/pilot-sampler.json",
         "--output",
-        str(RESULTS / request.name / "profile"),
+        str(WORK / request.name / "profile"),
         "--cpus",
         *(str(cpu) for cpu in cpus),
         "--matches-per-shard",
@@ -115,16 +117,31 @@ def select_cpus(allowed: set[int]) -> tuple[int, ...]:
 def run_remote(request: Request) -> int:
     output = RESULTS / request.name
     output.mkdir(parents=True, exist_ok=False)
+    local = WORK / request.name
+    local.mkdir(parents=True, exist_ok=False)
     started = time.time()
     code = -1
     try:
-        code = run_child(request, output, started)
+        code = run_child(request, local, started)
         return code
     finally:
+        stage_results(local, output)
         (output / "result.json").write_text(
             json.dumps({"exit_code": code, "started_unix": started, "finished_unix": time.time()}, indent=2)
         )
         modal.Volume.from_name(VOLUME).commit()
+
+
+def stage_results(source: Path, destination: Path) -> None:
+    # Modal Volumes do not support the hard links used for atomic checkpoints.
+    # Finish on local POSIX storage, then copy bytes into the durable Volume.
+    shutil.copytree(
+        source,
+        destination,
+        dirs_exist_ok=True,
+        copy_function=shutil.copyfile,
+        ignore=shutil.ignore_patterns("tmp", "inductor", "triton"),
+    )
 
 
 def run_child(request: Request, output: Path, started: float) -> int:

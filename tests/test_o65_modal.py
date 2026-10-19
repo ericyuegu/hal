@@ -75,6 +75,23 @@ def test_cpu_selection_uses_distinct_available_ids() -> None:
         select_cpus(set(range(16)))
 
 
+def test_volume_staging_copies_checkpoint_bytes_and_excludes_caches(tmp_path: Path) -> None:
+    source, target = tmp_path / "local", tmp_path / "volume"
+    checkpoint = source / "profile/checkpoints/actor.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"durable actor")
+    (checkpoint.parent / "linked.pt").hardlink_to(checkpoint)
+    for name in ("tmp", "inductor", "triton"):
+        (source / name).mkdir()
+        (source / name / "cache").write_bytes(b"ephemeral")
+    launcher.stage_results(source, target)
+    copied = target / "profile/checkpoints/actor.pt"
+    assert copied.read_bytes() == b"durable actor"
+    assert (copied.parent / "linked.pt").read_bytes() == copied.read_bytes()
+    assert copied.stat().st_ino != checkpoint.stat().st_ino
+    assert not any((target / name).exists() for name in ("tmp", "inductor", "triton"))
+
+
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
 def test_replay_chunks_reject_invalid_sizes(value: int) -> None:
     with pytest.raises(ValueError, match="positive integers"):
