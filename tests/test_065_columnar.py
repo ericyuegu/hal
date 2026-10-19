@@ -270,8 +270,17 @@ def test_rollout_keeps_contexts_in_tensors_until_diagnostics_request_them() -> N
     run = transformer_trainer("cpu", development=True)
     rollout = run.engine.collect(0)
     assert isinstance(rollout.records, loop_exp.DecisionRecords)
-    store = rollout.records.states.table.store
+    table = rollout.records.states.table
+    store = table.store
     assert store._host is None and not store._views
+    for host, device in (
+        (table.duration, table.duration_device),
+        (table.remaining, table.remaining_device),
+        (table.terminal, table.terminal_device),
+        (table.boundary, table.boundary_device),
+        (table.following, table.following_device),
+    ):
+        torch.testing.assert_close(device[: table.count].cpu(), torch.from_numpy(host[: table.count]), rtol=0, atol=0)
     batch = run.prepare(rollout)
     run.fit(batch)
     assert store._host is None and not store._views

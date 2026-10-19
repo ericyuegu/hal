@@ -1876,13 +1876,8 @@ def _decision_batch(records: Sequence[DecisionRecord | DecisionRecordView], devi
     if isinstance(records, DecisionRecords):
         states = records.states
         meta = states.tensor(states.table.integers)
-        ids = states.ids
-
-        def integers_column(values: NDArray[np.int64]) -> Tensor:
-            return torch.from_numpy(values).to(device)
-
         delay, replan = meta[:, DELAY].contiguous(), meta[:, REPLAN].contiguous()
-        remaining = integers_column(states.table.remaining[ids])
+        remaining = states.tensor(states.table.remaining_device)
         remaining = torch.where(remaining < 0, delay + replan, remaining)
         return DecisionBatch(
             observation_frame_J=meta[:, CLOCK].contiguous(),
@@ -1891,9 +1886,9 @@ def _decision_batch(records: Sequence[DecisionRecord | DecisionRecordView], devi
             committed_prefix_JD4=states.tensor(states.table.prefix)[..., DECODE_GROUP_INDICES],
             behavior_log_probs_JF=states.tensor(states.table.behavior),
             executed_factors_JF=executed_factor_mask(delay, replan, remaining),
-            duration_J=integers_column(states.table.duration[ids]),
-            bootstrap_mask_J=torch.from_numpy(~states.table.terminal[ids]).to(device),
-            trace_mask_J=torch.from_numpy(~states.table.boundary[ids]).to(device),
+            duration_J=states.tensor(states.table.duration_device),
+            bootstrap_mask_J=~states.tensor(states.table.terminal_device),
+            trace_mask_J=~states.tensor(states.table.boundary_device),
             kl_coefficient_J=states.tensor(states.table.coefficients),
             delay_J=delay,
             replan_J=replan,
@@ -2241,6 +2236,11 @@ class DecisionTable:
         self.terminal = np.zeros(capacity, dtype=np.bool_)
         self.boundary = np.zeros(capacity, dtype=np.bool_)
         self.following = np.full(capacity, -1, dtype=np.int64)
+        self.duration_device = torch.zeros(capacity, dtype=torch.long, device=self.device)
+        self.remaining_device = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
+        self.terminal_device = torch.zeros(capacity, dtype=torch.bool, device=self.device)
+        self.boundary_device = torch.zeros(capacity, dtype=torch.bool, device=self.device)
+        self.following_device = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.episodes: dict[tuple[int, int], Episode] = {}
         self.episode_slots = np.zeros(capacity, dtype=np.int64)
         self.episode_ends = np.full(capacity, -1, dtype=np.int64)
@@ -2249,6 +2249,20 @@ class DecisionTable:
 
     def rows(self, ids: Sequence[int] | NDArray[np.int64]) -> DecisionRows:
         return DecisionRows(self, np.asarray(ids, dtype=np.int64))
+
+    def finalize(self) -> None:
+        episode_ends = self.episode_ends[self.episode_slots[: self.count]]
+        self.remaining[: self.count] = np.where(episode_ends >= 0, episode_ends - self.meta[: self.count, CLOCK], -1)
+        # The host schedules resets and bootstrap rows. Publish its scalar
+        # columns once, before any no-grad or training gather can read them.
+        for target, source in (
+            (self.duration_device, self.duration),
+            (self.remaining_device, self.remaining),
+            (self.terminal_device, self.terminal),
+            (self.boundary_device, self.boundary),
+            (self.following_device, self.following),
+        ):
+            target[: self.count].copy_(torch.from_numpy(source[: self.count]), non_blocking=True)
 
     def state(self, index: int, metadata: NDArray[np.int64] | None = None) -> DecisionState:
         row = self.meta[index] if metadata is None else metadata
@@ -2412,6 +2426,7 @@ class DecisionRecordView:
     @frames_remaining.setter
     def frames_remaining(self, value: int) -> None:
         self.table.remaining[self.row] = value
+        self.table.remaining_device[self.row] = value
 
     @property
     def next_state(self) -> DecisionState | None:
@@ -2962,10 +2977,7 @@ class RolloutEngine:
             state = self.matches[match]
             state.history = state.history[-129:]
             state.history_start = end - len(state.history) + 1
-        episode_ends = table.episode_ends[table.episode_slots[: table.count]]
-        table.remaining[: table.count] = np.where(
-            episode_ends >= 0, episode_ends - table.meta[: table.count, CLOCK], -1
-        )
+        table.finalize()
         self.clocks[group_id] = end
         self.cursor = (group_id + 1) % len(self.groups)
         self.completed_update = update
