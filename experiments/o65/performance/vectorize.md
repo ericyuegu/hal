@@ -321,3 +321,34 @@ groups, graph memory and snapshot generations are not measured by these local
 runs. The numbers are planning estimates, not a qualified production rate or
 memory fit. The smaller projected gain is consistent with amortizing away much
 of the fixed launch cost at larger batches.
+
+## Review fixes and validation
+
+The review covers `git diff o65-selfplay-ppo-plan...HEAD`, the O65 plan's math
+and risks, and the performance-stream delta from `499b05eb`. It checks factor
+and frame offsets, terminal masks, context ownership, critic detach points,
+optimizer separation, counter domains, checkpoint identity, evaluation callers
+and persisted formats. Prototype losses and graphs rejected by the stop rule
+are absent from maintained code.
+
+The first pass found and fixed three graph ownership issues: wire-table tensor
+replacement, eager RoPE cache replacement, and reuse of a graph with another
+engine's action ring. It also moved the verifier's temporary mode change inside
+its cleanup scope; a failure during graph cleanup now restores the original
+mode and update boundary. Focused tests cover each case.
+
+A final check found a scalar device read in block prefill length validation.
+Lengths now validate from CPU metadata before transfer; the cache still rejects
+invalid lengths before mutation. Empty histories use a fixed-shape masked fill.
+CPU/device-length cache parity is checked exactly. This changes validation
+placement, not the trunk calculation or representation. It adds no unchecked
+fast path. The CPU checks pass (7 tests); their two CUDA cases were explicitly
+hidden in that diagnostic run and remain required in GPU qualification.
+
+The first complete unit run passes 2,533 tests, with 8 skips, 89 integration
+deselections and 27 warnings. Six skips lack
+`data/processed/ranked-anonymized-1/mds-v7-sub4/train` in the supplied read-only
+data tree. **Those missing fixtures remain a validation failure under AGENTS.md,
+despite pytest's zero exit status.** Two other skips require the production GPU
+and `HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1`. The reviewed code receives
+another full unit run after the prefill change.

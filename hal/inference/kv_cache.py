@@ -262,6 +262,7 @@ class BlockRestartCache:
 
     Restart receives left-padded previous frames from the current episode only.
     The caller restarts at every weight update. No cached feature survives it.
+    CPU lengths validate before transfer and avoid a device readback.
     """
 
     def __init__(
@@ -298,13 +299,14 @@ class BlockRestartCache:
             raise ValueError("block prefill lengths must be integer [B]")
         if bool(((lengths < 0) | (lengths > count)).any()):
             raise ValueError("block prefill lengths exceed the supplied history")
+        lengths = lengths.to(previous_tokens.device, non_blocking=True)
         self.reset()
         if count:
             self.cache.next_position.copy_(lengths - count)
             valid = torch.arange(count, device=previous_tokens.device)[None] >= count - lengths[:, None]
             previous_tokens = torch.where(valid[..., None], previous_tokens, 0)
             _append_tokens(self.model, previous_tokens, self.cache)
-            self.cache.hidden[lengths == 0] = 0
+            self.cache.hidden.masked_fill_((lengths == 0)[:, None, None], 0)
 
     @torch.inference_mode()
     def append(self, tokens: Tensor) -> Tensor:

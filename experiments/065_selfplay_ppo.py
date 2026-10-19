@@ -1765,8 +1765,8 @@ class TransformerPolicy:
                 previous = torch.where((positions >= 0)[..., None], previous, 0)
                 padded = tokens.new_zeros(len(streams), 128, tokens.shape[-1])
                 padded.index_copy_(0, at, previous)
-                padded_lengths = torch.zeros(len(streams), device=self.device, dtype=torch.long)
-                padded_lengths.index_copy_(0, at, lengths)
+                padded_lengths = torch.zeros(len(streams), dtype=torch.long)
+                padded_lengths[torch.from_numpy(slots)] = torch.from_numpy(meta[:, LENGTH].copy()) - 1
                 cache.restart(padded, padded_lengths)
                 self.tick_windows[key] = window
             appended = 1 if restart else 2

@@ -151,3 +151,24 @@ def test_deployment_handoff_matches_full_window_across_mixed_boundaries(compiled
             full = model.trunk.forward_dense(tokens[row : row + 1, start : last + 1], torch.zeros(1, dtype=torch.long))
             torch.testing.assert_close(actual[row, -1], full[0, -1], atol=2e-6, rtol=2e-5)
             assert active.next_position[row] == last + 1 - start
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("lengths", [(0, 128), (51, 7)])
+@torch.inference_mode()
+def test_cuda_prefill_with_cpu_lengths_matches_device_lengths(lengths: tuple[int, int]) -> None:
+    torch.manual_seed(65)
+    device = torch.device("cuda", torch.cuda.current_device())
+    model = _model().to(device)
+    cpu_lengths = BlockRestartCache(model, 2, device, dtype=torch.float32)
+    gpu_lengths = BlockRestartCache(model, 2, device, dtype=torch.float32)
+    previous = torch.randn(2, 128, 32, device=device)
+    cpu_lengths.restart(previous, torch.tensor(lengths))
+    gpu_lengths.restart(previous, torch.tensor(lengths, device=device))
+    for actual, expected in zip(cpu_lengths.cache.buffers(), gpu_lengths.cache.buffers(), strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    before = cpu_lengths.cache.next_position.clone()
+    for invalid in ((-1, 7), (129, 7)):
+        with pytest.raises(ValueError, match="lengths exceed"):
+            cpu_lengths.restart(previous, torch.tensor(invalid))
+        torch.testing.assert_close(cpu_lengths.cache.next_position, before, rtol=0, atol=0)
