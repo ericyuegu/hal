@@ -42,7 +42,7 @@ def test_proxy_batched_msl_actions_and_outcomes_through_resets(
     monkeypatch.setenv("HAL_NATIVE_LIBRARY", str(native_build.build(root, tmp_path / "libhal_native.so")))
     checkpoint_path = Path("runs/proxy/final.pt")
     assert checkpoint_path.is_file(), "required O63 proxy is missing"
-    checkpoint = load_evaluation_checkpoint(checkpoint_path, device=torch.device("cuda"))
+    checkpoint = load_evaluation_checkpoint(checkpoint_path, device=torch.device("cuda"), decoder_precision="fp32")
     opponent = checkpoint
     if distinct_weights:
         model = copy.deepcopy(checkpoint.model)
