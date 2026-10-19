@@ -1,5 +1,6 @@
 import dataclasses
 import importlib.util
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -20,6 +21,65 @@ _SPEC.loader.exec_module(launcher)
 Request = launcher.Request
 command = launcher.command
 select_cpus = launcher.select_cpus
+
+
+def test_budget_reserves_failures_and_reconciles_completed_calls(tmp_path: Path) -> None:
+    path = tmp_path / "budget.jsonl"
+    assert launcher.reserved_seconds(path) == 0
+    launcher.record_budget(path, "first", 900, "reserve")
+    launcher.record_budget(path, "first", -600, "completed")
+    launcher.record_budget(path, "failed", 900, "reserve")
+    assert launcher.reserved_seconds(path) == 1200
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"format": "old"},
+        {"extra": 1},
+        {"reserved_gpu_seconds": float("nan")},
+        {"reserved_gpu_seconds": True},
+        {"reserved_gpu_seconds": -1},
+    ],
+)
+def test_budget_rejects_invalid_or_unversioned_records(tmp_path: Path, change: dict[str, object]) -> None:
+    path = tmp_path / "budget.jsonl"
+    record = {"format": launcher.BUDGET_FORMAT, "name": "test", "reason": "reserve", "reserved_gpu_seconds": 900}
+    record.update(change)
+    path.write_text(json.dumps(record) + "\n")
+    with pytest.raises(ValueError):
+        launcher.reserved_seconds(path)
+
+
+@pytest.mark.parametrize(
+    "change", [{}, {"format": "old"}, {"exit_code": True}, {"elapsed_seconds": float("inf")}, {"finished_unix": 99}]
+)
+def test_result_duration_validates_identity(tmp_path: Path, change: dict[str, object]) -> None:
+    path = tmp_path / "result.json"
+    record = {
+        "format": launcher.RESULT_FORMAT,
+        "exit_code": 0,
+        "started_unix": 100,
+        "finished_unix": 103,
+        "elapsed_seconds": 3,
+    }
+    record.update(change)
+    path.write_text(json.dumps(record))
+    if not change:
+        assert launcher.result_seconds(path, 0) == 3
+    else:
+        with pytest.raises(ValueError, match="result identity"):
+            launcher.result_seconds(path, 0)
+
+
+def test_download_paths_stay_inside_the_named_run() -> None:
+    for path in ("run/profile/timed.json", "/run/profile/timed.json"):
+        assert launcher.relative_result_path("run", path) == Path("profile/timed.json")
+    for path in ("other/file", "run/../outside", "run"):
+        with pytest.raises(ValueError):
+            launcher.relative_result_path("run", path)
+    with pytest.raises(ValueError, match="run name"):
+        launcher.relative_result_path("../outside", "../outside/file")
 
 
 def test_image_delivery_commands_match_the_real_cli() -> None:

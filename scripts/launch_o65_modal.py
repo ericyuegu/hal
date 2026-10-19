@@ -4,6 +4,7 @@ import dataclasses
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import shlex
@@ -35,6 +36,64 @@ MEMORY_USD_GIB_SECOND = 0.00000222
 MAX_GPU_SECONDS = 10800
 MAX_USD = 30.0
 BUILD_RESERVE_USD = 3.0
+BUDGET_FORMAT = "hal.o65.modal-budget.v1"
+RESULT_FORMAT = "hal.o65.modal-result.v1"
+
+
+def validate_name(name: str) -> None:
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", name) is None:
+        raise ValueError("invalid Modal run name")
+
+
+def reserved_seconds(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    total = 0.0
+    for line in path.read_text().splitlines():
+        raw = json.loads(line)
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"format", "name", "reserved_gpu_seconds", "reason"}
+            or raw["format"] != BUDGET_FORMAT
+            or not isinstance(raw["name"], str)
+            or not isinstance(raw["reason"], str)
+            or not raw["reason"]
+        ):
+            raise ValueError("unsupported Modal budget record")
+        validate_name(raw["name"])
+        seconds = raw["reserved_gpu_seconds"]
+        if type(seconds) not in (int, float) or not math.isfinite(seconds):
+            raise ValueError("invalid Modal budget duration")
+        total += seconds
+        if total < 0:
+            raise ValueError("Modal budget credits exceed reservations")
+    return total
+
+
+def record_budget(path: Path, name: str, seconds: float, reason: str) -> None:
+    with path.open("a") as log:
+        log.write(
+            json.dumps({"format": BUDGET_FORMAT, "name": name, "reserved_gpu_seconds": seconds, "reason": reason})
+            + "\n"
+        )
+
+
+def result_seconds(path: Path, exit_code: int) -> float:
+    raw = json.loads(path.read_text())
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"format", "exit_code", "started_unix", "finished_unix", "elapsed_seconds"}
+        or raw["format"] != RESULT_FORMAT
+        or type(raw["exit_code"]) is not int
+        or raw["exit_code"] != exit_code
+        or any(
+            type(raw[key]) not in (int, float) or not math.isfinite(raw[key]) or raw[key] < 0
+            for key in ("started_unix", "finished_unix", "elapsed_seconds")
+        )
+        or raw["finished_unix"] < raw["started_unix"]
+    ):
+        raise ValueError("invalid Modal result identity or duration")
+    return float(raw["elapsed_seconds"])
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -48,8 +107,7 @@ class Request:
     timeout_seconds: int = 1800
 
     def __post_init__(self) -> None:
-        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", self.name) is None:
-            raise ValueError("invalid Modal run name")
+        validate_name(self.name)
         if re.fullmatch(r"[0-9a-f]{40}", self.git_sha) is None:
             raise ValueError("expected a full published HAL Git SHA")
         if self.mode not in ("smoke", "profile"):
@@ -120,6 +178,7 @@ def run_remote(request: Request) -> int:
     local = WORK / request.name
     local.mkdir(parents=True, exist_ok=False)
     started = time.time()
+    started_clock = time.perf_counter()
     code = -1
     try:
         code = run_child(request, local, started)
@@ -127,7 +186,16 @@ def run_remote(request: Request) -> int:
     finally:
         stage_results(local, output)
         (output / "result.json").write_text(
-            json.dumps({"exit_code": code, "started_unix": started, "finished_unix": time.time()}, indent=2)
+            json.dumps(
+                {
+                    "format": RESULT_FORMAT,
+                    "exit_code": code,
+                    "started_unix": started,
+                    "finished_unix": time.time(),
+                    "elapsed_seconds": time.perf_counter() - started_clock,
+                },
+                indent=2,
+            )
         )
         modal.Volume.from_name(VOLUME).commit()
 
@@ -164,6 +232,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
     )
     Path(env["TMPDIR"]).mkdir()
     identity = {
+        "format": "hal.o65.modal-launch.v1",
         "request": dataclasses.asdict(request),
         "command": argv,
         "image": IMAGE,
@@ -221,12 +290,21 @@ def build_image(sha: str, secret: modal.Secret) -> modal.Image:
     )
 
 
+def relative_result_path(name: str, path: str) -> Path:
+    validate_name(name)
+    relative = Path(path.lstrip("/")).relative_to(name)
+    if relative == Path(".") or ".." in relative.parts:
+        raise ValueError("invalid Modal artifact path")
+    return relative
+
+
 def download(name: str, local: Path) -> None:
+    validate_name(name)
     volume = modal.Volume.from_name(VOLUME)
     for entry in volume.iterdir(name, recursive=True):
         if entry.type != FileEntryType.FILE:
             continue
-        relative = Path(entry.path).relative_to(name)
+        relative = relative_result_path(name, entry.path)
         # Compile caches are not measurement evidence and can be large.
         if relative.parts[0] in ("inductor", "triton", "tmp"):
             continue
@@ -261,16 +339,15 @@ def main(args: Args) -> None:
         raise ValueError("only branch o65-modal can launch this job")
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     published = subprocess.check_output(["git", "ls-remote", "origin", "refs/heads/o65-modal"], cwd=ROOT, text=True)
-    if published.split()[0] != sha:
+    if published.split()[:1] != [sha]:
         raise ValueError("push o65-modal HEAD before launching")
     name = args.name or f"{args.mode}-{args.matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
     request = Request(name, sha, args.mode, args.matches, args.windows, args.decisions, args.timeout_seconds)
     args.output.mkdir(parents=True, exist_ok=True)
     budget = args.output / "budget.jsonl"
-    prior = [json.loads(line) for line in budget.read_text().splitlines()] if budget.exists() else []
     # Reserve the full timeout for each call, including failures and client loss.
     allowance = request.timeout_seconds + 360
-    reserved = sum(row["reserved_gpu_seconds"] for row in prior) + allowance
+    reserved = reserved_seconds(budget) + allowance
     rate = GPU_USD_SECOND + CPU_CORES * CPU_USD_SECOND + (MEMORY_MIB / 1024) * MEMORY_USD_GIB_SECOND
     if reserved > MAX_GPU_SECONDS or reserved * rate + BUILD_RESERVE_USD > MAX_USD:
         raise ValueError("O65 Modal time or cost budget exhausted")
@@ -292,23 +369,26 @@ def main(args: Args) -> None:
         include_source=False,
         serialized=True,
     )(run_remote)
-    with budget.open("a") as log:
-        log.write(json.dumps({"request": dataclasses.asdict(request), "reserved_gpu_seconds": allowance}) + "\n")
+    record_budget(budget, name, allowance, "full timeout plus startup and teardown allowance")
     with modal.enable_output(), app.run():
         print(f"App: {app.app_id}; name: {name}; SDK: {importlib.metadata.version('modal')}", flush=True)
         call = worker.spawn(request)
         (args.output / f"{name}-call.json").write_text(
             json.dumps(
-                {"app_id": app.app_id, "call_id": call.object_id, "request": dataclasses.asdict(request)}, indent=2
+                {
+                    "format": "hal.o65.modal-call.v1",
+                    "app_id": app.app_id,
+                    "call_id": call.object_id,
+                    "request": dataclasses.asdict(request),
+                },
+                indent=2,
             )
         )
         print(f"Call: {call.object_id}; argv: {shlex.join(command(request, tuple(range(16))))}", flush=True)
         code = call.get()
     download(name, args.output)
-    result = json.loads((args.output / name / "result.json").read_text())
-    charged = min(allowance, result["finished_unix"] - result["started_unix"] + 360)
-    with budget.open("a") as log:
-        log.write(json.dumps({"name": name, "reserved_gpu_seconds": charged - allowance}) + "\n")
+    charged = min(allowance, result_seconds(args.output / name / "result.json", code) + 360)
+    record_budget(budget, name, charged - allowance, "completed call; retain startup and teardown allowance")
     if code:
         raise SystemExit(f"Modal job exited {code}; see {args.output / name / 'run.log'}")
     hashes = {}
