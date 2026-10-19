@@ -4779,6 +4779,12 @@ class NativeCli:
             raise ValueError("evaluation interval must be nonnegative")
         if self.max_frame != -1 and (type(self.max_frame) is not int or self.max_frame < 0):
             raise ValueError("max frame must be -1 or nonnegative")
+        if self.profiling is None and self.replay_chunks != DEFAULT_REPLAY_CHUNKS:
+            raise ValueError("nondefault replay chunks are qualified for profiling only")
+        if self.profiling is not None and (
+            self.profiling.warm_updates < self.groups or self.updates != self.profiling.warm_updates + 2
+        ):
+            raise ValueError("profiling must warm every group and run exactly two measured updates")
 
 
 def read_native_sampler(path: Path) -> SamplerConfig:

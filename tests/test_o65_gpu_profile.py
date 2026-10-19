@@ -98,6 +98,30 @@ def test_profile_cli_uses_pilot_layout_and_rejects_training_side_effects(tmp_pat
             dataclasses.replace(native, **change)
 
 
+def test_profile_rejects_cold_groups_and_misreported_update_count(tmp_path: Path) -> None:
+    import dataclasses
+
+    cli = gpu_profile.GpuProfileCli(tmp_path / "final.pt", tmp_path / "data", tmp_path / "output", cpus=(0,))
+    with pytest.raises(ValueError, match="warm every group"):
+        dataclasses.replace(cli, warm_updates=3).native()
+    with pytest.raises(ValueError, match="two measured updates"):
+        dataclasses.replace(cli.native(), updates=7)
+
+
+def test_training_rejects_unqualified_scoring_chunks(tmp_path: Path) -> None:
+    import dataclasses
+
+    cli = gpu_profile.GpuProfileCli(
+        tmp_path / "final.pt",
+        tmp_path / "data",
+        tmp_path / "output",
+        cpus=(0,),
+        replay_chunks=gpu_profile.ReplayChunks(32, 256),
+    ).native()
+    with pytest.raises(ValueError, match="profiling only"):
+        dataclasses.replace(cli, profiling=None)
+
+
 def test_measurement_syncs_are_excluded_by_annotations(tmp_path: Path) -> None:
     path = tmp_path / "syncs.json"
     path.write_text(
