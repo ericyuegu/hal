@@ -1,9 +1,11 @@
 """Ready streams use one cached model call while preserving stream identity."""
 
 import os
+from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Literal
+from typing import cast
 
 import melee.gamestate
 import numpy as np
@@ -28,9 +30,11 @@ from hal.inference.observation_history import ObservationHistory
 from hal.inference.warmup import make_warmup_observations
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
+from hal.models.action_sequence import TemporalBlock
 from hal.models.attention import KVMemory
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import DiscreteControllerCodec
+from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.representation.features import BASE_ITEMS_PROJECTION
 from hal.representation.features import ITEM_COLUMNS
@@ -203,7 +207,7 @@ def test_ready_cached_streams_share_gpu_calls_and_keep_stream_rng() -> None:
         return_value: torch.Tensor,
         condition_present: torch.Tensor,
         temperature: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         calls.append(("decoder", hidden.shape[0], 1))
         return decoder(hidden, memory, observed, uniforms, forced, return_value, condition_present, temperature)
 
@@ -743,7 +747,9 @@ def test_cuda_graph_cache_matches_eager_through_wrap_reset_and_settings() -> Non
 
 
 @pytest.mark.parametrize("history_mode", ["window", "kv_cache"])
-def test_prediction_returns_latest_value_without_changing_actions_or_rng(history_mode: str) -> None:
+def test_prediction_returns_latest_value_without_changing_actions_or_rng(
+    history_mode: Literal["window", "kv_cache"],
+) -> None:
     policy = _policy(2, history_mode=history_mode)
     control = _policy(2, history_mode=history_mode)
     requests = tuple(_request(policy, stream_id, 7, 8, 0) for stream_id in (7, 42))
@@ -754,7 +760,7 @@ def test_prediction_returns_latest_value_without_changing_actions_or_rng(history
         seen.append(hidden.detach().clone())
         return estimate(hidden)
 
-    policy.model.estimate_value = record
+    policy.model.estimate_value: Callable[[torch.Tensor], torch.Tensor] = record
     actual = policy.predict(requests)
     expected = control.predict(requests)
     assert [p.actions for p in actual] == [p.actions for p in expected]
@@ -843,6 +849,7 @@ def test_block_restart_policy_handoff_and_sparse_rows_match_serial(capacity: int
     serial.release_stream(42)
     request = _request(batched, 42, 0, 1, 0)
     _assert_plans_match(batched.predict((request,)), serial.predict((request,)))
+    assert batched._cache_pool is not None and batched._secondary_pool is not None
     assert batched._cache_pool.storage.next_position[row] == 1
     assert batched._secondary_pool.storage.next_position[row] == 1
     profile = PreparedInferenceProfile("block", "a" * 64, "block_restart", 4, 0, (1, 2, 4), capacity)
@@ -858,6 +865,7 @@ def test_widened_policy_serves_u95_with_block_restart(delay: int, replan: int, d
         ConditioningRanges((-5.0, 5.0), (8, 10), (2, 4)),
         max_opponent_queue=14,
         critic_hidden_dim=16,
+        decoder_precision="fp32",
     ).eval()
     state = dict(control.model.state_dict())
     state.update({name: value for name, value in widened.state_dict().items() if name.startswith("percentile_head.")})
@@ -874,6 +882,41 @@ def test_widened_policy_serves_u95_with_block_restart(delay: int, replan: int, d
     invalid = replace(_request(candidate, 42, 4, 1, 1), fixed_actions=request.fixed_actions)
     with pytest.raises(ValueError, match="u95"):
         candidate.predict((invalid,))
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@torch.inference_mode()
+def test_widened_live_policy_uses_saved_decoder_precision(precision: DecoderPrecision, device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    template = _policy(1, history_mode="block_restart").model
+    model = (
+        SelfPlayTransformer(
+            template.cfg,
+            ConditioningRanges((-5.0, 5.0), (8, 10), (2, 4)),
+            max_opponent_queue=14,
+            critic_hidden_dim=16,
+            decoder_precision=precision,
+        )
+        .eval()
+        .to(device)
+    )
+    candidate = _policy(
+        1, model=model, device=torch.device(device), history_mode="block_restart", horizon=12, prefix=8, log_lambda=0.0
+    )
+    dtypes: list[torch.dtype] = []
+
+    def record_dtype(_module: torch.nn.Module, _args: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        dtypes.append(output.dtype)
+
+    handle = cast(TemporalBlock, model.temporal.blocks[0]).qkv.register_forward_hook(record_dtype)
+    try:
+        request = replace(_request(candidate, 42, 3, 4, 0), fixed_actions=(NEUTRAL_CONTROLLER_ACTION,) * 8)
+        candidate.predict((request,))
+    finally:
+        handle.remove()
+    assert dtypes and set(dtypes) == {torch.bfloat16 if precision == "bf16" else torch.float32}
 
 
 def test_block_reset_uses_neutral_first_frame_controller_features() -> None:

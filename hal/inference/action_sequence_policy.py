@@ -1,5 +1,6 @@
 """Execute prepared action-sequence predictions over independent observation streams."""
 
+import contextlib
 import math
 import secrets
 from collections.abc import Sequence
@@ -44,6 +45,7 @@ from hal.inference.window_policy import WindowPolicy
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.attention import KVMemory
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_executed_offsets
 from hal.representation.features import BASE_ITEMS_PROJECTION
 from hal.representation.features import ITEM_COLUMNS
@@ -307,22 +309,37 @@ class ActionSequencePolicy:
         condition_present: Tensor,
         temperature: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        indices = self.model.temporal.sample_indices(
-            hidden,
-            observed,
-            self.model.head_offsets[: self._prediction_frames],
-            return_value,
-            condition_present,
-            argmax=False,
-            uniforms=uniforms,
-            temperature=temperature,
-            forced_prefix=forced,
-            history=memory,
-            policy_condition=None
-            if self._policy_condition is None
-            else self._policy_condition.expand(hidden.shape[0], -1),
-        )
-        return indices, self.model.estimate_value(hidden)
+        trunk = hidden
+        precision = self.model.decoder_precision if isinstance(self.model, SelfPlayTransformer) else None
+        # BC retains its caller's precision. O65 owns this boundary, including
+        # direct live sampling that does not pass through DecisionDecoder.
+        with (
+            contextlib.nullcontext()
+            if precision is None
+            else torch.autocast(
+                hidden.device.type, dtype=torch.bfloat16, enabled=precision == "bf16", cache_enabled=False
+            )
+        ):
+            if precision is not None:
+                dtype = torch.bfloat16 if precision == "bf16" else torch.float32
+                hidden = hidden.to(dtype)
+                memory = KVMemory(memory.kv.to(dtype), memory.positions, memory.query_position, memory.window)
+            indices = self.model.temporal.sample_indices(
+                hidden,
+                observed,
+                self.model.head_offsets[: self._prediction_frames],
+                return_value,
+                condition_present,
+                argmax=False,
+                uniforms=uniforms,
+                temperature=temperature,
+                forced_prefix=forced,
+                history=memory,
+                policy_condition=None
+                if self._policy_condition is None
+                else self._policy_condition.expand(hidden.shape[0], -1),
+            )
+        return indices, self.model.estimate_value(trunk)
 
     def _prepare_kv_cache(self) -> None:
         if self._compiled:
