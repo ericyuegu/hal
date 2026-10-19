@@ -110,8 +110,8 @@ def validate_replay_inputs(
 ) -> None:
     """Validate data at assembly time, outside compiled/captured replay.
 
-    Invalid slots and queue padding can contain arbitrary values. Live slots
-    must use supported offsets, legal actions and a prefix execution mask.
+    Invalid slots and queue padding can contain arbitrary values. Window actions
+    must all be legal. Live slots need supported offsets and prefix execution.
     """
     _check_shapes(model, hidden_WLd, observed_WL4, slots)
     if any(parameter.dtype != torch.float32 for parameter in model.temporal.parameters()):
@@ -152,10 +152,9 @@ def validate_replay_inputs(
         or bool((frame_executed & (torch.arange(4, device=delay.device) >= replan[:, None])).any())
     ):
         raise ValueError("executed factors must be a prefix of complete frames within R")
-    rows = torch.arange(hidden_WLd.shape[0], device=delay.device)[:, None].expand_as(valid)[valid]
     group_sizes = torch.tensor(model.codec.group_vocabs, device=delay.device)
     for actions in (
-        observed_WL4[rows, positions],
+        observed_WL4,
         slots.forced_queue_WKD4[valid][
             torch.arange(slots.forced_queue_WKD4.shape[2], device=delay.device) < delay[:, None]
         ],

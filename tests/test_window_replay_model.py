@@ -198,3 +198,11 @@ def test_invalid_slots_are_rejected(field: str) -> None:
         value[0, 0] = 999
     with pytest.raises(ValueError):
         validate_replay_inputs(policy, hidden, observed, dataclasses.replace(slots, **{field: value}))
+
+
+def test_invalid_window_actions_are_rejected_even_outside_live_slot_positions() -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    observed[0, 0] = 999
+    with pytest.raises(ValueError, match="controller factor"):
+        validate_replay_inputs(policy, hidden, observed, slots)
