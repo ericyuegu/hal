@@ -12,6 +12,7 @@ from hal.models.replay_actor import ActorLoss
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
+from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 
 
@@ -39,10 +40,11 @@ class GraphedActorStep:
 
     forward receives a tuple of static tensor inputs and must run the trunk and
     replay_windows(..., grad=True). It must not close over differentiable trunk
-    outputs computed before capture. Compile forward in default mode with
-    triton.cudagraphs=False and emulate_precision_casts=True before passing it
-    here. CUDA flex attention requires compilation; Torch 2.11's BF16 replay
-    also needs cast preservation (see replay_windows). Parameters and input storage keep
+    outputs computed before capture. Compile replay_windows in default mode with
+    triton.cudagraphs=False and emulate_precision_casts=True, then call it from
+    forward. Keep the trunk eager inside this capture: whole-trunk compilation
+    failed the proxy precision gate on Torch 2.11. CUDA flex attention requires
+    compilation, and BF16 replay needs cast preservation. Parameters and input storage keep
     their identity for this helper's lifetime. Call backward once per step;
     gradient clipping and Muon run afterwards. Outputs are cloned before return.
     Validate each new payload at its assembly boundary before backward.
@@ -79,13 +81,20 @@ class GraphedActorStep:
         for parameter, gradient in zip(parameters, self.gradients, strict=True):
             parameter.grad = gradient
 
-        def backward() -> ActorLoss:
+        def backward() -> tuple[ActorLoss, ReplayOutput]:
             for gradient in self.gradients:
                 gradient.zero_()
             with torch.enable_grad():
-                result = actor_loss(forward(static[: self.input_count]), _targets(static[self.input_count :]))
+                output = forward(static[: self.input_count])
+                result = actor_loss(output, _targets(static[self.input_count :]))
                 result.loss.backward()
-            return ActorLoss(*(getattr(result, field.name).detach() for field in fields(result)))
+            detached = ReplayOutput(
+                output.log_probs_WKF.detach(),
+                tuple(p.detach() for p in output.distributions),
+                output.factor_mask_WKF,
+                output.features,
+            )
+            return ActorLoss(*(getattr(result, field.name).detach() for field in fields(result))), detached
 
         ready = False
         try:
@@ -109,5 +118,15 @@ class GraphedActorStep:
             parameter.grad is not gradient for parameter, gradient in zip(self.parameters, self.gradients, strict=True)
         ):
             raise ValueError("captured actor gradient storage changed; do not set gradients to None")
-        result = self.captured(values)
+        result, _ = self.captured(values)
         return ActorLoss(*(getattr(result, field.name).clone() for field in fields(result)))
+
+    def evaluation(self) -> ReplayOutput:
+        """Copy the most recent replay's outputs without another model pass."""
+        output = self.captured.output[1]
+        return ReplayOutput(
+            output.log_probs_WKF.clone(),
+            tuple(p.clone() for p in output.distributions),
+            output.factor_mask_WKF.clone(),
+            ReplayCriticFeatures(*(getattr(output.features, field.name).clone() for field in fields(output.features))),
+        )

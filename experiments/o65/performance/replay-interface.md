@@ -1,13 +1,12 @@
 # Window replay interface
 
-Qualification is in progress. The first compiled BF16 proxy trial failed the
-KL precision gate while other measured quantities passed. Keep the trainer on
-its existing path until the replay report records a passing configuration.
-The follow-up trial uses `options={"triton.cudagraphs": False,
-"emulate_precision_casts": True}`. The latter preserves BF16 rounding between
-fused operators; without it Torch 2.11 produces different gradient/no-gradient
-distributions and a false KL cost. The common-input diagnostic now agrees
-across gradient modes, and the full FP32-reference gate remains pending.
+Final graph qualification is in progress. Compile only `replay_windows`; keep
+its caller's trunk eager inside the CUDA graph. Whole-trunk compilation failed
+the real-rollout GAE precision gate on Torch 2.11. Decoder-only compilation
+with `options={"triton.cudagraphs": False, "emulate_precision_casts": True}`
+passes that gate functionally. The final check also measures the actual actor
+and reference CUDA graphs. Keep the trainer on its current path until the
+replay report records that result.
 
 The replay stream owns `hal.models.window_replay`. The interface commit defines
 `ReplaySlots`, `ReplayCriticFeatures`, and `ReplayOutput`. All are frozen, slotted
@@ -60,10 +59,11 @@ The PPO clip is 0.2 and direct KL is weighted by lambda / sigma.
 of tensor inputs, targets, and `model.actor_parameters()`. The callback must
 rebuild the trunk and call `replay_windows(..., grad=True)` from the supplied
 static tensor inputs. Include all changing slot tensors in that tuple; do not
-close over decision data that changes between calls. Compile the callback
+close over decision data that changes between calls. Compile `replay_windows`
 with `fullgraph=True`, `dynamic=False`, and
 `options={"triton.cudagraphs": False, "emulate_precision_casts": True}`
-(default mode). The cast option is required on tested Torch 2.11.0. Remove it
+(default mode), then call it from an eager trunk callback. Capture that whole
+callback and backward through `GraphedActorStep`. The cast option is required on tested Torch 2.11.0. Remove it
 only when the proxy gate and gradient/no-gradient comparison pass without it.
 Compiled flex
 attention requires head width at least 16; the proxy uses 64.
@@ -74,7 +74,9 @@ owns fixed gradient storage and rejects replacement of that storage. Run
 `step.backward(inputs, targets)`, then clipping and Muon outside the graph.
 Do not call `zero_grad(set_to_none=True)` after preparation. Backward clears
 the captured gradients itself. Returned loss tensors are copies, so later
-replays cannot overwrite an earlier result. Validate each new input payload
+replays cannot overwrite an earlier result. `step.evaluation()` also returns
+owned copies of the captured replay outputs for diagnostics without another
+model pass. Validate each new input payload
 at assembly time before entering the captured hot path.
 
 The graph helper contains no experiment import. Its small objective is a

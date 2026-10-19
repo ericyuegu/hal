@@ -210,11 +210,17 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
         .eval()
     )
     hidden, observed, slots = inputs(policy, "cuda")
+    compiled_replay = torch.compile(
+        replay_windows,
+        fullgraph=True,
+        dynamic=False,
+        options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+    )
 
     # Include a learned operation before replay, so repeated backward must build
     # the graph inside capture instead of reusing an external autograd history.
     def forward(values: tuple[Tensor, ...]) -> ReplayOutput:
-        return replay_windows(
+        return compiled_replay(
             policy,
             values[0] + policy.player_projection(policy.player_embedding(values[1]))[:, None],
             observed,
@@ -227,29 +233,32 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
     targets = targets_for(output)
     del output
     parameters = policy.actor_parameters()
-    compiled = torch.compile(
-        forward,
-        fullgraph=True,
-        dynamic=False,
-        options={"triton.cudagraphs": False, "emulate_precision_casts": True},
-    )
     with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
-        GraphedActorStep(compiled, values, targets, parameters)
-    graph = GraphedActorStep(compiled, values, targets, parameters)
+        GraphedActorStep(forward, values, targets, parameters)
+    graph = GraphedActorStep(forward, values, targets, parameters)
     saved: tuple[Tensor, Tensor] | None = None
+    saved_evaluation: tuple[Tensor, Tensor] | None = None
     for step in range(3):
         current = (values[0] + step * 0.05, values[1])
         policy.zero_grad(set_to_none=False)
-        expected = actor_loss((compiled if precision == "bf16" else forward)(current), targets)
+        expected = actor_loss(forward(current), targets)
         expected.loss.backward()
         gradients = tuple(p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in parameters)
         actual = graph.backward(current, targets)
+        evaluated = graph.evaluation()
+        torch.testing.assert_close(
+            evaluated.log_probs_WKF, forward(current).log_probs_WKF.detach(), atol=2e-6, rtol=2e-5
+        )
+        assert not evaluated.log_probs_WKF.requires_grad
         torch.testing.assert_close(actual.loss, expected.loss, atol=2e-5, rtol=2e-4)
         for parameter, gradient in zip(parameters, gradients, strict=True):
             torch.testing.assert_close(parameter.grad, gradient, atol=3e-5, rtol=5e-4)
         if saved is not None:
             torch.testing.assert_close(saved[0], saved[1], rtol=0, atol=0)
+        if saved_evaluation is not None:
+            torch.testing.assert_close(saved_evaluation[0], saved_evaluation[1], rtol=0, atol=0)
         saved = (actual.loss, actual.loss.clone())
+        saved_evaluation = (evaluated.log_probs_WKF, evaluated.log_probs_WKF.clone())
         with torch.no_grad():
             for parameter in parameters:
                 if parameter.grad is not None:

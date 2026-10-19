@@ -26,6 +26,7 @@ from test_065_columnar import ROOT
 from test_065_columnar import exp
 from torch import Tensor
 
+from hal.inference.cuda_graph import CapturedCall
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.attention import KVMemory
@@ -33,6 +34,7 @@ from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
@@ -114,7 +116,14 @@ def pack(policy: Any, states: Any, prepared: Any, keys: list[tuple[int, ...]], s
     )
 
 
-def window_forward(model: SelfPlayTransformer, batch: ProxyBatch, *, grad: bool, fp32: bool = False) -> ReplayOutput:
+def window_forward(
+    model: SelfPlayTransformer,
+    batch: ProxyBatch,
+    *,
+    grad: bool,
+    fp32: bool = False,
+    replay: Callable[..., ReplayOutput] = replay_windows,
+) -> ReplayOutput:
     with (
         torch.set_grad_enabled(grad),
         torch.autocast("cuda", dtype=torch.bfloat16, enabled=not fp32, cache_enabled=False),
@@ -122,7 +131,7 @@ def window_forward(model: SelfPlayTransformer, batch: ProxyBatch, *, grad: bool,
         hidden = model(
             batch.features, torch.zeros(len(batch.observed), dtype=torch.long, device="cuda"), batch.observed
         )
-    return replay_windows(model, hidden, batch.observed, batch.slots, grad=grad)
+    return replay(model, hidden, batch.observed, batch.slots, grad=grad)
 
 
 def old_forward(policy: Any, batch: ProxyBatch, *, grad: bool, fp32: bool = False) -> ReplayOutput:
@@ -142,8 +151,6 @@ def old_forward(policy: Any, batch: ProxyBatch, *, grad: bool, fp32: bool = Fals
         return target
 
     # Keep this conversion outside timing of the old evaluator.
-    from hal.models.window_replay import ReplayCriticFeatures
-
     features = ReplayCriticFeatures(
         *(pad(getattr(result.features, field.name)) for field in dataclasses.fields(result.features))
     )
@@ -241,27 +248,48 @@ def flattened_gradients(loss: Tensor, parameters: tuple[torch.nn.Parameter, ...]
 def quantities(
     policy: Any, reference: Any, batch: ProxyBatch, behavior: Tensor, *, window: bool, fp32: bool
 ) -> dict[str, Tensor]:
-    forward = (
+    compiled_replay = (
         torch.compile(
-            window_forward,
+            replay_windows,
             fullgraph=True,
             dynamic=False,
             options={"triton.cudagraphs": False, "emulate_precision_casts": True},
         )
         if window
-        else old_forward
+        else replay_windows
     )
+    forward = partial(window_forward, replay=compiled_replay) if window else old_forward
     output = forward(policy.model if window else policy, batch, grad=True, fp32=fp32)
-    ref_output = forward(reference.model if window else reference, batch, grad=False, fp32=fp32)
+    if window:
+        inputs = replay_inputs(batch)
+        score_forward = partial(
+            forward_inputs, reference.model, tuple(batch.features), grad=False, replay=compiled_replay
+        )
+        score = capture_score(score_forward, inputs)
+        ref_output = graph_score(score, inputs)
+    else:
+        ref_output = old_forward(reference, batch, grad=False, fp32=fp32)
     target = targets(output, ref_output, behavior, batch)
     validate_actor_targets(output, target)
     loss = actor_loss(output, target)
+    functional_actor = flattened_gradients(loss.loss, policy.model.actor_parameters())
+    if window:
+        # Default-stream actor nodes must be released before side-stream capture.
+        del output, loss
+        actor_forward = partial(forward_inputs, policy.model, tuple(batch.features), replay=compiled_replay)
+        graph = GraphedActorStep(actor_forward, inputs, target, policy.model.actor_parameters())
+        graph.backward(inputs, target)
+        output = graph.evaluation()
+        actor_gradient = torch.cat([gradient.detach().flatten() for gradient in graph.gradients])
+    else:
+        actor_gradient = functional_actor
     diagnostic_kl = actor_loss(output, dataclasses.replace(target, selected_WK=output.factor_mask_WKF.any(-1)))
     mask = output.factor_mask_WKF
     selected = batch.slots.valid_WK
     critic_values = values(policy.model, output)
-    critic_targets = batch.value_targets_WK
-    critic_loss = torch.where(selected, ((critic_values - critic_targets) / 150).square(), 0).sum() / selected.sum()
+    critic_loss = (
+        torch.where(selected, ((critic_values - batch.value_targets_WK) / 150).square(), 0).sum() / selected.sum()
+    )
     result = {
         "log_probs": output.log_probs_WKF[mask].detach(),
         "kl": diagnostic_kl.factor_kl_WKF[mask].detach(),
@@ -273,9 +301,13 @@ def quantities(
         ).detach(),
         "opponent_queue": output.features.opponent_queue_WKQ4[selected].float(),
         "opponent_lengths": output.features.opponent_lengths_WK[selected].float(),
-        "actor_gradients": flattened_gradients(loss.loss, policy.model.actor_parameters()),
+        "actor_gradients": actor_gradient,
         "critic_gradients": flattened_gradients(critic_loss, policy.model.critic_parameters()),
     }
+    if window:
+        result["functional_actor_gradients"] = functional_actor
+        # The returned tensors own their copies before graph pools are released.
+        torch.cuda.synchronize()
     return result
 
 
@@ -317,7 +349,12 @@ def measure(operation: Callable[[], object], repeats: int) -> dict[str, float]:
 
 
 def forward_inputs(
-    model: SelfPlayTransformer, names: tuple[str, ...], tensors: tuple[Tensor, ...], *, grad: bool = True
+    model: SelfPlayTransformer,
+    names: tuple[str, ...],
+    tensors: tuple[Tensor, ...],
+    *,
+    grad: bool = True,
+    replay: Callable[..., ReplayOutput] = replay_windows,
 ) -> ReplayOutput:
     count = len(names)
     observed = tensors[count]
@@ -328,13 +365,40 @@ def forward_inputs(
             torch.zeros(observed.shape[0], dtype=torch.long, device="cuda"),
             observed,
         )
-    return replay_windows(model, hidden, observed, slots, grad=grad)
+    return replay(model, hidden, observed, slots, grad=grad)
 
 
 def backward(policy: Any, batch: ProxyBatch, target: ActorTargets, *, window: bool) -> None:
     policy.model.zero_grad(set_to_none=True)
     output = window_forward(policy.model, batch, grad=True) if window else old_forward(policy, batch, grad=True)
     actor_loss(output, target).loss.backward()
+
+
+def graph_score(captured: CapturedCall[ReplayOutput], inputs: tuple[Tensor, ...]) -> ReplayOutput:
+    output = captured(inputs)
+    return ReplayOutput(
+        output.log_probs_WKF.clone(),
+        tuple(p.clone() for p in output.distributions),
+        output.factor_mask_WKF.clone(),
+        ReplayCriticFeatures(
+            *(getattr(output.features, field.name).clone() for field in dataclasses.fields(output.features))
+        ),
+    )
+
+
+def replay_inputs(batch: ProxyBatch) -> tuple[Tensor, ...]:
+    return (
+        *batch.features.values(),
+        batch.observed,
+        *(getattr(batch.slots, field.name) for field in dataclasses.fields(batch.slots)),
+    )
+
+
+def capture_score(
+    forward: Callable[[tuple[Tensor, ...]], ReplayOutput], inputs: tuple[Tensor, ...]
+) -> CapturedCall[ReplayOutput]:
+    static = tuple(t.detach().clone() for t in inputs)
+    return CapturedCall(partial(forward, static), static, device=inputs[0].device)
 
 
 def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
@@ -450,6 +514,7 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                 "W": len(keys),
                 "K": 64,
                 "tf32": False,
+                "compiled_scope": "replay_windows; trunk remains eager inside CUDA capture",
                 "compiler_options": {"triton.cudagraphs": False, "emulate_precision_casts": True},
                 "bias_shift": [-0.1, 0.1],
                 "actor_shift_applied_before_rollout": True,
@@ -462,6 +527,9 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
         }
         default = quantities(policy, reference, batch, behavior, window=False, fp32=False)
         candidate = quantities(policy, reference, batch, behavior, window=True, fp32=False)
+        report["actor_graph_vs_functional"] = error(
+            candidate["actor_gradients"], candidate["functional_actor_gradients"]
+        )
         high_model = exp.load_evaluation_checkpoint(
             ROOT / "runs/proxy/final.pt", device=torch.device("cuda"), decoder_precision="fp32"
         ).model
@@ -520,22 +588,16 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                         ]
                         target = targets(base, ref, old_behavior, measured)
                         model = policy.model
-                        tensors = (
-                            *measured.features.values(),
-                            measured.observed,
-                            *(getattr(measured.slots, f.name) for f in dataclasses.fields(measured.slots)),
-                        )
-                        compiled = torch.compile(
-                            partial(forward_inputs, model, tuple(measured.features)),
+                        tensors = replay_inputs(measured)
+                        compiled_replay = torch.compile(
+                            replay_windows,
                             fullgraph=True,
                             dynamic=False,
                             options={"triton.cudagraphs": False, "emulate_precision_casts": True},
                         )
-                        compiled_no_grad = torch.compile(
-                            partial(forward_inputs, model, tuple(measured.features), grad=False),
-                            fullgraph=True,
-                            dynamic=False,
-                            options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+                        compiled = partial(forward_inputs, model, tuple(measured.features), replay=compiled_replay)
+                        compiled_no_grad = partial(
+                            forward_inputs, model, tuple(measured.features), grad=False, replay=compiled_replay
                         )
                         row: dict[str, Any] = {"W": w, "K": k}
                         for name, operation in (
@@ -547,13 +609,15 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                         ):
                             torch.cuda.reset_peak_memory_stats()
                             row[name] = measure(operation, 5)
+                        score = capture_score(compiled_no_grad, tensors)
+                        row["graphed_no_grad"] = measure(partial(graph_score, score, tensors), 10)
                         graph = GraphedActorStep(compiled, tensors, target, model.actor_parameters())
                         row["graphed_backward"] = measure(partial(graph.backward, tensors, target), 10)
                         measurements.append(row)
                         report["performance"] = measurements
                         (output_dir / "measurements.json").write_text(json.dumps(report, indent=2))
                         print(json.dumps(row), flush=True)
-                        del graph, compiled, compiled_no_grad
+                        del graph, score, compiled, compiled_no_grad, compiled_replay
         return report
 
 
