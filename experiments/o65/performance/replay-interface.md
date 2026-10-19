@@ -3,6 +3,11 @@
 Qualification is in progress. The first compiled BF16 proxy trial failed the
 KL precision gate while other measured quantities passed. Keep the trainer on
 its existing path until the replay report records a passing configuration.
+The follow-up trial uses `options={"triton.cudagraphs": False,
+"emulate_precision_casts": True}`. The latter preserves BF16 rounding between
+fused operators; without it Torch 2.11 produces different gradient/no-gradient
+distributions and a false KL cost. The common-input diagnostic now agrees
+across gradient modes, and the full FP32-reference gate remains pending.
 
 The replay stream owns `hal.models.window_replay`. The interface commit defines
 `ReplaySlots`, `ReplayCriticFeatures`, and `ReplayOutput`. All are frozen, slotted
