@@ -92,6 +92,8 @@ class ProfileConfig:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ReplayChunks:
+    """Chunk sizes for no-grad full-window scoring; actor shapes stay fixed."""
+
     windows: int = 16
     decisions: int = 128
 
@@ -2321,6 +2323,7 @@ class TransformerPolicy:
             return self._evaluate(states, actions)
 
     def _evaluate(self, states: Sequence[DecisionState], actions: Tensor) -> PolicyEvaluation:
+        chunks = self.replay_chunks if not torch.is_grad_enabled() else DEFAULT_REPLAY_CHUNKS
         states = self._columnar_states(states)
         self._validate_states(states, actions)
         meta = states.meta
@@ -2333,8 +2336,8 @@ class TransformerPolicy:
                 windows[key] = index
         window_states = states.take(list(windows.values()))
         encoded: dict[tuple[int, int, int, int], tuple[Tensor, Tensor, Tensor]] = {}
-        for start in range(0, len(window_states), self.replay_chunks.windows):
-            batch = window_states[start : start + self.replay_chunks.windows]
+        for start in range(0, len(window_states), chunks.windows):
+            batch = window_states[start : start + chunks.windows]
             if self.profile is not None:
                 self.profile.work[f"{self.profile.phase_name}/trunk_tokens"] += len(batch) * 256
             with sample(self.profile, "trunk_chunk", work=float(len(batch) * 256)):
@@ -2345,8 +2348,8 @@ class TransformerPolicy:
                 for row, data in enumerate(batch.meta):
                     encoded[_window_key(data)] = (hidden[row], observed[row], memory[:, row])
         outputs: list[PolicyEvaluation] = []
-        for start in range(0, len(states), self.replay_chunks.decisions):
-            batch = states[start : start + self.replay_chunks.decisions]
+        for start in range(0, len(states), chunks.decisions):
+            batch = states[start : start + chunks.decisions]
             if self.profile is not None:
                 self.profile.work[f"{self.profile.phase_name}/decoder_tokens"] += len(batch) * (
                     self.decoder.max_delay + 4
@@ -4387,6 +4390,7 @@ def _configuration_digest(trainer: Trainer) -> str:
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["compiled"] = trainer.policy.compiled
+        identity["no_grad_chunks"] = dataclasses.asdict(trainer.policy.replay_chunks)
         identity["decision_kernels"] = "fp32_decoder_fixed_tick_graph_v3"
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)

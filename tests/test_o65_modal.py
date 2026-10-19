@@ -70,7 +70,7 @@ def test_replay_chunks_reject_invalid_sizes(value: int) -> None:
 
 
 @pytest.mark.parametrize("chunks", [exp.ReplayChunks(1, 1), exp.ReplayChunks(2, 3)])
-def test_replay_chunking_preserves_rows_features_and_gradients(chunks: exp.ReplayChunks) -> None:
+def test_replay_chunking_preserves_rows_features_and_gradients(chunks: exp.ReplayChunks, tmp_path: Path) -> None:
     run = transformer_trainer("cpu", development=True)
     policy = run.policy
     match = run.engine.matches[0]
@@ -96,13 +96,21 @@ def test_replay_chunking_preserves_rows_features_and_gradients(chunks: exp.Repla
     gradients = tuple(None if p.grad is None else p.grad.clone() for p in policy.actor_parameters())
     policy.model.zero_grad(set_to_none=True)
     treatment = exp.TransformerPolicy(policy.model, policy.schedule, policy.statistics, replay_chunks=chunks)
-    actual = treatment.evaluate(states, actions)
+    recorder = exp.UpdateProfile(tmp_path, torch.device("cpu"), traces=False)
+    treatment.profile = recorder
+    with torch.no_grad():
+        actual = treatment.evaluate(states, actions)
+    assert recorder.calls["outside/trunk_chunk"] == (3 + chunks.windows - 1) // chunks.windows
+    assert recorder.calls["outside/decoder_chunk"] == (4 + chunks.decisions - 1) // chunks.decisions
     torch.testing.assert_close(actual.log_probs, expected.log_probs, rtol=2e-5, atol=2e-6)
     torch.testing.assert_close(actual.features.trunk, expected.features.trunk, rtol=2e-5, atol=2e-6)
     torch.testing.assert_close(actual.features.decoder, expected.features.decoder, rtol=2e-5, atol=2e-6)
     for first, second in zip(actual.distributions, expected.distributions, strict=True):
         torch.testing.assert_close(first, second, rtol=2e-5, atol=2e-6)
-    (-actual.log_probs.sum()).backward()
+    recorder.calls.clear()
+    actor = treatment.evaluate(states, actions)
+    assert recorder.calls == {"outside/trunk_chunk": 1, "outside/decoder_chunk": 1}
+    (-actor.log_probs.sum()).backward()
     for gradient, parameter in zip(gradients, treatment.actor_parameters(), strict=True):
         if gradient is None:
             assert parameter.grad is None
@@ -121,3 +129,10 @@ def test_profile_cli_records_chunk_sizes(tmp_path: Path) -> None:
         replay_chunks=exp.ReplayChunks(32, 256),
     )
     assert cli.native().replay_chunks == exp.ReplayChunks(32, 256)
+
+
+def test_resume_identity_binds_no_grad_chunk_sizes() -> None:
+    run = transformer_trainer("cpu", development=True)
+    original = exp._configuration_digest(run)
+    run.policy.replay_chunks = exp.ReplayChunks(32, 256)
+    assert exp._configuration_digest(run) != original
