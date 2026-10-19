@@ -228,3 +228,32 @@ native profile finishes its updates but its coverage guard still requires old
 chunk sites; updating that guard passes all 15 profiler tests. Both canonical
 profiles then finish. A separate diagnostic harness first has a Python syntax
 error before execution; the corrected whole-preparation trace completes.
+
+
+The bootstrap follow-up uses `7012de66`, trainer SHA-256
+`debc1bbec7512bc252dd12667e1b45ffabb1d79745128f1c41216f21f1a05d4c`.
+It evaluates one fixed player-sized batch for each occupied timeout block or
+final boundary and skips empty roles. No model or objective changes. Raw
+source-verified outputs are `runs/dense/step4b-final16` and `step4b-final64`.
+
+| Matches | Phase | Wall s | Main-thread CPU s | Eager launches, estimated | Graph launches, estimated | Kernel executions, estimated |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | rollout | 2.853 | 2.642 | 86,534 | 384 | 611,048 |
+| 16 | reference | 0.102 | 0.102 | 16 | 1 | 1,173 |
+| 16 | preparation | 0.063 | 0.063 | 74 | 1 | 1,230 |
+| 16 | critic | 0.017 | 0.013 | 601 | 0 | 613 |
+| 16 | actor | 0.473 | 0.473 | 3,636 | 4 | 18,920 |
+| 64 | rollout | 3.777 | 3.623 | 86,534 | 384 | 618,822 |
+| 64 | reference | 0.394 | 0.394 | 16 | 1 | 1,174 |
+| 64 | preparation | 0.139 | 0.139 | 74 | 1 | 1,230 |
+| 64 | critic | 0.044 | 0.041 | 593 | 0 | 609 |
+| 64 | actor | 0.942 | 0.941 | 7,272 | 8 | 37,840 |
+
+Other preparation falls to 0.063 and 0.139 s, from 0.124 and 0.380 s. Counts
+stay flat; the smaller bootstrap batch removes GPU work. Updates take 3.509
+and 5.298 s. Policy/tick-state CPU time is 3.077 and 3.443 ms per tick;
+complete rollout CPU divided by 128 ticks is 20.643 and 28.304 ms. The count
+projections remain about 3.87 s for rollout and 3.79 s for actor at 1,024.
+The full-preparation trace's host projection remains 0.050 s; GPU work still
+needs the final PRO 6000 measurement. Focused checks pass four tests with one
+CUDA-only diagnostic skip. Both canonical follow-up profiles complete.
