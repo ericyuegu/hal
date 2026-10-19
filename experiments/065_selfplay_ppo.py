@@ -2209,7 +2209,7 @@ class PreparedUpdate:
     rollout: Rollout
     decisions: DecisionBatch
     old: PolicyEvaluation
-    reference: PolicyEvaluation
+    reference: PolicyEvaluation | None
     values: Tensor
     advantages: Tensor
     targets: Tensor
@@ -2302,12 +2302,12 @@ class Trainer:
         states = [r.state for r in records]
         actions = torch.stack([r.actions for r in records]).to(device)
         old = self.policy.evaluate(states, actions)
-        reference = self.reference.evaluate(states, actions)
-        kl = factor_kl(old, reference)
+        reference = None if self.warming else self.reference.evaluate(states, actions)
+        kl = torch.zeros_like(old.log_probs) if reference is None else factor_kl(old, reference)
         frame_rewards = torch.tensor(
             [record.rewards + [0.0] * (4 - len(record.rewards)) for record in records], device=device
         )
-        rewards = regularized_reward(decisions, frame_rewards, kl if not self.warming else torch.zeros_like(kl))
+        rewards = regularized_reward(decisions, frame_rewards, kl)
         values = self.policy.values(old.features)
         next_values = torch.zeros_like(values)
         # Bootstrap from the next decision inside an episode, or from the final
@@ -2452,29 +2452,20 @@ class Trainer:
         )
 
     def fit(self, batch: PreparedUpdate) -> dict[str, float]:
+        if not self.warming and batch.reference is None:
+            raise ValueError("actor update requires a reference evaluation")
         cfg = self.config
         metrics = dict(batch.metrics)
         started = time.perf_counter()
         features = batch.old.features.detached()
         count = len(batch.values)
-        for epoch in range(cfg.critic_epochs):
-            order = sorted(
-                range(count),
-                key=lambda j: self.engine.sampler.rng.uniform(
-                    "critic_shuffle",
-                    batch.rollout.records[j].state.stream,
-                    batch.rollout.records[j].state.episode.number,
-                    batch.rollout.update,
-                    epoch,
-                    j,
-                ),
-            )
-            at = torch.tensor(order, device=self.policy.device)
+        selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
+        for _ in range(cfg.critic_epochs):
             self.critic_optimizer.zero_grad(set_to_none=True)
             loss = critic_loss(
-                self.policy.values(_take_features(features, at)),
-                batch.targets[at],
-                torch.ones(count, dtype=torch.bool, device=at.device),
+                self.policy.values(features),
+                batch.targets,
+                selected,
                 value_scale=cfg.value_scale,
             )
             loss.backward()
@@ -2488,6 +2479,7 @@ class Trainer:
         metrics["policy/empty_update"] = float(not batch.steps)
         if not batch.steps:
             return metrics
+        assert batch.reference is not None
         started = time.perf_counter()
         policy_losses: list[float] = []
         kl_losses: list[float] = []
@@ -3210,7 +3202,7 @@ def _batch_hash(batch: PreparedUpdate) -> str:
             "advantages": batch.advantages,
             "targets": batch.targets,
             "old": batch.old.log_probs,
-            "reference": batch.reference.log_probs,
+            "reference": None if batch.reference is None else batch.reference.log_probs,
             "observations": tuple(
                 (
                     record.state.stream,
