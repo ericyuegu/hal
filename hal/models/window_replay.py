@@ -186,8 +186,11 @@ def replay_windows(
 
     The caller runs the trunk once per window. With grad=True its autograd
     history is preserved. This function owns decoder precision, as the rollout
-    decoder does. Compile with default or max-autotune-no-cudagraphs before
-    explicit CUDA capture. Critic features never carry actor gradients.
+    decoder does. On Torch 2.11, compile in default mode with
+    triton.cudagraphs=False and emulate_precision_casts=True before explicit
+    CUDA capture. Cast preservation prevents gradient/no-gradient BF16 drift;
+    remove it only after the proxy FP32-reference gate passes without it.
+    Critic features never carry actor gradients.
     """
     _check_shapes(model, hidden_WLd, observed_WL4, slots)
     valid = slots.valid_WK

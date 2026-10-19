@@ -39,9 +39,10 @@ class GraphedActorStep:
 
     forward receives a tuple of static tensor inputs and must run the trunk and
     replay_windows(..., grad=True). It must not close over differentiable trunk
-    outputs computed before capture. Compile forward with default and
-    triton.cudagraphs=False, or max-autotune-no-cudagraphs, before passing it
-    here when replay uses CUDA flex attention. Parameters and input storage keep
+    outputs computed before capture. Compile forward in default mode with
+    triton.cudagraphs=False and emulate_precision_casts=True before passing it
+    here. CUDA flex attention requires compilation; Torch 2.11's BF16 replay
+    also needs cast preservation (see replay_windows). Parameters and input storage keep
     their identity for this helper's lifetime. Call backward once per step;
     gradient clipping and Muon run afterwards. Outputs are cloned before return.
     Validate each new payload at its assembly boundary before backward.

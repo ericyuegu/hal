@@ -61,8 +61,11 @@ of tensor inputs, targets, and `model.actor_parameters()`. The callback must
 rebuild the trunk and call `replay_windows(..., grad=True)` from the supplied
 static tensor inputs. Include all changing slot tensors in that tuple; do not
 close over decision data that changes between calls. Compile the callback
-with `fullgraph=True`, `dynamic=False`, and `options={"triton.cudagraphs": False}`
-(default mode), or use `mode="max-autotune-no-cudagraphs"`. Compiled flex
+with `fullgraph=True`, `dynamic=False`, and
+`options={"triton.cudagraphs": False, "emulate_precision_casts": True}`
+(default mode). The cast option is required on tested Torch 2.11.0. Remove it
+only when the proxy gate and gradient/no-gradient comparison pass without it.
+Compiled flex
 attention requires head width at least 16; the proxy uses 64.
 
 Release earlier eager autograd graphs before constructing capture buckets.
