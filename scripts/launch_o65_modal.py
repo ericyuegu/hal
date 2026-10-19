@@ -38,6 +38,12 @@ MAX_USD = 30.0
 BUILD_RESERVE_USD = 3.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
+MODAL_SDK = "1.5.3"
+
+
+def require_modal_version(version: str) -> None:
+    if version != MODAL_SDK:
+        raise ValueError(f"Modal {version} has not passed this launcher's compatibility tests; expected {MODAL_SDK}")
 
 
 def validate_name(name: str) -> None:
@@ -112,7 +118,8 @@ class Request:
             raise ValueError("expected a full published HAL Git SHA")
         if self.mode not in ("smoke", "profile"):
             raise ValueError("unsupported run mode")
-        allowed = (16,) if self.mode == "smoke" else (256, 1024, 4096)
+        # Four-group KV storage alone needs 105.22 GiB at 4096 matches.
+        allowed = (16,) if self.mode == "smoke" else (256, 1024)
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
         if any(type(value) is not int or value < 1 for value in (self.windows, self.decisions)):
@@ -213,6 +220,7 @@ def stage_results(source: Path, destination: Path) -> None:
 
 
 def run_child(request: Request, output: Path, started: float) -> int:
+    require_modal_version(importlib.metadata.version("modal"))
     cpus = select_cpus(set(os.sched_getaffinity(0)))
     os.sched_setaffinity(0, set(cpus))
     argv = command(request, cpus[:16])
@@ -328,6 +336,7 @@ class Args:
 
 
 def main(args: Args) -> None:
+    require_modal_version(importlib.metadata.version("modal"))
     if args.mode == "download":
         if args.name is None:
             raise ValueError("download requires a run name")

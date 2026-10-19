@@ -105,6 +105,7 @@ def test_image_delivery_commands_match_the_real_cli() -> None:
         ("windows", 0),
         ("decisions", True),
         ("matches", 64),
+        ("matches", 4096),
         ("name", "../x"),
         ("git_sha", "HEAD"),
         ("timeout_seconds", 0),
@@ -113,6 +114,12 @@ def test_image_delivery_commands_match_the_real_cli() -> None:
 def test_modal_request_rejects_invalid_config(field: str, value: object) -> None:
     with pytest.raises(ValueError):
         dataclasses.replace(Request("test", "a" * 40), **{field: value})
+
+
+def test_modal_sdk_rejects_unqualified_versions() -> None:
+    launcher.require_modal_version("1.5.3")
+    with pytest.raises(ValueError, match="compatibility tests"):
+        launcher.require_modal_version("1.5.4")
 
 
 def test_modal_commands_are_bounded_and_have_no_external_sink() -> None:
