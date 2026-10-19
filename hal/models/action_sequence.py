@@ -640,10 +640,11 @@ class CausalTemporalDecoder(nn.Module):
     def _project_action_head(self, head: NonlinearActionHead, features: Tensor) -> Tensor:
         if self.return_conditioner.ranges is None or not torch.is_autocast_enabled(features.device.type):
             return head.project(features)
-        # BF16 readout products must not round away a small policy bias change.
-        # Keep bias addition and the subsequent sum of temporal/trunk logits in FP32.
+        # The categorical readout needs FP32 resolution across decode batch
+        # layouts. Keep its small final projection outside decoder autocast.
         hidden = F.silu(head.up(features))
-        return F.linear(hidden, head.down.weight).float() + cast(Tensor, head.down.bias)
+        with torch.autocast(features.device.type, enabled=False):
+            return head.down(hidden.float())
 
     def _decode_step(
         self,
