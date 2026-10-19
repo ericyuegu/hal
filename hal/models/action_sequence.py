@@ -1390,6 +1390,67 @@ class CausalTemporalDecoder(nn.Module):
             state[rows, delay],
         )
 
+    def replay_window_queue_state(
+        self,
+        hidden: Tensor,
+        observed: Tensor,
+        prefix_positions: Tensor,
+        history_starts: Tensor,
+        forced_queue: Tensor,
+        queue_lengths: Tensor,
+        policy_condition: Tensor,
+    ) -> Tensor:
+        """Return the pre-action state after each [W,K] committed queue.
+
+        The caller validates positions, actions and lengths before capture.
+        Conditions describe the episode's configured D/R; queue lengths describe
+        the actual committed prefix. No new action or action probability is made.
+        """
+        windows, slots = prefix_positions.shape
+        count = forced_queue.shape[2] + 1
+        if forced_queue.shape != (windows, slots, count - 1, 4) or policy_condition.shape != (windows, slots, 3):
+            raise ValueError("window queues or conditions have the wrong shape")
+        if queue_lengths.shape != (windows, slots) or queue_lengths.dtype not in (torch.int32, torch.int64):
+            raise ValueError("committed queue lengths must be integer [W,K]")
+        if not torch.compiler.is_compiling() and bool(((queue_lengths < 0) | (queue_lengths >= count)).any()):
+            raise ValueError("committed queue length exceeds its capacity")
+        if count > self.offset_embedding.num_embeddings - 1:
+            raise ValueError("committed queue exceeds decoder offset capacity")
+        depth = torch.arange(count, device=hidden.device)
+        rows = torch.arange(windows, device=hidden.device)[:, None]
+        prefix = torch.where(
+            (torch.arange(count - 1, device=hidden.device) < queue_lengths[..., None])[..., None],
+            forced_queue,
+            0,
+        )
+        previous = torch.cat((observed[rows, prefix_positions][:, :, None], prefix), dim=2)
+        raw_trunk = hidden[rows, prefix_positions]
+        bias = self._state_bias(decoder_rmsnorm(raw_trunk))
+        state = decoder_rmsnorm(bias[:, :, None] + self._step_features(previous, depth + 1))
+        state = state.reshape(windows * slots, count, self.d_model)
+        conditioning = self.return_conditioner(
+            torch.full((windows, slots), 0.9 * RETURN_SCALE, device=hidden.device),
+            torch.ones((windows, slots), dtype=torch.bool, device=hidden.device),
+            policy_condition,
+        )
+        for index, module in enumerate(self.blocks):
+            block = cast(TemporalBlock, module)
+            modulation = None if conditioning is None else conditioning[index].reshape(-1, 1, 4, self.d_model)
+            state, _ = block.prefill(state, modulation)
+            if index == 0:
+                key, value = self.history_attention.project_memory(hidden)
+                state = self.history_attention.forward_projected(
+                    state.reshape(windows, slots * count, self.d_model),
+                    key,
+                    value,
+                    history_starts,
+                    prefix_positions,
+                    offsets_per_prefix=count,
+                ).reshape(windows * slots, count, self.d_model)
+        state = decoder_rmsnorm(state)
+        selected = state[torch.arange(windows * slots, device=hidden.device), queue_lengths.flatten()]
+        return selected.reshape(windows, slots, self.d_model)
+
     def replay_window_decisions(
         self,
         hidden: Tensor,

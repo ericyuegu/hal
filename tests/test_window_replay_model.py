@@ -206,3 +206,33 @@ def test_invalid_window_actions_are_rejected_even_outside_live_slot_positions() 
     observed[0, 0] = 999
     with pytest.raises(ValueError, match="controller factor"):
         validate_replay_inputs(policy, hidden, observed, slots)
+
+
+def test_queue_only_replay_matches_the_pre_action_state() -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    expected = replay_windows(policy, hidden, observed, slots, grad=False)
+    queue_state = policy.temporal.replay_window_queue_state(
+        hidden,
+        observed,
+        slots.positions_WK,
+        slots.history_starts_WL,
+        slots.forced_queue_WKD4,
+        slots.delay_WK,
+        slots.condition_WK3,
+    )
+    torch.testing.assert_close(
+        queue_state[slots.valid_WK], expected.features.decoder_WKt[slots.valid_WK], atol=2e-6, rtol=2e-5
+    )
+    lengths = slots.delay_WK.clone()
+    lengths[0, 0] = -1
+    with pytest.raises(ValueError, match="queue length"):
+        policy.temporal.replay_window_queue_state(
+            hidden,
+            observed,
+            slots.positions_WK,
+            slots.history_starts_WL,
+            slots.forced_queue_WKD4,
+            lengths,
+            slots.condition_WK3,
+        )
