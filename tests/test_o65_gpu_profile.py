@@ -43,6 +43,7 @@ def test_trace_counts_device_work_once_and_merges_overlap(tmp_path: Path) -> Non
     assert result["kernel_seconds"] == pytest.approx(20e-6)
     assert result["kernel_count"] == 2
     assert result["runtime_launch_count"] == 2
+    assert result["runtime_launch_seconds"] == pytest.approx(2e-6)
     assert result["top15_kernel_share"] == 1
     assert result["copies"] == {"h2d_count": 1, "h2d_bytes": 64, "d2h_count": 1, "d2h_bytes": 4}
     assert result["synchronizations"] == {"cudaEventSynchronize": 1}
@@ -97,6 +98,30 @@ def test_profile_cli_uses_pilot_layout_and_rejects_training_side_effects(tmp_pat
             dataclasses.replace(native, **change)
 
 
+def test_profile_rejects_cold_groups_and_misreported_update_count(tmp_path: Path) -> None:
+    import dataclasses
+
+    cli = gpu_profile.GpuProfileCli(tmp_path / "final.pt", tmp_path / "data", tmp_path / "output", cpus=(0,))
+    with pytest.raises(ValueError, match="warm every group"):
+        dataclasses.replace(cli, warm_updates=3).native()
+    with pytest.raises(ValueError, match="two measured updates"):
+        dataclasses.replace(cli.native(), updates=7)
+
+
+def test_training_rejects_unqualified_scoring_chunks(tmp_path: Path) -> None:
+    import dataclasses
+
+    cli = gpu_profile.GpuProfileCli(
+        tmp_path / "final.pt",
+        tmp_path / "data",
+        tmp_path / "output",
+        cpus=(0,),
+        replay_chunks=gpu_profile.ReplayChunks(32, 256),
+    ).native()
+    with pytest.raises(ValueError, match="profiling only"):
+        dataclasses.replace(cli, profiling=None)
+
+
 def test_measurement_syncs_are_excluded_by_annotations(tmp_path: Path) -> None:
     path = tmp_path / "syncs.json"
     path.write_text(
@@ -133,6 +158,7 @@ def test_estimates_scale_by_work_and_recompute_top_kernels(tmp_path: Path) -> No
             "kernel_seconds_by_name": {"gemm": 0.1},
             "kernel_count": 2,
             "runtime_launch_count": 2,
+            "runtime_launch_seconds": 0.002,
             "copies": {"h2d_count": 1, "h2d_bytes": 4},
             "synchronizations": {"cudaStreamSynchronize": 1},
         }
@@ -140,6 +166,7 @@ def test_estimates_scale_by_work_and_recompute_top_kernels(tmp_path: Path) -> No
     estimate = gpu_profile.estimate_profile(timed, traced)
     site = estimate["sites"]["student/trunk_chunk"]
     assert site["scale"] == 4 and site["kernel_count"] == 6
+    assert site["runtime_launch_seconds"] == pytest.approx(0.006)
     assert site["device_busy_seconds"] == pytest.approx(0.4)
     assert site["synchronizations_excluding_injected"] == {"cudaStreamSynchronize": 3}
     assert site["copies"] == {"h2d_count": 3, "h2d_bytes": 16}

@@ -93,6 +93,21 @@ class ProfileConfig:
             raise ValueError("profiling requires at least one warm update")
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ReplayChunks:
+    """Chunk sizes for no-grad full-window scoring; actor shapes stay fixed."""
+
+    windows: int = 16
+    decisions: int = 128
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int or value < 1 for value in (self.windows, self.decisions)):
+            raise ValueError("replay chunk sizes must be positive integers")
+
+
+DEFAULT_REPLAY_CHUNKS = ReplayChunks()
+
+
 def interval_union(intervals: list[tuple[float, float]]) -> float:
     end = total = 0.0
     for start, stop in sorted(intervals):
@@ -123,6 +138,7 @@ def summarize_trace(path: Path) -> dict[str, object]:
     measurement_syncs: dict[str, int] = defaultdict(int)
     intervals: list[tuple[float, float]] = []
     kernel_count = launches = 0
+    launch_seconds = 0.0
     for event in events:
         category = event.get("cat", "")
         name = event.get("name", "")
@@ -145,6 +161,7 @@ def summarize_trace(path: Path) -> dict[str, object]:
             kernel_count += 1
         if category == "cuda_runtime" and ("LaunchKernel" in name or "GraphLaunch" in name):
             launches += 1
+            launch_seconds += duration / 1e6
         if category == "gpu_memcpy":
             if "HtoD" in name:
                 direction = "h2d"
@@ -166,6 +183,7 @@ def summarize_trace(path: Path) -> dict[str, object]:
         "kernel_seconds": total / 1e6,
         "kernel_count": kernel_count,
         "runtime_launch_count": launches,
+        "runtime_launch_seconds": launch_seconds,
         "kernel_seconds_by_name": {name: value / 1e6 for name, value in kernels.items()},
         "top15_kernel_share": sum(value for _, value in top) / total if total else 0.0,
         "top15_kernels": [{"name": name, "seconds": value / 1e6} for name, value in top],
@@ -314,6 +332,7 @@ def estimate_profile(timed: UpdateProfile, traced: UpdateProfile) -> dict[str, o
             "kernel_seconds": total,
             "kernel_count": sum(cast(int, row["kernel_count"]) for row in rows) * call_scale,
             "runtime_launch_count": sum(cast(int, row["runtime_launch_count"]) for row in rows) * call_scale,
+            "runtime_launch_seconds": sum(cast(float, row["runtime_launch_seconds"]) for row in rows) * call_scale,
             "copies": dict(copies),
             "synchronizations_excluding_injected": dict(syncs),
             "top15_kernel_share": sum(value for _, value in top) / total if total else 0,
@@ -370,12 +389,15 @@ class HostSampler:
             with (self.output / "host.jsonl").open("x") as log:
                 while not self.stop.is_set():
                     threads: dict[str, list[int]] = {}
+                    thread_affinity: dict[str, list[int]] = {}
                     for path in Path(f"/proc/{os.getpid()}/task").glob("*/stat"):
                         try:
                             fields = path.read_text().rsplit(")", 1)[1].split()
-                        except FileNotFoundError:
+                            affinity = sorted(os.sched_getaffinity(int(path.parent.name)))
+                        except FileNotFoundError, ProcessLookupError:
                             continue
                         threads[path.parent.name] = [int(fields[11]), int(fields[12])]
+                        thread_affinity[path.parent.name] = affinity
                     cores = [line for line in Path("/proc/stat").read_text().splitlines() if line.startswith("cpu")]
                     gpu = subprocess.check_output(
                         [
@@ -386,7 +408,19 @@ class HostSampler:
                         text=True,
                         timeout=10,
                     ).strip()
-                    log.write(json.dumps({"time": time.time(), "threads": threads, "cores": cores, "gpu": gpu}) + "\n")
+                    log.write(
+                        json.dumps(
+                            {
+                                "time": time.time(),
+                                "pid": os.getpid(),
+                                "threads": threads,
+                                "thread_affinity": thread_affinity,
+                                "cores": cores,
+                                "gpu": gpu,
+                            }
+                        )
+                        + "\n"
+                    )
                     log.flush()
                     self.stop.wait(0.5)
         except (OSError, subprocess.SubprocessError) as error:
@@ -1561,10 +1595,12 @@ class TransformerPolicy:
         statistics: dict[str, FeatureStats],
         *,
         compiled: bool = False,
+        replay_chunks: ReplayChunks = DEFAULT_REPLAY_CHUNKS,
     ) -> None:
         self.profile: UpdateProfile | None = None
         self.model = model.eval()
         self.compiled = compiled
+        self.replay_chunks = replay_chunks
         self.schedule = schedule
         self.statistics = statistics
         for stat in statistics.values():
@@ -1632,7 +1668,9 @@ class TransformerPolicy:
     def frozen_copy(self) -> LoopPolicy:
         model = copy.deepcopy(self.model).requires_grad_(False)
         model.zero_grad(set_to_none=True)
-        return TransformerPolicy(model, self.schedule, self.statistics, compiled=self.compiled)
+        return TransformerPolicy(
+            model, self.schedule, self.statistics, compiled=self.compiled, replay_chunks=self.replay_chunks
+        )
 
     def _validate_states(self, states: Sequence[DecisionState], actions: Tensor | None = None) -> None:
         if not states:
@@ -2288,6 +2326,7 @@ class TransformerPolicy:
             return self._evaluate(states, actions)
 
     def _evaluate(self, states: Sequence[DecisionState], actions: Tensor) -> PolicyEvaluation:
+        chunks = self.replay_chunks if not torch.is_grad_enabled() else DEFAULT_REPLAY_CHUNKS
         states = self._columnar_states(states)
         self._validate_states(states, actions)
         meta = states.meta
@@ -2300,8 +2339,8 @@ class TransformerPolicy:
                 windows[key] = index
         window_states = states.take(list(windows.values()))
         encoded: dict[tuple[int, int, int, int], tuple[Tensor, Tensor, Tensor]] = {}
-        for start in range(0, len(window_states), 16):
-            batch = window_states[start : start + 16]
+        for start in range(0, len(window_states), chunks.windows):
+            batch = window_states[start : start + chunks.windows]
             if self.profile is not None:
                 self.profile.work[f"{self.profile.phase_name}/trunk_tokens"] += len(batch) * 256
             with sample(self.profile, "trunk_chunk", work=float(len(batch) * 256)):
@@ -2312,8 +2351,8 @@ class TransformerPolicy:
                 for row, data in enumerate(batch.meta):
                     encoded[_window_key(data)] = (hidden[row], observed[row], memory[:, row])
         outputs: list[PolicyEvaluation] = []
-        for start in range(0, len(states), 128):
-            batch = states[start : start + 128]
+        for start in range(0, len(states), chunks.decisions):
+            batch = states[start : start + chunks.decisions]
             if self.profile is not None:
                 self.profile.work[f"{self.profile.phase_name}/decoder_tokens"] += len(batch) * (
                     self.decoder.max_delay + 4
@@ -4356,6 +4395,7 @@ def _configuration_digest(trainer: Trainer) -> str:
         identity["compiled"] = trainer.policy.compiled
         identity["decision_kernels"] = "decoder_precision_fixed_tick_graph_v4"
         identity["decoder_precision"] = trainer.policy.model.decoder_precision
+        identity["no_grad_chunks"] = dataclasses.asdict(trainer.policy.replay_chunks)
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
         identity["statistics"] = {key: dataclasses.asdict(value) for key, value in trainer.policy.statistics.items()}
@@ -4728,6 +4768,7 @@ class NativeCli:
     wandb_project: str | None = None
     profiling: ProfileConfig | None = None
     decoder_precision: DecoderPrecision = "bf16"
+    replay_chunks: ReplayChunks = ReplayChunks()
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
@@ -4756,6 +4797,12 @@ class NativeCli:
             raise ValueError("evaluation interval must be nonnegative")
         if self.max_frame != -1 and (type(self.max_frame) is not int or self.max_frame < 0):
             raise ValueError("max frame must be -1 or nonnegative")
+        if self.profiling is None and self.replay_chunks != DEFAULT_REPLAY_CHUNKS:
+            raise ValueError("nondefault replay chunks are qualified for profiling only")
+        if self.profiling is not None and (
+            self.profiling.warm_updates < self.groups or self.updates != self.profiling.warm_updates + 2
+        ):
+            raise ValueError("profiling must warm every group and run exactly two measured updates")
 
 
 def read_native_sampler(path: Path) -> SamplerConfig:
@@ -4801,7 +4848,9 @@ def train_native(config: NativeCli) -> None:
     checkpoint.model.requires_grad_(True)
     checkpoint.model.percentile_head.requires_grad_(False)
     schedule = development_config(checkpoint.model.head_offsets)
-    policy = TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics, compiled=config.compiled)
+    policy = TransformerPolicy(
+        checkpoint.model, schedule, checkpoint.statistics, compiled=config.compiled, replay_chunks=config.replay_chunks
+    )
     sampling = read_native_sampler(config.sampler)
     for row in sampling.identities:
         if row.identity >= policy.model.cfg.player_vocab_size:
@@ -4991,6 +5040,7 @@ class GpuProfileCli:
     groups: int = 4
     warm_updates: int = 4
     decoder_precision: DecoderPrecision = "bf16"
+    replay_chunks: ReplayChunks = ReplayChunks()
 
     def native(self) -> NativeCli:
         return NativeCli(
@@ -5007,6 +5057,7 @@ class GpuProfileCli:
             evaluation_every=0,
             profiling=ProfileConfig(self.warm_updates),
             decoder_precision=self.decoder_precision,
+            replay_chunks=self.replay_chunks,
         )
 
 
