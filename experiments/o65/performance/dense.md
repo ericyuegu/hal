@@ -115,3 +115,51 @@ The projection uses 14 us per eager launch and 5 us per remaining graph
 kernel. It is a host-cost projection with sampled coverage, not a measured
 PRO 6000 time. The final layout cache avoids per-tick validation loops and
 reuses cache rows after anchor assignments change at a block boundary.
+
+
+## Step 3: two simulator buffers
+
+Each buffer owns a CUDA stream. The hot tick samples A, starts A's shard
+workers, then samples B and starts B's workers. Device transfers and accepted
+observations stay on their buffer's stream. The default stream joins both
+before the next tick. Queue snapshots precede both policies, so critic inputs
+exclude either player's new action. The two stepped frames precede the first
+new action at D+1 >= 9. Cold captures run before worker CUDA calls; they use
+the same tick operation and serialize shared-ring snapshot restoration.
+
+Source-verified profiles use commit `382c9300`, trainer SHA-256
+`893dbe6956cd4af33408eaba2e054e7888ace7ae3d46e3cc25d37daa8466caf0`.
+Raw outputs are `runs/dense/step3-final16` and `runs/dense/step3-final64`.
+
+| Matches | Phase | Wall s | Main-thread CPU s | Eager launches, estimated | Graph launches, estimated | Kernel executions, estimated |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | rollout | 2.875 | 2.660 | 86,534 | 384 | 611,048 |
+| 16 | reference | 0.269 | 0.269 | 18,520 | 0 | 19,100 |
+| 16 | preparation | 0.097 | 0.096 | 4,790 | 0 | 4,906 |
+| 16 | critic | 0.017 | 0.013 | 601 | 0 | 613 |
+| 16 | actor | 0.473 | 0.265 | 30,256 | 0 | 31,196 |
+| 64 | rollout | 3.704 | 3.556 | 86,534 | 384 | 618,822 |
+| 64 | reference | 1.025 | 1.024 | 70,073 | 0 | 72,271 |
+| 64 | preparation | 0.257 | 0.257 | 15,514 | 0 | 15,674 |
+| 64 | critic | 0.044 | 0.041 | 593 | 0 | 609 |
+| 64 | actor | 1.696 | 0.851 | 108,960 | 0 | 112,584 |
+
+Policy and tick-state CPU time is 3.084 ms per tick at 16 matches and 3.345 ms
+at 64. Complete rollout main-thread CPU time divided by 128 ticks is 20.777
+and 27.784 ms; this includes shard acceptance, resets and setup. Update wall
+time is 3.733 and 6.731 s. Splitting the GPU batch costs time at these local
+sizes: rollout was 2.368 and 3.284 s before overlap. The scheduling test proves
+that A can step while B samples; these measurements do not show a local speedup.
+
+The sampled rollout launch counts are flat. Applying the supplied PRO 6000
+host costs gives a **projection** of 3.834 to 3.873 s at 1,024 matches, close
+to the 4 s target limit. Coverage and overlap caveats from step 2 apply.
+Reference and actor still miss their projected targets; bounded local traces
+identify their eager replay calls. Window replay replaces them next.
+
+Validation: CPU-focused checks passed 94 tests, with 13 diagnostic skips and
+19 deselections. The first two-stream CUDA run passed scheduling/reset checks
+but failed exact resume on an implicit BF16-to-FP32 indexed write. Making the
+conversion explicit fixed it. The retry passed both tests (19 deselections,
+15 dependency warnings), including odd-frame timeouts and deterministic exact
+resume. Both source-verified native profiles completed.
