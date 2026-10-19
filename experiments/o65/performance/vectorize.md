@@ -271,10 +271,10 @@ unsorted stream ids and separate engines. Final focused qualification has
 The final 16-match common-input comparison has max/p99 log-probability error
 0.069510/0.012662 nats, unused cached value error 2.603963/1.440185 reward units,
 and decision KL error 0.001665/0.000332 nats. Actor-gradient cosine is 0.999769
-and relative difference norm is 0.021527. Critic gradients match exactly. It
-uses task 2's unchanged bounds. These tests qualify numerical changes on common
-inputs; they do not claim that changing anchor match allocation preserves a
-whole training trajectory.
+and relative difference norm is 0.021550 (norm ratio 0.998424). Critic gradients
+match exactly. It uses task 2's unchanged bounds. These tests qualify changes
+on common inputs; they do not claim that changing anchor match allocation
+preserves a whole training trajectory.
 
 ## Final complete-update measurements
 
@@ -283,24 +283,26 @@ four native shards on CPUs 0–3, one active group and 256 frames per rollout.
 Both development cadences remain mixed. Three updates run per arm; the table
 averages updates 2 and 3. Startup, evaluation and checkpoints are outside timing.
 No timed run has an episode end or idle frame. Raw records retain allocated
-and reserved peaks for every update; the table reports the reserved maximum.
+and reserved peaks for every update; the table reports the reserved maximum
+of the steady updates. These final runs use reviewed commit `e8df534f`; the
+earlier task-6 measurements remain in the raw record as `initial_runs`.
 
 | Matches | Phase | Rollout s | No-grad s | Actor s | Critic s | Update s | Match-frames/s | Peak reserved GiB | Decode calls/tick |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | PPO | 3.725 | 0.637 | 0.508 | 0.017 | 4.930 | 830.902 | 2.098 | 2.00 |
-| 16 | WARMUP | 3.718 | 0.344 | 0.000 | 0.017 | 4.122 | 993.653 | 1.006 | 2.00 |
-| 64 | PPO | 5.739 | 2.380 | 1.825 | 0.045 | 10.109 | 1620.820 | 3.932 | 2.00 |
-| 64 | WARMUP | 5.718 | 1.268 | 0.000 | 0.045 | 7.150 | 2291.383 | 2.201 | 2.00 |
+| 16 | PPO | 3.706 | 0.636 | 0.509 | 0.017 | 4.912 | 833.941 | 2.098 | 2.00 |
+| 16 | WARMUP | 3.726 | 0.348 | 0.000 | 0.017 | 4.134 | 990.895 | 1.006 | 2.00 |
+| 64 | PPO | 5.757 | 2.417 | 1.825 | 0.045 | 10.166 | 1611.645 | 3.934 | 2.00 |
+| 64 | WARMUP | 5.712 | 1.275 | 0.000 | 0.045 | 7.151 | 2291.059 | 2.201 | 2.00 |
 
-Compared with the merged control, complete PPO updates improve 44.7% at 16
-matches and 30.6% at 64. Warmup improves 49.5% and 38.7%. The final task alone
-improves 64-match PPO by 18.5% and warmup by 25.1% relative to task 2, passing
+Compared with the merged control, complete PPO updates improve 44.9% at 16
+matches and 30.2% at 64. Warmup improves 49.3% and 38.7%. The final task alone
+improves 64-match PPO by 18.0% and warmup by 25.1% relative to task 2, passing
 the stop rule. The shipped changes keep the student scoring pass, eager
 reference scoring and eager actor steps.
 
-From 16 to 64 matches, final PPO rollout time grows 1.54x, no-grad time 3.74x,
-actor time 3.59x, critic time 2.71x and total time 2.05x. Warmup rollout grows
-1.54x, no-grad time 3.69x, critic time 2.63x and total time 1.73x. Thus rollout
+From 16 to 64 matches, final PPO rollout time grows 1.55x, no-grad time 3.80x,
+actor time 3.58x, critic time 2.69x and total time 2.07x. Warmup rollout grows
+1.53x, no-grad time 3.66x, critic time 2.66x and total time 1.73x. Thus rollout
 still has a large fixed cost; scoring and training scale close to the amount of
 data. Phase times are the trainer's existing wall-clock metrics, and diagnostics
 outside their timers remain part of the complete update.
@@ -309,18 +311,18 @@ outside their timers remain part of the complete update.
 
 **Projection only; no 1,024-match or remote job ran.** Fit a straight line to
 complete local update times at 16 and 64 matches, separately for control and
-final code. Their 1,024-match RTX 3060 extrapolations are 127.8/113.7 s for PPO
-and 81.6/67.7 s for warmup. Apply each final/control ratio to the supplied RTX
-PRO 6000 observations of 97/73 s. This gives approximately **86 s per PPO
-update (3,037 match-frames/s)** and **61 s per warmup update (4,330 match-frames/s)**.
+final code. Their 1,024-match RTX 3060 extrapolations are 127.8/115.3 s for PPO
+and 81.6/67.5 s for warmup. Apply each final/control ratio to the supplied RTX
+PRO 6000 observations of 97/73 s. This gives approximately **88 s per PPO
+update (2,996 match-frames/s)** and **60 s per warmup update (4,343 match-frames/s)**.
 
 This assumes the relative local gain transfers and per-match work stays linear.
 The provided PRO 6000 observations predate this merge, so this calibration also
 mixes source revisions. GPU kernels, 16 server shard threads, four resident
 groups, graph memory and snapshot generations are not measured by these local
-runs. The numbers are planning estimates, not a qualified production rate or
-memory fit. The smaller projected gain is consistent with amortizing away much
-of the fixed launch cost at larger batches.
+timing runs. The numbers are planning estimates, not a qualified production
+rate or memory fit. The smaller projected gain is consistent with amortizing
+away much of the fixed launch cost at larger batches.
 
 ## Review fixes and validation
 
@@ -343,12 +345,93 @@ invalid lengths before mutation. Empty histories use a fixed-shape masked fill.
 CPU/device-length cache parity is checked exactly. This changes validation
 placement, not the trunk calculation or representation. It adds no unchecked
 fast path. The CPU checks pass (7 tests); their two CUDA cases were explicitly
-hidden in that diagnostic run and remain required in GPU qualification.
+hidden in that diagnostic run. Final GPU qualification passes all 21 block-cache
+and vectorized-rollout checks, including those two cases. The actor-gradient
+cosine is 0.999769, norm ratio 0.998424 and relative difference norm 0.021550.
+Critic gradients remain equal. No tolerance changed after the final review.
+
+The second review pass found no further defect in the retained throughput
+change. It also found a pre-existing model limitation outside this treatment:
+`QueueResidualHead` averages concatenated action and offset embeddings before
+its MLP. Permuting queued actions therefore leaves that queue summary unchanged;
+offsets describe the queue length but do not bind actions to positions. Changing
+that representation would change the critic treatment, so it is a separate
+scientific follow-up. This stream does not change the critic model.
 
 The first complete unit run passes 2,533 tests, with 8 skips, 89 integration
-deselections and 27 warnings. Six skips lack
+deselections and 27 warnings. The final run after the prefill fix passes 2,535,
+with the same 8 skips and 89 deselections, and 26 warnings. Six skips lack
 `data/processed/ranked-anonymized-1/mds-v7-sub4/train` in the supplied read-only
 data tree. **Those missing fixtures remain a validation failure under AGENTS.md,
 despite pytest's zero exit status.** Two other skips require the production GPU
-and `HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1`. The reviewed code receives
-another full unit run after the prefill change.
+and `HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1`.
+
+The final native verifier uses four groups, four shards per group and four
+matches per shard: 64 resident matches, 16 active at a time. Four default-mode
+PPO updates precede its two deterministic comparison updates. It passes:
+
+- Next batch: `7e2c858f338ecb984a2757712176c28017d57e246544a9c85c7f771e5c113354`.
+- Optimizers and scheduler: `86ecdc0dd16f8b61633cfcc3a8abcf61bef4b20cad3d180856b6c7b41adea8c4`.
+- Maximum parameter error: zero; comparison time: 58.916 s.
+
+The compared update contains 16 resets and 16 timeouts. Its command is:
+
+```sh
+uv run python experiments/065_selfplay_ppo.py train \
+  --checkpoint runs/proxy/final.pt \
+  --sampler experiments/o65/pilot-sampler.json \
+  --output runs/vectorize/final-resume-64 \
+  --data-dir /home/ericgu/src/melee-sim-light/data \
+  --cpus 0 1 2 3 --updates 4 --groups 4 --matches-per-shard 4 \
+  --compiled --max-frame 140 --training.critic-warmup-updates 0 \
+  --evaluation-every 0 --verify-resume
+```
+
+### Handoff commands and results
+
+The GPU commands use the lock and memory scope stated above, with
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, the local MSL source/library, proxy checkpoint,
+and `HAL_O65_COMPILE_CUDA=1`. Final jobs also set
+`TORCHINDUCTOR_COMPILE_THREADS=1`. Every pytest command sets `--basetemp` under
+`$TMPDIR`. Logs are in `runs/vectorize/`.
+
+| Command | Result |
+| --- | --- |
+| `uv run ruff format --check .` | Pass, 379 files. |
+| `uv run ruff check .` | Pass. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts experiments/065_selfplay_ppo.py experiments/o65/pilot.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_065_vectorize.py tests/test_o65_pilot.py tests/test_block_restart.py` | Pass, zero diagnostics. |
+| `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/handoff-final"` | 2,533 passed, 8 skipped, 89 deselected; before the last prefill fix. |
+| `uv run pytest -q -s tests/test_block_restart.py tests/test_065_vectorize.py --basetemp "$TMPDIR/prefill-qualified"` | 21 passed, no skips; includes proxy and CUDA cases. |
+| `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/handoff-reviewed"` | 2,535 passed, 8 skipped, 89 deselected; final code. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra -s tests/test_065_loop.py tests/test_065_columnar.py tests/test_065_vectorize.py tests/test_native_sim_integration.py tests/test_batched_self_play_integration.py -m integration --basetemp "$TMPDIR/native-final"` | Initially 12 failed, 12 passed, 129 deselected. All failures were the absent `zstandard` dependency for `.slpz`. O65 golden, numerical, restore and batched-evaluator checks passed. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run --with zstandard pytest -q -ra tests/test_native_sim_integration.py -m integration --basetemp "$TMPDIR/native-replays-qualified"` | 15 passed, no skips, with zstandard 0.25.0; resolves all 12 failures. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra tests/test_roundtrip.py tests/test_session_cleanup.py -m integration --basetemp "$TMPDIR/roundtrip-final"` | 8 passed, 6 deselected, no skips. |
+| `git diff o65-selfplay-ppo-plan...HEAD --check` | Pass. |
+
+Earlier prototype test failures and the deliberately hidden CUDA diagnostic
+are recorded with their respective tasks above. A diagnostic
+`uv run py-spy dump --pid ...` could not run because py-spy is not installed;
+it was not a validation gate.
+
+### Cross-stream changes
+
+- `hal/eval/self_play_checkpoint.py`: training format v4.
+- `hal/eval/O65.md`: execution-mode resume contract.
+- `hal/models/attention.py`: explicit CUDA graphs own RoPE calculations.
+- `hal/inference/kv_cache.py`: validate CPU prefill lengths before transfer.
+
+No MSL source, other worktree, remote machine or remote repository changed.
+
+### Impasses and remaining work
+
+The missing v7 fixture prevents qualification of six existing schema tests.
+It is in the supplied read-only data tree; this stream neither invents a
+replacement nor downloads another dataset. Restore that fixture and rerun
+`tests/test_policy_world_schema.py` before claiming a complete validation pass.
+
+Task 3 stopped at its required precision gate. Tasks 4 and 5 were reverted
+under the complete-update stop rule; task 5 also exceeded its gradient limit.
+Those results leave the eager scoring and actor paths in place. The critic's
+order-insensitive queue summary is a separate scientific follow-up. Production
+GPU timing, memory fit and netplay hardware qualification remain unmeasured;
+the 1,024-match numbers above are projections.
