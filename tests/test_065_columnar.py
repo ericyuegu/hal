@@ -73,11 +73,15 @@ def fingerprints(run: Any, batch: Any) -> dict[str, str]:
     }
 
 
-def capture(matches: int, output: Path, *, performance: bool, verify_resume: bool = False) -> dict[str, object]:
+def capture(
+    matches: int, output: Path, *, performance: bool, verify_resume: bool = False, warmup: bool = False
+) -> dict[str, object]:
     if matches not in (16, 64):
         raise ValueError("local capture requires 16 or 64 matches")
     if performance and verify_resume:
         raise ValueError("resume verification requires a deterministic parity capture")
+    if warmup and not performance:
+        raise ValueError("warmup measurement requires performance mode")
     torch.set_num_threads(2)
     torch.use_deterministic_algorithms(not performance)
     torch.manual_seed(65)
@@ -87,7 +91,7 @@ def capture(matches: int, output: Path, *, performance: bool, verify_resume: boo
     schedule = exp.development_config(checkpoint.model.head_offsets)
     policy = exp.TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics, compiled=True)
     sampling = exp.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json")
-    training = exp.TrainConfig(critic_warmup_updates=0, deterministic=not performance)
+    training = exp.TrainConfig(critic_warmup_updates=10000 if warmup else 0, deterministic=not performance)
     source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
     output.mkdir(parents=True, exist_ok=True)
     with contextlib.ExitStack() as resources:
@@ -110,7 +114,11 @@ def capture(matches: int, output: Path, *, performance: bool, verify_resume: boo
         run = exp.Trainer(engine, training)
         rows = []
         for _ in range(3 if performance else 2):
+            policies = (policy, *engine.anchors.values())
+            before = sum(sum(size * count for size, count in p.sample_group_counts.items()) for p in policies)
             batch, metrics = run.run_update()
+            after = sum(sum(size * count for size, count in p.sample_group_counts.items()) for p in policies)
+            metrics["systems/decode_calls_per_tick"] = (after - before) / (schedule.rollout_frames / 2)
             row = metrics if performance else fingerprints(run, batch)
             if not performance:
                 row["all_frame_records"] = exp._state_hash([s.record_digest.hexdigest() for s in shards])
@@ -391,6 +399,11 @@ def test_capture_rejects_resume_with_default_algorithms(tmp_path: Path) -> None:
         capture(16, tmp_path, performance=True, verify_resume=True)
 
 
+def test_capture_rejects_warmup_in_golden_parity_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires performance mode"):
+        capture(16, tmp_path, performance=False, warmup=True)
+
+
 def test_frame_store_rejects_a_changed_observation_schema() -> None:
     from test_065_loop import trainer
 
@@ -407,5 +420,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--performance", action="store_true")
     parser.add_argument("--verify-resume", action="store_true")
+    parser.add_argument("--warmup", action="store_true")
     args = parser.parse_args()
-    capture(args.matches, args.output, performance=args.performance, verify_resume=args.verify_resume)
+    capture(
+        args.matches, args.output, performance=args.performance, verify_resume=args.verify_resume, warmup=args.warmup
+    )

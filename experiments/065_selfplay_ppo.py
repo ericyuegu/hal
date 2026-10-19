@@ -1231,20 +1231,31 @@ class TransformerPolicy:
         self.button_valid_cpu = self.model.codec.button_valid_for_trigger.cpu()
         self.builders = (ColumnContextBuilder(statistics, 1), ColumnContextBuilder(statistics, 2))
         self.packed_builder = PackedColumnContextBuilder(statistics, native.OBSERVATION_FIELDS, self.device)
+        self.decode_order = torch.tensor(DECODE_GROUP_INDICES, device=self.device)
+        self.tick_decoder = DecisionDecoder(model, configurations, compiled=False)
+        self.tick_caches: dict[tuple[int, ...], BlockRestartCache] = {}
+        self.tick_graphs: dict[tuple[tuple[int, ...], int, int], CapturedCall[PolicyEvaluation]] = {}
+        self.tick_windows: dict[tuple[int, ...], tuple[int, int]] = {}
         self.caches: dict[int, CachedStream] = {}
         self.rollout_caches: dict[tuple[int, ...], BlockRestartCache] = {}
         self.used_cache_keys: set[tuple[int, ...]] = set()
         self.sample_group_counts: dict[int, int] = defaultdict(int)
         self.sample_batch_counts: dict[int, int] = defaultdict(int)
+        self.device_wire_tables: tuple[Tensor, ...] = ()
         self.wire_tables: tuple[NDArray[np.float32], ...] = ()
         self._prepare_wire_tables()
 
     @torch.no_grad()
     def _prepare_wire_tables(self) -> None:
-        self.device_wire_tables = tuple(
+        tables = tuple(
             self.model.codec.semantic_values(name, torch.arange(size, device=self.device)).float()
             for name, size in zip(CONTROLLER_GROUP_NAMES, self.model.codec.group_vocabs, strict=True)
         )
+        if self.device_wire_tables:
+            for target, source in zip(self.device_wire_tables, tables, strict=True):
+                target.copy_(source)
+        else:
+            self.device_wire_tables = tables
         self.wire_tables = tuple(value.cpu().numpy() for value in self.device_wire_tables)
 
     def actor_parameters(self) -> tuple[torch.nn.Parameter, ...]:
@@ -1255,6 +1266,7 @@ class TransformerPolicy:
 
     def clear_caches(self) -> None:
         self.caches.clear()
+        self.tick_windows.clear()
         self._prepare_wire_tables()
         if self.used_cache_keys:
             self.rollout_caches = {
@@ -1578,13 +1590,40 @@ class TransformerPolicy:
         history: KVMemory,
         count: int,
     ) -> PolicyEvaluation:
-        integers = states.tensor(states.table.integers)
-        conditions = states.tensor(states.table.conditions)
+        return self._decode_tensors(
+            states.tensor(states.table.integers),
+            states.tensor(states.table.conditions),
+            states.tensor(states.table.prefix),
+            states.tensor(states.table.opponent),
+            hidden,
+            observed,
+            uniforms,
+            actions,
+            history=history,
+            count=count,
+            decoder=self.decoder,
+        )
+
+    def _decode_tensors(
+        self,
+        integers: Tensor,
+        conditions: Tensor,
+        prefix: Tensor,
+        opponent: Tensor,
+        hidden: Tensor,
+        observed: Tensor,
+        uniforms: Tensor,
+        actions: Tensor | None,
+        *,
+        history: KVMemory,
+        count: int,
+        decoder: DecisionDecoder,
+    ) -> PolicyEvaluation:
         delay = integers[:, DELAY].contiguous()
         replan = integers[:, REPLAN].contiguous()
         log_lambda = conditions[:, 0].contiguous()
-        queue = states.tensor(states.table.prefix)[:, : self.decoder.max_delay].contiguous()
-        output = self.decoder(
+        queue = prefix[:, : decoder.max_delay].contiguous()
+        output = decoder(
             hidden,
             observed,
             queue,
@@ -1610,18 +1649,20 @@ class TransformerPolicy:
             output.decoder_state.detach(),
             condition.detach(),
             opponent_condition.detach(),
-            states.tensor(states.table.opponent)[:, :capacity].contiguous(),
+            opponent[:, :capacity].contiguous(),
             integers[:, OPP_LENGTH].contiguous(),
         )
         distributions = []
         for group in DECODE_GROUP_INDICES:
             probabilities = output.distributions[group]
-            padding = probabilities.new_zeros(len(states), 4 - count, probabilities.shape[-1])
+            padding = probabilities.new_zeros(hidden.shape[0], 4 - count, probabilities.shape[-1])
             padding[..., 0] = 1
             distributions.append(torch.cat((probabilities, padding), dim=1))
         return PolicyEvaluation(
             torch.nn.functional.pad(output.actions, (0, 0, 0, 4 - count)),
-            torch.nn.functional.pad(output.log_probs[..., DECODE_GROUP_INDICES], (0, 0, 0, 4 - count)).flatten(1),
+            torch.nn.functional.pad(
+                output.log_probs.index_select(-1, self.decode_order), (0, 0, 0, 4 - count)
+            ).flatten(1),
             tuple(distributions),
             features,
         )
@@ -1659,6 +1700,148 @@ class TransformerPolicy:
         return _take_evaluation(
             _concatenate_evaluations(rows), torch.tensor(np.argsort(order)).to(self.device, non_blocking=True)
         )
+
+    @torch.no_grad()
+    def sample_tick(
+        self,
+        states: DecisionRows,
+        rng: CounterRng,
+        streams: tuple[int, ...],
+        ring: ActionRing,
+    ) -> PolicyEvaluation:
+        meta = states.meta
+        clock = int(meta[0, CLOCK])
+        if np.any(meta[:, CLOCK] != clock):
+            raise ValueError("rollout tick must share one clock")
+        if len(set(streams)) != len(streams) or len(np.unique(meta[:, STREAM])) != len(meta):
+            raise ValueError("rollout tick streams must be distinct")
+        slots_by_stream = {stream: index for index, stream in enumerate(streams)}
+        try:
+            slots = np.array([slots_by_stream[int(stream)] for stream in meta[:, STREAM]], dtype=np.int64)
+        except KeyError as error:
+            raise ValueError("rollout tick contains an unknown stream") from error
+        cache = self.tick_caches.get(streams)
+        if cache is None:
+            cache = BlockRestartCache(self.model, len(streams), self.device, dtype=torch.bfloat16)
+            self.tick_caches[streams] = cache
+        at = torch.from_numpy(slots).to(self.device)
+        window = int(meta[0, UPDATE]), clock // 128
+        restart = self.tick_windows.get(streams) != window
+        if restart and clock % 128:
+            raise ValueError("rollout tick cache must start at a block boundary")
+        with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+            if restart:
+                features, observed = self._contexts(states, length=129)
+                tokens = self.model.context_tokens(features, observed)
+                lengths = torch.from_numpy(meta[:, LENGTH].copy()).to(self.device) - 1
+                positions = torch.arange(128, device=self.device)[None] - (128 - lengths[:, None])
+                previous = tokens.gather(1, positions.clamp_min(0)[..., None].expand(-1, -1, tokens.shape[-1]))
+                previous = torch.where((positions >= 0)[..., None], previous, 0)
+                padded = tokens.new_zeros(len(streams), 128, tokens.shape[-1])
+                padded.index_copy_(0, at, previous)
+                padded_lengths = torch.zeros(len(streams), device=self.device, dtype=torch.long)
+                padded_lengths.index_copy_(0, at, lengths)
+                cache.restart(padded, padded_lengths)
+                self.tick_windows[streams] = window
+            appended = 1 if restart else 2
+            inputs = (
+                *states.packed(appended, tail=appended),
+                states.tensor(states.table.integers),
+                states.tensor(states.table.conditions),
+                states.tensor(states.table.prefix),
+                states.tensor(states.table.opponent),
+                self._action_uniforms(states, rng),
+            )
+            padded_inputs = []
+            for index, value in enumerate(inputs):
+                axis = 2 if index == 9 else 0
+                shape = list(value.shape)
+                shape[axis] = len(streams)
+                padded_value = value.new_zeros(shape)
+                if index == 5:
+                    padded_value[:, DELAY] = self.schedule.configurations[0].delay
+                    padded_value[:, REPLAN] = 2
+                padded_value.index_copy_(axis, at, value)
+                padded_inputs.append(padded_value)
+            integers = padded_inputs[5]
+            # Each static row owns a distinct queue, including absent anchor rows.
+            base_lane = int(meta[0, LANE]) - streams.index(int(meta[0, STREAM])) // 2
+            lanes = torch.tensor([base_lane + index // 2 for index in range(len(streams))], device=self.device)
+            sides = torch.tensor([stream % 2 for stream in streams], device=self.device)
+            integers[:, LANE] = lanes
+            integers[:, SIDE] = sides
+            active = torch.zeros(len(streams), dtype=torch.bool, device=self.device)
+            active[at] = True
+            padded_inputs.append(active)
+            count = 4 if clock % 4 == 0 else 2
+            key = streams, appended, count
+            captured = self.tick_graphs.get(key)
+            if captured is None:
+                static = tuple(value.clone() for value in padded_inputs)
+
+                def tick() -> PolicyEvaluation:
+                    with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+                        context, observed = self._packed_context(static[:5])
+                        tokens = self.model.context_tokens(context, observed)
+                        hidden = forward_tokens_with_kv_cache(self.model, tokens, cache.cache)
+                        cache.frames_in_block.add_(appended)
+                        result = self._decode_tensors(
+                            static[5],
+                            static[6],
+                            static[7],
+                            static[8],
+                            hidden[:, -1:],
+                            observed[:, -1],
+                            static[9],
+                            None,
+                            history=cache.memory(),
+                            count=count,
+                            decoder=self.tick_decoder,
+                        )
+                        rows = static[5]
+                        lanes, sides = rows[:, LANE], rows[:, SIDE]
+                        due = static[10] & (rows[:, CLOCK] % rows[:, REPLAN].clamp_min(1) == 0)
+                        lengths = ring.length_device[lanes, sides]
+                        offsets = torch.arange(count, device=self.device)[None]
+                        positions = (ring.head[lanes, sides, None] + lengths[:, None] + offsets) % ring.capacity
+                        valid = due[:, None] & (offsets < rows[:, REPLAN, None])
+                        current = ring.values[lanes[:, None], sides[:, None], positions]
+                        ring.values[lanes[:, None], sides[:, None], positions] = torch.where(
+                            valid[..., None],
+                            result.actions[:, :count],
+                            current,
+                        )
+                        if ring.controllers is None:
+                            raise ValueError("rollout tick requires controller storage")
+                        controller = self.device_wire_actions(result.actions[:, :count])
+                        previous = ring.controllers[lanes[:, None], sides[:, None], positions]
+                        ring.controllers[lanes[:, None], sides[:, None], positions] = torch.where(
+                            valid[..., None],
+                            controller,
+                            previous,
+                        )
+                        ring.length_device[lanes, sides] += torch.where(due, rows[:, REPLAN], 0)
+                        return result
+
+                captured = CapturedCall(
+                    tick,
+                    static,
+                    (
+                        *cache.cache.buffers(),
+                        cache.frames_in_block,
+                        ring.values,
+                        cast(Tensor, ring.controllers),
+                        ring.length_device,
+                    ),
+                    device=self.device,
+                )
+                self.tick_graphs[key] = captured
+            output = captured(tuple(padded_inputs))
+        due = clock % meta[:, REPLAN] == 0
+        ring.length[meta[due, LANE], meta[due, SIDE]] += meta[due, REPLAN]
+        self.sample_group_counts[1] += 1
+        self.sample_batch_counts[len(states)] += 1
+        return _take_evaluation(output, at)
 
     def _advance_rollout_cache(self, batch: DecisionRows, seen: int) -> tuple[Tensor, Tensor, BlockRestartCache]:
         meta = batch.meta
@@ -2114,6 +2297,7 @@ class ActionRing:
 
     def __init__(self, matches: int, capacity: int, device: torch.device) -> None:
         self.values = torch.zeros(matches, 2, capacity, 4, dtype=torch.long, device=device)
+        self.controllers: Tensor | None = None
         self.head = torch.zeros(matches, 2, dtype=torch.long, device=device)
         self.length = np.zeros((matches, 2), dtype=np.int64)
         self.length_device = torch.zeros(matches, 2, dtype=torch.long, device=device)
@@ -2517,6 +2701,9 @@ class RolloutEngine:
         self.group_matches = tuple(tuple(match for shard in group for match in shard.match_ids) for group in groups)
         capacity = max(t.delay + t.replan for t in sampler.schedule.configurations)
         self.rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
+        if isinstance(policy, TransformerPolicy) and policy.compiled and policy.device.type == "cuda":
+            for ring in self.rings:
+                ring.controllers = policy.device_wire_actions(ring.values)
         self.locations = {
             match: (group, lane)
             for group, matches in enumerate(self.group_matches)
@@ -2614,6 +2801,10 @@ class RolloutEngine:
             ):
                 raise ValueError("invalid rollout pool queues or columns")
             ring.length[:] = saved.length.cpu().numpy()
+            if ring.controllers is not None:
+                if not isinstance(self.policy, TransformerPolicy):
+                    raise ValueError("controller storage requires a transformer policy")
+                ring.controllers.copy_(self.policy.device_wire_actions(ring.values))
             for name, target in store.extra.items():
                 source = saved.extra[name]
                 if target.shape != source.shape or target.dtype != source.dtype:
@@ -2662,6 +2853,10 @@ class RolloutEngine:
         store.write_frame(position, at, frame)
         ring = self.rings[group]
         ring.reset(at, (episode.players[0].timing.delay, episode.players[1].timing.delay))
+        if ring.controllers is not None:
+            if not isinstance(self.policy, TransformerPolicy):
+                raise ValueError("controller storage requires a transformer policy")
+            ring.controllers[at].copy_(self.policy.device_wire_actions(ring.values[at]))
         self.matches[match] = MatchState(
             episode,
             clock,
@@ -2729,6 +2924,13 @@ class RolloutEngine:
         records: list[int],
         pending: NDArray[np.int64],
     ) -> None:
+        tick = (
+            isinstance(self.policy, TransformerPolicy)
+            and self.policy.compiled
+            and self.policy.device.type == "cuda"
+            and not torch.are_deterministic_algorithms_enabled()
+        )
+        streams = tuple(2 * match + side for shard in shards for match in shard.match_ids for side in (0, 1))
         groups: dict[int | None, tuple[list[list[int]], list[Episode]]] = {}
         for shard in shards:
             for match in shard.match_ids:
@@ -2737,9 +2939,10 @@ class RolloutEngine:
                     continue
                 group, lane = self.locations[match]
                 for side, player in enumerate(state.episode.players):
-                    if clock % player.timing.replan:
+                    due = clock % player.timing.replan == 0
+                    if not due and not tick:
                         continue
-                    if self.rings[group].length[lane, side] != player.timing.delay:
+                    if due and self.rings[group].length[lane, side] != player.timing.delay:
                         raise ValueError("decision must see exactly D committed frames")
                     metadata, episodes = groups.setdefault(player.anchor, ([], []))
                     metadata.append(self._metadata(match, side, clock, update))
@@ -2751,9 +2954,18 @@ class RolloutEngine:
         for anchor, decisions in states.items():
             policy = self.policy if anchor is None else self.anchors[anchor]
             with torch.no_grad():
-                output = policy.sample(decisions, self.sampler.rng)
+                if tick:
+                    if not isinstance(policy, TransformerPolicy):
+                        raise ValueError("batched rollout requires transformer anchors")
+                    output = policy.sample_tick(decisions, self.sampler.rng, streams, self.rings[self.cursor])
+                    due = np.flatnonzero(clock % decisions.meta[:, REPLAN] == 0)
+                    decisions = decisions.take(due)
+                    output = _take_evaluation(output, torch.from_numpy(due).to(self.policy.device))
+                else:
+                    output = policy.sample(decisions, self.sampler.rng)
             meta = decisions.meta
-            self.rings[self.cursor].append(meta[:, LANE], meta[:, SIDE], output.actions.detach(), meta[:, REPLAN])
+            if not tick:
+                self.rings[self.cursor].append(meta[:, LANE], meta[:, SIDE], output.actions.detach(), meta[:, REPLAN])
             at = torch.from_numpy(decisions.ids).to(self.policy.device)
             table.actions[at] = output.actions.detach()
             table.behavior[at] = output.log_probs.detach()
@@ -2773,6 +2985,13 @@ class RolloutEngine:
         if np.any(ring.length[lanes_host[active]] < count):
             raise ValueError("simulator step would consume an uncommitted action")
         lanes = torch.from_numpy(lanes_host).to(self.policy.device)
+        if ring.controllers is not None and not torch.are_deterministic_algorithms_enabled():
+            positions = (ring.head[lanes, :, None] + ring.offsets[:count]) % ring.capacity
+            controllers = ring.controllers[
+                lanes[:, None, None], torch.arange(2, device=lanes.device)[None, :, None], positions
+            ]
+            controllers = controllers.permute(2, 0, 1, 3)
+            return torch.where(torch.from_numpy(active).to(self.policy.device)[None, :, None, None], controllers, 0)
         indices = torch.stack([ring.read(lanes, torch.full_like(lanes, side), count) for side in range(2)], dim=2)
         indices = indices.permute(1, 0, 2, 3)
         indices = torch.where(torch.from_numpy(active).to(self.policy.device)[None, :, None, None], indices, 0)
@@ -2943,11 +3162,18 @@ class RolloutEngine:
         pending = np.full((len(matches), 2), -1, dtype=np.int64)
         resets = timeouts = frames_stepped = 0
         split = (len(shards) + 1) // 2
+        tick = (
+            isinstance(self.policy, TransformerPolicy)
+            and self.policy.compiled
+            and self.policy.device.type == "cuda"
+            and not torch.are_deterministic_algorithms_enabled()
+        )
+        halves = (shards,) if tick else (shards[:split], shards[split:])
         with ThreadPoolExecutor(max_workers=len(shards)) as workers:
             for clock in range(start, start + count, 2):
                 resets += self._reset_waiting(shards, clock)
                 futures = []
-                for half in (shards[:split], shards[split:]):
+                for half in halves:
                     self._decide(half, clock, update, table, records, pending)
                     for shard in half:
                         active = self._active(shard)
@@ -3666,7 +3892,7 @@ def _configuration_digest(trainer: Trainer) -> str:
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["compiled"] = trainer.policy.compiled
-        identity["decision_kernels"] = "fp32_packed_context_graph_append_blake2b_v2"
+        identity["decision_kernels"] = "fp32_decoder_fixed_tick_graph_v3"
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
         identity["statistics"] = {key: dataclasses.asdict(value) for key, value in trainer.policy.statistics.items()}
@@ -4250,6 +4476,8 @@ def _clear_execution_caches(trainer: Trainer) -> None:
         if isinstance(policy, TransformerPolicy):
             policy.rollout_caches.clear()
             policy.decoder.graphs.clear()
+            policy.tick_caches.clear()
+            policy.tick_graphs.clear()
 
 
 def _verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str], manifest: Path) -> None:
