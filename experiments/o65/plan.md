@@ -196,20 +196,22 @@ leaves the advantage almost entirely to a new critic.
 $$
 \begin{aligned}
 \rho_j(\theta) &= \exp \sum_{i \in \mathcal{E}_j} \big[\log \pi_\theta(a_i \mid c_i) - \log \pi_{\text{old}}(a_i \mid c_i)\big] \\
-w_j &= \min\Big(\exp \sum_{i \in \mathcal{E}_j} \big[\log \pi_{\text{old}}(a_i \mid c_i) - \log \mu(a_i \mid c_i)\big],\; C\Big) \\
-L_\pi &= -\frac{1}{J} \sum_{j} \mathrm{sg}(w_j)\, \min\big(\rho_j\,\hat A_j,\; \operatorname{clip}(\rho_j,\, 1-\epsilon,\, 1+\epsilon)\,\hat A_j\big)
+L_\pi &= -\frac{1}{J} \sum_{j} \min\big(\rho_j\,\hat A_j,\; \operatorname{clip}(\rho_j,\, 1-\epsilon,\, 1+\epsilon)\,\hat A_j\big)
 \end{aligned}
 $$
 
 - $\rho_j$ is the joint ratio of the chunk, 16 to 24 factors.
 - $\epsilon$ starts at 0.2, and the pilot tunes it to a clip fraction of roughly
   10 to 20%.
-- $\pi_{\text{old}}$ log-probs come from the student's no-grad pass, which runs
-  the training step's kernels.
-- $\mu$ is the rollout policy. It has the same weights, but the rollout decodes
-  from the KV cache with other kernels and batch sizes, so its log-probs differ
-  slightly. $w_j$ corrects for the gap at the sampled decision. It leaves later
-  states and GAE targets uncorrected, so we treat a large gap as a parity bug.
+- $\pi_{\text{old}} = \mu$: the rollout's stored behavior log-probabilities
+  define PPO's old policy. There is no student no-grad scoring pass and no
+  truncated importance correction. Rollout stores the student distributions,
+  critic features, and values; only the reference replays sampled actions.
+- Numerical qualification compares each candidate with an all-FP32 reference
+  on identical weights and inputs, with TF32 disabled. For factor log-probs,
+  KL, values, and actor/critic gradients, candidate error must be at most
+  1.5 times the current default error plus a recorded small absolute floor.
+  Statistical parity with commit `aacdfee0` replaces old-trainer bit parity.
 - We normalize $\hat A$ per minibatch, using the global mean and standard
   deviation across ranks.
 - The policy loss trains 16 decisions per window, sampled uniformly from the
@@ -221,8 +223,7 @@ $$
 ### Critic loss
 
 The critic regresses on $V^{\text{target}}$ with squared error, scaled like
-O64's value loss. It trains for $K_v$ epochs on features cached in the no-grad
-pass, with no trunk or decoder recompute. Its parameters (`value_head` and
+O64's value loss. It trains for $K_v$ epochs on features cached during rollout, with no trunk or decoder recompute. Its parameters (`value_head` and
 $\text{head}_{\text{res}}$) live in a separate optimizer. HAL's Muon optimizer
 fills a missing gradient with zeros and keeps stepping momentum, so critic-only
 epochs through the shared optimizer would move the actor.
@@ -442,10 +443,9 @@ data.
    compute the value of the last state before the reset.
 3. Prefill block 2, roll out its 128 frames, and compute the end-of-rollout
    bootstrap value.
-4. Run the no-grad pass over all windows. The student and the reference run
-   every decision. This yields $\mathrm{KL}_j$, $\pi_{\text{old}}$ log-probs,
-   $\pi_{\text{ref}}$'s distributions for the trained decisions, and the critic
-   features, which we cache.
+4. Replay the reference over all windows. Combine its distributions with the
+   stored student distributions to compute $\mathrm{KL}_j$. PPO uses stored
+   behavior log-probs, values, and critic features directly.
 5. Compute rewards and GAE over each stream's 256 frames.
 6. Run the critic epochs on the cached features.
 7. Run one PPO epoch. Each step takes 512 windows per GPU with DDP across the
@@ -834,7 +834,7 @@ one level deep.
       critic features.
 - [x] GAE with $\Delta_j$, bootstrap masks and trace masks, plus time-out and
       end-of-rollout bootstrap values.
-- [x] Joint-ratio PPO with the truncated weight, $L_{\text{KL}}$, decision
+- [x] Joint-ratio PPO on stored behavior log-probs, $L_{\text{KL}}$, decision
       subsampling and masking of unexecuted decisions.
 - [x] Separate critic optimizer and critic epochs on cached features.
 - [x] $\lambda$ calibration from warmup advantages.
@@ -871,10 +871,6 @@ one level deep.
 ## Open decisions
 
 - $\lambda_{\max}$, from warmup advantages and early return-KL curves
-- Truncation cap $C$
-- Whether $\mu$ can replace $\pi_{\text{old}}$. If the measured gap is tiny, the
-  no-grad pass runs only $\pi_{\text{ref}}$ and saves about 0.8 s of the 5.5 s
-  update. The student's per-factor distributions would then come from rollout.
 - Anchor share and snapshot refresh interval
 - $\lambda_{\text{gae}}$, if 0.99 per frame proves too noisy
 - PPO $\epsilon$ and the learning rate

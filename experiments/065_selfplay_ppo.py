@@ -220,6 +220,7 @@ class UpdateProfile:
         start_event = torch.cuda.Event(enable_timing=True)
         stop_event = torch.cuda.Event(enable_timing=True)
         started = time.perf_counter()
+        cpu_started = time.thread_time()
         started_unix = time.time()
         start_event.record()
         try:
@@ -231,6 +232,7 @@ class UpdateProfile:
                 "started_unix": started_unix,
                 "finished_unix": time.time(),
                 "wall_seconds": time.perf_counter() - started,
+                "main_thread_cpu_seconds": time.thread_time() - cpu_started,
                 "cuda_span_seconds": start_event.elapsed_time(stop_event) / 1000,
             }
             self.phase_name = previous
@@ -238,12 +240,14 @@ class UpdateProfile:
     @contextlib.contextmanager
     def sample(self, name: str, *, work: float = 0.0, limit: int = 1, skip: int = 0) -> Iterator[None]:
         started = time.perf_counter()
+        cpu_started = time.thread_time()
         key = f"{self.phase_name}/{name}"
         try:
             with self._sample(name, work=work, limit=limit, skip=skip):
                 yield
         finally:
             self.host_seconds[key] += time.perf_counter() - started
+            self.host_seconds[f"{key}/main_thread_cpu"] += time.thread_time() - cpu_started
 
     @contextlib.contextmanager
     def _sample(self, name: str, *, work: float, limit: int, skip: int) -> Iterator[None]:
@@ -955,41 +959,33 @@ def _training_mask(
 class PolicyLoss:
     loss: Tensor
     joint_ratio_J: Tensor
-    importance_weight_J: Tensor
 
 
 def ppo_loss(
     decisions: DecisionBatch,
     new_log_probs_JF: Tensor,
-    old_log_probs_JF: Tensor,
     advantages_J: Tensor,
     selected_J: Tensor,
     statistics: AdvantageStatistics,
     *,
     clip_epsilon: float,
-    importance_cap: float,
     reduction: DecisionReduction | None = None,
 ) -> PolicyLoss:
     """Joint PPO on selected decisions using detached global advantage statistics."""
     _training_mask(decisions, selected_J, statistics, reduction)
     if not math.isfinite(clip_epsilon) or not 0 < clip_epsilon < 1:
         raise ValueError("clip_epsilon must be in (0, 1)")
-    if not math.isfinite(importance_cap) or importance_cap <= 0:
-        raise ValueError("importance_cap must be finite and positive")
     _check_tensor("advantages", advantages_J, tuple(decisions.delay_J.shape), "float", decisions.delay_J.device)
     executed = decisions.executed_factors_JF & selected_J[:, None]
     new = _masked_factors(new_log_probs_JF, executed)
-    old = _masked_factors(old_log_probs_JF.detach(), executed)
-    behavior = _masked_factors(decisions.behavior_log_probs_JF.detach(), executed)
+    old = _masked_factors(decisions.behavior_log_probs_JF.detach(), executed)
     # Subtract per factor before summing to preserve small kernel differences.
     ratio = (new - old).sum(-1).exp()
     _check_finite("joint ratio", ratio)
-    # Cap in log space so an extreme parity failure cannot overflow before truncation.
-    weight = (old - behavior).sum(-1).clamp(max=math.log(importance_cap)).exp().detach()
     advantages = torch.where(selected_J, advantages_J.detach(), 0)
     normalized = (advantages - statistics.mean.detach()) / statistics.sigma.detach()
     surrogate = torch.minimum(ratio * normalized, ratio.clamp(1 - clip_epsilon, 1 + clip_epsilon) * normalized)
-    return PolicyLoss(_decision_mean(-weight * surrogate, selected_J, reduction), ratio, weight)
+    return PolicyLoss(_decision_mean(-surrogate, selected_J, reduction), ratio)
 
 
 def differentiable_kl_loss(
@@ -1050,6 +1046,16 @@ class CounterRng:
         key = json.dumps((self.seed, domain, stream, episode, frame, offset, factor), separators=(",", ":"))
         digest = hashlib.blake2b(key.encode(), digest_size=8, person=b"hal-o65-rng-v1").digest()
         return (int.from_bytes(digest, "little") >> 11) * 2.0**-53
+
+    def tensor_uniform(self, domain: int, stream: Tensor, episode: Tensor, frame: Tensor) -> Tensor:
+        """Version 2 integer counters, identical on CPU and CUDA without RNG state."""
+        value = torch.full_like(stream, self.seed & 0xFFFFFFFF)
+        for counter in (domain, stream, episode, frame):
+            value = (value ^ counter) & 0xFFFFFFFF
+            value = ((value ^ (value >> 16)) * 0x7FEB352D) & 0xFFFFFFFF
+            value = ((value ^ (value >> 15)) * 0x846CA68B) & 0xFFFFFFFF
+            value = value ^ (value >> 16)
+        return value.double() * 2.0**-32
 
     def choice(self, weights: Sequence[float], domain: str, stream: int, episode: int, frame: int) -> int:
         if not weights or any(not math.isfinite(x) or x < 0 for x in weights) or sum(weights) <= 0:
@@ -2844,6 +2850,30 @@ class DecisionTable:
         self.episode_ends = np.full(capacity, -1, dtype=np.int64)
         self.episode_indices: dict[tuple[int, int], int] = {}
         self.count = 0
+        self.evaluation: PolicyEvaluation | None = None
+        self.values = torch.zeros(capacity, device=self.device)
+
+    def record_evaluation(self, ids: Tensor, output: PolicyEvaluation, values: Tensor) -> None:
+        if self.evaluation is None:
+
+            def storage(value: Tensor) -> Tensor:
+                return value.new_zeros((len(self.meta), *value.shape[1:]))
+
+            self.evaluation = PolicyEvaluation(
+                self.actions,
+                self.behavior,
+                tuple(storage(p) for p in output.distributions),
+                CriticFeatures(
+                    *(storage(getattr(output.features, f.name)) for f in dataclasses.fields(CriticFeatures))
+                ),
+            )
+        self.actions[ids] = output.actions
+        self.behavior[ids] = output.log_probs
+        self.values[ids] = values
+        for target, source in zip(self.evaluation.distributions, output.distributions, strict=True):
+            target[ids] = source
+        for field in dataclasses.fields(CriticFeatures):
+            getattr(self.evaluation.features, field.name)[ids] = getattr(output.features, field.name)
 
     def rows(self, ids: Sequence[int] | NDArray[np.int64]) -> DecisionRows:
         return DecisionRows(self, np.asarray(ids, dtype=np.int64))
@@ -3425,8 +3455,8 @@ class RolloutEngine:
             if not tick:
                 self.rings[self.cursor].append(meta[:, LANE], meta[:, SIDE], output.actions.detach(), meta[:, REPLAN])
             at = torch.from_numpy(decisions.ids).to(self.policy.device)
-            table.actions[at] = output.actions.detach()
-            table.behavior[at] = output.log_probs.detach()
+            with torch.no_grad():
+                table.record_evaluation(at, output, policy.values(output.features))
             if anchor is not None:
                 continue
             previous = pending[meta[:, LANE], meta[:, SIDE]]
@@ -3715,7 +3745,6 @@ class TrainConfig:
     windows_per_step: int = 32
     decisions_per_window: int = 16
     clip_epsilon: float = 0.2
-    importance_cap: float = 2.0
     gradient_clip: float = 1.0
     value_scale: float = 150.0
     warmup_steps: int = 32
@@ -3751,7 +3780,6 @@ class TrainConfig:
         for name in (
             "actor_lr",
             "critic_lr",
-            "importance_cap",
             "gradient_clip",
             "value_scale",
             "lambda_spread_multiplier",
@@ -3811,14 +3839,15 @@ def _log_distribution(probabilities: Tensor) -> Tensor:
     return torch.where(positive, probabilities, 1).log().masked_fill(~positive, -torch.inf)
 
 
-def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation) -> Tensor:
-    return torch.stack(
-        [
-            categorical_kl(_log_distribution(p), _log_distribution(q))
-            for p, q in zip(policy.distributions, reference.distributions, strict=True)
-        ],
-        -1,
-    ).flatten(1)
+def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF: Tensor) -> Tensor:
+    rows = []
+    for group, (p, q) in enumerate(zip(policy.distributions, reference.distributions, strict=True)):
+        valid = executed_JF[:, group::4, None]
+        neutral = torch.nn.functional.one_hot(torch.zeros_like(p[..., 0], dtype=torch.long), p.shape[-1]).to(p.dtype)
+        p = torch.where(valid, p, neutral)
+        q = torch.where(valid, q, neutral)
+        rows.append(categorical_kl(_log_distribution(p), _log_distribution(q)))
+    return torch.stack(rows, -1).flatten(1)
 
 
 def explained_variance(values: Tensor, targets: Tensor) -> float:
@@ -3838,7 +3867,7 @@ class PreparedUpdate:
     advantages: Tensor
     targets: Tensor
     selected: Tensor
-    steps: tuple[tuple[int, ...], ...]
+    steps: tuple[Tensor, ...]
     metrics: dict[str, float]
 
 
@@ -3849,53 +3878,46 @@ def select_decisions(
     update: int,
     count: int,
     windows_per_step: int,
-) -> tuple[Tensor, tuple[tuple[int, ...], ...]]:
-    windows: dict[tuple[int, int, int], list[int]] = defaultdict(list)
-    metadata = records.states.meta if isinstance(records, DecisionRecords) else None
-    if metadata is not None:
-        for index, row in enumerate(metadata):
-            windows[int(row[UPDATE]), int(row[STREAM]), int(row[BLOCK])].append(index)
-    else:
-        for index, record in enumerate(records):
-            windows[record.state.window[:3]].append(index)
+) -> tuple[Tensor, tuple[Tensor, ...]]:
+    if count < 1 or windows_per_step < 1:
+        raise ValueError("selection counts must be positive")
+    if not isinstance(records, DecisionRecords):
+        raise TypeError("selection requires tensor decision storage")
+    meta = records.states.tensor(records.states.table.integers)
+    _check_tensor("eligible decisions", eligible, (len(meta),), "bool", meta.device)
+    keys, inverse = torch.unique(meta[:, [STREAM, BLOCK]], dim=0, return_inverse=True)
+    windows = len(keys)
+    if not windows:
+        return torch.zeros_like(eligible), ()
+    # Stable sorts give each window its own random order without a [W,J] matrix.
+    draws = rng.tensor_uniform(1, meta[:, STREAM], meta[:, EPISODE], meta[:, CLOCK])
+    order = torch.argsort(torch.where(eligible, draws, torch.inf), stable=True)
+    order = order[torch.argsort(inverse[order], stable=True)]
+    sizes = torch.bincount(inverse, minlength=windows)
+    starts = sizes.cumsum(0) - sizes
+    rank = torch.arange(len(meta), device=meta.device) - starts[inverse[order]]
     selected = torch.zeros_like(eligible)
-    eligible_host = eligible.cpu().tolist()
-    chosen: list[int] = []
-    by_match: dict[int, list[list[int]]] = defaultdict(list)
-    for indices in windows.values():
-        candidates = [index for index in indices if eligible_host[index]]
-        candidates.sort(
-            key=lambda j: rng.uniform(
-                "decision_subsample",
-                int(metadata[j, STREAM]) if metadata is not None else records[j].state.stream,
-                int(metadata[j, EPISODE]) if metadata is not None else records[j].state.episode.number,
-                int(metadata[j, CLOCK]) if metadata is not None else records[j].state.clock,
-            )
-        )
-        chosen.extend(candidates[:count])
-        if candidates:
-            match = int(metadata[indices[0], MATCH]) if metadata is not None else records[indices[0]].state.match
-            by_match[match].append(indices)
-    selected[chosen] = True
-    if not by_match:
+    selected[order] = (rank < count) & eligible[order]
+    active = torch.zeros(windows, device=meta.device, dtype=torch.long)
+    active.scatter_add_(0, inverse, selected.long())
+    live_windows = torch.nonzero(active > 0).flatten()
+    if not len(live_windows):
         return selected, ()
-    total = sum(len(windows) for windows in by_match.values())
-    slots = max(max(len(windows) for windows in by_match.values()), math.ceil(total / windows_per_step))
-    placement: list[list[list[int]]] = [[] for _ in range(slots)]
-    match_ids = sorted(by_match, key=lambda match: rng.uniform("minibatch_placement", match, 0, update))
-    for match in match_ids:
-        used: set[int] = set()
-        for window in by_match[match]:
-            choices = [slot for slot in range(slots) if slot not in used and len(placement[slot]) < windows_per_step]
-            if not choices:
-                raise ArithmeticError("cannot place match windows in distinct actor steps")
-            slot = min(
-                choices, key=lambda slot: (len(placement[slot]), rng.uniform("placement_tie", match, update, slot))
-            )
-            placement[slot].append(window)
-            used.add(slot)
-    steps = tuple(tuple(index for window in step for index in window) for step in placement if step)
-    return selected, steps
+    matches, match_at = torch.unique(keys[live_windows, 0] // 2, return_inverse=True)
+    sizes = torch.bincount(match_at, minlength=len(matches))
+    steps = max(int(sizes.max()), math.ceil(len(live_windows) / windows_per_step))
+    match_order = torch.argsort(
+        rng.tensor_uniform(2, matches, torch.zeros_like(matches), torch.full_like(matches, update)), stable=True
+    )
+    match_rank = torch.empty_like(match_order)
+    match_rank[match_order] = torch.arange(len(matches), device=meta.device)
+    ordered = live_windows[torch.argsort(match_rank[match_at], stable=True)]
+    # Contiguous windows of each match span distinct slots; round-robin bounds
+    # every slot by windows_per_step, including ragged or all-anchor matches.
+    placement = torch.full((windows,), -1, dtype=torch.long, device=meta.device)
+    placement[ordered] = torch.arange(len(ordered), device=meta.device) % steps
+    row_step = placement[inverse]
+    return selected, tuple(torch.nonzero((row_step == step) & selected).flatten() for step in range(steps))
 
 
 class Trainer:
@@ -3939,11 +3961,16 @@ class Trainer:
             if isinstance(states, DecisionRows)
             else torch.stack([r.actions for r in records]).to(device)
         )
-        with phase(self.profile, "student"):
-            old = self.policy.evaluate(states, actions)
+        if not isinstance(states, DecisionRows) or states.table.evaluation is None:
+            raise ValueError("rollout is missing its behavior evaluation")
+        old = _take_evaluation(states.table.evaluation, states.device_ids)
         with phase(self.profile, "reference"):
             reference = None if self.warming else self.reference.evaluate(states, actions)
-        kl = torch.zeros_like(old.log_probs) if reference is None else factor_kl(old, reference)
+        kl = (
+            torch.zeros_like(old.log_probs)
+            if reference is None
+            else factor_kl(old, reference, decisions.executed_factors_JF)
+        )
         frame_rewards = (
             states.tensor(states.table.rewards)
             if isinstance(states, DecisionRows)
@@ -3952,7 +3979,7 @@ class Trainer:
             )
         )
         rewards = regularized_reward(decisions, frame_rewards, kl)
-        values = self.policy.values(old.features)
+        values = states.tensor(states.table.values)
         next_values = torch.zeros_like(values)
         # Bootstrap from the next decision inside an episode, or from the final
         # pre-reset observation at a timeout.
@@ -4041,7 +4068,6 @@ class Trainer:
             "numerics/mu_old_gap_p50": float(gap.abs().quantile(0.5)),
             "numerics/mu_old_gap_p99": float(gap.abs().quantile(0.99)),
             "numerics/mu_old_gap_max": float(gap.abs().max()),
-            "numerics/truncated_weight_fraction": float((gap > math.log(self.config.importance_cap)).float().mean()),
             "policy/kl_per_frame": float(torch.where(executed, kl, 0).sum() / decisions.replan_J.sum()),
             "return/interval_reward": float(frame_rewards.sum(-1).mean()),
             "data/anchor_share": sum(
@@ -4174,17 +4200,15 @@ class Trainer:
         kl_losses: list[float] = []
         ratios: list[Tensor] = []
         old_log_ratios: list[Tensor] = []
-        selected_host = batch.selected.cpu().tolist()
         with phase(self.profile, "actor"):
             for step, indices in enumerate(batch.steps):
                 with sample(self.profile, "step", work=float(len(indices)), limit=2):
-                    indices = tuple(index for index in indices if selected_host[index])
-                    at = torch.tensor(indices, device=self.policy.device)
+                    at = indices
                     decisions = _take_decisions(batch.decisions, at)
                     selected = batch.selected[at]
                     statistics = advantage_statistics(advantage_moments(batch.advantages[at], selected))
                     step_states = (
-                        states.take(indices)
+                        states.take(indices.cpu().numpy())
                         if states is not None
                         else [batch.rollout.records[index].state for index in indices]
                     )
@@ -4194,14 +4218,14 @@ class Trainer:
                     policy_loss = ppo_loss(
                         decisions,
                         new.log_probs,
-                        batch.old.log_probs[at],
                         batch.advantages[at],
                         selected,
                         statistics,
                         clip_epsilon=cfg.clip_epsilon,
-                        importance_cap=cfg.importance_cap,
                     )
-                    kl_loss = differentiable_kl_loss(decisions, factor_kl(new, reference), selected, statistics)
+                    kl_loss = differentiable_kl_loss(
+                        decisions, factor_kl(new, reference, decisions.executed_factors_JF), selected, statistics
+                    )
                     loss = policy_loss.loss + kl_loss
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
@@ -4219,7 +4243,7 @@ class Trainer:
                     old_log_ratios.append(old_gap[selected])
                     metrics[f"policy/old_log_ratio_step{step}"] = float(old_gap[selected].mean())
                     old_policy = _take_evaluation(batch.old, at)
-                    old_kl = factor_kl(new, old_policy).detach()
+                    old_kl = factor_kl(new, old_policy, decisions.executed_factors_JF).detach()
                     metrics[f"policy/old_kl_step{step}"] = float(
                         torch.where(decisions.executed_factors_JF & selected[:, None], old_kl, 0).sum()
                         / selected.sum()
@@ -4388,7 +4412,8 @@ def _configuration_digest(trainer: Trainer) -> str:
             [s.max_frame if isinstance(s, NativeSimulatorShard) else None for s in group] for group in engine.groups
         ],
         "episode_reset": "shared_stocks_block_wait_v1",
-        "rollout_storage": "tensor_windows_action_ring_v2",
+        "rollout_storage": "stored_behavior_device_selection_v3",
+        "selection_rng": "integer_counter_v2",
         "opponent_layout": "fixed_anchor_ranges_v1" if engine.fixed_anchor_lanes else "sampled_anchor_lanes_v1",
     }
     if isinstance(trainer.policy, TransformerPolicy):
@@ -5001,8 +5026,6 @@ def profile_native(
         required = {
             "rollout/tick",
             "rollout/boundary_tick",
-            "student/trunk_chunk",
-            "student/decoder_chunk",
             "reference/trunk_chunk",
             "reference/decoder_chunk",
             "critic/fit",
@@ -5257,7 +5280,7 @@ def _episode_diagnostics(
     states = [record.state for record in records]
     current = policy.evaluate(states, actions)
     control = reference.evaluate(states, actions)
-    kl = _factor_sum(factor_kl(current, control), batch.executed_factors_JF)
+    kl = _factor_sum(factor_kl(current, control, batch.executed_factors_JF), batch.executed_factors_JF)
     metrics = {
         "kl_cost": float((kl * batch.kl_coefficient_J).sum()) / len(results),
         "kl_per_frame": float(kl.sum()) / sum(result.duration for result in results.values()),
@@ -5268,7 +5291,7 @@ def _episode_diagnostics(
         rewards[index, : len(record.rewards)] = torch.tensor(record.rewards, device=policy.device)
         if not results[record.state.match].timeout:
             by_match[record.state.match].append(index)
-    regularized = regularized_reward(batch, rewards, factor_kl(current, control))
+    regularized = regularized_reward(batch, rewards, factor_kl(current, control, batch.executed_factors_JF))
     targets = torch.zeros(len(records), device=policy.device)
     selected = torch.zeros(len(records), device=policy.device, dtype=torch.bool)
     for indices in by_match.values():

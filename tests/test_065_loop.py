@@ -252,7 +252,9 @@ def assert_batch_equal(left: Any, right: Any) -> None:
         )
     for name in ("advantages", "targets", "selected", "values"):
         torch.testing.assert_close(getattr(left, name), getattr(right, name), atol=0, rtol=0)
-    assert left.steps == right.steps
+    assert len(left.steps) == len(right.steps)
+    for a, b in zip(left.steps, right.steps, strict=True):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
     for a, b in zip(left.rollout.records, right.rollout.records, strict=True):
         assert (a.state.stream, a.state.episode, a.state.clock, a.rewards) == (
             b.state.stream,
@@ -572,7 +574,10 @@ def test_student_and_reference_evaluations_are_identical_before_first_actor_step
         for actual, expected in zip(student.distributions, reference.distributions, strict=True):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
         torch.testing.assert_close(
-            exp.factor_kl(student, reference), torch.zeros_like(student.log_probs), atol=0, rtol=0
+            exp.factor_kl(student, reference, torch.ones_like(student.log_probs, dtype=torch.bool)),
+            torch.zeros_like(student.log_probs),
+            atol=0,
+            rtol=0,
         )
 
     compare()
@@ -771,7 +776,7 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
     rollout = run.engine.collect(run.update)
     following = run.prepare(rollout)
     assert following.reference is not None
-    kl = exp.factor_kl(following.old, following.reference)
+    kl = exp.factor_kl(following.old, following.reference, following.decisions.executed_factors_JF)
     assert float(kl.max()) > 0
     executed = following.decisions.executed_factors_JF
     expected_kl = torch.where(executed, kl, 0).sum() / following.decisions.replan_J.sum()

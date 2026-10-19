@@ -115,15 +115,13 @@ def actor_gradients(run: Any, batch: Any) -> tuple[Tensor | None, ...]:
         objective = exp.ppo_loss(
             decisions,
             new.log_probs,
-            batch.old.log_probs[at],
             batch.advantages[at],
             selected,
             statistics,
             clip_epsilon=run.config.clip_epsilon,
-            importance_cap=run.config.importance_cap,
         )
         loss = objective.loss + exp.differentiable_kl_loss(
-            decisions, exp.factor_kl(new, reference), selected, statistics
+            decisions, exp.factor_kl(new, reference, decisions.executed_factors_JF), selected, statistics
         )
         loss.backward()
     return tuple(None if p.grad is None else p.grad.detach().clone() for p in parameters)

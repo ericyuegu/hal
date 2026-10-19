@@ -264,9 +264,7 @@ def test_regularized_gradient_matches_enumerated_categorical_chain(estimator: st
             advantage = frames[:, 0] - exp.sampled_kl_penalty(decisions, reference)
         stats = _statistics(device, mean=0.4, sigma=sigma)
         selected = decisions.loss_mask_J
-        policy = exp.ppo_loss(
-            decisions, sampled, sampled.detach(), advantage, selected, stats, clip_epsilon=0.2, importance_cap=2
-        ).loss
+        policy = exp.ppo_loss(decisions, sampled, advantage, selected, stats, clip_epsilon=0.2).loss
         score_only_loss = score_only_loss + probability.detach() * policy
         loss = policy
         if estimator == "exact":
@@ -335,12 +333,10 @@ def test_delayed_actions_receive_unshifted_credit_through_untrained_tail(device:
             * exp.ppo_loss(
                 current,
                 sampled,
-                sampled.detach(),
                 action * result.advantages,
                 selected,
                 _statistics(device),
                 clip_epsilon=0.2,
-                importance_cap=2,
             ).loss
         )
     gradient = torch.autograd.grad(expected_loss, theta)[0]
@@ -354,19 +350,15 @@ def test_joint_ppo_clipping_is_per_decision_and_all_targets_are_detached() -> No
     old = (old_joint.log()[:, None] / 8).expand(4, 16).clone().requires_grad_()
     new = (old.detach() + joint.log()[:, None] / 8).requires_grad_()
     advantages = torch.tensor([2.0, -2.0, 2.0, -2.0], dtype=torch.float64, requires_grad=True)
-    behavior = decisions.behavior_log_probs_JF.clone().requires_grad_()
+    behavior = old.detach().clone().requires_grad_()
     decisions = dataclasses.replace(decisions, behavior_log_probs_JF=behavior)
     stats = exp.advantage_statistics(exp.advantage_moments(advantages, decisions.loss_mask_J))
-    result = exp.ppo_loss(
-        decisions, new, old, advantages, decisions.loss_mask_J, stats, clip_epsilon=0.2, importance_cap=1.2
-    )
+    result = exp.ppo_loss(decisions, new, advantages, decisions.loss_mask_J, stats, clip_epsilon=0.2)
     torch.testing.assert_close(result.joint_ratio_J, joint)
-    torch.testing.assert_close(result.importance_weight_J, old_joint.clamp(max=1.2))
-    expected = -(1.2 * 1.2 + 0.25 * -0.8 + 1.1 - 0.9) / 4
+    expected = -(1.2 - 0.8 + 1.1 - 0.9) / 4
     assert result.loss.item() == pytest.approx(expected)
     result.loss.backward()
     assert old.grad is None and advantages.grad is None and behavior.grad is None
-    assert not result.importance_weight_J.requires_grad
     assert new.grad is not None
     torch.testing.assert_close(new.grad[:2], torch.zeros_like(new.grad[:2]))
     assert torch.count_nonzero(new.grad[:, 8:]) == 0
@@ -384,12 +376,10 @@ def test_joint_log_ratio_subtracts_before_reducing_factors() -> None:
     result = exp.ppo_loss(
         decisions,
         new,
-        old,
         torch.ones(1),
         decisions.loss_mask_J,
         _statistics(),
         clip_epsilon=0.2,
-        importance_cap=2,
     )
     torch.testing.assert_close(result.joint_ratio_J.double(), expected[None])
     changed_behavior = dataclasses.replace(decisions, behavior_log_probs_JF=old - (new - old))
@@ -405,14 +395,7 @@ def test_ratio_overflow_is_rejected_even_when_clipping_would_hide_it() -> None:
     selected = decisions.loss_mask_J
     decisions = dataclasses.replace(decisions, behavior_log_probs_JF=old)
     with pytest.raises(ValueError, match="joint ratio must be finite"):
-        exp.ppo_loss(decisions, new, old, torch.ones(1), selected, _statistics(), clip_epsilon=0.2, importance_cap=2)
-    # Importance truncation is evaluated in log space and stays finite.
-    result = exp.ppo_loss(
-        decisions, new, new.detach(), torch.ones(1), selected, _statistics(), clip_epsilon=0.2, importance_cap=2
-    )
-    assert result.importance_weight_J.item() == 2
-    result.loss.backward()
-    assert new.grad is not None and torch.isfinite(new.grad).all()
+        exp.ppo_loss(decisions, new, torch.ones(1), selected, _statistics(), clip_epsilon=0.2)
 
 
 def test_policy_hyperparameters_are_validated_and_statistics_are_detached() -> None:
@@ -421,21 +404,17 @@ def test_policy_hyperparameters_are_validated_and_statistics_are_detached() -> N
     mean = torch.tensor(0.0, requires_grad=True)
     sigma = torch.tensor(2.0, requires_grad=True)
     stats = exp.AdvantageStatistics(mean, sigma, torch.tensor(1.0))
-    for epsilon, cap in ((0.0, 2.0), (1.0, 2.0), (math.nan, 2.0), (0.2, 0.0), (0.2, math.inf)):
+    for epsilon in (0.0, 1.0, math.nan):
         with pytest.raises(ValueError):
             exp.ppo_loss(
                 decisions,
                 new,
-                new.detach(),
                 torch.ones(1),
                 decisions.loss_mask_J,
                 stats,
                 clip_epsilon=epsilon,
-                importance_cap=cap,
             )
-    loss = exp.ppo_loss(
-        decisions, new, new.detach(), torch.ones(1), decisions.loss_mask_J, stats, clip_epsilon=0.2, importance_cap=2
-    ).loss
+    loss = exp.ppo_loss(decisions, new, torch.ones(1), decisions.loss_mask_J, stats, clip_epsilon=0.2).loss
     loss = loss + exp.differentiable_kl_loss(decisions, new.square(), decisions.loss_mask_J, stats)
     loss.backward()
     assert mean.grad is None and sigma.grad is None
@@ -451,12 +430,10 @@ def test_partial_execution_masks_padding_and_rejects_training_unexecuted_actions
     result = exp.ppo_loss(
         decisions,
         values,
-        torch.zeros_like(values),
         torch.ones(3),
         selected,
         _statistics(),
         clip_epsilon=0.2,
-        importance_cap=2,
     )
     assert result.joint_ratio_J[0].item() == pytest.approx(1.1)
     result.loss.backward()
@@ -488,12 +465,10 @@ def test_global_advantage_and_loss_hooks_match_a_single_rank_with_unequal_counts
         actor = exp.ppo_loss(
             decisions,
             logs,
-            torch.zeros_like(logs),
             advantage[part],
             selected[part],
             stats,
             clip_epsilon=0.2,
-            importance_cap=2,
             reduction=reduction,
         ).loss
         kl = exp.differentiable_kl_loss(decisions, logs.square(), selected[part], stats, reduction=reduction)
@@ -591,12 +566,10 @@ def test_actor_rejects_advantage_statistics_for_a_different_selection() -> None:
             exp.ppo_loss(
                 decisions,
                 torch.zeros(2, 16),
-                torch.zeros(2, 16),
                 torch.ones(2),
                 decisions.loss_mask_J,
                 _statistics(),
                 clip_epsilon=0.2,
-                importance_cap=2,
                 reduction=reduction,
             )
         with pytest.raises(ValueError, match="same global decision count"):
@@ -619,14 +592,12 @@ def test_mixed_cadence_records_and_invalid_controller_rows() -> None:
     joint = exp.ppo_loss(
         mixed,
         torch.full((2, 16), 0.01),
-        torch.zeros(2, 16),
         torch.ones(2),
         mixed.loss_mask_J,
         _statistics(count=2),
         clip_epsilon=0.2,
-        importance_cap=2,
     ).joint_ratio_J
-    torch.testing.assert_close(joint, torch.tensor([0.16, 0.08]).exp())
+    torch.testing.assert_close(joint, torch.tensor([0.16, 0.08], dtype=joint.dtype).exp())
     with pytest.raises(ValueError, match="invalid delay"):
         exp.executed_factor_mask(torch.tensor([torch.iinfo(torch.int64).max]), torch.tensor([4]), torch.tensor([20]))
     with pytest.raises(ValueError, match="non-negative"):

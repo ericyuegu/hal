@@ -312,3 +312,18 @@ warmup, training, evaluations, resume checks and upload. This estimate
 has not been measured on this VM. The existing instance continues to incur
 charges after the job ends. A cap expiry preserves partial evidence and
 fails completion. Long held-out matches can still exhaust the cap.
+
+## Dense execution treatment
+
+The dense trainer defines PPO's old policy as the stored rollout behavior
+log-probabilities (`pi_old = mu`). It removes the student scoring pass and
+the truncated importance weight (now one). Student distributions, critic
+features, and decision values are stored during rollout. Model, reward,
+KL objective, decision-grid GAE, and optimizer families remain fixed.
+
+Precision qualification uses an all-FP32 reference with TF32 disabled, with
+identical weights and inputs. Candidate error must be at most 1.5 times
+default-path error plus a reported small absolute floor for factor log-probs,
+KL, values, and actor and critic gradients. Statistical comparisons with
+`aacdfee0` at 64 matches use match-level confidence intervals. These systems
+comparisons do not select a policy or establish gameplay improvement.
