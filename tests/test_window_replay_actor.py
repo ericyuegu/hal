@@ -38,7 +38,14 @@ def test_actor_joint_ratio_masks_and_stop_gradients() -> None:
     output = replay_windows(policy, hidden, observed, slots, grad=True)
     targets = targets_for(output)
     validate_actor_targets(output, targets)
-    for field in ("behavior_log_probs_WKF", "advantages_WK", "kl_coefficient_WK"):
+    for field in (
+        "behavior_log_probs_WKF",
+        "advantages_WK",
+        "kl_coefficient_WK",
+        "advantage_mean",
+        "advantage_sigma",
+        "denominator",
+    ):
         getattr(targets, field).requires_grad_(True)
     for p in targets.reference_distributions:
         p.requires_grad_(True)
@@ -50,6 +57,9 @@ def test_actor_joint_ratio_masks_and_stop_gradients() -> None:
     assert targets.advantages_WK.grad is None
     assert targets.behavior_log_probs_WKF.grad is None
     assert targets.kl_coefficient_WK.grad is None
+    assert targets.advantage_mean.grad is None
+    assert targets.advantage_sigma.grad is None
+    assert targets.denominator.grad is None
     assert all(p.grad is None for p in targets.reference_distributions)
     for p in policy.critic_parameters():
         assert p.grad is None
@@ -124,6 +134,30 @@ def test_joint_ppo_clips_both_advantage_signs() -> None:
     assert bool((logs.grad[0, 1] < 0).all()) and bool((logs.grad[0, 2] > 0).all())
 
 
+@pytest.mark.parametrize("case", ["sigma", "reference", "empty", "invalid_slot", "behavior", "coefficient", "dtype"])
+def test_actor_rejects_invalid_targets(case: str) -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    output = replay_windows(policy, hidden, observed, slots, grad=False)
+    targets = targets_for(output)
+    if case == "sigma":
+        targets = dataclasses.replace(targets, advantage_sigma=torch.tensor(0.0))
+    elif case == "reference":
+        targets.reference_distributions[0][0, 0, 0] = 0
+    elif case == "empty":
+        targets = dataclasses.replace(targets, selected_WK=torch.zeros_like(targets.selected_WK))
+    elif case == "invalid_slot":
+        targets.selected_WK[0, 2] = True
+    elif case == "behavior":
+        targets.behavior_log_probs_WKF[0, 0, 0] = torch.nan
+    elif case == "coefficient":
+        targets.kl_coefficient_WK[0, 0] = -0.1
+    else:
+        targets = dataclasses.replace(targets, advantages_WK=targets.advantages_WK.double())
+    with pytest.raises(ValueError):
+        validate_actor_targets(output, targets)
+
+
 def test_fullgraph_capture_has_no_breaks() -> None:
     policy = model()
     hidden, observed, slots = inputs(policy)
@@ -170,6 +204,8 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights() -> N
     del output
     parameters = policy.actor_parameters()
     compiled = torch.compile(forward, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
+    with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
+        GraphedActorStep(compiled, values, targets, parameters)
     graph = GraphedActorStep(compiled, values, targets, parameters)
     saved: tuple[Tensor, Tensor] | None = None
     for step in range(3):

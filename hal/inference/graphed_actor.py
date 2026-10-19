@@ -56,8 +56,12 @@ class GraphedActorStep:
         targets: ActorTargets,
         parameters: tuple[nn.Parameter, ...],
     ) -> None:
+        if torch.is_inference_mode_enabled():
+            raise ValueError("actor capture requires autograd outside inference_mode")
         if not inputs or not inputs[0].is_cuda or not parameters:
             raise ValueError("actor capture requires CUDA inputs and actor parameters")
+        if len(targets.reference_distributions) != 4:
+            raise ValueError("actor capture requires four reference distributions")
         device = inputs[0].device
         if any(not p.requires_grad or p.device != device for p in parameters):
             raise ValueError("actor parameters must require gradients on the input device")
