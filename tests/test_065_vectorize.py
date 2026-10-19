@@ -16,16 +16,83 @@ from test_065_columnar import ROOT
 from test_065_columnar import exp
 from torch import Tensor
 
+from hal.models.action_sequence import DecisionOutput
+from hal.models.attention import KVMemory
+
+
+def sampling_replay(
+    hidden: Tensor,
+    observed: Tensor,
+    queue: Tensor,
+    delay: Tensor,
+    replan: Tensor,
+    condition: Tensor,
+    uniforms: Tensor,
+    *,
+    model: Any,
+    max_delay: int,
+    sampled_offsets: int,
+    forced_prefix_length: int,
+    bucketed: bool,
+    padded_delay: int,
+    ctx_pad: Tensor | None,
+    history: KVMemory,
+    sampled_actions: Tensor,
+) -> DecisionOutput:
+    batch = hidden.shape[0]
+    missing = (1 << (batch - 1).bit_length()) - batch if bucketed and hidden.is_cuda else 0
+    if missing:
+        # Match the grouped sampler's graph bucket, including absent rows.
+        hidden = torch.nn.functional.pad(hidden[:, -1:], (0, 0, 0, 0, 0, missing))
+        observed = torch.nn.functional.pad(observed, (0, 0, 0, missing))
+        queue = torch.nn.functional.pad(queue, (0, 0, 0, 0, 0, missing))
+        delay = torch.nn.functional.pad(delay, (0, missing), value=padded_delay)
+        replan = torch.nn.functional.pad(replan, (0, missing), value=2)
+        condition = torch.nn.functional.pad(condition, (0, 0, 0, missing))
+        uniforms = torch.nn.functional.pad(uniforms, (0, missing))
+        sampled_actions = torch.nn.functional.pad(sampled_actions, (0, 0, 0, 0, 0, missing))
+        history = KVMemory(
+            torch.nn.functional.pad(history.kv, (0, 0, 0, 0, 0, 0, 0, missing)),
+            torch.nn.functional.pad(history.positions, (0, 0, 0, missing), value=-1),
+            torch.nn.functional.pad(history.query_position, (0, missing)),
+            history.window,
+        )
+    output = model.temporal.decode_decisions(
+        hidden,
+        observed,
+        queue,
+        delay,
+        replan,
+        condition,
+        uniforms,
+        max_delay=max_delay,
+        sampled_offsets=sampled_offsets,
+        forced_prefix_length=forced_prefix_length,
+        ctx_pad=ctx_pad,
+        history=history,
+        sampled_actions=sampled_actions,
+    )
+    return DecisionOutput(
+        output.actions[:batch],
+        output.valid[:batch],
+        output.log_probs[:batch],
+        tuple(value[:batch] for value in output.distributions),
+        output.decoder_state[:batch],
+    )
+
 
 def sequential_replay(policy: Any) -> None:
     # A rollout oracle must force common actions through sampling's sequential
     # kernels. Parallel training replay measures mu/pi_old kernel differences.
     for count in (2, 4):
         policy.decoder.replay_variants[count] = partial(
-            policy.model.temporal.decode_decisions,
+            sampling_replay,
+            model=policy.model,
             max_delay=policy.decoder.max_delay,
             sampled_offsets=count,
             forced_prefix_length=min(delay for delay, _ in policy.decoder.configurations),
+            bucketed=policy.compiled,
+            padded_delay=policy.decoder.configurations[0][0],
         )
 
 
