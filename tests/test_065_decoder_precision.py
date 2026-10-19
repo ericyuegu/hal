@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,6 @@ from test_065_vectorize import errors
 from test_065_vectorize import executed_kl
 from test_065_vectorize import gradient_comparison
 from test_065_vectorize import grouped_score
-from test_065_vectorize import sequential_replay
 from torch import Tensor
 
 
@@ -80,6 +80,18 @@ def gap_distribution(old: Tensor, behavior: Tensor, mask: Tensor) -> dict[str, f
         "max": float(absolute.max()),
         "truncated_fraction": float(((-gap).exp() > 2).float().mean()),
     }
+
+
+def sequential_replay(policy: Any) -> None:
+    # Force common actions through sampling's kernels. The no-grad and actor
+    # passes retain parallel training replay, so mu/pi_old remains diagnostic.
+    for count in (2, 4):
+        policy.decoder.replay_variants[count] = partial(
+            policy.model.temporal.decode_decisions,
+            max_delay=policy.decoder.max_delay,
+            sampled_offsets=count,
+            forced_prefix_length=min(delay for delay, _ in policy.decoder.configurations),
+        )
 
 
 class CommonInputPolicy(exp.TransformerPolicy):

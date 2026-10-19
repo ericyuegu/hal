@@ -612,9 +612,6 @@ class CausalTemporalDecoder(nn.Module):
         token_projection parameter. Reuse the trunk projection across decoder steps.
         """
         weight = self.token_projection.weight
-        if self.return_conditioner.ranges is not None:
-            with torch.autocast(trunk.device.type, enabled=False):
-                return F.linear(trunk.float(), weight[:, : self.trunk_width], self.token_projection.bias)
         return F.linear(trunk, weight[:, : self.trunk_width], self.token_projection.bias)
 
     def _step_features(self, previous: Tensor, offsets: Tensor, embedded: Tensor | None = None) -> Tensor:
@@ -622,16 +619,13 @@ class CausalTemporalDecoder(nn.Module):
         weight = self.token_projection.weight
         action_weight = weight[:, self.trunk_width : self.trunk_width + self.controller_width]
         offset_weight = weight[:, self.trunk_width + self.controller_width :]
-        if self.return_conditioner.ranges is not None:
-            # Errors in this small input projection enter every residual block.
-            # Keep the projection, residual stream, and norms in FP32.
-            with torch.autocast(previous.device.type, enabled=False):
-                action = F.linear(
-                    (self.codec.embed_frame(previous) if embedded is None else embedded).float(), action_weight
-                )
-                return action + F.linear(self.offset_embedding(offsets).float(), offset_weight)
         action = F.linear(self.codec.embed_frame(previous) if embedded is None else embedded, action_weight)
-        return action + F.linear(self.offset_embedding(offsets), offset_weight)
+        offset = F.linear(self.offset_embedding(offsets), offset_weight)
+        if self.return_conditioner.ranges is not None:
+            # Keep the self-play residual stream and its norms in FP32 while
+            # attention and linear projections use the decoder's compute dtype.
+            return action.float() + offset.float()
+        return action + offset
 
     def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
         """Compute context-only logits once for all decoded offsets."""
