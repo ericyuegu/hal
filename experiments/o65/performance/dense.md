@@ -87,3 +87,31 @@ records, and a Torch compiler rejection of dataclass-class inspection. The
 GPU graph test passes on CPU and CUDA. The current CPU-focused run passes
 127 tests; CUDA-only cases and the unset proxy-path environment were skipped
 in that diagnostic run. Full validation remains required.
+
+
+Source-verified profiles use commit `f7bf145b`, trainer SHA-256
+`e05aabb8bd7421ba873186639b98729dbad9a38750fefc2366fc5e701b4ae08d`. The runner checked the source against Git before and after
+each job. These replace the preliminary profiles above. Raw outputs are in
+`runs/dense/step2-final16` and `runs/dense/step2-final64`.
+
+| Matches | Phase | Wall s | Main-thread CPU s | Eager launches, estimated | Graph launches, estimated | Kernel executions, estimated |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | rollout | 2.368 | 2.164 | 80,898 | 256 | 436,464 |
+| 16 | reference | 0.314 | 0.314 | 18,520 | 0 | 19,100 |
+| 16 | preparation | 0.101 | 0.100 | 4,790 | 0 | 4,906 |
+| 16 | critic | 0.019 | 0.014 | 601 | 0 | 613 |
+| 16 | actor | 0.505 | 0.276 | 30,256 | 0 | 31,196 |
+| 64 | rollout | 3.284 | 2.998 | 80,850 | 256 | 434,564 |
+| 64 | reference | 1.200 | 1.199 | 70,073 | 0 | 72,271 |
+| 64 | preparation | 0.264 | 0.264 | 15,514 | 0 | 15,674 |
+| 64 | critic | 0.045 | 0.040 | 593 | 0 | 609 |
+| 64 | actor | 1.790 | 0.872 | 108,960 | 0 | 112,584 |
+
+16 matches: GPU-tick CPU 2.220 ms; rollout projection 2.910 s; update 3.309 s.
+
+64 matches: GPU-tick CPU 2.859 ms; rollout projection 2.900 s; update 6.587 s.
+
+The projection uses 14 us per eager launch and 5 us per remaining graph
+kernel. It is a host-cost projection with sampled coverage, not a measured
+PRO 6000 time. The final layout cache avoids per-tick validation loops and
+reuses cache rows after anchor assignments change at a block boundary.
