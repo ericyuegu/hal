@@ -640,11 +640,10 @@ class CausalTemporalDecoder(nn.Module):
     def _project_action_head(self, head: NonlinearActionHead, features: Tensor) -> Tensor:
         if self.return_conditioner.ranges is None or not torch.is_autocast_enabled(features.device.type):
             return head.project(features)
-        # The categorical readout needs FP32 resolution across decode batch
-        # layouts. Keep its small final projection outside decoder autocast.
-        hidden = F.silu(head.up(features))
+        # Probability heads need FP32 resolution across decode batch layouts.
+        # The decoder's attention and feed-forward blocks retain autocast.
         with torch.autocast(features.device.type, enabled=False):
-            return head.down(hidden.float())
+            return head.project(features.float())
 
     def _decode_step(
         self,
