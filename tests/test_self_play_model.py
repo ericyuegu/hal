@@ -12,6 +12,7 @@ from torch import nn
 from hal.inference.decision_decoder import DecisionDecoder
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
+from hal.models.action_sequence import NonlinearActionHead
 from hal.models.action_sequence import ReturnConditioner
 from hal.models.action_sequence import SwiGLU
 from hal.models.action_sequence import TemporalBlock
@@ -353,6 +354,25 @@ def test_decoder_precision_defaults_to_bf16_and_rejects_other_values() -> None:
     for invalid in ("fp16", "BF16", "", None):
         with pytest.raises(ValueError, match="decoder precision"):
             model(cast(DecoderPrecision, invalid))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@torch.no_grad()
+def test_bf16_readouts_preserve_small_bias_changes(device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    policy = model("bf16").to(device)
+    head = cast(NonlinearActionHead, policy.temporal.outputs["c_stick"])
+    assert head.down.bias is not None
+    head.down.bias.fill_(1)
+    features = torch.randn(2, 32, device=device)
+    delta = torch.linspace(-0.001, 0.001, head.down.out_features, device=device)
+    with torch.autocast(device, dtype=torch.bfloat16):
+        before = policy.temporal._project_action_head(head, features)
+        head.down.bias.add_(delta)
+        after = policy.temporal._project_action_head(head, features)
+    assert before.dtype == after.dtype == torch.float32
+    torch.testing.assert_close(after - before, delta.expand_as(after), rtol=0, atol=2e-7)
 
 
 @pytest.mark.parametrize("precision", ["bf16", "fp32"])

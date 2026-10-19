@@ -358,7 +358,7 @@ class TemporalBlock(nn.Module):
             return normalized
         if shift is None:
             raise ValueError("modulation scale and shift must both be present")
-        return (1 + scale) * normalized + shift
+        return (1 + scale.to(normalized.dtype)) * normalized + shift.to(normalized.dtype)
 
     def _qkv(
         self,
@@ -628,7 +628,19 @@ class CausalTemporalDecoder(nn.Module):
 
     def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
         """Compute context-only logits once for all decoded offsets."""
-        return {name: self.trunk_outputs[name](hidden) for name in CONTROLLER_GROUP_NAMES}
+        logits: dict[str, Tensor] = {}
+        for name, module in self.trunk_outputs.items():
+            head = cast(NonlinearActionHead, module)
+            logits[name] = self._project_action_head(head, head.normalize(hidden))
+        return logits
+
+    def _project_action_head(self, head: NonlinearActionHead, features: Tensor) -> Tensor:
+        if self.return_conditioner.ranges is None or not torch.is_autocast_enabled(features.device.type):
+            return head.project(features)
+        # BF16 readout products must not round away a small policy bias change.
+        # Keep bias addition and the subsequent sum of temporal/trunk logits in FP32.
+        hidden = F.silu(head.up(features))
+        return F.linear(hidden, head.down.weight).float() + cast(Tensor, head.down.bias)
 
     def _decode_step(
         self,
@@ -753,7 +765,7 @@ class CausalTemporalDecoder(nn.Module):
         raw_scale, raw_shift = self.group_condition[name](prefix).chunk(2, dim=-1)
         scale = torch.tanh(raw_scale)
         shift = raw_shift
-        return normalized * (1.0 + scale) + shift
+        return normalized * (1.0 + scale.to(normalized.dtype)) + shift.to(normalized.dtype)
 
     def _teacher_forced_outputs(
         self,
@@ -1002,7 +1014,9 @@ class CausalTemporalDecoder(nn.Module):
             embedded = self.codec.embed_groups(target)
             group_logits = {
                 name: self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    self._project_action_head(
+                        cast(NonlinearActionHead, self.outputs[name]), self.group_features(state, name, embedded)
+                    )
                     + trunk_logits[name]
                 )
                 for name in CONTROLLER_GROUP_NAMES
@@ -1148,7 +1162,9 @@ class CausalTemporalDecoder(nn.Module):
             picks: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
                 logits = self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    self._project_action_head(
+                        cast(NonlinearActionHead, self.outputs[name]), self.group_features(state, name, embedded)
+                    )
                     + trunk_logits[name]
                 )
                 if name == "buttons":
@@ -1252,7 +1268,9 @@ class CausalTemporalDecoder(nn.Module):
             for name in CONTROLLER_DECODE_ORDER:
                 group = CONTROLLER_GROUP_INDEX[name]
                 logits = self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    self._project_action_head(
+                        cast(NonlinearActionHead, self.outputs[name]), self.group_features(state, name, embedded)
+                    )
                     + skips[name]
                 )
                 if name == "buttons":
@@ -1350,7 +1368,9 @@ class CausalTemporalDecoder(nn.Module):
         log_probs: list[Tensor] = []
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
             head = cast(NonlinearActionHead, self.outputs[name])
-            logits = self._center(head.project(self.group_features(selected, name, embedded)) + skips[name][:, None])
+            logits = self._center(
+                self._project_action_head(head, self.group_features(selected, name, embedded)) + skips[name][:, None]
+            )
             if name == "buttons":
                 logits = logits.masked_fill(self.codec.button_mask(actions[..., TRIGGERS_GROUP]), -torch.inf)
             logs = F.log_softmax(logits.float(), dim=-1)
@@ -1397,7 +1417,9 @@ class CausalTemporalDecoder(nn.Module):
             frame_logits: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
                 logits = self._center(
-                    cast(NonlinearActionHead, self.outputs[name]).project(self.group_features(state, name, embedded))
+                    self._project_action_head(
+                        cast(NonlinearActionHead, self.outputs[name]), self.group_features(state, name, embedded)
+                    )
                     + trunk_logits[name]
                 )
                 if name == "buttons":
