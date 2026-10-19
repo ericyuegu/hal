@@ -40,6 +40,7 @@ from hal.data.feature_stats import FeatureStats
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import Rank
 from hal.eval.periodic_self_play import PeriodicEvaluator
+from hal.eval.self_play_checkpoint import EVALUATION_FORMAT
 from hal.eval.self_play_checkpoint import PROXY_SHA256
 from hal.eval.self_play_checkpoint import TRAINING_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_VERSION
@@ -4497,7 +4498,13 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     ):
         raise ValueError("invalid checkpoint execution mode")
     if "actor" in paths:
-        actor = torch.load(paths["actor"], map_location="cpu", weights_only=False)["model"]
+        published = torch.load(paths["actor"], map_location="cpu", weights_only=False)
+        if (
+            published.get("format") != EVALUATION_FORMAT
+            or published.get("decoder_precision") != trainer.policy.model.decoder_precision
+        ):
+            raise ValueError("checkpoint evaluation actor precision or format mismatch")
+        actor = published["model"]
         if actor.keys() != saved["model"].keys() or any(
             not torch.equal(value, saved["model"][name]) for name, value in actor.items()
         ):
