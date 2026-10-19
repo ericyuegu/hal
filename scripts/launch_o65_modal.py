@@ -105,21 +105,29 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
     return argv
 
 
-def select_cpus(allowed: set[int], sysfs: Path = Path("/sys/devices/system/cpu")) -> tuple[int, ...]:
-    physical: dict[tuple[int, int], int] = {}
-    for cpu in sorted(allowed):
-        topology = sysfs / f"cpu{cpu}/topology"
-        key = (int((topology / "physical_package_id").read_text()), int((topology / "core_id").read_text()))
-        physical.setdefault(key, cpu)
-    if len(physical) < CPU_CORES:
-        raise ValueError("Modal job needs at least 17 available physical cores")
-    return tuple(physical.values())[:CPU_CORES]
+def select_cpus(allowed: set[int]) -> tuple[int, ...]:
+    """Modal exposes virtual CPU IDs and hides the host's sysfs topology."""
+    if len(allowed) < CPU_CORES:
+        raise ValueError("Modal job needs at least 17 available CPU IDs")
+    return tuple(sorted(allowed))[:CPU_CORES]
 
 
 def run_remote(request: Request) -> int:
     output = RESULTS / request.name
     output.mkdir(parents=True, exist_ok=False)
     started = time.time()
+    code = -1
+    try:
+        code = run_child(request, output, started)
+        return code
+    finally:
+        (output / "result.json").write_text(
+            json.dumps({"exit_code": code, "started_unix": started, "finished_unix": time.time()}, indent=2)
+        )
+        modal.Volume.from_name(VOLUME).commit()
+
+
+def run_child(request: Request, output: Path, started: float) -> int:
     cpus = select_cpus(set(os.sched_getaffinity(0)))
     os.sched_setaffinity(0, set(cpus))
     argv = command(request, cpus[:16])
@@ -145,6 +153,7 @@ def run_remote(request: Request) -> int:
         "modal_sdk": importlib.metadata.version("modal"),
         "container_id": os.environ.get("MODAL_TASK_ID"),
         "cpus": cpus,
+        "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
         "treatment": "active match count or no-grad chunks; see request",
         "control": "1024 active matches, 16 windows and 128 decisions per no-grad chunk",
@@ -152,26 +161,20 @@ def run_remote(request: Request) -> int:
     }
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
     with (output / "topology.txt").open("w") as log:
-        subprocess.run(["lscpu", "-e"], stdout=log, stderr=subprocess.STDOUT, check=True)
+        log.write("Modal virtual CPU IDs; physical core and NUMA topology are not exposed.\n")
+        log.write(Path("/proc/cpuinfo").read_text())
+        log.flush()
         subprocess.run(["nvidia-smi", "-q"], stdout=log, stderr=subprocess.STDOUT, check=True)
-    code = -1
-    try:
-        with (output / "run.log").open("w") as log:
-            result = subprocess.run(
-                argv,
-                cwd=REMOTE_ROOT,
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                timeout=request.timeout_seconds - 30,
-            )
-        code = result.returncode
-        return code
-    finally:
-        (output / "result.json").write_text(
-            json.dumps({"exit_code": code, "started_unix": started, "finished_unix": time.time()}, indent=2)
+    with (output / "run.log").open("w") as log:
+        result = subprocess.run(
+            argv,
+            cwd=REMOTE_ROOT,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            timeout=request.timeout_seconds - 30,
         )
-        modal.Volume.from_name(VOLUME).commit()
+    return result.returncode
 
 
 def image_commands(sha: str) -> list[str]:

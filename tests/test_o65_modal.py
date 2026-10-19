@@ -69,15 +69,10 @@ def test_modal_commands_are_bounded_and_have_no_external_sink() -> None:
     assert not any("wandb" in arg or "upload" in arg for arg in profile + smoke)
 
 
-def test_cpu_selection_uses_distinct_physical_cores(tmp_path: Path) -> None:
-    for cpu in range(36):
-        topology = tmp_path / f"cpu{cpu}/topology"
-        topology.mkdir(parents=True)
-        (topology / "physical_package_id").write_text("0")
-        (topology / "core_id").write_text(str(cpu % 18))
-    assert select_cpus(set(range(36)), tmp_path) == tuple(range(17))
-    with pytest.raises(ValueError, match="17 available physical cores"):
-        select_cpus(set(range(16)), tmp_path)
+def test_cpu_selection_uses_distinct_available_ids() -> None:
+    assert select_cpus(set(range(1, 37, 2))) == tuple(range(1, 35, 2))
+    with pytest.raises(ValueError, match="17 available CPU IDs"):
+        select_cpus(set(range(16)))
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
