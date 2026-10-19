@@ -1,5 +1,9 @@
 # Window replay interface
 
+Qualification is in progress. The first compiled BF16 proxy trial failed the
+KL precision gate while other measured quantities passed. Keep the trainer on
+its existing path until the replay report records a passing configuration.
+
 The replay stream owns `hal.models.window_replay`. The interface commit defines
 `ReplaySlots`, `ReplayCriticFeatures`, and `ReplayOutput`. All are frozen, slotted
 dataclasses. Tensor suffixes state the dimensions; their docstrings state order
