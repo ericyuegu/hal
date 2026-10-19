@@ -322,7 +322,7 @@ class ReturnConditioner(nn.Module):
         elif policy_condition is not None:
             raise ValueError("policy conditioning requires a widened conditioner")
         embedded = F.silu(self.embedding(inputs))
-        return tuple(
+        modulation = tuple(
             torch.where(
                 present[..., None, None],
                 projection(embedded).reshape(*return_value.shape, 4, self.width),
@@ -330,6 +330,7 @@ class ReturnConditioner(nn.Module):
             )
             for projection in self.projections
         )
+        return tuple(value.float() for value in modulation) if self.ranges is not None else modulation
 
 
 class TemporalBlock(nn.Module):
@@ -358,7 +359,7 @@ class TemporalBlock(nn.Module):
             return normalized
         if shift is None:
             raise ValueError("modulation scale and shift must both be present")
-        return (1 + scale.to(normalized.dtype)) * normalized + shift.to(normalized.dtype)
+        return (1 + scale) * normalized + shift
 
     def _qkv(
         self,
@@ -628,6 +629,8 @@ class CausalTemporalDecoder(nn.Module):
 
     def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
         """Compute context-only logits once for all decoded offsets."""
+        if self.return_conditioner.ranges is None or not torch.is_autocast_enabled(hidden.device.type):
+            return {name: self.trunk_outputs[name](hidden) for name in CONTROLLER_GROUP_NAMES}
         logits: dict[str, Tensor] = {}
         for name, module in self.trunk_outputs.items():
             head = cast(NonlinearActionHead, module)
@@ -763,9 +766,11 @@ class CausalTemporalDecoder(nn.Module):
             return normalized
         prefix = torch.cat([embedded[group] for group in CONTROLLER_DECODE_ORDER[:position]], dim=-1)
         raw_scale, raw_shift = self.group_condition[name](prefix).chunk(2, dim=-1)
+        if self.return_conditioner.ranges is not None:
+            raw_scale, raw_shift = raw_scale.float(), raw_shift.float()
         scale = torch.tanh(raw_scale)
         shift = raw_shift
-        return normalized * (1.0 + scale.to(normalized.dtype)) + shift.to(normalized.dtype)
+        return normalized * (1.0 + scale) + shift
 
     def _teacher_forced_outputs(
         self,
