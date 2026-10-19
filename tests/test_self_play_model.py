@@ -14,7 +14,9 @@ from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.action_sequence import ReturnConditioner
 from hal.models.action_sequence import SwiGLU
+from hal.models.action_sequence import TemporalBlock
 from hal.models.conditioning import ConditioningRanges
+from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_executed_offsets
 from hal.wire import ACTION_DIM
@@ -49,8 +51,10 @@ def config(*, proxy: bool = False) -> ActionSequenceConfig:
     )
 
 
-def model() -> SelfPlayTransformer:
-    return SelfPlayTransformer(config(), RANGES, max_opponent_queue=14, critic_hidden_dim=16).eval()
+def model(precision: DecoderPrecision = "fp32") -> SelfPlayTransformer:
+    return SelfPlayTransformer(
+        config(), RANGES, max_opponent_queue=14, critic_hidden_dim=16, decoder_precision=precision
+    ).eval()
 
 
 def test_widened_conditioner_preserves_learned_bc_modulation() -> None:
@@ -342,12 +346,65 @@ def test_decision_decoder_rejects_reduced_precision_parameters() -> None:
         DecisionDecoder(model().bfloat16(), ((8, 4), (10, 2)), compiled=False)
 
 
+def test_decoder_precision_defaults_to_bf16_and_rejects_other_values() -> None:
+    assert (
+        SelfPlayTransformer(config(), RANGES, max_opponent_queue=14, critic_hidden_dim=16).decoder_precision == "bf16"
+    )
+    for invalid in ("fp16", "BF16", "", None):
+        with pytest.raises(ValueError, match="decoder precision"):
+            model(cast(DecoderPrecision, invalid))
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_decoder_owns_compute_precision_and_keeps_probabilities_and_critic_in_fp32(
+    precision: DecoderPrecision, device: str
+) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    torch.manual_seed(79)
+    policy = model(precision).to(device)
+    decoder = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=False)
+    args = tuple(value.to(device) for value in decision_inputs(policy))
+    dtypes: list[torch.dtype] = []
+
+    def record_dtype(_module: nn.Module, _args: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        dtypes.append(output.dtype)
+
+    handle = cast(TemporalBlock, policy.temporal.blocks[0]).qkv.register_forward_hook(record_dtype)
+    try:
+        with torch.no_grad():
+            sampled = decoder(*args, sampled_offsets=4)
+        expected = decoder(*args, sampled_offsets=4, sampled_actions=sampled.actions)
+        with torch.autocast(device, dtype=torch.bfloat16):
+            actual = decoder(*args, sampled_offsets=4, sampled_actions=sampled.actions)
+        assert dtypes and set(dtypes) == {torch.bfloat16 if precision == "bf16" else torch.float32}
+    finally:
+        handle.remove()
+    assert actual.log_probs.dtype == torch.float32
+    assert all(probability.dtype == torch.float32 for probability in actual.distributions)
+    torch.testing.assert_close(actual.log_probs, expected.log_probs, rtol=0, atol=0)
+    (-actual.log_probs.sum()).backward()
+    grad = policy.temporal.token_projection.weight.grad
+    assert grad is not None and grad.dtype == torch.float32 and bool(grad.any())
+    hidden, _, _, log_lambda, delay, replan, _ = args
+    condition = RANGES.normalize(log_lambda, delay, replan)
+    queue = policy.codec.quantize(torch.zeros(2, 14, ACTION_DIM, device=device))
+    with torch.autocast(device, dtype=torch.bfloat16):
+        values = policy.self_play_value(hidden[:, -1], actual.decoder_state, condition, condition, queue, delay)
+    assert values.dtype == torch.float32
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @torch.inference_mode()
 def test_cuda_compiled_two_and_four_offset_variants_match_eager() -> None:
     torch.manual_seed(23)
     cfg = replace(config(), temporal_heads=2)
-    policy = SelfPlayTransformer(cfg, RANGES, max_opponent_queue=14, critic_hidden_dim=16).cuda().eval()
+    policy = (
+        SelfPlayTransformer(cfg, RANGES, max_opponent_queue=14, critic_hidden_dim=16, decoder_precision="fp32")
+        .cuda()
+        .eval()
+    )
     args = tuple(value.cuda() for value in decision_inputs(policy))
     eager = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=False)
     compiled = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=True)
@@ -368,12 +425,13 @@ def test_cuda_compiled_two_and_four_offset_variants_match_eager() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
 @torch.no_grad()
-def test_cuda_graph_buckets_keep_outputs_and_read_updated_weights() -> None:
+def test_cuda_graph_buckets_keep_outputs_and_read_updated_weights(precision: DecoderPrecision) -> None:
     from hal.models.attention import KVMemory
 
     torch.manual_seed(71)
-    policy = model().cuda()
+    policy = model(precision).cuda()
     compiled = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=True)
     eager = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=False)
     for count in (2, 4):
@@ -405,7 +463,11 @@ def test_cuda_graph_buckets_keep_outputs_and_read_updated_weights() -> None:
                 expected = eager(
                     hidden[:, -1:], *args, sampled_offsets=count, history=history, sampled_actions=actual.actions
                 )
-            torch.testing.assert_close(actual.log_probs, expected.log_probs, atol=2e-6, rtol=2e-5)
+            if precision == "fp32":
+                torch.testing.assert_close(actual.log_probs, expected.log_probs, atol=2e-6, rtol=2e-5)
+            else:
+                difference = (actual.log_probs - expected.log_probs).abs().flatten()
+                assert difference.max() < 0.2 and difference.quantile(0.99) < 0.06
             saved = actual.log_probs.clone()
             head = policy.temporal.outputs["c_stick"]
             assert isinstance(head, torch.nn.Module)
@@ -417,7 +479,12 @@ def test_cuda_graph_buckets_keep_outputs_and_read_updated_weights() -> None:
                     hidden[:, -1:], *args, sampled_offsets=count, history=history, sampled_actions=updated.actions
                 )
             torch.testing.assert_close(actual.log_probs, saved, rtol=0, atol=0)
-            torch.testing.assert_close(updated.log_probs, updated_expected.log_probs, atol=2e-6, rtol=2e-5)
+            if precision == "fp32":
+                torch.testing.assert_close(updated.log_probs, updated_expected.log_probs, atol=2e-6, rtol=2e-5)
+            else:
+                difference = (updated.log_probs - updated_expected.log_probs).abs().flatten()
+                assert difference.max() < 0.2 and difference.quantile(0.99) < 0.06
+            assert not torch.equal(updated.log_probs, saved)
     assert len(compiled.graphs) == 4
     with torch.inference_mode():
         compiled(hidden[:, -1:], *args, sampled_offsets=4, history=history)

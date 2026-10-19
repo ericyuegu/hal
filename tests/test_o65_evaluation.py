@@ -36,6 +36,7 @@ from hal.eval.self_play_policy import SelfPlayPolicy
 from hal.eval.self_play_policy import evaluation_uniforms
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.conditioning import ConditioningRanges
+from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.representation.player_identity import PlayerVocabulary
 from hal.sim.native import OBSERVATION_FIELDS
@@ -46,7 +47,7 @@ from hal.sim.trajectory import Trajectory
 from hal.wire import ACTION_DIM
 
 
-def small_model() -> SelfPlayTransformer:
+def small_model(precision: DecoderPrecision = "fp32") -> SelfPlayTransformer:
     vocabulary = PlayerVocabulary(())
     cfg = ActionSequenceConfig(
         d_model=16,
@@ -68,6 +69,7 @@ def small_model() -> SelfPlayTransformer:
         vocabulary,
         max_opponent_queue=14,
         critic_hidden_dim=8,
+        decoder_precision=precision,
     ).eval()
 
 
@@ -355,8 +357,9 @@ def test_event_counts_use_onsets_and_ignore_countdown() -> None:
     assert scored.won is None
 
 
-def test_evaluation_snapshot_roundtrip_and_schema_rejection(tmp_path: Path) -> None:
-    model = small_model()
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
+def test_evaluation_snapshot_roundtrip_and_schema_rejection(tmp_path: Path, precision: DecoderPrecision) -> None:
+    model = small_model(precision)
     path = tmp_path / "actor.pt"
     provenance: dict[str, object] = {
         "reference_sha256": "a" * 64,
@@ -367,11 +370,27 @@ def test_evaluation_snapshot_roundtrip_and_schema_rejection(tmp_path: Path) -> N
     save_evaluation_checkpoint(path, model, stats(), provenance=provenance)
     loaded = load_evaluation_checkpoint(path, device=torch.device("cpu"))
     assert loaded.provenance == provenance
+    assert loaded.model.decoder_precision == precision
+    assert (
+        SelfPlayPlayer(
+            loaded.model, stats(), PlayerCondition(), port=1, seed=0, logical_player=0
+        ).decoder.model.decoder_precision
+        == precision
+    )
+    with pytest.raises(ValueError, match="decoder precision differs"):
+        load_evaluation_checkpoint(
+            path, device=torch.device("cpu"), decoder_precision="fp32" if precision == "bf16" else "bf16"
+        )
     for name, tensor in model.state_dict().items():
         torch.testing.assert_close(loaded.model.state_dict()[name], tensor, rtol=0, atol=0)
     with pytest.raises(FileExistsError):
         save_evaluation_checkpoint(path, model, stats(), provenance=provenance)
     raw = torch.load(path, weights_only=False)
+    raw["decoder_precision"] = "fp16"
+    torch.save(raw, path)
+    with pytest.raises(ValueError, match="decoder precision"):
+        load_evaluation_checkpoint(path, device=torch.device("cpu"))
+    raw["decoder_precision"] = precision
     raw["format"] = "future"
     torch.save(raw, path)
     with pytest.raises(ValueError, match="unsupported checkpoint"):
@@ -664,6 +683,7 @@ def test_critic_architecture_does_not_change_policy_identity(tmp_path: Path) -> 
         PlayerVocabulary(()),
         max_opponent_queue=14,
         critic_hidden_dim=8,
+        decoder_precision=first.decoder_precision,
     ).eval()
     tensors = second.state_dict()
     for name, tensor in first.state_dict().items():
@@ -682,3 +702,25 @@ def test_critic_architecture_does_not_change_policy_identity(tmp_path: Path) -> 
     left = load_evaluation_checkpoint(before, device=torch.device("cpu"))
     right = load_evaluation_checkpoint(after, device=torch.device("cpu"))
     assert left.policy_sha256 == right.policy_sha256
+
+
+def test_decoder_precision_changes_policy_identity_and_rejects_old_artifacts(tmp_path: Path) -> None:
+    control, treatment = small_model("fp32"), small_model("bf16")
+    treatment.load_state_dict(control.state_dict())
+    provenance: dict[str, object] = {
+        "reference_sha256": "a" * 64,
+        "git_sha": "b" * 40,
+        "update": 1,
+        "data_manifests": {"ranked": "c" * 64},
+    }
+    paths = (tmp_path / "fp32.pt", tmp_path / "bf16.pt")
+    for path, model in zip(paths, (control, treatment), strict=True):
+        save_evaluation_checkpoint(path, model, stats(), provenance=provenance)
+    loaded = [load_evaluation_checkpoint(path, device=torch.device("cpu")) for path in paths]
+    assert loaded[0].policy_sha256 != loaded[1].policy_sha256
+    raw = torch.load(paths[0], weights_only=False)
+    del raw["decoder_precision"]
+    raw["format"] = "hal.o65.evaluation.v1"
+    torch.save(raw, paths[0])
+    with pytest.raises(ValueError, match="unsupported checkpoint"):
+        load_evaluation_checkpoint(paths[0], device=torch.device("cpu"))

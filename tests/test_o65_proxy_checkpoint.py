@@ -55,7 +55,13 @@ def test_real_bootstrap30_checkpoint_conditioning_and_cache_parity(dtype: torch.
     bc = ActionSequenceTransformer(cfg, vocabulary).eval().cuda()
     bc.load_state_dict({name: value for name, value in state.items() if not name.startswith("percentile_head.")})
     ranges = ConditioningRanges((math.log(0.01), math.log(100)), (8, 10), (2, 4))
-    policy = SelfPlayTransformer(cfg, ranges, vocabulary, max_opponent_queue=14, critic_hidden_dim=128).eval().cuda()
+    policy = (
+        SelfPlayTransformer(
+            cfg, ranges, vocabulary, max_opponent_queue=14, critic_hidden_dim=128, decoder_precision="fp32"
+        )
+        .eval()
+        .cuda()
+    )
     policy.load_bc_state_dict(state)
     decoder = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=os.environ.get("HAL_O65_COMPILE_CUDA") == "1")
     torch.manual_seed(101)
@@ -107,7 +113,7 @@ def test_real_bootstrap30_checkpoint_conditioning_and_cache_parity(dtype: torch.
                 bc.temporal.configure_live_horizons((d + r,))
                 draws = torch.full((d + r, 4, 1), 0.5, device="cuda")
                 draws[d:] = uniforms[:r, :, row : row + 1]
-                # O65 keeps action decoding in FP32 under either trunk dtype.
+                # This parity control selects FP32 decoding under either trunk dtype.
                 with torch.autocast("cuda", enabled=False):
                     indices, logits = bc.temporal.sample_indices_with_logits(
                         full[row : row + 1],

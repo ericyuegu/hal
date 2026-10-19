@@ -20,12 +20,14 @@ from hal.data.feature_stats import load_consolidated_mixture_stats
 from hal.inference.action_sequence_artifact import source_stats_paths
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.conditioning import ConditioningRanges
+from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.self_play import validate_decoder_precision
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 PROXY_STATS_SHA256 = "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3"
-EVALUATION_FORMAT = "hal.o65.evaluation.v1"
+EVALUATION_FORMAT = "hal.o65.evaluation.v2"
 TRAINING_FORMAT = "hal.o65.training.v4"
 TRAINING_VERSION = 4
 
@@ -192,6 +194,7 @@ def save_evaluation_checkpoint(
                     "format": EVALUATION_FORMAT,
                     "architecture": asdict(model.cfg),
                     "ranges": asdict(model.ranges),
+                    "decoder_precision": model.decoder_precision,
                     "max_opponent_queue": model.critic_residual.max_queue,
                     "critic_hidden_dim": model.critic_residual.residual.up.out_features // 2,
                     "model": {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()},
@@ -225,7 +228,12 @@ def _validate_provenance(value: dict[str, object]) -> None:
     json.dumps(value, allow_nan=False)
 
 
-def load_evaluation_checkpoint(path: Path, *, device: torch.device) -> EvaluationCheckpoint:
+def load_evaluation_checkpoint(
+    path: Path, *, device: torch.device, decoder_precision: DecoderPrecision | None = None
+) -> EvaluationCheckpoint:
+    """Read O65 precision from the artifact; select it explicitly for a BC proxy."""
+    if decoder_precision is not None:
+        validate_decoder_precision(decoder_precision)
     if path.suffix == ".json":
         path = evaluation_actor_path(path)
     digest = sha256(path)
@@ -233,6 +241,7 @@ def load_evaluation_checkpoint(path: Path, *, device: torch.device) -> Evaluatio
     if not isinstance(raw, dict):
         raise ValueError("evaluation checkpoint must be a mapping")
     if digest == PROXY_SHA256:
+        precision = "bf16" if decoder_precision is None else decoder_precision
         saved = raw["cfg"]
         if (saved["experiment_id"], saved["checkpoint_format_version"], saved["arm"], raw["step"]) != (
             "063_percentile_conditioning_v1",
@@ -274,6 +283,7 @@ def load_evaluation_checkpoint(path: Path, *, device: torch.device) -> Evaluatio
                 "format",
                 "architecture",
                 "ranges",
+                "decoder_precision",
                 "max_opponent_queue",
                 "critic_hidden_dim",
                 "model",
@@ -293,6 +303,9 @@ def load_evaluation_checkpoint(path: Path, *, device: torch.device) -> Evaluatio
         if not isinstance(range_values, dict) or set(range_values) != {"log_lambda", "delay", "replan"}:
             raise ValueError("evaluation conditioning fields changed")
         ranges = ConditioningRanges(range_values["log_lambda"], range_values["delay"], range_values["replan"])
+        precision = validate_decoder_precision(raw["decoder_precision"])
+        if decoder_precision is not None and decoder_precision != precision:
+            raise ValueError("decoder precision differs from the evaluation checkpoint")
         queue, critic = raw["max_opponent_queue"], raw["critic_hidden_dim"]
         stats = {name: FeatureStats(**value) for name, value in raw["statistics"].items()}
         provenance = raw["provenance"]
@@ -304,7 +317,9 @@ def load_evaluation_checkpoint(path: Path, *, device: torch.device) -> Evaluatio
         raise ValueError("evaluation statistics must be nonempty")
     state = raw["model"]
     vocabulary = vocabulary_from_checkpoint_buffer(state["player_code_bytes"].numpy())
-    model = SelfPlayTransformer(cfg, ranges, vocabulary, max_opponent_queue=queue, critic_hidden_dim=critic)
+    model = SelfPlayTransformer(
+        cfg, ranges, vocabulary, max_opponent_queue=queue, critic_hidden_dim=critic, decoder_precision=precision
+    )
     expected = model.state_dict()
     for name, tensor in state.items():
         if name not in expected or not isinstance(tensor, torch.Tensor) or tensor.dtype != expected[name].dtype:
@@ -320,6 +335,7 @@ def load_evaluation_checkpoint(path: Path, *, device: torch.device) -> Evaluatio
             {
                 "architecture": {name: value for name, value in asdict(cfg).items() if name != "value_hidden_dim"},
                 "ranges": asdict(ranges),
+                "decoder_precision": precision,
                 "statistics": {name: asdict(value) for name, value in stats.items()},
             },
             sort_keys=True,

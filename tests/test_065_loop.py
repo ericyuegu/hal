@@ -13,6 +13,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -615,7 +616,12 @@ def test_full_batch_critic_loss_and_gradient_match_shuffled_order(device: str) -
 
 
 def transformer_trainer(
-    device: str, *, development: bool = False, deterministic: bool = False, compiled: bool = False
+    device: str,
+    *,
+    development: bool = False,
+    deterministic: bool = False,
+    compiled: bool = False,
+    decoder_precision: Literal["bf16", "fp32"] = "bf16",
 ) -> Any:
     from hal.data.feature_stats import FeatureStats
     from hal.data.feature_stats import consolidate_key
@@ -659,7 +665,14 @@ def transformer_trainer(
     )
     ranges = ConditioningRanges((math.log(0.01), math.log(0.02)), (8, 10) if development else (0, 0), (2, 4))
     model = (
-        SelfPlayTransformer(cfg, ranges, vocabulary, max_opponent_queue=14 if development else 4, critic_hidden_dim=8)
+        SelfPlayTransformer(
+            cfg,
+            ranges,
+            vocabulary,
+            max_opponent_queue=14 if development else 4,
+            critic_hidden_dim=8,
+            decoder_precision=decoder_precision,
+        )
         .to(device)
         .eval()
     )

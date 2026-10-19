@@ -58,7 +58,9 @@ from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.attention import KVMemory
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.self_play import validate_decoder_precision
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 from hal.sim import native
 from hal.sim import native_bridge
@@ -4351,7 +4353,8 @@ def _configuration_digest(trainer: Trainer) -> str:
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["compiled"] = trainer.policy.compiled
-        identity["decision_kernels"] = "fp32_decoder_fixed_tick_graph_v3"
+        identity["decision_kernels"] = "decoder_precision_fixed_tick_graph_v4"
+        identity["decoder_precision"] = trainer.policy.model.decoder_precision
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
         identity["statistics"] = {key: dataclasses.asdict(value) for key, value in trainer.policy.statistics.items()}
@@ -4548,6 +4551,7 @@ def load_development_policy(
     lambda_max: float = 100.0,
     device: str = "cuda",
     compiled: bool = False,
+    decoder_precision: DecoderPrecision = "bf16",
 ) -> TransformerPolicy:
     """Load the recorded O63 bootstrap30 checkpoint with fresh RL optimizer state."""
     if sha256(checkpoint) != PROXY_SHA256:
@@ -4581,7 +4585,9 @@ def load_development_policy(
     state = saved["model"]
     vocabulary = vocabulary_from_checkpoint_buffer(state["player_code_bytes"].numpy())
     ranges = ConditioningRanges((math.log(lambda_min), math.log(lambda_max)), (8, 10), (2, 4))
-    model = SelfPlayTransformer(cfg, ranges, vocabulary, max_opponent_queue=14, critic_hidden_dim=128)
+    model = SelfPlayTransformer(
+        cfg, ranges, vocabulary, max_opponent_queue=14, critic_hidden_dim=128, decoder_precision=decoder_precision
+    )
     model.load_bc_state_dict(state)
     return TransformerPolicy(model.to(device).eval(), schedule, statistics, compiled=compiled)
 
@@ -4619,6 +4625,8 @@ def run_training(
         "invariants": "BC checkpoint, representation, data, simulator, adapter, reward, evaluation seeds",
         "run": run_configuration,
     }
+    if isinstance(trainer.policy, TransformerPolicy):
+        resolved["decoder_precision"] = trainer.policy.model.decoder_precision
     (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
     with wandb.init(project=wandb_project, mode="disabled" if wandb_project is None else "online", config=resolved):
         wandb.define_metric("global_step")
@@ -4686,6 +4694,7 @@ class ProxyCli:
     output: Path
     device: str = "cuda"
     compiled: bool = False
+    decoder_precision: DecoderPrecision = "bf16"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4711,8 +4720,10 @@ class NativeCli:
     fixed_anchor_lanes: bool = True
     wandb_project: str | None = None
     profiling: ProfileConfig | None = None
+    decoder_precision: DecoderPrecision = "bf16"
 
     def __post_init__(self) -> None:
+        validate_decoder_precision(self.decoder_precision)
         if self.profiling is not None and (
             self.device != "cuda"
             or self.training.critic_warmup_updates
@@ -4777,7 +4788,9 @@ def train_native(config: NativeCli) -> None:
     if sha256(config.checkpoint) != PROXY_SHA256:
         raise ValueError("native development run requires the recorded O63 proxy")
     torch.manual_seed(config.training.seed)
-    checkpoint = load_evaluation_checkpoint(config.checkpoint, device=torch.device(config.device))
+    checkpoint = load_evaluation_checkpoint(
+        config.checkpoint, device=torch.device(config.device), decoder_precision=config.decoder_precision
+    )
     checkpoint.model.requires_grad_(True)
     checkpoint.model.percentile_head.requires_grad_(False)
     schedule = development_config(checkpoint.model.head_offsets)
@@ -4836,6 +4849,8 @@ def train_native(config: NativeCli) -> None:
                 *config.evaluation_simulators,
                 "--device",
                 config.evaluation_device,
+                "--decoder-precision",
+                config.decoder_precision,
                 "--cadence-grid",
                 "8/4",
                 "10/2",
@@ -4897,7 +4912,7 @@ def profile_native(
                     "critic_parameters": sum(p.numel() for p in trainer.policy.critic_parameters()),
                     "formula": "2*9.4e6*trunk_tokens + 2*6.7e6*decoder_tokens; actor times 3; critic 6*parameters*rows*epochs",
                     "excludes": "attention score/value products, nonlinearities, feature building, optimizer, copies",
-                    "decoder_precision": "FP32",
+                    "decoder_precision": config.decoder_precision,
                     "trunk_precision": "BF16",
                 },
             },
@@ -4968,6 +4983,7 @@ class GpuProfileCli:
     matches_per_shard: int = 64
     groups: int = 4
     warm_updates: int = 4
+    decoder_precision: DecoderPrecision = "bf16"
 
     def native(self) -> NativeCli:
         return NativeCli(
@@ -4983,6 +4999,7 @@ class GpuProfileCli:
             training=TrainConfig(critic_warmup_updates=0, windows_per_step=32),
             evaluation_every=0,
             profiling=ProfileConfig(self.warm_updates),
+            decoder_precision=self.decoder_precision,
         )
 
 
@@ -5133,7 +5150,13 @@ def qualify_development(config: ProxyCli) -> None:
     stats = {
         name: FeatureStats(value["mean"], value["std"], value["min"], value["max"]) for name, value in raw.items()
     }
-    policy = load_development_policy(config.checkpoint, stats, device=config.device, compiled=config.compiled)
+    policy = load_development_policy(
+        config.checkpoint,
+        stats,
+        device=config.device,
+        compiled=config.compiled,
+        decoder_precision=config.decoder_precision,
+    )
     report = {
         "checkpoint_sha256": PROXY_SHA256,
         "schedule": dataclasses.asdict(policy.schedule),
@@ -5141,6 +5164,7 @@ def qualify_development(config: ProxyCli) -> None:
         "actor_parameters": sum(p.numel() for p in policy.actor_parameters()),
         "critic_parameters": sum(p.numel() for p in policy.critic_parameters()),
         "statistics_sha256": sha256(config.statistics),
+        "decoder_precision": policy.model.decoder_precision,
         "environment": _environment(),
     }
     config.output.parent.mkdir(parents=True, exist_ok=True)

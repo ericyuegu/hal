@@ -16,6 +16,7 @@ from hal.eval.conditioned_matchups import evaluate
 from hal.eval.conditioned_matchups import pilot_protocol
 from hal.eval.conditioned_matchups import read_protocol
 from hal.eval.self_play_policy import PlayerCondition
+from hal.models.self_play import DecoderPrecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class Args:
     device: str = "cuda"
     execution: Literal["serial", "batched"] = "batched"
     dolphin_workers: int = 8
+    decoder_precision: DecoderPrecision | None = None
 
 
 def main(args: Args) -> None:
@@ -78,6 +80,7 @@ def main(args: Args) -> None:
         condition_grid=grid,
         execution=args.execution,
         dolphin_workers=args.dolphin_workers,
+        decoder_precision=args.decoder_precision,
     )
 
 

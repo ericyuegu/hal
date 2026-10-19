@@ -39,6 +39,7 @@ from hal.eval.self_play_checkpoint import sha256
 from hal.eval.self_play_policy import PlayerCondition
 from hal.eval.self_play_policy import SelfPlayPlayer
 from hal.eval.self_play_policy import SelfPlayPolicy
+from hal.models.self_play import DecoderPrecision
 from hal.policy import INCLUDED_STAGES
 from hal.sim.inputs import native_controller_readback
 from hal.sim.native import FRAME_DTYPE
@@ -728,6 +729,7 @@ def evaluate(
     session: SessionConfig | None = None,
     execution: Literal["serial", "batched"] = "batched",
     dolphin_workers: int = 8,
+    decoder_precision: DecoderPrecision | None = None,
 ) -> dict[str, object]:
     if (
         not anchors
@@ -749,8 +751,11 @@ def evaluate(
     if history_mode not in ("block", "sliding") or (execution == "batched" and history_mode != "block"):
         raise ValueError("batched evaluation requires block history; use serial execution for sliding history")
     output.mkdir(parents=True, exist_ok=False)
-    focal = load_evaluation_checkpoint(checkpoint, device=torch.device(device))
-    frozen = [load_evaluation_checkpoint(anchor, device=torch.device(device)) for anchor in anchors]
+    focal = load_evaluation_checkpoint(checkpoint, device=torch.device(device), decoder_precision=decoder_precision)
+    frozen = [
+        load_evaluation_checkpoint(anchor, device=torch.device(device), decoder_precision=decoder_precision)
+        for anchor in anchors
+    ]
     grid = (conditions,) if condition_grid is None else condition_grid
     if not grid or len(set(grid)) != len(grid):
         raise ValueError("evaluation condition grid must be nonempty and unique")
@@ -800,6 +805,8 @@ def evaluate(
         ],
         "timeout_frame": 28800,
         "inference_dtype": str(next(focal.model.parameters()).dtype),
+        "decoder_precision": focal.model.decoder_precision,
+        "anchor_decoder_precision": [anchor.model.decoder_precision for anchor in frozen],
         "git_sha": git_sha,
         "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()),
         "environment": {

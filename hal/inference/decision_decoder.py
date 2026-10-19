@@ -1,4 +1,4 @@
-"""Sample controller chunks and replay conditional log-probabilities in FP32."""
+"""Sample and replay controller chunks with FP32 probability arithmetic."""
 
 from collections.abc import Callable
 from functools import partial
@@ -117,12 +117,14 @@ class DecisionDecoder:
             ):
                 raise ValueError(f"{name} contains buttons incompatible with its triggers")
         condition = self.model.ranges.normalize(log_lambda, delay, replan, validate=validate)
-        # Decoder residuals and heads dominate the joint BF16 log-ratio error.
-        # Keep the trunk and stored history in their caller's compute dtype.
-        with torch.autocast(hidden.device.type, enabled=False):
-            hidden = hidden.float()
+        bf16 = self.model.decoder_precision == "bf16"
+        dtype = torch.bfloat16 if bf16 else torch.float32
+        # Own the precision boundary even when evaluation has no outer autocast.
+        # Disable weight caching: rollout graphs must read updated actor weights.
+        with torch.autocast(hidden.device.type, dtype=torch.bfloat16, enabled=bf16, cache_enabled=False):
+            hidden = hidden.to(dtype)
             if history is not None:
-                history = KVMemory(history.kv.float(), history.positions, history.query_position, history.window)
+                history = KVMemory(history.kv.to(dtype), history.positions, history.query_position, history.window)
             if self.compiled and hidden.is_cuda and sampled_actions is None:
                 return self._sample_graph(
                     hidden,

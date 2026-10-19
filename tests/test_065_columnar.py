@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 import torch
 
+from hal.models.self_play import DecoderPrecision
 from hal.wire import ACTION_DIM
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,7 @@ def capture(
     verify_resume: bool = False,
     warmup: bool = False,
     fixed_anchor_lanes: bool = False,
+    decoder_precision: DecoderPrecision = "fp32",
 ) -> dict[str, object]:
     if matches not in (16, 64):
         raise ValueError("local capture requires 16 or 64 matches")
@@ -91,7 +93,9 @@ def capture(
     torch.set_num_threads(2)
     torch.use_deterministic_algorithms(not performance)
     torch.manual_seed(65)
-    checkpoint = exp.load_evaluation_checkpoint(ROOT / "runs/proxy/final.pt", device=torch.device("cuda"))
+    checkpoint = exp.load_evaluation_checkpoint(
+        ROOT / "runs/proxy/final.pt", device=torch.device("cuda"), decoder_precision=decoder_precision
+    )
     checkpoint.model.requires_grad_(True)
     checkpoint.model.percentile_head.requires_grad_(False)
     schedule = exp.development_config(checkpoint.model.head_offsets)
@@ -172,6 +176,8 @@ def capture(
         if fixed_anchor_lanes:
             result["configuration"]["fixed_anchor_lanes"] = True
             result["configuration"]["anchor_counts"] = list(engine.anchor_counts)
+        if performance:
+            result["configuration"]["decoder_precision"] = decoder_precision
         (output / "capture.json").write_text(json.dumps(result, indent=2, sort_keys=True))
         return result
 
@@ -431,6 +437,7 @@ if __name__ == "__main__":
     parser.add_argument("--verify-resume", action="store_true")
     parser.add_argument("--warmup", action="store_true")
     parser.add_argument("--fixed-anchor-lanes", action="store_true")
+    parser.add_argument("--decoder-precision", choices=("bf16", "fp32"), default="fp32")
     args = parser.parse_args()
     capture(
         args.matches,
@@ -439,4 +446,5 @@ if __name__ == "__main__":
         verify_resume=args.verify_resume,
         warmup=args.warmup,
         fixed_anchor_lanes=args.fixed_anchor_lanes,
+        decoder_precision=args.decoder_precision,
     )

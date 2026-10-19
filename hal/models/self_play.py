@@ -1,6 +1,7 @@
 """Condition a percentile policy on episode settings and fit a detached residual critic."""
 
 from collections.abc import Mapping
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -14,6 +15,16 @@ from hal.models.action_sequence import decoder_rmsnorm
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
 from hal.representation.player_identity import PlayerVocabulary
+
+type DecoderPrecision = Literal["bf16", "fp32"]
+
+
+def validate_decoder_precision(value: str) -> DecoderPrecision:
+    if value == "bf16":
+        return "bf16"
+    if value == "fp32":
+        return "fp32"
+    raise ValueError("decoder precision must be bf16 or fp32")
 
 
 class QueueResidualHead(nn.Module):
@@ -68,14 +79,21 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         *,
         max_opponent_queue: int,
         critic_hidden_dim: int,
+        decoder_precision: DecoderPrecision = "bf16",
     ) -> None:
+        precision = validate_decoder_precision(decoder_precision)
         super().__init__(cfg, vocabulary, live_horizons=())
+        self._decoder_precision = precision
         self.ranges = ranges
         with torch.random.fork_rng(devices=[]):
             self.temporal.return_conditioner = ReturnConditioner(cfg, ranges)
             self.percentile_head = SwiGLU(cfg.d_model, cfg.value_hidden_dim, 65, output_bias=True)
             self.critic_residual = QueueResidualHead(cfg, max_opponent_queue, critic_hidden_dim)
         self.percentile_head.requires_grad_(False)
+
+    @property
+    def decoder_precision(self) -> DecoderPrecision:
+        return self._decoder_precision
 
     def load_bc_state_dict(self, state: Mapping[str, Tensor]) -> None:
         """Load BC tensors and widen the conditioner with zero-valued input columns.
