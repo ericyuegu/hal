@@ -127,3 +127,30 @@ parity test incorrectly checked support on unexecuted padded factors; it now
 checks only executed factors. A later run exposed the overly tight cached
 value limit. The comparison above records both old and new cache-to-training
 gaps. Final qualification has five passes and no skips.
+
+
+## Task 3: keep the student scoring pass
+
+The precision trial uses the same inputs, sampler, update schedule and tick
+graphs. Treatment runs the context encoder, trunk and stored KV history in
+FP32. Control uses BF16 there. Both retain the existing FP32 decoder and the
+unchanged BF16 student no-grad pass, which matches actor precision. Each arm
+runs three complete PPO updates; these steady numbers average updates 2 and 3.
+The gap is the absolute **joint decision** log-probability difference over
+executed factors, as logged by `numerics/mu_old_gap_*`.
+
+| Matches | Rollout precision | Rollout s | Update s | Mean p99 gap, nats | Maximum gap, nats |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 16 | BF16 | 4.337 | 5.520 | 0.049790 | 0.119801 |
+| 16 | FP32 | 4.899 | 6.073 | 0.050752 | 0.133454 |
+| 64 | BF16 | 8.091 | 12.396 | 0.039873 | 0.138781 |
+| 64 | FP32 | 10.515 | 14.836 | 0.051842 | 0.176960 |
+
+The near-FP32 gate was p99 <= 1e-5 nats, allowing some margin over the earlier
+4e-6 observation. This implementation does not reproduce that observation
+against the current BF16 training pass. FP32 costs another 0.563 s per rollout
+at 16 matches and 2.424 s at 64, while its gap stays around 0.05 nats. That is
+large enough to change importance weights materially. Task 3 stops at its
+specified gate: no stored-value approximation replaces pi_old, and no factor
+or critic-feature cache is added. The FP32 trial remains only as local evidence;
+production code retains BF16 rollouts and the student scoring pass.
