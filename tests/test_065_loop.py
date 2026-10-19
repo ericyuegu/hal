@@ -532,8 +532,12 @@ def test_warmup_skips_reference_evaluation(monkeypatch: pytest.MonkeyPatch) -> N
     assert run.actor_steps == 0
 
 
-def test_student_and_reference_evaluations_are_identical_before_first_actor_step() -> None:
-    run = transformer_trainer("cpu", development=True)
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"))],
+)
+def test_student_and_reference_evaluations_are_identical_before_first_actor_step(device: str) -> None:
+    run = transformer_trainer(device, development=True)
     run = exp.Trainer(run.engine, dataclasses.replace(run.config, critic_warmup_updates=100))
     match = run.engine.matches[0]
     players = tuple(
@@ -555,7 +559,7 @@ def test_student_and_reference_evaluations_are_identical_before_first_actor_step
         )
         for side in range(2)
     )
-    actions = torch.zeros(2, 4, 4, dtype=torch.long)
+    actions = torch.zeros(2, 4, 4, dtype=torch.long, device=device)
 
     def compare() -> None:
         with torch.no_grad():
