@@ -5544,6 +5544,15 @@ def train_native(config: NativeCli) -> None:
             verify_checkpoint_resume(trainer, config.output, provenance)
 
 
+def validate_profile_sites(sites: set[str], *, bootstrap: bool) -> None:
+    required = {"rollout/tick", "rollout/boundary_tick", "reference/windows", "critic/fit", "actor/step"}
+    if bootstrap:
+        required.add("preparation/bootstrap")
+    missing = required - sites
+    if missing:
+        raise ValueError(f"profile is missing required sites: {sorted(missing)}")
+
+
 def profile_native(
     trainer: Trainer,
     config: NativeCli,
@@ -5605,17 +5614,10 @@ def profile_native(
             del batch
             recorder.write(metrics)
         estimates = estimate_profile(*recorders)
-        required = {
-            "rollout/tick",
-            "rollout/boundary_tick",
-            "reference/trunk_chunk",
-            "reference/decoder_chunk",
-            "critic/fit",
-            "actor/step",
-        }
-        missing = required - set(cast(dict[str, object], estimates["sites"]))
-        if missing:
-            raise ValueError(f"profile is missing required sites: {sorted(missing)}")
+        validate_profile_sites(
+            set(cast(dict[str, object], estimates["sites"])),
+            bootstrap=bool(recorders[0].calls.get("preparation/bootstrap", 0)),
+        )
         critic_flops = (
             6
             * sum(p.numel() for p in trainer.policy.critic_parameters())

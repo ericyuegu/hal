@@ -222,3 +222,15 @@ def test_missing_device_activity_is_an_error(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="no CUDA kernels"):
         gpu_profile.summarize_trace(path)
+
+
+def test_profile_requires_dense_window_sites_and_used_bootstraps() -> None:
+    sites = {"rollout/tick", "rollout/boundary_tick", "reference/windows", "critic/fit", "actor/step"}
+    gpu_profile.validate_profile_sites(sites, bootstrap=False)
+    with pytest.raises(ValueError, match="preparation/bootstrap"):
+        gpu_profile.validate_profile_sites(sites, bootstrap=True)
+    gpu_profile.validate_profile_sites(sites | {"preparation/bootstrap"}, bootstrap=True)
+    with pytest.raises(ValueError, match="reference/windows"):
+        gpu_profile.validate_profile_sites(
+            (sites - {"reference/windows"}) | {"reference/trunk_chunk", "reference/decoder_chunk"}, bootstrap=False
+        )
