@@ -55,15 +55,22 @@ from hal.inference.column_context import PackedColumnContextBuilder
 from hal.inference.cuda_graph import CapturedCall
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.decision_decoder import DecisionDecoder
+from hal.inference.graphed_actor import GraphedActorStep
 from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.attention import KVMemory
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
+from hal.models.replay_actor import ActorLoss
+from hal.models.replay_actor import ActorTargets
+from hal.models.replay_actor import actor_loss
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_decoder_precision
+from hal.models.window_replay import ReplayOutput
+from hal.models.window_replay import ReplaySlots
+from hal.models.window_replay import replay_windows
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 from hal.sim import native
 from hal.sim import native_bridge
@@ -1586,6 +1593,17 @@ class LoopPolicy(Protocol):
     def model(self) -> torch.nn.Module: ...
     @property
     def device(self) -> torch.device: ...
+    @property
+    def max_delay(self) -> int: ...
+    @property
+    def max_opponent_queue(self) -> int: ...
+    @property
+    def condition_ranges(self) -> ConditioningRanges: ...
+    def evaluate_windows(self, batch: ReplayBatch) -> ReplayOutput: ...
+    def evaluate_values(self, batch: ReplayBatch) -> Tensor: ...
+    def actor_step(
+        self, batch: ReplayBatch, targets: ActorTargets, *, clip_epsilon: float
+    ) -> tuple[ActorLoss, ReplayOutput]: ...
     def actor_parameters(self) -> tuple[torch.nn.Parameter, ...]: ...
     def critic_parameters(self) -> tuple[torch.nn.Parameter, ...]: ...
     def sample(self, states: Sequence[DecisionState], rng: CounterRng) -> PolicyEvaluation: ...
@@ -1698,6 +1716,30 @@ class TransformerPolicy:
         self.last_tick_values: Tensor | None = None
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
         self.tick_windows: dict[tuple[ActionRing, int], tuple[int, int]] = {}
+        self.window_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
+        self.value_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[Tensor]] = {}
+        self.queue_replay = (
+            torch.compile(
+                self.model.temporal.replay_window_queue_state,
+                fullgraph=True,
+                dynamic=False,
+                options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+            )
+            if self.device.type == "cuda"
+            else self.model.temporal.replay_window_queue_state
+        )
+        self.actor_graph: GraphedActorStep | None = None
+        self.actor_clip_epsilon: float | None = None
+        self.window_replay = (
+            torch.compile(
+                replay_windows,
+                fullgraph=True,
+                dynamic=False,
+                options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+            )
+            if self.device.type == "cuda"
+            else replay_windows
+        )
         self.caches: dict[int, CachedStream] = {}
         self.rollout_caches: dict[tuple[int, ...], BlockRestartCache] = {}
         self.used_cache_keys: set[tuple[int, ...]] = set()
@@ -1719,6 +1761,18 @@ class TransformerPolicy:
         else:
             self.device_wire_tables = tables
         self.wire_tables = tuple(value.cpu().numpy() for value in self.device_wire_tables)
+
+    @property
+    def max_delay(self) -> int:
+        return self.decoder.max_delay
+
+    @property
+    def max_opponent_queue(self) -> int:
+        return self.model.critic_residual.max_queue
+
+    @property
+    def condition_ranges(self) -> ConditioningRanges:
+        return self.model.ranges
 
     def actor_parameters(self) -> tuple[torch.nn.Parameter, ...]:
         return self.model.actor_parameters()
@@ -2450,6 +2504,123 @@ class TransformerPolicy:
                 )
         return _concatenate_evaluations(outputs)
 
+    def window_forward(self, inputs: tuple[Tensor, ...], *, grad: bool) -> ReplayOutput:
+        with (
+            torch.set_grad_enabled(grad),
+            torch.autocast(
+                self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda", cache_enabled=False
+            ),
+        ):
+            context, observed = self._packed_context(inputs[:5])
+            hidden = self.model(context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed)
+        # Torch 2.11 whole-trunk compilation failed the proxy precision gate.
+        # Capture the eager trunk together with the compiled shared-history decoder.
+        return self.window_replay(self.model, hidden, observed, ReplaySlots(*inputs[5:]), grad=grad)
+
+    @torch.no_grad()
+    def evaluate_windows(self, batch: ReplayBatch) -> ReplayOutput:
+        if self.profile is not None:
+            phase_name = self.profile.phase_name
+            self.profile.work[f"{phase_name}/trunk_tokens"] += batch.records.shape[0] * batch.records.shape[1]
+            self.profile.work[f"{phase_name}/decoder_tokens"] += batch.rows.numel() * (self.max_delay + 4)
+        inputs = batch.inputs()
+        if self.device.type == "cpu":
+            return self.window_forward(inputs, grad=False)
+        key = tuple(tuple(value.shape) for value in inputs)
+        captured = self.window_graphs.get(key)
+        if captured is None:
+            static = tuple(value.clone() for value in inputs)
+            with prepared_shape_compilation(64):
+                captured = CapturedCall(lambda: self.window_forward(static, grad=False), static, device=self.device)
+            self.window_graphs[key] = captured
+        return captured(inputs)
+
+    def value_forward(self, inputs: tuple[Tensor, ...]) -> Tensor:
+        slots = ReplaySlots(*inputs[5:])
+        valid = slots.valid_WK
+        positions = torch.where(valid, slots.positions_WK, 0)
+        delay = torch.where(valid, slots.delay_WK, 0)
+        condition = torch.where(valid[..., None], slots.condition_WK3, 0)
+        with torch.autocast(
+            self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda", cache_enabled=False
+        ):
+            context, observed = self._packed_context(inputs[:5])
+            hidden = self.model(context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed)
+        with torch.autocast(
+            self.device.type, dtype=torch.bfloat16, enabled=self.model.decoder_precision == "bf16", cache_enabled=False
+        ):
+            state = self.queue_replay(
+                hidden.float(), observed, positions, slots.history_starts_WL, slots.forced_queue_WKD4, delay, condition
+            )
+        rows = torch.arange(len(observed), device=self.device)[:, None]
+        lengths = torch.where(valid, slots.opponent_lengths_WK, 0)
+        opponent_queue = torch.where(
+            (torch.arange(self.max_opponent_queue, device=self.device) < lengths[..., None])[..., None],
+            slots.opponent_queue_WKQ4,
+            0,
+        )
+        features = CriticFeatures(
+            hidden[rows, positions].flatten(0, 1).detach(),
+            state.flatten(0, 1).detach(),
+            condition.flatten(0, 1),
+            torch.where(valid[..., None], slots.opponent_condition_WK3, 0).flatten(0, 1),
+            opponent_queue.flatten(0, 1),
+            lengths.flatten(),
+        )
+        return self.values(features, validate=False).reshape(valid.shape)
+
+    @torch.no_grad()
+    def evaluate_values(self, batch: ReplayBatch) -> Tensor:
+        if self.profile is not None:
+            phase_name = self.profile.phase_name
+            self.profile.work[f"{phase_name}/trunk_tokens"] += batch.records.shape[0] * batch.records.shape[1]
+            self.profile.work[f"{phase_name}/decoder_tokens"] += batch.rows.numel() * (self.max_delay + 1)
+        inputs = batch.inputs()
+        if self.device.type == "cpu":
+            return self.value_forward(inputs)
+        key = tuple(tuple(value.shape) for value in inputs)
+        captured = self.value_graphs.get(key)
+        if captured is None:
+            static = tuple(value.clone() for value in inputs)
+            with prepared_shape_compilation(64):
+                captured = CapturedCall(lambda: self.value_forward(static), static, device=self.device)
+            self.value_graphs[key] = captured
+        return captured(inputs)
+
+    def actor_step(
+        self, batch: ReplayBatch, targets: ActorTargets, *, clip_epsilon: float
+    ) -> tuple[ActorLoss, ReplayOutput]:
+        if self.profile is not None:
+            phase_name = self.profile.phase_name
+            self.profile.work[f"{phase_name}/trunk_tokens"] += batch.records.shape[0] * batch.records.shape[1]
+            self.profile.work[f"{phase_name}/decoder_tokens"] += batch.rows.numel() * (self.max_delay + 4)
+        inputs = batch.inputs()
+        if self.device.type == "cpu":
+            self.model.zero_grad(set_to_none=True)
+            output = self.window_forward(inputs, grad=True)
+            result = actor_loss(output, targets, clip_epsilon=clip_epsilon)
+            result.loss.backward()
+            detached = ReplayOutput(
+                output.log_probs_WKF.detach(),
+                tuple(value.detach() for value in output.distributions),
+                output.factor_mask_WKF,
+                output.features,
+            )
+            return result, detached
+        if self.actor_graph is not None and self.actor_clip_epsilon != clip_epsilon:
+            raise ValueError("actor clip epsilon differs from the captured objective")
+        if self.actor_graph is None:
+            with prepared_shape_compilation(64):
+                self.actor_graph = GraphedActorStep(
+                    lambda values: self.window_forward(values, grad=True),
+                    inputs,
+                    targets,
+                    self.actor_parameters(),
+                    clip_epsilon=clip_epsilon,
+                )
+            self.actor_clip_epsilon = clip_epsilon
+        return self.actor_graph.backward(inputs, targets), self.actor_graph.evaluation()
+
     def values(self, features: CriticFeatures, *, validate: bool = True) -> Tensor:
         return self.model.self_play_value(
             features.trunk,
@@ -2524,7 +2695,7 @@ class DecisionRecord:
 class Rollout:
     """Dense group storage stays valid until that group is collected again."""
 
-    records: Sequence[DecisionRecord | DecisionRecordView]
+    records: DecisionRecords
     group: int
     update: int
     frames: int
@@ -3407,6 +3578,9 @@ class RolloutEngine:
                 policy.tick_graphs.clear()
                 policy.tick_caches.clear()
                 policy.current_layouts.clear()
+                policy.window_graphs.clear()
+                policy.value_graphs.clear()
+                policy.actor_graph = None
         for group_id, matches in enumerate(self.group_matches):
             for lane, match in enumerate(matches):
                 state = self.matches[match]
@@ -4167,55 +4341,171 @@ class PreparedUpdate:
     selected: Tensor
     steps: tuple[Tensor, ...]
     metrics: dict[str, float]
+    windows: ReplayBatch
+    placement: WindowPlacement
 
 
-def select_decisions(
-    records: Sequence[DecisionRecord | DecisionRecordView],
-    eligible: Tensor,
-    rng: CounterRng,
-    update: int,
-    count: int,
-    windows_per_step: int,
-) -> tuple[Tensor, tuple[Tensor, ...]]:
-    if count < 1 or windows_per_step < 1:
-        raise ValueError("selection counts must be positive")
-    if not isinstance(records, DecisionRecords):
-        raise TypeError("selection requires tensor decision storage")
-    meta = records.states.tensor(records.states.table.integers)
-    _check_tensor("eligible decisions", eligible, (len(meta),), "bool", meta.device)
-    keys, inverse = torch.unique(meta[:, [STREAM, BLOCK]], dim=0, return_inverse=True)
-    windows = len(keys)
-    if not windows:
-        return torch.zeros_like(eligible), ()
-    # Stable sorts give each window its own random order without a [W,J] matrix.
-    draws = rng.tensor_uniform(1, meta[:, STREAM], meta[:, EPISODE], meta[:, CLOCK])
-    order = torch.argsort(torch.where(eligible, draws, torch.inf), stable=True)
-    order = order[torch.argsort(inverse[order], stable=True)]
-    sizes = torch.bincount(inverse, minlength=windows)
-    starts = sizes.cumsum(0) - sizes
-    rank = torch.arange(len(meta), device=meta.device) - starts[inverse[order]]
+@dataclasses.dataclass(frozen=True, slots=True)
+class ReplayBatch:
+    """Packed windows and their fixed decision slots; rows index dense storage."""
+
+    records: Tensor
+    applied_actions: Tensor
+    sides: Tensor
+    identities: Tensor
+    lengths: Tensor
+    slots: ReplaySlots
+    rows: Tensor
+    metadata: Tensor
+
+    def inputs(self) -> tuple[Tensor, ...]:
+        return (
+            self.records,
+            self.applied_actions,
+            self.sides,
+            self.identities,
+            self.lengths,
+            *(getattr(self.slots, name) for name in REPLAY_SLOT_NAMES),
+        )
+
+    def take(self, windows: Tensor, positions: Tensor, live: Tensor) -> ReplayBatch:
+        """Gather a padded actor step without materializing per-decision history."""
+        at = windows.clamp(0, len(self.records) - 1)
+        selected_positions = positions[at]
+        fields = []
+        for name in REPLAY_SLOT_NAMES:
+            value = getattr(self.slots, name)
+            selected = value[at]
+            if name != "history_starts_WL":
+                selected = selected[torch.arange(len(at), device=at.device)[:, None], selected_positions]
+            if name == "valid_WK":
+                selected = selected & live[:, None]
+            fields.append(selected)
+        return ReplayBatch(
+            self.records[at],
+            self.applied_actions[at],
+            self.sides[at],
+            self.identities[at],
+            self.lengths[at],
+            ReplaySlots(*fields),
+            self.rows[at[:, None], selected_positions],
+            self.metadata[at[:, None], selected_positions],
+        )
+
+
+REPLAY_SLOT_NAMES = tuple(field.name for field in dataclasses.fields(ReplaySlots))
+
+
+def replay_batch(policy: LoopPolicy, table: DecisionTable, rows: Tensor, valid: Tensor) -> ReplayBatch:
+    """Assemble device slots from one episode per block, guaranteed by reset cadence."""
+    meta = table.integers[rows]
+    active_lengths = torch.where(valid, meta[..., LENGTH], 0)
+    longest = active_lengths.argmax(1)
+    index = torch.arange(len(rows), device=rows.device)
+    window = meta[index, longest]
+    lengths = active_lengths.amax(1).clamp_min(1)
+    time = torch.arange(256, device=rows.device)[None]
+    in_history = time < lengths[:, None]
+    positions = torch.where(in_history, window[:, START, None] + time, 0)
+    flat = (positions * table.store.records.shape[1] + window[:, LANE, None]).flatten()
+    records = table.store.records.flatten(0, 1)[flat].reshape(len(rows), 256, -1)
+    applied = table.store.actions.flatten(0, 1)[flat].reshape(len(rows), 256, 2, ACTION_DIM)
+    records = torch.where(in_history[..., None], records, 0)
+    applied = torch.where(in_history[..., None, None], applied, 0)
+    conditions = table.conditions[rows]
+    remaining = table.remaining_device[rows]
+    remaining = torch.where(remaining < 0, meta[..., DELAY] + meta[..., REPLAN], remaining)
+    frame = torch.arange(1, 5, device=rows.device)
+    mask = (frame <= meta[..., REPLAN, None]) & (meta[..., DELAY, None] + frame <= remaining[..., None])
+    mask = mask.repeat_interleave(4, -1)
+    slots = ReplaySlots(
+        (meta[..., LENGTH] - 1).clamp_min(0),
+        valid,
+        torch.zeros(len(rows), 256, dtype=torch.long, device=rows.device),
+        table.prefix[rows, : policy.max_delay],
+        meta[..., DELAY],
+        meta[..., REPLAN],
+        policy.condition_ranges.normalize(conditions[..., 0], meta[..., DELAY], meta[..., REPLAN], validate=False),
+        policy.condition_ranges.normalize(
+            conditions[..., 1], meta[..., OPP_DELAY], meta[..., OPP_REPLAN], validate=False
+        ),
+        table.opponent[rows, : policy.max_opponent_queue],
+        meta[..., OPP_LENGTH],
+        table.actions[rows],
+        mask.reshape(*rows.shape, 16),
+    )
+    return ReplayBatch(records, applied, window[:, SIDE], window[:, IDENTITY], lengths, slots, rows, meta)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class WindowPlacement:
+    selected: Tensor  # [W,K]
+    positions: Tensor  # [W,decisions_per_window]
+    windows: Tensor  # [steps,windows_per_step], -1 padding
+
+
+def place_windows(
+    batch: ReplayBatch, rng: CounterRng, update: int, count: int, windows_per_step: int
+) -> WindowPlacement:
+    if not 1 <= count <= batch.rows.shape[1] or windows_per_step < 1:
+        raise ValueError("invalid decision/window selection shape")
+    eligible = batch.slots.valid_WK & batch.slots.executed_WKF.any(-1)
+    meta = batch.metadata
+    draws = rng.tensor_uniform(1, meta[..., STREAM], meta[..., EPISODE], meta[..., CLOCK])
+    positions = torch.argsort(torch.where(eligible, draws, torch.inf), stable=True)[:, :count]
     selected = torch.zeros_like(eligible)
-    selected[order] = (rank < count) & eligible[order]
-    active = torch.zeros(windows, device=meta.device, dtype=torch.long)
-    active.scatter_add_(0, inverse, selected.long())
-    live_windows = torch.nonzero(active > 0).flatten()
-    if not len(live_windows):
-        return selected, ()
-    matches, match_at = torch.unique(keys[live_windows, 0] // 2, return_inverse=True)
-    sizes = torch.bincount(match_at, minlength=len(matches))
-    steps = max(int(sizes.max()), math.ceil(len(live_windows) / windows_per_step))
+    selected.scatter_(1, positions, eligible.gather(1, positions))
+    live = selected.any(-1)
+    total = int(live.sum())
+    if not total:
+        return WindowPlacement(
+            selected, positions, torch.empty(0, windows_per_step, dtype=torch.long, device=meta.device)
+        )
+    matches, inverse = torch.unique(meta[:, 0, MATCH], return_inverse=True)
+    sizes = torch.zeros(len(matches), dtype=torch.long, device=meta.device)
+    sizes.scatter_add_(0, inverse, live.long())
+    steps = max(int(sizes.max()), math.ceil(total / windows_per_step))
     match_order = torch.argsort(
         rng.tensor_uniform(2, matches, torch.zeros_like(matches), torch.full_like(matches, update)), stable=True
     )
-    match_rank = torch.empty_like(match_order)
-    match_rank[match_order] = torch.arange(len(matches), device=meta.device)
-    ordered = live_windows[torch.argsort(match_rank[match_at], stable=True)]
-    # Contiguous windows of each match span distinct slots; round-robin bounds
-    # every slot by windows_per_step, including ragged or all-anchor matches.
-    placement = torch.full((windows,), -1, dtype=torch.long, device=meta.device)
-    placement[ordered] = torch.arange(len(ordered), device=meta.device) % steps
-    row_step = placement[inverse]
-    return selected, tuple(torch.nonzero((row_step == step) & selected).flatten() for step in range(steps))
+    rank = torch.empty_like(match_order)
+    rank[match_order] = torch.arange(len(matches), device=meta.device)
+    ordered = torch.argsort(rank[inverse], stable=True)
+    ordered = ordered[live[ordered]]
+    index = torch.arange(total, device=meta.device)
+    placed = torch.full((steps, windows_per_step), -1, dtype=torch.long, device=meta.device)
+    placed[index % steps, index // steps] = ordered
+    return WindowPlacement(selected, positions, placed)
+
+
+def window_indices(rows: Tensor, players: int) -> Tensor:
+    tick = rows // players
+    return ((tick // 64) * players + rows % players) * 64 + tick % 64
+
+
+def window_evaluation(output: ReplayOutput, actions: Tensor, indices: Tensor) -> PolicyEvaluation:
+    def flatten(value: Tensor) -> Tensor:
+        return value.flatten(0, 1)[indices]
+
+    features = output.features
+    return PolicyEvaluation(
+        actions,
+        flatten(output.log_probs_WKF),
+        tuple(flatten(value) for value in output.distributions),
+        CriticFeatures(
+            *(
+                flatten(getattr(features, name))
+                for name in (
+                    "trunk_WKd",
+                    "decoder_WKt",
+                    "condition_WK3",
+                    "opponent_condition_WK3",
+                    "opponent_queue_WKQ4",
+                    "opponent_lengths_WK",
+                )
+            )
+        ),
+    )
 
 
 class Trainer:
@@ -4254,16 +4544,23 @@ class Trainer:
         records = rollout.records
         decisions = _decision_batch(records, device)
         states = records.states if isinstance(records, DecisionRecords) else [r.state for r in records]
-        actions = (
-            states.tensor(states.table.actions)
-            if isinstance(states, DecisionRows)
-            else torch.stack([r.actions for r in records]).to(device)
-        )
         if not isinstance(states, DecisionRows) or states.table.evaluation is None:
             raise ValueError("rollout is missing its behavior evaluation")
-        old = _take_evaluation(states.table.evaluation, states.device_ids)
-        with phase(self.profile, "reference"):
-            reference = None if self.warming else self.reference.evaluate(states, actions)
+        table = states.table
+        players = 2 * len(self.engine.group_matches[rollout.group])
+        ticks = self.engine.sampler.schedule.rollout_frames // 2
+        size = ticks * players
+        rows = torch.arange(size, device=device).reshape(-1, 64, players).transpose(1, 2).reshape(-1, 64)
+        windows = replay_batch(self.policy, table, rows, table.valid[rows])
+        compact = window_indices(states.device_ids, players)
+        assert table.evaluation is not None
+        old = _take_evaluation(table.evaluation, states.device_ids)
+        with phase(self.profile, "reference"), sample(self.profile, "windows", work=float(rows.numel())):
+            reference = (
+                None
+                if self.warming
+                else window_evaluation(self.reference.evaluate_windows(windows), old.actions, compact)
+            )
         kl = (
             torch.zeros_like(old.log_probs)
             if reference is None
@@ -4291,17 +4588,15 @@ class Trainer:
             raise ValueError("GAE trace crossed an episode reset")
         boundary_mask = boundary & ~terminal
         boundary_at = torch.nonzero(boundary_mask).flatten()
-        boundary_indices = boundary_at.cpu().tolist()
-        boundary_states = table.rows(following[boundary_at].cpu().numpy())
         all_values = table.values.clone()
-        if len(boundary_states):
-            neutral = torch.zeros(len(boundary_states), 4, 4, dtype=torch.long, device=device)
-            bootstrap = self.policy.evaluate(boundary_states, neutral)
-            all_values[boundary_states.device_ids] = self.policy.values(bootstrap.features)
+        bootstrap_rows = torch.arange(size, len(table.values), device=device)[:, None]
+        bootstrap_valid = torch.zeros_like(table.valid)
+        bootstrap_valid[following[boundary_at]] = True
+        if len(boundary_at):
+            with sample(self.profile, "bootstrap", work=float(len(bootstrap_rows))):
+                bootstrap_batch = replay_batch(self.policy, table, bootstrap_rows, bootstrap_valid[bootstrap_rows])
+                all_values[size:] = self.policy.evaluate_values(bootstrap_batch).flatten()
         next_values = torch.where(terminal, 0, all_values[following.clamp_min(0)])
-        players = 2 * len(self.engine.group_matches[rollout.group])
-        ticks = self.engine.sampler.schedule.rollout_frames // 2
-        size = ticks * players
         dense_rewards = torch.zeros_like(table.values)
         dense_next = torch.zeros_like(table.values)
         dense_rewards[states.device_ids] = rewards
@@ -4317,14 +4612,15 @@ class Trainer:
         )
         advantages = result.advantages.flatten()[states.device_ids]
         targets = result.value_targets.flatten()[states.device_ids]
-        selected, steps = select_decisions(
-            records,
-            decisions.loss_mask_J,
+        placement = place_windows(
+            windows,
             self.engine.sampler.rng,
             rollout.update,
             self.config.decisions_per_window,
             self.config.windows_per_step,
         )
+        selected = placement.selected.flatten()[compact]
+        steps = tuple(placement.windows.unbind(0))
         executed = decisions.executed_factors_JF
         gap = torch.where(executed, old.log_probs - decisions.behavior_log_probs_JF, 0).sum(-1)
         metrics = {
@@ -4343,7 +4639,7 @@ class Trainer:
             "data/resets": float(rollout.resets),
             "data/timeouts": float(rollout.timeouts),
             "systems/rollout_seconds": rollout.elapsed,
-            "systems/no_grad_seconds": time.perf_counter() - started,
+            "systems/preparation_seconds": time.perf_counter() - started,
             "systems/simulator_fps": rollout.frames / rollout.elapsed,
             "systems/rollout_frames": float(rollout.frames),
             "systems/reset_idle_frames": float(rollout.idle_frames),
@@ -4384,28 +4680,28 @@ class Trainer:
                     counts[value] += 1
                 for key, value in counts.items():
                     metrics[f"data/{name}_{key}"] = float(value)
-        if isinstance(boundary_states, DecisionRows):
-            final_positions = np.flatnonzero(boundary_states.meta[:, CLOCK] % 256 == 0)
-            final_indices = [boundary_indices[int(i)] for i in final_positions]
-            shorter: Sequence[DecisionState] = boundary_states.take(final_positions).tail(129)
-        else:
-            final_indices = []
-            shorter_list = []
-            for index, state in zip(boundary_indices, boundary_states, strict=True):
-                if state.clock % 256 == 0:
-                    final_indices.append(index)
-                    shorter_list.append(
-                        dataclasses.replace(
-                            state,
-                            frames=state.frames[-129:],
-                            window=(state.window[0], state.stream, state.clock, state.episode.number),
-                        )
-                    )
-            shorter = shorter_list
-        if final_indices:
-            replay = self.policy.evaluate(shorter, torch.zeros(len(shorter), 4, 4, dtype=torch.long, device=device))
+        final_rows = following[boundary_at]
+        final = table.integers[final_rows, CLOCK] % self.engine.sampler.schedule.rollout_frames == 0
+        subset = final_rows[final][:32]
+        if len(subset):
+            shorter = replay_batch(
+                self.policy, table, subset[:, None], torch.ones(len(subset), 1, device=device, dtype=torch.bool)
+            )
+            length = shorter.lengths.clamp_max(129)
+            shift = shorter.lengths - length
+            frame = torch.arange(256, device=device)[None]
+            source = (shift[:, None] + frame).clamp_max(255)
+            records_short = shorter.records.gather(1, source[..., None].expand(-1, -1, shorter.records.shape[-1]))
+            applied_short = shorter.applied_actions.gather(1, source[..., None, None].expand(-1, -1, 2, ACTION_DIM))
+            shorter = dataclasses.replace(
+                shorter,
+                records=records_short,
+                applied_actions=applied_short,
+                lengths=length,
+                slots=dataclasses.replace(shorter.slots, positions_WK=length[:, None] - 1),
+            )
             metrics["critic/bootstrap_context_gap"] = float(
-                (self.policy.values(replay.features) - next_values[final_indices]).abs().mean()
+                (self.policy.evaluate_values(shorter).flatten() - all_values[subset]).abs().mean()
             )
         for timing in self.engine.sampler.schedule.configurations:
             mask = (decisions.delay_J == timing.delay) & (decisions.replan_J == timing.replan)
@@ -4421,7 +4717,18 @@ class Trainer:
             valid = torch.arange(4, device=device)[None] < decisions.replan_J[:, None]
             metrics[f"policy/entropy_{factor}"] = float(entropy[valid].mean())
         return PreparedUpdate(
-            rollout, decisions, old, reference, values, advantages, targets, selected, steps, metrics
+            rollout,
+            decisions,
+            old,
+            reference,
+            values,
+            advantages,
+            targets,
+            selected,
+            steps,
+            metrics,
+            windows,
+            placement,
         )
 
     def fit(self, batch: PreparedUpdate) -> dict[str, float]:
@@ -4436,7 +4743,6 @@ class Trainer:
         ):
             features = batch.old.features.detached()
             count = len(batch.values)
-            states = batch.rollout.records.states if isinstance(batch.rollout.records, DecisionRecords) else None
             selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
             for _ in range(cfg.critic_epochs):
                 self.critic_optimizer.zero_grad(set_to_none=True)
@@ -4461,63 +4767,72 @@ class Trainer:
             return metrics
         assert batch.reference is not None
         started = time.perf_counter()
-        policy_losses: list[float] = []
-        kl_losses: list[float] = []
+        policy_losses: list[Tensor] = []
+        kl_losses: list[Tensor] = []
         ratios: list[Tensor] = []
         old_log_ratios: list[Tensor] = []
+        table = batch.rollout.records.states.table
+        dense_advantage = torch.zeros_like(table.values)
+        dense_advantage[batch.rollout.records.states.device_ids] = batch.advantages
+        assert batch.reference is not None
+        reference_dense = tuple(
+            value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions
+        )
+        for target, value in zip(reference_dense, batch.reference.distributions, strict=True):
+            target[batch.rollout.records.states.device_ids] = value
         with phase(self.profile, "actor"):
-            for step, indices in enumerate(batch.steps):
-                with sample(self.profile, "step", work=float(len(indices)), limit=2):
-                    at = indices
-                    decisions = _take_decisions(batch.decisions, at)
-                    selected = batch.selected[at]
-                    statistics = advantage_statistics(advantage_moments(batch.advantages[at], selected))
-                    step_states = (
-                        states.take(indices.cpu().numpy())
-                        if states is not None
-                        else [batch.rollout.records[index].state for index in indices]
+            for step, window_ids in enumerate(batch.steps):
+                with sample(
+                    self.profile, "step", work=float(cfg.windows_per_step * cfg.decisions_per_window), limit=2
+                ):
+                    live = window_ids >= 0
+                    windows = batch.windows.take(window_ids, batch.placement.positions, live)
+                    selected = (
+                        batch.placement.selected[window_ids.clamp_min(0)].gather(
+                            1, batch.placement.positions[window_ids.clamp_min(0)]
+                        )
+                        & live[:, None]
                     )
-                    self.actor_optimizer.zero_grad(set_to_none=True)
-                    new = self.policy.evaluate(step_states, batch.old.actions[at])
-                    reference = _take_evaluation(batch.reference, at)
-                    policy_loss = ppo_loss(
-                        decisions,
-                        new.log_probs,
-                        batch.advantages[at],
+                    advantages = dense_advantage[windows.rows]
+                    statistics = advantage_statistics(advantage_moments(advantages.flatten(), selected.flatten()))
+                    targets = ActorTargets(
+                        table.behavior[windows.rows],
+                        advantages,
                         selected,
-                        statistics,
-                        clip_epsilon=cfg.clip_epsilon,
+                        table.coefficients[windows.rows],
+                        tuple(value[windows.rows] for value in reference_dense),
+                        statistics.mean.float(),
+                        statistics.sigma.float(),
+                        selected.sum().float(),
                     )
-                    kl_loss = differentiable_kl_loss(
-                        decisions, factor_kl(new, reference, decisions.executed_factors_JF), selected, statistics
-                    )
-                    loss = policy_loss.loss + kl_loss
-                    loss.backward()
+                    result, current = self.policy.actor_step(windows, targets, clip_epsilon=cfg.clip_epsilon)
                     torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )
                     self.actor_optimizer.step()
                     self.scheduler.step()
                     self.actor_steps += 1
-                    policy_losses.append(float(policy_loss.loss.detach()))
-                    kl_losses.append(float(kl_loss.detach()))
-                    ratios.append(policy_loss.joint_ratio_J[selected].detach())
-                    old_gap = torch.where(
-                        decisions.executed_factors_JF, new.log_probs.detach() - batch.old.log_probs[at], 0
-                    ).sum(-1)
-                    old_log_ratios.append(old_gap[selected])
-                    metrics[f"policy/old_log_ratio_step{step}"] = float(old_gap[selected].mean())
-                    old_policy = _take_evaluation(batch.old, at)
-                    old_kl = factor_kl(new, old_policy, decisions.executed_factors_JF).detach()
-                    metrics[f"policy/old_kl_step{step}"] = float(
-                        torch.where(decisions.executed_factors_JF & selected[:, None], old_kl, 0).sum()
-                        / selected.sum()
+                    policy_losses.append(result.policy_loss.detach())
+                    kl_losses.append(result.kl_loss.detach())
+                    ratio = result.joint_ratio_WK[selected].detach()
+                    ratios.append(ratio)
+                    old_log_ratios.append(ratio.log())
+                    metrics[f"policy/old_log_ratio_step{step}"] = float(ratio.log().mean())
+                    assert table.evaluation is not None
+                    new = window_evaluation(
+                        current,
+                        table.actions[windows.rows].flatten(0, 1),
+                        torch.arange(windows.rows.numel(), device=windows.rows.device),
                     )
+                    previous = _take_evaluation(table.evaluation, windows.rows.flatten())
+                    mask = (current.factor_mask_WKF & selected[..., None]).flatten(0, 1)
+                    old_kl = factor_kl(new, previous, mask)
+                    metrics[f"policy/old_kl_step{step}"] = float(torch.where(mask, old_kl, 0).sum() / selected.sum())
         ratio = torch.cat(ratios)
         metrics.update(
             {
-                "policy/loss": sum(policy_losses) / len(policy_losses),
-                "policy/kl_loss": sum(kl_losses) / len(kl_losses),
+                "policy/loss": float(torch.stack(policy_losses).mean()),
+                "policy/kl_loss": float(torch.stack(kl_losses).mean()),
                 "policy/clip_fraction": float(((ratio - 1).abs() > cfg.clip_epsilon).float().mean()),
                 "policy/ratio_p01": float(ratio.quantile(0.01)),
                 "policy/ratio_p99": float(ratio.quantile(0.99)),
@@ -5442,6 +5757,9 @@ def _clear_execution_caches(trainer: Trainer) -> None:
             policy.tick_caches.clear()
             policy.tick_graphs.clear()
             policy.current_layouts.clear()
+            policy.window_graphs.clear()
+            policy.value_graphs.clear()
+            policy.actor_graph = None
 
 
 def _verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str], manifest: Path) -> None:

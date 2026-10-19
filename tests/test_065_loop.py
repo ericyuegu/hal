@@ -21,6 +21,7 @@ import torch
 from numpy.typing import NDArray
 
 from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.models.window_replay import ReplayCriticFeatures
 from hal.wire import ACTION_DIM
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -176,6 +177,51 @@ class ToyPolicy:
 
     def evaluate(self, states: Any, actions: torch.Tensor) -> Any:
         return self._evaluation(states, actions)
+
+    max_delay = 20
+    max_opponent_queue = 24
+    condition_ranges = exp.ConditioningRanges((math.log(0.01), math.log(100)), (0, 20), (2, 4))
+
+    def evaluate_windows(self, batch: Any) -> Any:
+        slots = batch.slots
+        count, positions = slots.valid_WK.shape
+        probabilities = self.model.logits.softmax(-1)[None, None, None].expand(count, positions, 4, 4, 2)
+        actions = slots.sampled_actions_WK44
+        logs = (
+            probabilities.log().gather(-1, actions[..., None]).squeeze(-1)[..., exp.DECODE_GROUP_INDICES].flatten(-2)
+        )
+        mask = slots.executed_WKF & slots.valid_WK[..., None]
+        trunk = torch.ones(count, positions, 1, device=self.device)
+        features = ReplayCriticFeatures(
+            trunk,
+            trunk,
+            slots.condition_WK3,
+            slots.opponent_condition_WK3,
+            slots.opponent_queue_WKQ4,
+            slots.opponent_lengths_WK,
+        )
+        return exp.ReplayOutput(
+            torch.where(mask, logs, 0),
+            tuple(probabilities[..., g, :] for g in exp.DECODE_GROUP_INDICES),
+            mask,
+            features,
+        )
+
+    def evaluate_values(self, batch: Any) -> torch.Tensor:
+        shape = batch.slots.valid_WK.shape
+        trunk = torch.ones(*shape, 1, device=self.device)
+        return self.model.value_head(trunk).squeeze(-1)
+
+    def actor_step(self, batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
+        self.model.zero_grad(set_to_none=True)
+        output = self.evaluate_windows(batch)
+        result = exp.actor_loss(output, targets, clip_epsilon=clip_epsilon)
+        result.loss.backward()
+        return result, dataclasses.replace(
+            output,
+            log_probs_WKF=output.log_probs_WKF.detach(),
+            distributions=tuple(p.detach() for p in output.distributions),
+        )
 
     def values(self, features: Any) -> torch.Tensor:
         return self.model.value_head(features.trunk.detach()).squeeze(-1)
@@ -597,8 +643,8 @@ def test_full_batch_critic_loss_and_gradient_match_shuffled_order(device: str) -
     with torch.no_grad():
         policy.model.critic_residual.residual.down.weight.fill_(0.03)
     features = exp.CriticFeatures(
-        torch.randn(count, 16, device=device),
-        torch.randn(count, 16, device=device),
+        torch.randn(count, policy.model.cfg.d_model, device=device),
+        torch.randn(count, policy.model.cfg.temporal_d_model, device=device),
         torch.randn(count, 3, device=device),
         torch.randn(count, 3, device=device),
         torch.zeros(count, 14, 4, dtype=torch.long, device=device),
@@ -652,10 +698,10 @@ def transformer_trainer(
         d_model=16,
         n_layers=1,
         n_heads=2,
-        temporal_d_model=16,
+        temporal_d_model=32,
         temporal_layers=1,
         temporal_heads=2,
-        temporal_ff_dim=32,
+        temporal_ff_dim=64,
         group_head_dim=8,
         value_hidden_dim=8,
         return_embed_dim=8,
