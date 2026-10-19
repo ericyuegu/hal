@@ -150,7 +150,7 @@ def old_forward(policy: Any, batch: ProxyBatch, *, grad: bool, fp32: bool = Fals
         target[slots.valid_WK] = value
         return target
 
-    # Keep this conversion outside timing of the old evaluator.
+    # The timed control also includes this slot-layout conversion.
     features = ReplayCriticFeatures(
         *(pad(getattr(result.features, field.name)) for field in dataclasses.fields(result.features))
     )
