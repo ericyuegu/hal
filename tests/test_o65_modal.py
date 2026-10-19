@@ -1,10 +1,12 @@
 import dataclasses
 import importlib.util
+import shlex
 import sys
 from pathlib import Path
 
 import pytest
 import torch
+import tyro
 from test_065_loop import exp
 from test_065_loop import transformer_trainer
 
@@ -18,6 +20,23 @@ _SPEC.loader.exec_module(launcher)
 Request = launcher.Request
 command = launcher.command
 select_cpus = launcher.select_cpus
+
+
+def test_image_delivery_commands_match_the_real_cli() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "o65_modal_delivery", Path(__file__).parents[1] / "scripts/o65_delivery.py"
+    )
+    assert spec is not None and spec.loader is not None
+    delivery = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = delivery
+    spec.loader.exec_module(delivery)
+    parsed = []
+    for line in launcher.image_commands("a" * 40):
+        argv = shlex.split(line)
+        if "scripts.o65_delivery" in argv:
+            parsed.append(tyro.cli(delivery.Args, args=argv[3:]))
+    assert [args.action for args in parsed] == ["install", "verify"]
+    assert all(args.output == Path("delivery") for args in parsed)
 
 
 @pytest.mark.parametrize(

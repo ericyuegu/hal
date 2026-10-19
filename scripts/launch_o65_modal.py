@@ -174,25 +174,29 @@ def run_remote(request: Request) -> int:
         modal.Volume.from_name(VOLUME).commit()
 
 
-def build_image(sha: str, secret: modal.Secret) -> modal.Image:
+def image_commands(sha: str) -> list[str]:
     root = str(REMOTE_ROOT)
-    commands = [
+    return [
         f"git init {root}",
         f"git -C {root} remote add origin https://github.com/ericyuegu/hal.git",
         f"git -C {root} fetch --depth=1 origin {sha}",
         f"git -C {root} checkout --detach FETCH_HEAD",
         "UV_INDEX_URL=https://pypi.org/simple uv sync --locked",
-        "/opt/venv/bin/python -m scripts.o65_delivery install --output delivery",
+        "/opt/venv/bin/python -m scripts.o65_delivery --action install --output delivery",
         "bash docker/o65-build-msl.sh /opt/o65-hal/delivery",
-        "/opt/venv/bin/python -m scripts.o65_delivery verify --output delivery",
+        "/opt/venv/bin/python -m scripts.o65_delivery --action verify --output delivery",
     ]
+
+
+def build_image(sha: str, secret: modal.Secret) -> modal.Image:
+    root = str(REMOTE_ROOT)
     return (
         modal.Image.from_registry(IMAGE)
         .entrypoint([])
         .apt_install("build-essential", "binutils")
         .env({"PYTHONPATH": root, "UV_PROJECT_ENVIRONMENT": "/opt/venv"})
         .workdir(root)
-        .run_commands(commands, secrets=[secret])
+        .run_commands(image_commands(sha), secrets=[secret])
         .env({"PYTHONPATH": f"{root}:{root}/delivery/msl"})
     )
 
