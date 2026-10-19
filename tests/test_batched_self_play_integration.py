@@ -1,5 +1,8 @@
 """Compare FP32 batched evaluation with independent serial MSL matches."""
 
+import copy
+import dataclasses
+import hashlib
 import os
 from pathlib import Path
 
@@ -25,8 +28,9 @@ from hal.sim.rollout import Slot
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize("distinct_weights", [False, True], ids=["shared-weights", "two-weights"])
 def test_proxy_batched_msl_actions_and_outcomes_through_resets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, distinct_weights: bool
 ) -> None:
     assert torch.cuda.is_available(), "the proxy parity test requires CUDA"
     root = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser().resolve()
@@ -39,17 +43,30 @@ def test_proxy_batched_msl_actions_and_outcomes_through_resets(
     checkpoint_path = Path("runs/proxy/final.pt")
     assert checkpoint_path.is_file(), "required O63 proxy is missing"
     checkpoint = load_evaluation_checkpoint(checkpoint_path, device=torch.device("cuda"))
+    opponent = checkpoint
+    if distinct_weights:
+        model = copy.deepcopy(checkpoint.model)
+        with torch.no_grad():
+            weight = dict(model.named_parameters())["temporal.outputs.buttons.down.weight"]
+            weight.add_(torch.linspace(-0.001, 0.001, weight.numel(), device=weight.device).view_as(weight))
+        digest = hashlib.sha256()
+        for name, tensor in model.state_dict().items():
+            digest.update(name.encode())
+            digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+        opponent = dataclasses.replace(checkpoint, model=model, policy_sha256=digest.hexdigest())
+        assert opponent.policy_sha256 != checkpoint.policy_sha256
+    checkpoints = (checkpoint, opponent)
     conditions = (PlayerCondition(delay=8, replan=4), PlayerCondition(delay=10, replan=2))
     schedule = tuple(
         ScheduledMatch(EvaluationStart("fd", 25, (1, 22)), seed, port, str(seed))
         for seed in (17, 29)
         for port in (1, 2)
     )
-    batched = build_batched_policy((checkpoint, checkpoint), conditions, schedule)
-    serial = [
-        build_policy((checkpoint, checkpoint), conditions, seed=game.seed, focal_port=game.focal_port)
-        for game in schedule
-    ]
+    batched = build_batched_policy(checkpoints, conditions, schedule)
+    assert len(batched.models) == (2 if distinct_weights else 1)
+    assert all(model.compiled for model in batched.models)
+    model_by_slot = {stream.slot: model for model in batched.models for stream in model.streams}
+    serial = [build_policy(checkpoints, conditions, seed=game.seed, focal_port=game.focal_port) for game in schedule]
     # One-hit stockouts exercise winners and asynchronous resets after handoff.
     configs = tuple(
         NativeMatch(
@@ -96,10 +113,10 @@ def test_proxy_batched_msl_actions_and_outcomes_through_resets(
                         )
                     )
                     slot = Slot(lane, port)
-                    sampled = batched.models[0].last_sampled[slot]
+                    sampled = model_by_slot[slot].last_sampled[slot]
                     assert player.last_sampled is not None and player.last_log_probs is not None
                     torch.testing.assert_close(sampled, player.last_sampled, rtol=0, atol=0)
-                    gap = batched.models[0].last_log_probs[slot] - player.last_log_probs
+                    gap = model_by_slot[slot].last_log_probs[slot] - player.last_log_probs
                     max_log_gap = max(max_log_gap, float(gap.abs().max()))
             np.testing.assert_array_equal(actions, expected_actions)
             actions_trace.append(actions.copy())
@@ -132,7 +149,7 @@ def test_proxy_batched_msl_actions_and_outcomes_through_resets(
             assert frame.records is not None
             assert frame.records[0].tobytes() == final_records[lane].tobytes()
     short_schedule = schedule[:3]
-    short_policy = build_batched_policy((checkpoint, checkpoint), conditions, short_schedule)
+    short_policy = build_batched_policy(checkpoints, conditions, short_schedule)
     limits = (1, 4, 28800)
     short_configs = tuple(
         NativeMatch(
