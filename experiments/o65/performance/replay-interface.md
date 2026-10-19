@@ -32,7 +32,9 @@ experiment's `PolicyEvaluation` does. The four distributions have shapes
 `[W,K,4,V_group]`. `factor_mask_WKF` intersects valid slots, cadence and the
 execution mask. Every policy or KL reduction must use that mask. Critic
 features are detached, including z at D+1 before the first sampled factor.
-Flatten W and K to call `model.self_play_value`.
+Flatten W and K to call `model.self_play_value`. Use `slots.valid_WK` for critic
+fitting, including decisions with zero executed factors. Do not derive the
+critic mask from `factor_mask_WKF`.
 
 ## Actor capture
 

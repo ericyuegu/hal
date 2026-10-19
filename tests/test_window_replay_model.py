@@ -146,6 +146,30 @@ def test_critic_state_precedes_ego_draw_and_replay_rejects_unsupervised_offsets(
         validate_replay_inputs(unsupported, hidden, observed, slots)
 
 
+def test_unexecuted_valid_decision_retains_critic_features() -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    expected = replay_windows(policy, hidden, observed, slots, grad=False)
+    executed = slots.executed_WKF.clone()
+    executed[0, 0] = False
+    output = replay_windows(policy, hidden, observed, dataclasses.replace(slots, executed_WKF=executed), grad=False)
+    assert not bool(output.factor_mask_WKF[0, 0].any())
+    assert not bool(output.log_probs_WKF[0, 0].any())
+    torch.testing.assert_close(output.features.decoder_WKt[0, 0], expected.features.decoder_WKt[0, 0], rtol=0, atol=0)
+    features = output.features
+    value = policy.self_play_value(
+        features.trunk_WKd[0, :1],
+        features.decoder_WKt[0, :1],
+        features.condition_WK3[0, :1],
+        features.opponent_condition_WK3[0, :1],
+        features.opponent_queue_WKQ4[0, :1],
+        features.opponent_lengths_WK[0, :1],
+    )
+    value.sum().backward()
+    assert any(p.grad is not None and bool(p.grad.any()) for p in policy.critic_parameters())
+    assert all(p.grad is None for p in policy.actor_parameters())
+
+
 @pytest.mark.parametrize(
     "field",
     [
