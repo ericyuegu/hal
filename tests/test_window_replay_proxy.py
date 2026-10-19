@@ -47,9 +47,14 @@ class ProxyBatch:
     states: Any
     actions: Tensor
     source_indices: Tensor
+    advantages_WK: Tensor
+    value_targets_WK: Tensor
+    selected_WK: Tensor
+    kl_coefficient_WK: Tensor
 
 
-def pack(policy: Any, states: Any, decisions: Any, keys: list[tuple[int, ...]], slots_per_window: int) -> ProxyBatch:
+def pack(policy: Any, states: Any, prepared: Any, keys: list[tuple[int, ...]], slots_per_window: int) -> ProxyBatch:
+    decisions = prepared.decisions
     groups: dict[tuple[int, ...], list[int]] = defaultdict(list)
     for row, meta in enumerate(states.meta):
         groups[exp._window_key(meta)].append(row)
@@ -95,7 +100,18 @@ def pack(policy: Any, states: Any, decisions: Any, keys: list[tuple[int, ...]], 
         pad(actions),
         pad(decisions.executed_factors_JF[source]),
     )
-    return ProxyBatch(features, observed, slots, chosen, actions, source)
+    return ProxyBatch(
+        features,
+        observed,
+        slots,
+        chosen,
+        actions,
+        source,
+        pad(prepared.advantages[source]),
+        pad(prepared.targets[source]),
+        pad(prepared.selected[source]),
+        pad(decisions.kl_coefficient_J[source]),
+    )
 
 
 def window_forward(model: SelfPlayTransformer, batch: ProxyBatch, *, grad: bool, fp32: bool = False) -> ReplayOutput:
@@ -186,15 +202,15 @@ def values(model: SelfPlayTransformer, output: ReplayOutput) -> Tensor:
     ).reshape(output.log_probs_WKF.shape[:2])
 
 
-def targets(output: ReplayOutput, reference: ReplayOutput, behavior: Tensor) -> ActorTargets:
-    selected = output.factor_mask_WKF.any(-1)
-    # Fixed common advantages isolate numerical error from target estimation.
-    advantages = torch.linspace(-2, 2, selected.numel(), device="cuda").reshape_as(selected)
+def targets(output: ReplayOutput, reference: ReplayOutput, behavior: Tensor, batch: ProxyBatch) -> ActorTargets:
+    selected = batch.selected_WK & output.factor_mask_WKF.any(-1)
+    # The control's GAE targets stay fixed across all numerical paths.
+    advantages = batch.advantages_WK
     return ActorTargets(
         behavior,
         advantages,
         selected,
-        torch.full_like(advantages, 0.3),
+        batch.kl_coefficient_WK,
         reference.distributions,
         advantages[selected].mean(),
         advantages[selected].std(unbiased=False),
@@ -237,17 +253,18 @@ def quantities(
     )
     output = forward(policy.model if window else policy, batch, grad=True, fp32=fp32)
     ref_output = forward(reference.model if window else reference, batch, grad=False, fp32=fp32)
-    target = targets(output, ref_output, behavior)
+    target = targets(output, ref_output, behavior, batch)
     validate_actor_targets(output, target)
     loss = actor_loss(output, target)
+    diagnostic_kl = actor_loss(output, dataclasses.replace(target, selected_WK=output.factor_mask_WKF.any(-1)))
     mask = output.factor_mask_WKF
     selected = batch.slots.valid_WK
     critic_values = values(policy.model, output)
-    critic_targets = torch.linspace(-10, 10, selected.numel(), device="cuda").reshape_as(selected)
+    critic_targets = batch.value_targets_WK
     critic_loss = torch.where(selected, ((critic_values - critic_targets) / 150).square(), 0).sum() / selected.sum()
     result = {
         "log_probs": output.log_probs_WKF[mask].detach(),
-        "kl": loss.factor_kl_WKF[mask].detach(),
+        "kl": diagnostic_kl.factor_kl_WKF[mask].detach(),
         "values": critic_values[selected].detach(),
         "trunk_features": output.features.trunk_WKd[selected].detach(),
         "decoder_features": output.features.decoder_WKt[selected].detach(),
@@ -335,6 +352,11 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
     schedule = exp.development_config(checkpoint.model.head_offsets)
     policy = exp.TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics, compiled=True)
     reference = policy.frozen_copy()
+    # Nonzero KL and a nonzero residual critic exercise every precision path.
+    with torch.no_grad():
+        for head in policy.model.temporal.outputs.values():
+            head.down.bias.add_(torch.linspace(-0.1, 0.1, head.down.out_features, device="cuda"))
+        torch.nn.init.normal_(policy.model.critic_residual.residual.down.weight, std=0.005)
     source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
     sampling = exp.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json")
     with contextlib.ExitStack() as resources:
@@ -355,12 +377,9 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
         engine.initialize()
         rollout = engine.collect(0)
         states = rollout.records.states
-        decisions = exp._decision_batch(rollout.records, policy.device)
-        # Nonzero KL and a nonzero residual critic exercise all precision paths.
-        with torch.no_grad():
-            for head in policy.model.temporal.outputs.values():
-                head.down.bias.add_(torch.linspace(-0.1, 0.1, head.down.out_features, device="cuda"))
-            torch.nn.init.normal_(policy.model.critic_residual.residual.down.weight, std=0.005)
+        training = exp.TrainConfig(critic_warmup_updates=0, deterministic=False)
+        prepared = exp.Trainer(engine, training).prepare(rollout)
+        decisions = prepared.decisions
         groups: dict[tuple[int, ...], int] = {}
         for index, meta in enumerate(states.meta):
             if meta[exp.BLOCK] == 128:
@@ -371,7 +390,7 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
             if len(candidates) < 2:
                 raise ValueError("precision fixture needs two windows of each cadence")
             keys.extend(candidates[:2])
-        batch = pack(policy, states, decisions, keys, 64)
+        batch = pack(policy, states, prepared, keys, 64)
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             hidden = policy.model(
                 batch.features, torch.zeros(len(keys), dtype=torch.long, device="cuda"), batch.observed
@@ -385,6 +404,10 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                 "observed": batch.observed,
                 "slots": dataclasses.asdict(batch.slots),
                 "behavior": behavior,
+                "advantages": batch.advantages_WK,
+                "value_targets": batch.value_targets_WK,
+                "selected": batch.selected_WK,
+                "kl_coefficient": batch.kl_coefficient_WK,
             },
             output_dir / "inputs.pt",
         )
@@ -429,9 +452,12 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                 "tf32": False,
                 "compiler_options": {"triton.cudagraphs": False, "emulate_precision_casts": True},
                 "bias_shift": [-0.1, 0.1],
+                "actor_shift_applied_before_rollout": True,
                 "critic_residual_down_std": 0.005,
-                "advantages": "fixed linspace(-2,2)",
-                "critic_targets": "fixed linspace(-10,10)",
+                "advantages": "control GAE from the native rollout, fixed across numerical paths",
+                "critic_targets": "control GAE + V, fixed across numerical paths",
+                "selection": "control counter sampling, 16 decisions per window",
+                "training": dataclasses.asdict(training),
             },
         }
         default = quantities(policy, reference, batch, behavior, window=False, fp32=False)
@@ -484,7 +510,7 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                 for k in (32, 64):
                     eligible = [key for key, row in groups.items() if int(states.meta[row, exp.REPLAN]) == 128 // k]
                     for w in (1, 2, 4):
-                        measured = pack(policy, states, decisions, eligible[:w], k)
+                        measured = pack(policy, states, prepared, eligible[:w], k)
                         with torch.no_grad():
                             ref = window_forward(reference.model, measured, grad=False)
                             base = window_forward(policy.model, measured, grad=False)
@@ -492,7 +518,7 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
                         old_behavior[measured.slots.valid_WK] = decisions.behavior_log_probs_JF[
                             measured.source_indices
                         ]
-                        target = targets(base, ref, old_behavior)
+                        target = targets(base, ref, old_behavior, measured)
                         model = policy.model
                         tensors = (
                             *measured.features.values(),
