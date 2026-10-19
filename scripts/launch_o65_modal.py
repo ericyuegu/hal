@@ -33,8 +33,8 @@ MEMORY_MIB = 65536
 GPU_USD_SECOND = 0.000842
 CPU_USD_SECOND = 0.0000131
 MEMORY_USD_GIB_SECOND = 0.00000222
-MAX_GPU_SECONDS = 10800
-MAX_USD = 30.0
+MAX_GPU_SECONDS = 3600
+MAX_USD = 10.0
 BUILD_RESERVE_USD = 3.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
@@ -108,8 +108,6 @@ class Request:
     git_sha: str
     mode: Literal["smoke", "profile"] = "profile"
     matches: int = 1024
-    windows: int = 16
-    decisions: int = 128
     timeout_seconds: int = 1800
 
     def __post_init__(self) -> None:
@@ -122,8 +120,6 @@ class Request:
         allowed = (16,) if self.mode == "smoke" else (256, 1024)
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
-        if any(type(value) is not int or value < 1 for value in (self.windows, self.decisions)):
-            raise ValueError("chunk sizes must be positive integers")
         if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= 3600:
             raise ValueError("timeout must be 60 to 3600 seconds")
 
@@ -149,18 +145,15 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         "--matches-per-shard",
         str(request.matches // 16),
         "--groups",
-        "1" if request.mode == "smoke" else "4",
-        "--replay-chunks.windows",
-        str(request.windows),
-        "--replay-chunks.decisions",
-        str(request.decisions),
+        "1",
     ]
+    if request.mode == "profile":
+        argv.extend(("--warm-updates", "1"))
     if request.mode == "smoke":
         argv.extend(
             (
                 "--updates",
                 "1",
-                "--compiled",
                 "--training.critic-warmup-updates",
                 "0",
                 "--training.windows-per-step",
@@ -249,9 +242,9 @@ def run_child(request: Request, output: Path, started: float) -> int:
         "cpus": cpus,
         "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
-        "treatment": "active match count or no-grad chunks; see request",
+        "treatment": "dense tick storage and fixed window replay",
         "control": "1024 active matches, 16 windows and 128 decisions per no-grad chunk",
-        "invariants": "seed 65, proxy, sampler, simulator, D/R, reward, optimizer, 16 shards, four groups",
+        "invariants": "seed 65, proxy, sampler, simulator, D/R, reward, optimizer, 16 shards, one group",
     }
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
     with (output / "topology.txt").open("w") as log:
@@ -328,8 +321,6 @@ class Args:
     mode: Literal["smoke", "profile", "download"] = "profile"
     name: str | None = None
     matches: int = 1024
-    windows: int = 16
-    decisions: int = 128
     timeout_seconds: int = 1800
     secret: str = "hal"
     output: Path = Path("runs/modal")
@@ -344,14 +335,15 @@ def main(args: Args) -> None:
         return
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise ValueError("commit changes before launching published source")
-    if subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip() != "o65-modal":
-        raise ValueError("only branch o65-modal can launch this job")
+    branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip()
+    if branch not in ("o65-modal", "o65-dense"):
+        raise ValueError("only branch o65-modal or o65-dense can launch this job")
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    published = subprocess.check_output(["git", "ls-remote", "origin", "refs/heads/o65-modal"], cwd=ROOT, text=True)
+    published = subprocess.check_output(["git", "ls-remote", "origin", f"refs/heads/{branch}"], cwd=ROOT, text=True)
     if published.split()[:1] != [sha]:
-        raise ValueError("push o65-modal HEAD before launching")
+        raise ValueError(f"push {branch} HEAD before launching")
     name = args.name or f"{args.mode}-{args.matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
-    request = Request(name, sha, args.mode, args.matches, args.windows, args.decisions, args.timeout_seconds)
+    request = Request(name, sha, args.mode, args.matches, args.timeout_seconds)
     args.output.mkdir(parents=True, exist_ok=True)
     budget = args.output / "budget.jsonl"
     # Reserve the full timeout for each call, including failures and client loss.
