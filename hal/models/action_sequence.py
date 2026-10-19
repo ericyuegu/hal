@@ -622,16 +622,16 @@ class CausalTemporalDecoder(nn.Module):
         weight = self.token_projection.weight
         action_weight = weight[:, self.trunk_width : self.trunk_width + self.controller_width]
         offset_weight = weight[:, self.trunk_width + self.controller_width :]
-        action_features = self.codec.embed_frame(previous) if embedded is None else embedded
-        offset_features = self.offset_embedding(offsets)
         if self.return_conditioner.ranges is not None:
             # Errors in this small input projection enter every residual block.
             # Keep the projection, residual stream, and norms in FP32.
             with torch.autocast(previous.device.type, enabled=False):
-                return F.linear(action_features.float(), action_weight) + F.linear(
-                    offset_features.float(), offset_weight
+                action = F.linear(
+                    (self.codec.embed_frame(previous) if embedded is None else embedded).float(), action_weight
                 )
-        return F.linear(action_features, action_weight) + F.linear(offset_features, offset_weight)
+                return action + F.linear(self.offset_embedding(offsets).float(), offset_weight)
+        action = F.linear(self.codec.embed_frame(previous) if embedded is None else embedded, action_weight)
+        return action + F.linear(self.offset_embedding(offsets), offset_weight)
 
     def _trunk_skip_logits(self, hidden: Tensor) -> dict[str, Tensor]:
         """Compute context-only logits once for all decoded offsets."""
