@@ -34,5 +34,38 @@ execution mask. Every policy or KL reduction must use that mask. Critic
 features are detached, including z at D+1 before the first sampled factor.
 Flatten W and K to call `model.self_play_value`.
 
+## Actor capture
+
+`hal.models.replay_actor` provides `ActorTargets`, `ActorLoss`,
+`validate_actor_targets`, and `actor_loss`. Targets contain stored behavior
+factor log-probs, raw advantages, selection, lambda, reference probabilities,
+the common advantage mean/sigma, and a scalar denominator. Use the local
+selected decision count on one device. With DDP, use global count / world
+size, because DDP averages gradients. This boundary has no importance weight.
+The PPO clip is 0.2 and direct KL is weighted by lambda / sigma.
+
+`hal.inference.graphed_actor.GraphedActorStep` takes a forward callback, a tuple
+of tensor inputs, targets, and `model.actor_parameters()`. The callback must
+rebuild the trunk and call `replay_windows(..., grad=True)` from the supplied
+static tensor inputs. Include all changing slot tensors in that tuple; do not
+close over decision data that changes between calls. Compile the callback
+with `fullgraph=True`, `dynamic=False`, and `options={"triton.cudagraphs": False}`
+(default mode), or use `mode="max-autotune-no-cudagraphs"`. Compiled flex
+attention requires head width at least 16; the proxy uses 64.
+
+Release earlier eager autograd graphs before constructing capture buckets.
+Torch 2.11 retains the original stream on their leaf gradient nodes. Capture
+owns fixed gradient storage and rejects replacement of that storage. Run
+`step.backward(inputs, targets)`, then clipping and Muon outside the graph.
+Do not call `zero_grad(set_to_none=True)` after preparation. Backward clears
+the captured gradients itself. Returned loss tensors are copies, so later
+replays cannot overwrite an earlier result. Validate each new input payload
+at assembly time before entering the captured hot path.
+
+The graph helper contains no experiment import. Its small objective is a
+tested reimplementation at this model boundary; experiment losses were not
+moved or imported. The dense stream still owns trainer integration, selection,
+stored behavior probabilities, critic fitting, and persisted format changes.
+
 The approved BF16 decoder commits through `8decbe99` were already ancestors of
 this branch's base `aacdfee0`; no cherry-pick was needed.
