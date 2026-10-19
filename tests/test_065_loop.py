@@ -784,8 +784,13 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
 def test_actor_fit_rejects_missing_reference() -> None:
     run = trainer(groups=1, anchor_rate=0)
     batch = run.prepare(run.engine.collect(0))
+    before = copy.deepcopy(run.policy.model.state_dict())
     with pytest.raises(ValueError, match="actor update requires a reference evaluation"):
         run.fit(dataclasses.replace(batch, reference=None))
+    assert not run.actor_optimizer.state
+    assert not run.critic_optimizer.state
+    for name, value in before.items():
+        torch.testing.assert_close(run.policy.model.state_dict()[name], value, rtol=0, atol=0)
 
 
 def test_unfinished_update_cannot_be_checkpointed(tmp_path: Path) -> None:
