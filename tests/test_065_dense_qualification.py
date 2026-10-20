@@ -441,7 +441,7 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
             else:
                 matches = torch.tensor([row.state.match for row in batch.rollout.records], device=policy.device)
                 frame_reward = torch.tensor([sum(row.rewards) for row in batch.rollout.records], device=policy.device)
-            kl = module.factor_kl(batch.old, batch.reference, batch.decisions.executed_factors_JF)
+            kl = exp.factor_kl(batch.old, batch.reference, batch.decisions.executed_factors_JF)
             entropy = torch.zeros_like(batch.values)
             for p in batch.old.distributions:
                 entropy += torch.where(p > 0, -p * torch.where(p > 0, p, 1).log(), 0).sum(-1).sum(-1)
