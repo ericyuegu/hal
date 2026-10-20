@@ -1,10 +1,72 @@
 import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 import torch
 from test_065_loop import exp as gpu_profile
+
+
+@pytest.mark.integration
+def test_nvtx_phase_contains_its_completed_gpu_work(tmp_path: Path) -> None:
+    nsys = os.environ.get("HAL_NSYS_BINARY") or shutil.which("nsys")
+    if nsys is None or not torch.cuda.is_available():
+        if os.environ.get("HAL_REQUIRE_INTEGRATION") == "1":
+            pytest.fail("phase attribution requires Nsight Systems and CUDA")
+        pytest.skip("requires Nsight Systems and CUDA")
+    script = tmp_path / "phase.py"
+    script.write_text(
+        "import json, sys, torch\n"
+        "from pathlib import Path\n"
+        "from test_065_loop import exp\n"
+        "x = torch.randn(2048, 2048, device='cuda')\n"
+        "y = torch.empty_like(x)\n"
+        "for _ in range(2): torch.mm(x, x, out=y)\n"
+        "torch.cuda.synchronize()\n"
+        "graph = torch.cuda.CUDAGraph()\n"
+        "with torch.cuda.graph(graph):\n"
+        "    for _ in range(64): torch.mm(x, x, out=y)\n"
+        "recorder = exp.UpdateProfile(Path(sys.argv[1]), torch.device('cuda'), traces=False)\n"
+        "torch.cuda.profiler.start()\n"
+        "with recorder.phase('preparation'):\n"
+        "    with recorder.phase('reference'): graph.replay()\n"
+        "torch.cuda.profiler.stop()\n"
+    )
+    report = tmp_path / "phase"
+    subprocess.run(
+        [
+            nsys,
+            "profile",
+            "--trace=cuda,nvtx",
+            "--sample=none",
+            "--cpuctxsw=none",
+            "--cuda-graph-trace=node",
+            "--capture-range=cudaProfilerApi",
+            "--capture-range-end=stop",
+            f"--output={report}",
+            sys.executable,
+            str(script),
+            str(tmp_path),
+        ],
+        check=True,
+        timeout=60,
+    )
+    database = tmp_path / "phase.sqlite"
+    subprocess.run(
+        [nsys, "export", "--type=sqlite", f"--output={database}", str(report) + ".nsys-rep"], check=True, timeout=60
+    )
+    db = sqlite3.connect(database)
+    try:
+        end = db.execute("SELECT end FROM NVTX_EVENTS WHERE text='o65/reference'").fetchone()[0]
+        kernel_end = db.execute("SELECT MAX(end) FROM CUPTI_ACTIVITY_KIND_KERNEL").fetchone()[0]
+        assert end >= kernel_end
+    finally:
+        db.close()
 
 
 def test_trace_counts_device_work_once_and_merges_overlap(tmp_path: Path) -> None:

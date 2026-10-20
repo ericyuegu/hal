@@ -4301,9 +4301,9 @@ class UpdateProfile:
         try:
             yield
         finally:
-            torch.cuda.nvtx.range_pop()
             stop_event.record()
             stop_event.synchronize()
+            torch.cuda.nvtx.range_pop()
             self.phases[name] = {
                 "started_unix": started_unix,
                 "finished_unix": time.time(),
