@@ -14,28 +14,28 @@ PYTHONPATH="$HOME/src/melee-sim-light" \
 uv run python experiments/065_selfplay_ppo.py train \
   --checkpoint runs/proxy/final.pt --sampler experiments/o65/pilot-sampler.json \
   --data-dir "$HOME/src/melee-sim-light/data" --output runs/native-pilot \
-  --cpus 0 1 --groups 2 --matches-per-shard 1 --updates 2 --compiled \
+  --cpus 0 1 --groups 2 --matches-per-shard 1 --updates 2 \
   --training.windows-per-step 4 --training.critic-warmup-updates 0 \
   --training.checkpoint-interval 2 --training.deterministic \
   --evaluation-every 0 --verify-resume
 ```
 
 This functional check bypasses critic warmup. The defaults use Muon LR 1e-5,
-four critic epochs, importance cap 2, initial lambda maximum 100, Master
+four critic epochs, initial lambda maximum 100, Master
 deployment identity, and data floor 100. Warmup calibrates the lambda maximum.
 A short functional run cannot establish improved gameplay.
 
-With `--compiled`, the decoder samples through CUDA graphs with separate two-
-and four-offset variants. The native CUDA path also captures packed feature
-construction and trunk appends. The decoder computes in FP32; the trunk and
-stored history use BF16. Captured casts read current actor weights.
-See [the measured comparisons](performance/report.md).
+CUDA training uses graphs for dense tick storage, actor-shaped reference replay,
+and actor forward/backward. The decoder and trunk compute in BF16; probability
+arithmetic and critic heads use FP32. Captured casts read current actor weights.
+PPO uses stored behavior log-probs. See [dense validation and measurements](performance/dense.md).
 
 Normal training uses default Torch algorithms. `--training.deterministic`
 selects deterministic algorithms and configures cuBLAS before CUDA starts.
-`--verify-resume` requires that option. It restores the saved boundary, checks
-the entire next batch, both optimizers, scheduler, and model update, then restores
-the boundary again. [Validation results](validation.md) record the comparisons.
+`--verify-resume` runs the same graph path in deterministic mode, compares the
+next batch, both optimizers, scheduler, parameters and RNGs, then restores the
+original boundary and execution mode. Training format v5 and pool snapshot v3
+reject earlier persisted formats.
 
 The sampler JSON uses `hal.o65.sampler.v1`. It reads identity/character counts,
 weighted character pairs, HAL stage ids, a shared starting stock count, and

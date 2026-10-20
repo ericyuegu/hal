@@ -128,7 +128,6 @@ def training_command(
         str(matches),
         "--updates",
         str(updates),
-        "--compiled",
         "--training.windows-per-step",
         "32",
         "--training.seed",

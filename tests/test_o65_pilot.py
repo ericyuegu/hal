@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import tyro
 
 _SPEC = importlib.util.spec_from_file_location("o65_pilot", Path(__file__).parents[1] / "experiments/o65/pilot.py")
 assert _SPEC is not None and _SPEC.loader is not None
@@ -83,6 +84,10 @@ def test_pilot_reserves_determinism_for_resume_segments(tmp_path: Path, verify: 
     assert command[command.index("--evaluation-every") + 1] == "0"
     assert ("--training.deterministic" in command) == deterministic
     assert ("--verify-resume" in command) == verify
+    from test_065_loop import exp
+
+    parsed = tyro.cli(exp.NativeCli, args=command[3:])
+    assert parsed.verify_resume == verify and parsed.training.deterministic == deterministic
     evaluation = _MODULE.evaluation_command(
         tmp_path, tmp_path / "model", tmp_path / "protocol", tmp_path / "eval", held_out=False, simulators=("msl",)
     )

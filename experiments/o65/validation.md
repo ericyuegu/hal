@@ -1,5 +1,9 @@
 # Proxy validation
 
+This report preserves the earlier refactor checks and their commands. Current
+dense-path commands and evidence are in [the README](README.md) and
+[dense performance report](performance/dense.md).
+
 The refactor comparison starts from `o65-integrate` commit
 `55c1aef157dfc7190e0f90e6c040523f3e1c32b5`. The checkpoint, sampler, and
 training data hashes are recorded in [the measurement report](performance/report.md).
