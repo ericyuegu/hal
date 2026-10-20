@@ -175,3 +175,24 @@ def test_interrupted_staging_keeps_the_previous_checkpoint_readable(
     assert copied.index("new.pt") < copied.index("update-00000064.json")
     assert (destination / "old.pt").read_bytes() == b"old state"
     assert not (destination / "update-00000064.json").exists()
+
+
+def test_failed_pilot_preserves_the_published_resume_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    results, work = tmp_path / "results", tmp_path / "work"
+    published = results / "pilot/pilot"
+    published.mkdir(parents=True)
+    (published / "checkpoint").write_text("published update 32")
+
+    def run_child(request: Request, output: Path, started: float) -> int:
+        (output / "pilot/checkpoint").write_text("unpublished update 64")
+        return 1
+
+    monkeypatch.setattr(launcher, "RESULTS", results)
+    monkeypatch.setattr(launcher, "WORK", work)
+    monkeypatch.setattr(launcher, "run_child", run_child)
+    monkeypatch.setattr(launcher.modal.Volume, "from_name", Mock(return_value=Mock()))
+    assert launcher.run_remote(Request("pilot", "a" * 40, mode="pilot")) == 1
+    assert (published / "checkpoint").read_text() == "published update 32"
+    assert (results / "pilot/last-attempt/pilot/checkpoint").read_text() == "unpublished update 64"

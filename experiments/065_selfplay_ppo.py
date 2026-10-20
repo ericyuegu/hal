@@ -68,6 +68,7 @@ from hal.sim import native_bridge
 from hal.sim import native_shard
 from hal.sim.inputs import native_controller_readback
 from hal.sim.native_shard import NativeShard
+from hal.training import self_play_publication
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.wire import ACTION_DIM
 
@@ -4293,6 +4294,7 @@ def run_training(
     *,
     wandb_project: str | None = None,
     run_configuration: dict[str, object] | None = None,
+    publisher: self_play_publication.CheckpointPublisher | None = None,
 ) -> None:
     import wandb
 
@@ -4320,6 +4322,8 @@ def run_training(
         wandb.define_metric("*", step_metric="global_step")
         with (output / "metrics.jsonl").open("a") as log:
             while trainer.update < updates:
+                if publisher is not None:
+                    publisher.check()
                 batch, metrics = trainer.run_update()
                 del batch
                 resolved["calibrated_lambda_max"] = trainer.engine.sampler.lambda_max
@@ -4327,9 +4331,10 @@ def run_training(
                 wandb.log(metrics)
                 log.write(json.dumps(metrics, sort_keys=True) + "\n")
                 log.flush()
-                if trainer.update % trainer.config.checkpoint_interval == 0:
-                    save_checkpoint(trainer, output / "checkpoints", provenance)
-            save_checkpoint(trainer, output / "checkpoints", provenance)
+                if trainer.update % trainer.config.checkpoint_interval == 0 or trainer.update == updates:
+                    checkpoint = save_checkpoint(trainer, output / "checkpoints", provenance)
+                    if publisher is not None:
+                        publisher.submit(checkpoint)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4362,9 +4367,16 @@ class NativeCli:
     profiling: ProfileConfig | None = None
     decoder_precision: DecoderPrecision = "bf16"
     compile_cache: Path | None = None
+    publication: self_play_publication.Args | None = None
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.publication is not None:
+            self_play_publication.validate_args(self.publication)
+            if self.output.resolve() != (self.publication.source / "train").resolve():
+                raise ValueError("publication source must contain this run's train directory")
+            if self.verify_only:
+                raise ValueError("verify-only does not publish checkpoints")
         if self.verify_only and (not self.verify_resume or self.resume is None):
             raise ValueError("verify-only needs a resume checkpoint and verify-resume")
         if self.profiling is not None and (
@@ -4373,8 +4385,11 @@ class NativeCli:
             or self.resume is not None
             or self.wandb_project is not None
             or self.verify_resume
+            or self.publication is not None
         ):
-            raise ValueError("profiling requires CUDA, warmup off, fresh state, disabled W&B, and no resume check")
+            raise ValueError(
+                "profiling requires CUDA, warmup off, fresh state, disabled W&B, no publication or resume check"
+            )
         if (
             not self.cpus
             or len(set(self.cpus)) != len(self.cpus)
@@ -4519,6 +4534,11 @@ def train_native(config: NativeCli) -> None:
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)
             return
+        publisher = (
+            resources.enter_context(contextlib.closing(self_play_publication.CheckpointPublisher(config.publication)))
+            if config.publication is not None
+            else None
+        )
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
@@ -4544,6 +4564,7 @@ def train_native(config: NativeCli) -> None:
             provenance,
             wandb_project=config.wandb_project,
             run_configuration=native_config,
+            publisher=publisher,
         )
         if config.verify_resume:
             verify_checkpoint_resume(trainer, config.output, provenance)

@@ -84,7 +84,11 @@ largest per-cadence advantage spread within the conditioner bounds. We retain
 lambda_min=0.01 and record the calibrated maximum before PPO. Failure to leave
 warmup fails this stage.
 
-We publish complete checkpoints every 32 updates and at update 2,000.
+One trainer process runs all updates. It saves complete checkpoints every 32
+updates and at update 2,000. A worker publishes immutable local snapshots to
+the Modal Volume and R2. The queue holds at most two snapshots, including the
+active publication. A worker failure or full queue fails the run. The trainer
+drains publication before final evaluation.
 Training progress comes from existing anchor matches. After a real preemption,
 we resume from the latest complete checkpoint. The first warmup and PPO
 updates record allocated and reserved bytes by phase. We preserve partial
@@ -151,9 +155,11 @@ CPU ids for shards. Modal does not expose physical-core or NUMA topology.
 
 We store compilation results under hal-o65-profile:/compile-cache, separated
 by source, Torch, Triton, CUDA and GPU identity. Each process captures its own
-CUDA graphs. At publication boundaries, we copy local state into Modal Volume
-hal-o65-profile:/<run-name>/pilot, commit it, then copy changed files to
+CUDA graphs. The publication worker copies snapshots into Modal Volume
+hal-o65-profile:/<run-name>/pilot, commits them, then copies changed files to
 R2 o65/pilot-results/<run-name>/state/. We publish the file hash index last.
+Only this worker replaces the training resume tree. Final process cleanup
+stores local diagnostics under last-attempt, including unpublished state.
 
 We retain the latest complete resume state and every actor snapshot, move
 retired manifests into history, then remove unreferenced training/simulator
@@ -175,7 +181,7 @@ to 4.78 GPU-hours, or $18.69 to $20.75 compute before startup, publication and
 final evaluation. We make no allowance for cheaper critic warmup in that sum.
 
 We allow 6 to 8 GPU-hours and $29.07 to $37.76 compute for the full pilot,
-including a $3 build reserve, compilation, publication restarts and final play.
+including a $3 build reserve, compilation, publication and final play.
 The final grid's server runtime is unmeasured. These estimates use the rates
 recorded on 2026-10-20: GPU $0.000842/s, CPU $0.0000131/core/s and RAM
 $0.00000222/GiB/s. Storage and excess egress are additional charges.

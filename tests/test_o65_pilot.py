@@ -1,12 +1,17 @@
+import dataclasses
 import hashlib
 import importlib.util
 import json
+import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import tyro
+
+from hal.training import self_play_publication
 
 _SPEC = importlib.util.spec_from_file_location("o65_pilot", Path(__file__).parents[1] / "experiments/o65/pilot.py")
 assert _SPEC is not None and _SPEC.loader is not None
@@ -156,13 +161,7 @@ def test_latest_resume_rejects_a_corrupt_latest_instead_of_falling_back(tmp_path
 
 
 def test_publication_preserves_shards_before_manifests_and_compaction(tmp_path: Path) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "o65_pilot_state", Path(__file__).parents[1] / "scripts/o65_pilot_state.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = self_play_publication
     stage_state = module.stage_state
 
     source, destination = tmp_path / "source", tmp_path / "volume"
@@ -196,13 +195,7 @@ def test_latest_resume_rejects_a_renamed_manifest(tmp_path: Path) -> None:
 
 
 def test_publication_rejects_missing_and_overlapping_source_trees(tmp_path: Path) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "o65_pilot_state_guard", Path(__file__).parents[1] / "scripts/o65_pilot_state.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = self_play_publication
     source = tmp_path / "pilot"
     source.mkdir()
     checkpoint = source / "state.pt"
@@ -216,13 +209,7 @@ def test_publication_rejects_missing_and_overlapping_source_trees(tmp_path: Path
 
 
 def test_published_held_out_consumption_blocks_a_retry(tmp_path: Path) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "o65_pilot_state_claim", Path(__file__).parents[1] / "scripts/o65_pilot_state.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = self_play_publication
     source, volume = tmp_path / "local", tmp_path / "volume"
     source.mkdir()
     consumed = _MODULE.consume_held_out(source, 2000, tmp_path / "protocol.json")
@@ -241,3 +228,130 @@ def test_completed_pilot_cannot_resume_under_different_source(tmp_path: Path) ->
     with pytest.raises(ValueError, match="source or inputs differ"):
         _MODULE.bind_pilot_identity(tmp_path, "b" * 40, tiny=False)
     assert _MODULE.latest_checkpoint(tmp_path / "train/checkpoints").name == "update-00002000.json"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_publication_leaves_training_free_and_reports_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    started, release = threading.Event(), threading.Event()
+    caller = threading.get_ident()
+    source = tmp_path / "pilot"
+    source.mkdir()
+    (source / "pilot-identity.json").write_text("fixed identity")
+    destination = tmp_path / "volume"
+    published: list[int] = []
+
+    def publish(args: self_play_publication.Args) -> None:
+        assert threading.get_ident() != caller
+        started.set()
+        assert release.wait(timeout=30)
+        if fail:
+            raise OSError("publication failed")
+        self_play_publication.stage_state(args.source, args.destination)
+        checkpoint = _MODULE.latest_checkpoint(destination / "train/checkpoints")
+        update = json.loads(checkpoint.read_text())["update"]
+        rows = (destination / "train/metrics.jsonl").read_text().splitlines()
+        assert json.loads(rows[-1])["global_step"] == update
+        published.append(update)
+
+    monkeypatch.setattr(self_play_publication, "publish", publish)
+    publisher = self_play_publication.CheckpointPublisher(
+        self_play_publication.Args(source, destination, "test", "o65/pilot-results/test")
+    )
+    run = trainer(groups=1, anchor_rate=0)
+    run.config = dataclasses.replace(run.config, checkpoint_interval=1)
+    try:
+        exp.run_training(run, 2, source / "train", PROVENANCE, publisher=publisher)
+        assert started.wait(timeout=5)
+        assert run.update == 2 and not release.is_set()
+        # The first snapshot's shards survive local compaction at update two.
+        assert len(publisher.pending) == 2
+        with pytest.raises(RuntimeError, match="queue is full"):
+            publisher.submit(source / "train/checkpoints/update-00000002.json")
+    finally:
+        release.set()
+        if fail:
+            with pytest.raises(OSError, match="publication failed"):
+                publisher.close()
+            with pytest.raises(OSError, match="publication failed"):
+                publisher.check()
+        else:
+            publisher.close()
+    assert published == ([] if fail else [1, 2])
+
+
+def test_pilot_dispatches_one_trainer_with_in_process_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_065_loop import exp
+
+    output = tmp_path / "pilot"
+    commands: list[exp.NativeCli] = []
+
+    def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
+        if command[1] != str(_MODULE.ROOT / "experiments/065_selfplay_ppo.py"):
+            return
+        config = tyro.cli(exp.NativeCli, args=command[3:])
+        commands.append(config)
+        write_boundary(config.output / "checkpoints", config.updates)
+        (config.output / "metrics.jsonl").write_text('{"global_step":4,"train/warming":0}\n')
+
+    monkeypatch.setattr(_MODULE, "execute", execute)
+    _MODULE.main(
+        _MODULE.Args(
+            output,
+            local_delivery=tmp_path / "delivery",
+            tiny=True,
+            wandb=False,
+            publish_directory=tmp_path / "volume",
+            publish_volume="test",
+            r2_prefix="o65/pilot-results/test",
+        )
+    )
+    assert len(commands) == 1
+    assert commands[0].updates == 4 and commands[0].training.checkpoint_interval == 1
+    assert commands[0].publication == self_play_publication.Args(
+        output, tmp_path / "volume", "test", "o65/pilot-results/test"
+    )
+
+
+def test_training_rejects_publication_of_another_run(tmp_path: Path) -> None:
+    from test_065_loop import exp
+
+    with pytest.raises(ValueError, match="source must contain this run"):
+        exp.NativeCli(
+            tmp_path / "checkpoint.pt",
+            tmp_path / "sampler.json",
+            tmp_path / "other/train",
+            tmp_path / "data",
+            (min(os.sched_getaffinity(0)),),
+            1,
+            publication=self_play_publication.Args(
+                tmp_path / "pilot", tmp_path / "volume", "test", "o65/pilot-results/test"
+            ),
+        )
+
+
+def test_verify_only_rejects_unused_publication(tmp_path: Path) -> None:
+    from test_065_loop import exp
+
+    with pytest.raises(ValueError, match="verify-only does not publish"):
+        exp.NativeCli(
+            tmp_path / "checkpoint.pt",
+            tmp_path / "sampler.json",
+            tmp_path / "pilot/train",
+            tmp_path / "data",
+            (min(os.sched_getaffinity(0)),),
+            1,
+            resume=tmp_path / "resume.json",
+            verify_resume=True,
+            verify_only=True,
+            publication=self_play_publication.Args(
+                tmp_path / "pilot", tmp_path / "volume", "test", "o65/pilot-results/test"
+            ),
+        )

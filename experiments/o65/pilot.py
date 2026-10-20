@@ -20,6 +20,7 @@ import tyro
 import wandb
 
 from hal.eval.self_play_checkpoint import read_training_manifest
+from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,36 +38,6 @@ class Args:
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
-
-
-def compact_checkpoints(directory: Path, latest: int) -> None:
-    """Keep complete resume state for the latest update.
-
-    Retain every actor and move retired manifests into a separate history
-    directory before removing their unreferenced training and simulator files.
-    Call only while the trainer is stopped.
-    """
-    retained: set[str] = set()
-    retired = directory.parent / "retired-checkpoints"
-    parsed = [(path, read_training_manifest(path)) for path in sorted(directory.glob("update-*.json"))]
-    if latest not in {manifest["update"] for _, manifest in parsed}:
-        raise ValueError("latest checkpoint is missing")
-    for path, manifest in parsed:
-        if path.name != f"update-{manifest['update']:08d}.json":
-            raise ValueError("checkpoint filename differs from its update")
-        if (retired / path.name).exists():
-            raise FileExistsError(retired / path.name)
-    for path, manifest in parsed:
-        if manifest["update"] == latest:
-            retained.update(shard["name"] for shard in manifest["shards"])
-        else:
-            retired.mkdir(exist_ok=True)
-            target = retired / path.name
-            path.rename(target)
-    for pattern in ("*.rank0.pt", "*.sim.zlib"):
-        for path in directory.glob(pattern):
-            if path.name not in retained:
-                path.unlink()
 
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
@@ -333,28 +304,36 @@ def main(args: Args) -> None:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))
-    boundaries = list(range(1, updates + 1)) if args.tiny else [*range(32, updates + 1, 32), updates]
-    boundaries = sorted(set(boundaries))
+    publication = (args.publish_directory, args.publish_volume, args.r2_prefix)
+    if any(value is not None for value in publication):
+        if any(value is None for value in publication):
+            raise ValueError("pilot publication requires directory, volume and R2 prefix")
+        command.extend(
+            (
+                "publication:args",
+                "--publication.source",
+                str(output),
+                "--publication.destination",
+                str(args.publish_directory),
+                "--publication.volume",
+                str(args.publish_volume),
+                "--publication.r2-prefix",
+                str(args.r2_prefix),
+                "--publication.compact" if args.checkpoint_retention == "compact" else "--publication.no-compact",
+            )
+        )
     previous = latest_checkpoint(run / "checkpoints") if args.resume else None
     restored_update = read_training_manifest(previous)["update"] if previous is not None else 0
     if args.resume and previous is None and run.exists():
         run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
     if previous is not None:
         trim_interrupted_metrics(run / "metrics.jsonl", restored_update)
+        command.extend(("--resume", str(previous)))
     publish(args, output)
-    for boundary in boundaries:
-        if boundary <= restored_update:
-            continue
-        checkpoint = run / f"checkpoints/update-{boundary:08d}.json"
-        current = command.copy()
-        current[current.index("--updates") + 1] = str(boundary)
-        if previous is not None:
-            current.extend(("--resume", str(previous)))
-        execute(current, output / f"train-{boundary:08d}.log", environment)
-        previous = checkpoint
+    if restored_update < updates:
+        execute(command, output / "train.log", environment)
         if args.checkpoint_retention == "compact":
-            compact_checkpoints(run / "checkpoints", boundary)
-        publish(args, output)
+            compact_checkpoints(run / "checkpoints", updates)
     metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     last = next(row for row in reversed(metrics) if "train/warming" in row)
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):

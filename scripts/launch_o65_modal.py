@@ -230,7 +230,9 @@ def run_remote(request: Request) -> int:
         code = run_child(request, local, started)
         return code
     finally:
-        stage_results(local, output)
+        # Only the publisher may replace the pilot resume tree. A failed trainer
+        # can have newer local checkpoints which were never published.
+        stage_results(local, output / "last-attempt" if request.mode == "pilot" else output)
         (output / "result.json").write_text(
             json.dumps(
                 {
@@ -374,7 +376,7 @@ def pilot_estimate() -> dict[str, object]:
             6 * 3600 * rate + BUILD_RESERVE_USD,
             8 * 3600 * rate + BUILD_RESERVE_USD,
         ],
-        "assumptions": "async projection from performance.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, 32-update publication/restarts and a final 384-match MSL evaluation with four stocks and an eight-minute timer",
+        "assumptions": "async projection from performance.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, background publication every 32 updates and a final 384-match MSL evaluation with four stocks and an eight-minute timer",
         "hard_timeout_seconds": PILOT_TIMEOUT_SECONDS,
         "maximum_compute_usd": (PILOT_TIMEOUT_SECONDS + 360) * rate + BUILD_RESERVE_USD,
         "excludes": "storage/egress beyond included allowances; build variation",
