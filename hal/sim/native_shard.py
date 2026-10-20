@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from collections.abc import Sequence
 from concurrent.futures import Future
@@ -34,6 +35,7 @@ class NativeShard:
             raise ValueError("cpu must be in the caller's allowed CPU set")
         self._executor = ThreadPoolExecutor(max_workers=1, initializer=_bind_cpu, initargs=(cpu,))
         self._closed = False
+        self.last_step_seconds = 0.0
         try:
             self._batch = self._executor.submit(
                 native.NativeRolloutBatch, data_dir, batch_size, records=records
@@ -83,7 +85,10 @@ class NativeShard:
     ) -> native.NativeFrameBatch:
         if before_write is not None:
             before_write()
-        return self._batch.step(actions, mask)
+        started = time.perf_counter()
+        result = self._batch.step(actions, mask)
+        self.last_step_seconds = time.perf_counter() - started
+        return result
 
     def save(self, lane: int) -> Future[bytes]:
         self._check_open()

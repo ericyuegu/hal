@@ -891,6 +891,16 @@ class SimulatorShard(Protocol):
     def restore(self, state: bytes) -> None: ...
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ShardTiming:
+    started: float
+    wall: float
+    simulator: float
+    packing: float
+    input_wait: float
+    other: float
+
+
 class NativeSimulatorShard:
     """Step native matches with pinned buffers and batch their device transfers.
 
@@ -919,6 +929,7 @@ class NativeSimulatorShard:
         self.reset_seconds = 0.0
         self.stepped_frames = 0
         self.copied_bytes = 0
+        self.timings: list[ShardTiming] = []
         self._configs = [native.NativeMatch(25, (native.NativePlayer(1, 1), native.NativePlayer(2, 22)), 0)] * count
         self.shard = NativeShard(data_dir, count, cpu=cpu, records=self._records)
 
@@ -959,6 +970,7 @@ class NativeSimulatorShard:
 
     def step(self, inputs: Tensor, active: NDArray[np.bool_]) -> tuple[ShardFrames, ...]:
         started = time.perf_counter()
+        simulator = packing = 0.0
         source = inputs
         if (
             source.dtype != torch.float32
@@ -972,15 +984,24 @@ class NativeSimulatorShard:
         if self._step_input.shape[0] < len(source):
             self._step_input = torch.empty(source.shape, dtype=torch.float32, pin_memory=self.device.type == "cuda")
         # A single device-to-pinned-host transfer supplies the whole tick.
+        waiting = time.perf_counter()
         self._step_input[: len(source)].copy_(source)
+        input_wait = time.perf_counter() - waiting
         rows = []
         for actions in self._step_input[: len(source)]:
             frame = self.shard.step(actions.numpy(), active, before_write=self._before_write).result()
+            simulator += self.shard.last_step_seconds
+            packing_started = time.perf_counter()
             rows.append(self._frames(frame))
+            packing += time.perf_counter() - packing_started
             self.stepped_frames += int(active.sum())
             if ((frame.terminated | frame.truncated) & active).any():
                 break
-        self.step_seconds += time.perf_counter() - started
+        elapsed = time.perf_counter() - started
+        self.step_seconds += elapsed
+        self.timings.append(
+            ShardTiming(started, elapsed, simulator, packing, input_wait, elapsed - simulator - packing - input_wait)
+        )
         return tuple(rows)
 
     def reset(self, lane: int, episode: Episode) -> ShardFrames:
@@ -3473,6 +3494,8 @@ class Trainer:
         native_shards = [
             shard for shard in self.engine.groups[self.engine.cursor] if isinstance(shard, NativeSimulatorShard)
         ]
+        for shard in native_shards:
+            shard.timings.clear()
         before = [
             (shard.step_seconds, shard.reset_seconds, shard.stepped_frames, shard.copied_bytes)
             for shard in native_shards
@@ -3482,6 +3505,10 @@ class Trainer:
             torch.cuda.reset_peak_memory_stats(self.policy.device)
         with phase(self.profile, "rollout"):
             rollout = self.engine.collect(self.update)
+        if self.profile is not None:
+            self.profile.shard_timings = {
+                str(i): [dataclasses.asdict(t) for t in shard.timings] for i, shard in enumerate(native_shards)
+            }
         with phase(self.profile, "preparation"):
             batch = self.prepare(rollout)
         metrics = self.fit(batch)
@@ -4285,6 +4312,7 @@ class UpdateProfile:
         self.work: dict[str, float] = defaultdict(float)
         self.samples: list[dict[str, object]] = []
         self.host_seconds: dict[str, float] = defaultdict(float)
+        self.shard_timings: dict[str, list[dict[str, float]]] = {}
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Iterator[None]:
@@ -4375,6 +4403,7 @@ class UpdateProfile:
             "site_host_seconds": dict(self.host_seconds),
             "samples": self.samples,
             "metrics": metrics,
+            "shard_timings": self.shard_timings,
         }
         (self.output / f"{name}.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
 
