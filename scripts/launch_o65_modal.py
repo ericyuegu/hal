@@ -40,6 +40,7 @@ BUILD_RESERVE_USD = 3.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
+NSYS_VERSION_CHECK = 'test "$(nsys --version)" = "NVIDIA Nsight Systems version 2026.5.1.161-265138896106v0"'
 
 
 def require_modal_version(version: str) -> None:
@@ -295,9 +296,12 @@ def run_child(request: Request, output: Path, started: float) -> int:
         "cpus": cpus,
         "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
-        "treatment": "dense tick storage and fixed window replay",
-        "control": "1024 active matches, 16 windows and 128 decisions per no-grad chunk",
-        "invariants": "seed 65, proxy, sampler, simulator, D/R, reward, optimizer, 16 shards, one group",
+        "treatment": f"floor measurement: mode={request.mode}, active_matches={request.matches}",
+        "control": "unchanged o65-dense trainer at 1024 active matches",
+        "invariants": (
+            "seed 65, proxy, sampler, simulator, D/R, reward, optimizer, 16 shards, one group, "
+            "32 windows and 16 decisions per actor step, 64 reference slots"
+        ),
     }
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
     with (output / "topology.txt").open("w") as log:
@@ -422,7 +426,7 @@ def build_image(sha: str, secret: modal.Secret) -> modal.Image:
             "NsightSystems-linux-cli-public-2026.5.1.161-3889610.deb -o /var/tmp/nsys.deb && "
             "echo '61829db6392e5c293ada1319df86a97c3356bc810335a1975cb551fcfe3eca08  /var/tmp/nsys.deb' | sha256sum -c - && "
             "dpkg -i /var/tmp/nsys.deb && rm /var/tmp/nsys.deb; fi",
-            "nsys --version",
+            NSYS_VERSION_CHECK,
         )
         .env({"PYTHONPATH": root, "UV_PROJECT_ENVIRONMENT": "/opt/venv"})
         .workdir(root)

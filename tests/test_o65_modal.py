@@ -2,6 +2,7 @@ import dataclasses
 import importlib.util
 import json
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +17,22 @@ _SPEC.loader.exec_module(launcher)
 Request = launcher.Request
 command = launcher.command
 select_cpus = launcher.select_cpus
+
+
+@pytest.mark.parametrize(
+    "version, accepted",
+    [
+        ("NVIDIA Nsight Systems version 2026.5.1.161-265138896106v0", True),
+        ("NVIDIA Nsight Systems version 2026.5.1.161-other-build", False),
+        ("other version", False),
+    ],
+)
+def test_image_rejects_an_unqualified_preinstalled_nsys(tmp_path: Path, version: str, accepted: bool) -> None:
+    binary = tmp_path / "nsys"
+    binary.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(version) + "\n")
+    binary.chmod(0o755)
+    result = subprocess.run(["/bin/sh", "-c", launcher.NSYS_VERSION_CHECK], env={"PATH": str(tmp_path)})
+    assert (result.returncode == 0) == accepted
 
 
 def test_budget_reserves_failures_and_reconciles_completed_calls(tmp_path: Path) -> None:
