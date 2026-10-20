@@ -867,27 +867,34 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_muon_resume_repeats_the_next_fit(tmp_path: Path, device: str) -> None:
-    run = transformer_trainer(device, development=True)
-    run = exp.Trainer(run.engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
-    run.run_update()
-    manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
-    optimizer_before = exp._state_hash(
-        (run.actor_optimizer.state_dict(), run.critic_optimizer.state_dict(), run.scheduler.state_dict())
-    )
-    batch = run.prepare(run.engine.collect(run.update))
-    run.fit(batch)
-    expected = {name: value.detach().cpu().clone() for name, value in run.policy.model.state_dict().items()}
-    exp.restore_checkpoint(run, manifest, PROVENANCE)
-    assert (
-        exp._state_hash(
+def test_muon_resume_repeats_the_next_fit(tmp_path: Path, device: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exact equality is guaranteed in the verifier's deterministic mode.
+    initial_mode = torch.are_deterministic_algorithms_enabled()
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True)
+    try:
+        run = transformer_trainer(device, development=True, deterministic=True)
+        run = exp.Trainer(run.engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
+        run.run_update()
+        manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+        optimizer_before = exp._state_hash(
             (run.actor_optimizer.state_dict(), run.critic_optimizer.state_dict(), run.scheduler.state_dict())
         )
-        == optimizer_before
-    )
-    run.fit(batch)
-    for name, value in expected.items():
-        torch.testing.assert_close(run.policy.model.state_dict()[name].cpu(), value, rtol=0, atol=0, msg=name)
+        batch = run.prepare(run.engine.collect(run.update))
+        run.fit(batch)
+        expected = {name: value.detach().cpu().clone() for name, value in run.policy.model.state_dict().items()}
+        exp.restore_checkpoint(run, manifest, PROVENANCE)
+        assert (
+            exp._state_hash(
+                (run.actor_optimizer.state_dict(), run.critic_optimizer.state_dict(), run.scheduler.state_dict())
+            )
+            == optimizer_before
+        )
+        run.fit(batch)
+        for name, value in expected.items():
+            torch.testing.assert_close(run.policy.model.state_dict()[name].cpu(), value, rtol=0, atol=0, msg=name)
+    finally:
+        torch.use_deterministic_algorithms(initial_mode)
 
 
 @pytest.mark.parametrize("version", [1, 2])
