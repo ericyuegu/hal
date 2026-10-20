@@ -285,13 +285,21 @@ def test_publication_leaves_training_free_and_reports_worker_failure(
     assert published == ([] if fail else [1, 2])
 
 
+@pytest.mark.parametrize("resume", [False, True])
 def test_pilot_dispatches_one_trainer_with_in_process_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume: bool
 ) -> None:
     from test_065_loop import exp
 
     output = tmp_path / "pilot"
     commands: list[exp.NativeCli] = []
+    previous = None
+    if resume:
+        output.mkdir()
+        sha = _MODULE.subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        _MODULE.bind_pilot_identity(output, sha, tiny=True)
+        previous = write_boundary(output / "train/checkpoints", 2)
+        (output / "train/metrics.jsonl").write_text('{"global_step":2,"train/warming":0}\n')
 
     def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
         if command[1] != str(_MODULE.ROOT / "experiments/065_selfplay_ppo.py"):
@@ -312,10 +320,12 @@ def test_pilot_dispatches_one_trainer_with_in_process_publication(
             publish_directory=tmp_path / "volume",
             publish_volume="test",
             r2_prefix="o65/pilot-results/test",
+            resume=resume,
         )
     )
     assert len(commands) == 1
     assert commands[0].updates == 4 and commands[0].training.checkpoint_interval == 1
+    assert commands[0].resume == previous
     assert commands[0].publication == self_play_publication.Args(
         output, tmp_path / "volume", "test", "o65/pilot-results/test"
     )

@@ -309,6 +309,13 @@ def main(args: Args) -> None:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))
+    previous = latest_checkpoint(run / "checkpoints") if args.resume else None
+    restored_update = read_training_manifest(previous)["update"] if previous is not None else 0
+    if args.resume and previous is None and run.exists():
+        run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
+    if previous is not None:
+        trim_interrupted_metrics(run / "metrics.jsonl", restored_update)
+        command.extend(("--resume", str(previous)))
     publication = (args.publish_directory, args.publish_volume, args.r2_prefix)
     if any(value is not None for value in publication):
         if any(value is None for value in publication):
@@ -327,13 +334,6 @@ def main(args: Args) -> None:
                 "--publication.compact" if args.checkpoint_retention == "compact" else "--publication.no-compact",
             )
         )
-    previous = latest_checkpoint(run / "checkpoints") if args.resume else None
-    restored_update = read_training_manifest(previous)["update"] if previous is not None else 0
-    if args.resume and previous is None and run.exists():
-        run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
-    if previous is not None:
-        trim_interrupted_metrics(run / "metrics.jsonl", restored_update)
-        command.extend(("--resume", str(previous)))
     publish(args, output)
     if restored_update < updates:
         execute(command, output / "train.log", environment)
