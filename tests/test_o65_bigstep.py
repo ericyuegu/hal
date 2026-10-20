@@ -4,6 +4,7 @@ import dataclasses
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from test_065_loop import PROVENANCE
@@ -147,11 +148,14 @@ def test_resume_preserves_u_and_episode_metric_totals(tmp_path: Path) -> None:
     run = trainer(groups=1, length=300, anchor_rate=0)
     run.run_update()
     before = dict(run.episode_metrics)
+    run.anchor_win_history = [{0: (1, 2), 7: (0, 1)}]
+    anchor_history = list(run.anchor_win_history)
     checkpoint = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     expected, metrics = run.run_update()
     restored = trainer(groups=1, length=300, anchor_rate=0)
     exp.restore_checkpoint(restored, checkpoint, PROVENANCE)
     assert restored.episode_metrics == before
+    assert restored.anchor_win_history == anchor_history
     actual, resumed_metrics = restored.run_update()
     torch.testing.assert_close(
         actual.rollout.table.conditions[actual.rollout.ids],
@@ -162,6 +166,64 @@ def test_resume_preserves_u_and_episode_metric_totals(tmp_path: Path) -> None:
     assert resumed_metrics["return/completed_match_kl_cost"] == metrics["return/completed_match_kl_cost"]
     assert resumed_metrics["critic/monte_carlo_rmse"] == metrics["critic/monte_carlo_rmse"]
     assert restored.episode_metrics == run.episode_metrics
+    assert restored.anchor_win_history == run.anchor_win_history
+
+
+def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -> None:
+    run = trainer(groups=1)
+    run.engine.anchors[7] = run.policy.frozen_copy()
+    store = exp.FrameStore(16, 2, torch.device("cpu"))
+    table = exp.DenseRollout(64, store)
+    records = np.zeros((16, 2), dtype=exp.native.FRAME_DTYPE)
+    for lane, stocks, percents in (
+        (0, [(4, 4), (4, 3), (3, 3), (4, 4), (3, 4)], [(20, 10), (25, 0), (0, 7), (0, 0), (0, 9)]),
+        (1, [(4, 4), (4, 4), (3, 4), (3, 4)], [(0, 0), (10, 3), (0, 5), (2, 8)]),
+    ):
+        for side in range(2):
+            for name, values, dtype in (("stock", stocks, np.int32), ("percent", percents, np.float32)):
+                records["columns"][: len(values), lane, exp.NATIVE_COLUMN_LAYOUT[f"p{side + 1}_{name}"][0]] = np.array(
+                    values, dtype=dtype
+                )[:, side].view(np.uint32)
+    store.records.copy_(torch.from_numpy(records.view(np.uint8).reshape(16, 2, -1)))
+    table.integers[:4, exp.LANE] = torch.tensor([0, 0, 1, 1])
+    table.integers[:4, exp.SIDE] = torch.tensor([0, 1, 1, 0])
+    table.integers[:4, exp.START] = torch.tensor([0, 3, 0, 0])
+    table.integers[:4, exp.LENGTH] = 1
+    table.duration[:4] = torch.tensor([2, 1, 3, 3])
+    table.opponent_anchor[:4] = torch.tensor([0, 7, 0, -1])
+    episode = run.engine.sampler.sample(0, 0, (0,))
+
+    def completed(anchor: int, anchor_side: int, *, timeout: bool = False):
+        players = tuple(
+            dataclasses.replace(player, anchor=anchor if side == anchor_side else None)
+            for side, player in enumerate(episode.players)
+        )
+        return exp.EpisodeResult(0, dataclasses.replace(episode, players=players), 300, (0.0, 0.0), timeout, (1, 0))
+
+    rollout = exp.Rollout(
+        table, torch.arange(4), 0, 0, 6, 1, 1, 0.0, (completed(0, 1), completed(7, 0), completed(0, 0, timeout=True))
+    )
+    metrics = run.anchor_metrics(rollout)
+    assert metrics["gameplay/pi_ref_net_stocks_per_min"] == pytest.approx(720)
+    assert metrics["gameplay/pi_ref_net_damage_per_min"] == pytest.approx(4320)
+    assert metrics["gameplay/anchor7_net_stocks_per_min"] == pytest.approx(3600)
+    assert metrics["gameplay/anchor7_net_damage_per_min"] == pytest.approx(-32400)
+    assert metrics["gameplay/pi_ref_count"] == metrics["gameplay/pi_ref_win_rate"] == 1
+    assert metrics["gameplay/anchor7_count"] == 1 and metrics["gameplay/anchor7_win_rate"] == 0
+    second = dataclasses.replace(rollout, results=(completed(0, 0), completed(0, 0)))
+    metrics = run.anchor_metrics(second)
+    assert metrics["gameplay/pi_ref_win_rate_32_updates"] == pytest.approx(1 / 3)
+    empty = dataclasses.replace(rollout, results=())
+    for _ in range(30):
+        metrics = run.anchor_metrics(empty)
+    assert metrics["gameplay/pi_ref_count"] == 0
+    assert "gameplay/pi_ref_win_rate" not in metrics
+    assert metrics["gameplay/pi_ref_win_rate_32_updates"] == pytest.approx(1 / 3)
+    metrics = run.anchor_metrics(empty)
+    assert metrics["gameplay/pi_ref_count_32_updates"] == 2
+    assert metrics["gameplay/pi_ref_win_rate_32_updates"] == 0
+    metrics = run.anchor_metrics(empty)
+    assert "gameplay/pi_ref_win_rate_32_updates" not in metrics
 
 
 def test_gradient_noise_estimate_uses_preclip_gradients_and_window_counts() -> None:

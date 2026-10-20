@@ -1381,6 +1381,7 @@ class DenseRollout:
         self.conditions = torch.zeros(capacity, 4, device=self.device)
         self.coefficients = torch.zeros(capacity, device=self.device)
         self.age = torch.zeros(capacity, dtype=torch.long, device=self.device)
+        self.opponent_anchor = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.prefix = torch.zeros(capacity, 24, 4, dtype=torch.long, device=self.device)
         self.opponent = torch.zeros_like(self.prefix)
         self.actions = torch.zeros(capacity, 4, 4, dtype=torch.long, device=self.device)
@@ -2472,6 +2473,11 @@ class RolloutEngine:
         at = torch.arange(players, device=self.policy.device) + tick * players
         meta = self._dense_metadata(clock, update)
         table.integers[at] = meta
+        if clock % 128 == 0:
+            # Opponents change only at resets on block boundaries.
+            table.opponent_anchor[tick * players : (tick + 64) * players].view(64, players).copy_(
+                self.owners[group].reshape(-1, 2).flip(1).flatten()
+            )
         table.age[at] = meta[:, CLOCK] - self.episode_clocks[group].repeat_interleave(2)
         table.remaining[at] = -1
         table.conditions[at] = self.dense_logs[group]
@@ -3431,12 +3437,10 @@ def action_statistics(
 
 
 @torch.no_grad()
-def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
-    table = rollout.table
-    meta = table.integers[rollout.ids]
+def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    meta = table.integers[ids]
     positions = meta[:, START] + meta[:, LENGTH] - 1
-    lane, side = meta[:, LANE], meta[:, SIDE]
-    valid = torch.arange(4, device=meta.device)[None] < table.duration[rollout.ids, None]
+    lane = meta[:, LANE]
     at = (positions[:, None] + torch.arange(5, device=meta.device)).clamp_max(len(table.store.records) - 1)
     records = table.store.records[at, lane[:, None]]
     columns = records[:, :, : 4 * len(native.OBSERVATION_FIELDS)].contiguous().view(torch.int32)
@@ -3447,6 +3451,16 @@ def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
     losses = (stock[:, 1:] < stock[:, :-1]).float()
     damage = (percent[:, 1:] - percent[:, :-1]).clamp_min(0)
     wins = losses * (stock[:, 1:] == 0)
+    return losses, damage, wins
+
+
+@torch.no_grad()
+def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
+    table = rollout.table
+    meta = table.integers[rollout.ids]
+    side = meta[:, SIDE]
+    valid = torch.arange(4, device=meta.device)[None] < table.duration[rollout.ids, None]
+    losses, damage, wins = frame_components(table, rollout.ids)
     result = {}
     rows = torch.arange(len(meta), device=meta.device)[:, None]
     for name, value, scale in (("damage", damage, 1.0), ("stock", losses, 120.0), ("win", wins, 50.0)):
@@ -3584,6 +3598,74 @@ class Trainer:
         self.evaluation_cursor = 0
         self.updating = False
         self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+        self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
+
+    @torch.no_grad()
+    def anchor_metrics(self, rollout: Rollout) -> dict[str, float]:
+        """Measure training exposure and stockout wins from the student side."""
+        table, ids = rollout.table, rollout.ids
+        ids = ids[table.opponent_anchor[ids] >= 0]
+        opponents = table.opponent_anchor[ids]
+        side = table.integers[ids, SIDE]
+        frames = torch.arange(4, device=ids.device)[None]
+        valid = frames < table.duration[ids, None]
+        losses, damage, _ = frame_components(table, ids)
+        rows = torch.arange(len(ids), device=ids.device)[:, None]
+        net = torch.stack(
+            [
+                value[rows, frames, 1 - side[:, None]] - value[rows, frames, side[:, None]]
+                for value in (losses, damage)
+            ],
+            -1,
+        )
+        totals = torch.where(valid[..., None], net, 0).sum(1)
+        completed: dict[int, tuple[int, int]] = {}
+        for result in rollout.results:
+            if result.timeout:
+                continue
+            for side_index, player in enumerate(result.episode.players):
+                if player.anchor is None:
+                    continue
+                if result.stocks is None:
+                    raise ValueError("completed anchor match is missing stocks")
+                wins, count = completed.get(player.anchor, (0, 0))
+                completed[player.anchor] = (
+                    wins + int(result.stocks[1 - side_index] > result.stocks[side_index]),
+                    count + 1,
+                )
+        self.anchor_win_history.append(completed)
+        self.anchor_win_history = self.anchor_win_history[-32:]
+        anchors = sorted(
+            set(self.engine.anchors) | set(completed) | {key for row in self.anchor_win_history for key in row}
+        )
+        exposure = (
+            torch.stack(
+                [
+                    torch.cat(
+                        (totals[opponents == anchor].sum(0), table.duration[ids][opponents == anchor].sum()[None])
+                    )
+                    for anchor in anchors
+                ]
+            )
+            .cpu()
+            .tolist()
+        )
+        metrics: dict[str, float] = {}
+        for anchor, (stocks, damage_total, duration) in zip(anchors, exposure, strict=True):
+            prefix = "gameplay/pi_ref" if anchor == 0 else f"gameplay/anchor{anchor}"
+            if duration:
+                metrics[f"{prefix}_net_stocks_per_min"] = stocks * 3600 / duration
+                metrics[f"{prefix}_net_damage_per_min"] = damage_total * 3600 / duration
+            wins, count = completed.get(anchor, (0, 0))
+            metrics[f"{prefix}_count"] = float(count)
+            if count:
+                metrics[f"{prefix}_win_rate"] = wins / count
+            recent_wins = sum(row.get(anchor, (0, 0))[0] for row in self.anchor_win_history)
+            recent_count = sum(row.get(anchor, (0, 0))[1] for row in self.anchor_win_history)
+            metrics[f"{prefix}_count_32_updates"] = float(recent_count)
+            if recent_count:
+                metrics[f"{prefix}_win_rate_32_updates"] = recent_wins / recent_count
+        return metrics
 
     @torch.no_grad()
     def completed_metrics(self, rollout: Rollout, kl: Tensor) -> dict[str, float]:
@@ -4072,6 +4154,7 @@ class Trainer:
         with self.memory.phase("optimization"):
             metrics = self.fit(batch)
         metrics.update(self.completed_metrics(rollout, batch.kl))
+        metrics.update(self.anchor_metrics(rollout))
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True
         for index, (shard, previous) in enumerate(zip(native_shards, before, strict=True)):
@@ -4248,6 +4331,7 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "warming": trainer.warming,
         "warmup_moments": trainer.warmup_moments,
         "episode_metrics": trainer.episode_metrics,
+        "anchor_win_history": trainer.anchor_win_history,
         "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
         "fresh_variances": trainer.fresh_variances,
         "next_anchor": trainer.next_anchor,
@@ -4420,6 +4504,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.warming = saved["warming"]
     trainer.warmup_moments = saved["warmup_moments"]
     trainer.episode_metrics = saved["episode_metrics"]
+    trainer.anchor_win_history = saved["anchor_win_history"]
     trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
     trainer.fresh_variances = saved["fresh_variances"]
     trainer.next_anchor = saved["next_anchor"]
