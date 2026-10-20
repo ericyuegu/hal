@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from datetime import UTC
@@ -108,7 +109,7 @@ def result_seconds(path: Path, exit_code: int) -> float:
 class Request:
     name: str
     git_sha: str
-    mode: Literal["smoke", "profile", "floor", "floor-extra"] = "profile"
+    mode: Literal["smoke", "profile", "floor", "floor-extra", "pilot"] = "profile"
     matches: int = 1024
     timeout_seconds: int = 1800
     created_unix: float = dataclasses.field(default_factory=time.time)
@@ -120,15 +121,17 @@ class Request:
         validate_name(self.name)
         if re.fullmatch(r"[0-9a-f]{40}", self.git_sha) is None:
             raise ValueError("expected a full published HAL Git SHA")
-        if self.mode not in ("smoke", "profile", "floor", "floor-extra"):
+        if self.mode not in ("smoke", "profile", "floor", "floor-extra", "pilot"):
             raise ValueError("unsupported run mode")
         allowed = (16,) if self.mode == "smoke" else (256, 1024, 2048, 4096)
-        if self.mode in ("floor", "floor-extra"):
+        if self.mode in ("floor", "floor-extra", "pilot"):
             allowed = (1024,)
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
-        if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= 6600:
-            raise ValueError("timeout must be 60 to 6600 seconds")
+        if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= (
+            85500 if self.mode == "pilot" else 6600
+        ):
+            raise ValueError("timeout must be 60..6600 seconds (pilot: at most 85500)")
         if (
             type(self.created_unix) not in (int, float)
             or not math.isfinite(self.created_unix)
@@ -160,6 +163,28 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
     if len(cpus) != 16 or len(set(cpus)) != 16:
         raise ValueError("O65 requires 16 distinct shard CPUs")
     delivery = REMOTE_ROOT / "delivery"
+    if request.mode == "pilot":
+        return [
+            "/opt/venv/bin/python",
+            "experiments/o65/pilot.py",
+            "--output",
+            str(WORK / request.name / "pilot"),
+            "--local-delivery",
+            str(delivery),
+            "--cpus",
+            *(str(cpu) for cpu in cpus),
+            "--compile-cache",
+            str(RESULTS / "compile-cache"),
+            "--resume",
+            "--checkpoint-retention",
+            "compact",
+            "--publish-directory",
+            str(RESULTS / request.name / "pilot"),
+            "--publish-volume",
+            VOLUME,
+            "--r2-prefix",
+            f"o65/pilot-results/{request.name}",
+        ]
     if request.mode == "floor-extra":
         source = RESULTS / str(request.source_name) / "profile"
         return [
@@ -230,9 +255,11 @@ def select_cpus(allowed: set[int]) -> tuple[int, ...]:
 
 def run_remote(request: Request) -> int:
     output = RESULTS / request.name
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=request.mode == "pilot")
     local = WORK / request.name
     local.mkdir(parents=True, exist_ok=False)
+    if request.mode == "pilot" and (output / "pilot").is_dir():
+        stage_results(output / "pilot", local / "pilot")
     started = time.time()
     started_clock = time.perf_counter()
     code = -1
@@ -256,6 +283,17 @@ def run_remote(request: Request) -> int:
         modal.Volume.from_name(VOLUME).commit()
 
 
+def copy_result(source: str, destination: str) -> str:
+    target = Path(destination)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.partial")
+    try:
+        shutil.copyfile(source, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def stage_results(source: Path, destination: Path) -> None:
     # Modal Volumes do not support the hard links used for atomic checkpoints.
     # Finish on local POSIX storage, then copy bytes into the durable Volume.
@@ -263,7 +301,7 @@ def stage_results(source: Path, destination: Path) -> None:
         source,
         destination,
         dirs_exist_ok=True,
-        copy_function=shutil.copyfile,
+        copy_function=copy_result,
         ignore=shutil.ignore_patterns("tmp", "inductor", "triton"),
     )
 
@@ -274,10 +312,12 @@ def run_child(request: Request, output: Path, started: float) -> int:
     os.sched_setaffinity(0, set(cpus))
     argv = command(request, cpus[:16])
     env = dict(os.environ)
-    # The existing Secret also holds W&B credentials. This path has no W&B sink.
-    env.pop("WANDB_API_KEY", None)
+    if request.mode != "pilot":
+        env.pop("WANDB_API_KEY", None)
+    elif not env.get("WANDB_API_KEY"):
+        raise ValueError("the pilot requires W&B credentials in its Modal Secret")
     env.update(
-        WANDB_MODE="disabled",
+        WANDB_MODE="online" if request.mode == "pilot" else "disabled",
         HAL_NATIVE_LIBRARY=str(REMOTE_ROOT / "delivery/libhal_native.so"),
         TMPDIR=str(output / "tmp"),
         TORCHINDUCTOR_COMPILE_THREADS="1",
@@ -296,7 +336,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
         "cpus": cpus,
         "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
-        "treatment": f"floor measurement: mode={request.mode}, active_matches={request.matches}",
+        "treatment": f"mode={request.mode}, active_matches={request.matches}; pilot: 512 windows, Beta u and pretraining identity prior",
         "control": "unchanged o65-dense trainer at 1024 active matches",
         "invariants": (
             "seed 65, proxy, sampler, simulator, D/R, reward, optimizer, 16 shards, one group, "
@@ -309,9 +349,11 @@ def run_child(request: Request, output: Path, started: float) -> int:
         log.write(Path("/proc/cpuinfo").read_text())
         log.flush()
         subprocess.run(["nvidia-smi", "-q"], stdout=log, stderr=subprocess.STDOUT, check=True)
-    with (output / "run.log").open("w") as log:
+    with (output / "run.log").open("a") as log:
         if request.mode == "floor":
             return run_floor(request, output, env, cpus[:16], log)
+        if request.mode == "pilot":
+            return run_pilot_child(argv, env, log, remaining_seconds(request, time.time()) - 90)
         result = subprocess.run(
             argv,
             cwd=REMOTE_ROOT,
@@ -321,6 +363,44 @@ def run_child(request: Request, output: Path, started: float) -> int:
             timeout=remaining_seconds(request, time.time()) - 30,
         )
     return result.returncode
+
+
+def run_pilot_child(argv: list[str], env: dict[str, str], log: TextIO, timeout: float) -> int:
+    process = subprocess.Popen(
+        argv, cwd=REMOTE_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+    )
+    try:
+        return process.wait(timeout=timeout)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
+def pilot_estimate() -> dict[str, object]:
+    rate = GPU_USD_SECOND + CPU_CORES * CPU_USD_SECOND + (MEMORY_MIB / 1024) * MEMORY_USD_GIB_SECOND
+    # Preserve model work: larger steps only save repeated step/optimizer overhead.
+    seconds = (11.4 - (6.703817 - 4.246) - 1.2, 11.4 - (6.703817 - 4.500) - 0.6)
+    return {
+        "label": "estimates, not PRO 6000 measurements of this treatment",
+        "baseline_seconds_per_update": 11.4,
+        "projected_seconds_per_update": seconds,
+        "training_gpu_hours": [2000 * value / 3600 for value in seconds],
+        "training_compute_usd": [2000 * value * rate for value in seconds],
+        "full_protocol_gpu_hours_estimate": [8, 12],
+        "full_protocol_compute_usd_estimate": [
+            8 * 3600 * rate + BUILD_RESERVE_USD,
+            12 * 3600 * rate + BUILD_RESERVE_USD,
+        ],
+        "assumptions": "async projection from performance/async.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, 32-update restarts, evaluation and publication",
+        "hard_timeout_seconds": 85500,
+        "maximum_compute_usd": (85500 + 360) * rate + BUILD_RESERVE_USD,
+        "excludes": "storage/egress beyond included allowances; build variation",
+    }
 
 
 def nsys_command(argv: list[str], output: Path) -> list[str]:
@@ -462,10 +542,11 @@ def download(name: str, local: Path) -> None:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    mode: Literal["smoke", "profile", "floor", "floor-extra", "download"] = "profile"
+    mode: Literal["smoke", "profile", "floor", "floor-extra", "pilot", "download"] = "profile"
     name: str | None = None
     matches: int = 1024
-    timeout_seconds: int = 1800
+    timeout_seconds: int | None = None
+    dry_run: bool = False
     secret: str = "hal"
     output: Path = Path("runs/modal")
     source_name: str | None = None
@@ -478,15 +559,19 @@ def main(args: Args) -> None:
             raise ValueError("download requires a run name")
         download(args.name, args.output)
         return
-    if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
+    if not args.dry_run and subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise ValueError("commit changes before launching published source")
     branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip()
-    if branch != "o65-floor":
-        raise ValueError("only branch o65-floor can launch this job")
+    expected_branch = "o65-bigstep" if args.mode == "pilot" else "o65-floor"
+    if branch != expected_branch:
+        raise ValueError(f"only branch {expected_branch} can launch this job")
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    published = subprocess.check_output(["git", "ls-remote", "origin", f"refs/heads/{branch}"], cwd=ROOT, text=True)
-    if published.split()[:1] != [sha]:
-        raise ValueError(f"push {branch} HEAD before launching")
+    if not args.dry_run:
+        published = subprocess.check_output(
+            ["git", "ls-remote", "origin", f"refs/heads/{branch}"], cwd=ROOT, text=True
+        )
+        if published.split()[:1] != [sha]:
+            raise ValueError(f"push {branch} HEAD before launching")
     name = args.name or f"{args.mode}-{args.matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
     inputs_digest = layout_digest = None
     if args.mode == "floor-extra":
@@ -503,26 +588,30 @@ def main(args: Args) -> None:
         sha,
         args.mode,
         args.matches,
-        args.timeout_seconds,
+        args.timeout_seconds if args.timeout_seconds is not None else (85500 if args.mode == "pilot" else 1800),
         source_name=args.source_name,
         source_inputs_sha256=inputs_digest,
         source_layout_sha256=layout_digest,
     )
     args.output.mkdir(parents=True, exist_ok=True)
-    budget = ROOT / "runs/modal-floor/budget.jsonl"
+    budget = ROOT / ("runs/modal-pilot/budget.jsonl" if args.mode == "pilot" else "runs/modal-floor/budget.jsonl")
     budget.parent.mkdir(parents=True, exist_ok=True)
     # Reserve the full timeout for each call, including failures and client loss.
     allowance = request.timeout_seconds + 360
     reserved = reserved_seconds(budget) + allowance
     rate = GPU_USD_SECOND + CPU_CORES * CPU_USD_SECOND + (MEMORY_MIB / 1024) * MEMORY_USD_GIB_SECOND
-    if reserved > MAX_GPU_SECONDS or reserved * rate + BUILD_RESERVE_USD > MAX_USD:
+    max_seconds, max_usd = (85860, 110.0) if args.mode == "pilot" else (MAX_GPU_SECONDS, MAX_USD)
+    if reserved > max_seconds or reserved * rate + BUILD_RESERVE_USD > max_usd:
         raise ValueError("O65 Modal time or cost budget exhausted")
-    secret = modal.Secret.from_name(args.secret, required_keys=list(AWS_KEYS))
-    secret.hydrate()
+    keys = [*AWS_KEYS, *(["WANDB_API_KEY"] if args.mode == "pilot" else [])]
+    secret = modal.Secret.from_name(args.secret, required_keys=keys)
+    if not args.dry_run:
+        secret.hydrate()
     app = modal.App(f"o65-{name}")
     volume = modal.Volume.from_name(VOLUME, create_if_missing=True)
     worker = app.function(
         image=build_image(sha, secret),
+        secrets=[secret],
         gpu="RTX-PRO-6000",
         cpu=(17.0, 17.0),
         memory=(MEMORY_MIB, MEMORY_MIB),
@@ -535,6 +624,34 @@ def main(args: Args) -> None:
         include_source=False,
         serialized=True,
     )(run_remote)
+    launch_command = [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "scripts.launch_o65_modal",
+        "--mode",
+        args.mode,
+        "--name",
+        name,
+        "--timeout-seconds",
+        str(request.timeout_seconds),
+    ]
+    print(f"Launch: {shlex.join(launch_command)}", flush=True)
+    if args.mode == "pilot":
+        print(json.dumps(pilot_estimate(), indent=2), flush=True)
+    if args.dry_run:
+        plan = {
+            "request": dataclasses.asdict(request),
+            "command": command(request, tuple(range(16))),
+            "volume": VOLUME,
+            "image": IMAGE,
+            "function_built": worker is not None,
+            "launch_command": launch_command,
+        }
+        (args.output / f"{name}-dry-run.json").write_text(json.dumps(plan, indent=2))
+        print("Dry run: job built locally; no Modal requests or GPU allocation.", flush=True)
+        return
     record_budget(budget, name, allowance, "full timeout plus startup and teardown allowance")
     with modal.enable_output(), app.run():
         print(f"App: {app.app_id}; name: {name}; SDK: {importlib.metadata.version('modal')}", flush=True)

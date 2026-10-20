@@ -33,7 +33,13 @@ class Args:
     tiny: bool = False
     wandb: bool = True
     cpus: tuple[int, ...] = ()
-    checkpoint_retention: Literal["all", "compact"] = "all"
+    checkpoint_retention: Literal["all", "compact"] = "compact"
+    resume: bool = False
+    compile_cache: Path | None = None
+    publish_directory: Path | None = None
+    publish_volume: str | None = None
+    r2_prefix: str | None = None
+    qualify_pool_sizes: bool = False
 
 
 def compact_checkpoints(directory: Path, latest: int) -> None:
@@ -68,7 +74,7 @@ def compact_checkpoints(directory: Path, latest: int) -> None:
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
     print(f"O65: {log.name}", flush=True)
-    with log.open("xb") as target:
+    with log.open("ab") as target:
         subprocess.run(command, stdout=target, stderr=subprocess.STDOUT, env=environment, check=True, cwd=ROOT)
 
 
@@ -76,7 +82,7 @@ def kill_at_checkpoint(command: list[str], manifest: Path, log: Path, environmen
     """Kill the process group only after atomic checkpoint publication."""
     if manifest.exists():
         raise FileExistsError(manifest)
-    with log.open("xb") as target:
+    with log.open("ab") as target:
         process = subprocess.Popen(
             command, stdout=target, stderr=subprocess.STDOUT, env=environment, cwd=ROOT, start_new_session=True
         )
@@ -107,6 +113,7 @@ def training_command(
     warmup: int,
     verify: bool,
     deterministic: bool = False,
+    compile_cache: Path | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -129,7 +136,7 @@ def training_command(
         "--updates",
         str(updates),
         "--training.windows-per-step",
-        "32",
+        "512",
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",
@@ -139,6 +146,8 @@ def training_command(
         "--evaluation-every",
         "0",
     ]
+    if compile_cache is not None:
+        command.extend(("--compile-cache", str(compile_cache)))
     if deterministic:
         command.append("--training.deterministic")
     if verify:
@@ -174,6 +183,7 @@ def evaluation_command(
     *,
     held_out: bool,
     simulators: tuple[Literal["msl", "dolphin"], ...],
+    anchors: tuple[Path, ...] = (),
 ) -> list[str]:
     return [
         sys.executable,
@@ -181,7 +191,7 @@ def evaluation_command(
         "--checkpoint",
         str(checkpoint),
         "--anchors",
-        str(delivery / "payloads/final.pt"),
+        *(str(path) for path in (delivery / "payloads/final.pt", *anchors)),
         "--data-dir",
         str(delivery / "inputs/msl/data"),
         "--protocol",
@@ -217,6 +227,9 @@ def log_evaluation(path: Path, update: int, environment: dict[str, str], *, onli
                     value = values[name][statistic]
                     if value is not None:
                         metrics[f"{prefix}_{name}_{statistic}"] = float(value)
+            for name, interval in values.get("events", {}).items():
+                if interval["mean"] is not None:
+                    metrics[f"{prefix}_{name}"] = float(interval["mean"])
             for name in ("matches", "completed_pairs", "net_stock_lcb"):
                 if values[name] is not None:
                     metrics[f"{prefix}_{name}"] = float(values[name])
@@ -228,10 +241,90 @@ def log_evaluation(path: Path, update: int, environment: dict[str, str], *, onli
             wandb.log(metrics)
 
 
+def latest_checkpoint(directory: Path) -> Path | None:
+    manifests = sorted(directory.glob("update-*.json"))
+    if not manifests:
+        return None
+    latest = manifests[-1]
+    manifest = read_training_manifest(latest)
+    for shard in manifest["shards"]:
+        path = directory / shard["name"]
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        if digest != shard["sha256"]:
+            raise ValueError(f"latest checkpoint has a corrupt shard: {path}")
+    return latest
+
+
+def snapshot_anchors(directory: Path, update: int) -> tuple[Path, ...]:
+    # Evaluation uses the same recent snapshot cadence as the training pool.
+    updates = [value for value in range(256, update + 1, 256)][-3:]
+    snapshots: list[Path] = []
+    for value in updates:
+        path = directory / f"update-{value:08d}.json"
+        if not path.is_file():
+            path = directory.parent / "retired-checkpoints" / path.name
+        manifest = read_training_manifest(path)
+        actors = [shard for shard in manifest["shards"] if shard["role"] == "actor"]
+        if len(actors) != 1:
+            raise ValueError("snapshot anchor requires one published actor")
+        snapshots.append(directory / actors[0]["name"])
+    return tuple(snapshots)
+
+
+def publish(args: Args, output: Path) -> None:
+    values = (args.publish_directory, args.publish_volume, args.r2_prefix)
+    if all(value is None for value in values):
+        return
+    if any(value is None for value in values):
+        raise ValueError("pilot publication requires directory, volume and R2 prefix")
+    execute(
+        [
+            sys.executable,
+            "-m",
+            "scripts.o65_pilot_state",
+            "--source",
+            str(output),
+            "--destination",
+            str(args.publish_directory),
+            "--volume",
+            str(args.publish_volume),
+            "--r2-prefix",
+            str(args.r2_prefix),
+        ],
+        output.parent / "publish.log",
+        dict(os.environ),
+    )
+
+
+def trim_interrupted_metrics(path: Path, update: int) -> None:
+    if not path.is_file():
+        return
+    lines = path.read_text().splitlines()
+    keep = []
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            if index != len(lines) - 1:
+                raise
+            break
+        if row["global_step"] <= update:
+            keep.append(line)
+    previous = path.with_name(f"metrics-interrupted-{time.time_ns()}.jsonl")
+    path.rename(previous)
+    path.write_text("".join(line + "\n" for line in keep))
+
+
+def terminate(_signal: int, _frame: object) -> None:
+    raise SystemExit("pilot interrupted; resume from the latest published checkpoint")
+
+
 def main(args: Args) -> None:
+    signal.signal(signal.SIGTERM, terminate)
     os.chdir(ROOT)
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=args.resume)
     available = tuple(sorted(os.sched_getaffinity(0)))
     cpus = args.cpus or available[: 2 if args.tiny else 16]
     if len(cpus) != (2 if args.tiny else 16) or len(set(cpus)) != len(cpus) or set(cpus) - set(available):
@@ -241,12 +334,8 @@ def main(args: Args) -> None:
             raise ValueError("the hardware pilot requires W&B logging")
         if not os.environ.get("WANDB_API_KEY"):
             raise ValueError("the hardware pilot requires WANDB_API_KEY")
-        if (
-            len(available) != 48
-            or torch.cuda.device_count() != 1
-            or "RTX PRO 6000" not in torch.cuda.get_device_name()
-        ):
-            raise ValueError("the hardware pilot requires one RTX PRO 6000 and 48 available vCPUs")
+        if len(available) < 17 or torch.cuda.device_count() != 1 or "RTX PRO 6000" not in torch.cuda.get_device_name():
+            raise ValueError("the hardware pilot requires one RTX PRO 6000 and at least 17 available vCPUs")
     environment = dict(os.environ)
     environment.update(OMP_NUM_THREADS="2", MKL_NUM_THREADS="2", TORCHINDUCTOR_COMPILE_THREADS="1")
     delivery = args.local_delivery.resolve() if args.local_delivery is not None else output / "delivery"
@@ -279,7 +368,7 @@ def main(args: Args) -> None:
         raw["max_frames"] = 132
         tiny_protocol.write_text(json.dumps(raw))
     protocol = tiny_protocol if args.tiny else ROOT / "experiments/o65/pilot-evaluation.json"
-    sizes = (1, 2, 4) if args.tiny else (16, 32, 64)
+    sizes = ((1, 2, 4) if args.tiny else (16, 32, 64)) if args.qualify_pool_sizes else ()
     qualification = []
     for size in sizes:
         run = output / f"qualify-{size * len(cpus)}"
@@ -301,8 +390,12 @@ def main(args: Args) -> None:
         metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
         qualification.append({"matches": size * len(cpus), "steady_updates": metrics[1:]})
     (output / "throughput.json").write_text(json.dumps(qualification, indent=2))
-    if not args.tiny:
+    if qualification and not args.tiny:
         qualify_pool([row["steady_updates"] for row in qualification])
+    if not args.tiny and not (output / "control/results.json").is_file():
+        control = output / "control"
+        if control.exists():
+            control.rename(control.with_name(f"control-interrupted-{time.time_ns()}"))
         execute(
             evaluation_command(
                 delivery,
@@ -317,7 +410,7 @@ def main(args: Args) -> None:
         )
     # No automatic pool or optimizer sweep: each changes the experiment.
     run = output / "train"
-    kill_update, updates = (2, 4) if args.tiny else (256, 512)
+    kill_update, updates = (2, 4) if args.tiny else (256, 2000)
     checkpoint_every = 1 if args.tiny else 32
     command = training_command(
         delivery,
@@ -329,6 +422,7 @@ def main(args: Args) -> None:
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 172,
         verify=False,
+        compile_cache=args.compile_cache,
     )
     if args.wandb:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -337,14 +431,46 @@ def main(args: Args) -> None:
         command.extend(("--wandb-project", "hal-o65"))
     manifest = run / f"checkpoints/update-{kill_update:08d}.json"
     # Stop at each evaluation boundary, so one GPU never trains and evaluates concurrently.
-    boundaries = range(1, updates + 1) if args.tiny else range(32, updates + 1, 32)
-    previous: Path | None = None
+    boundaries = list(range(1, updates + 1)) if args.tiny else [*range(32, updates + 1, 32), updates]
+    boundaries = sorted(set(boundaries))
+    previous = latest_checkpoint(run / "checkpoints") if args.resume else None
+    restored_update = read_training_manifest(previous)["update"] if previous is not None else 0
+    if args.resume and previous is None and run.exists():
+        run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
+    if previous is not None:
+        trim_interrupted_metrics(run / "metrics.jsonl", restored_update)
+    if restored_update >= kill_update and not (output / "kill.json").is_file():
+        raise RuntimeError(
+            "preemption interrupted the forced-kill qualification; inspect its preserved boundary before continuing"
+        )
+    verify_boundary = kill_update + checkpoint_every
+    if restored_update >= verify_boundary and not (run / "resume-check.json").is_file():
+        check = command.copy()
+        check[check.index("--updates") + 1] = str(verify_boundary + 1)
+        check.extend(
+            (
+                "--resume",
+                str(run / f"checkpoints/update-{verify_boundary:08d}.json"),
+                "--verify-resume",
+                "--verify-only",
+            )
+        )
+        execute(check, output / "resume-verification.log", environment)
+    publish(args, output)
     for boundary in boundaries:
+        checkpoint = run / f"checkpoints/update-{boundary:08d}.json"
+        result = output / "selection" / f"update-{boundary:08d}"
+        if boundary < restored_update:
+            continue
+        if boundary == restored_update and (result / "results.json").is_file():
+            continue
         current = command.copy()
         current[current.index("--updates") + 1] = str(boundary)
         if previous is not None:
             current.extend(("--resume", str(previous)))
-        if boundary == kill_update:
+        if boundary == restored_update:
+            pass
+        elif boundary == kill_update:
             # Give the child another update to do after publication, so the kill cannot race normal exit.
             current[current.index("--updates") + 1] = str(boundary + checkpoint_every)
             kill_at_checkpoint(current, manifest, output / "before-kill.log", environment)
@@ -355,24 +481,32 @@ def main(args: Args) -> None:
             if boundary == kill_update + checkpoint_every:
                 current.append("--verify-resume")
             execute(current, output / f"train-{boundary:08d}.log", environment)
-        previous = run / f"checkpoints/update-{boundary:08d}.json"
+        previous = checkpoint
+        publish(args, output)
         simulators: tuple[Literal["msl", "dolphin"], ...] = (
             ("msl", "dolphin") if not args.tiny and boundary % 128 == 0 else ("msl",)
         )
-        result = output / "selection" / f"update-{boundary:08d}"
+        if (result / "results.json").is_file():
+            continue
+        if result.exists():
+            result.rename(result.with_name(f"{result.name}-interrupted-{time.time_ns()}"))
+        anchors = snapshot_anchors(run / "checkpoints", boundary)
         execute(
-            evaluation_command(delivery, previous, protocol, result, held_out=False, simulators=simulators),
+            evaluation_command(
+                delivery, previous, protocol, result, held_out=False, simulators=simulators, anchors=anchors
+            ),
             output / f"evaluation-{boundary:08d}.log",
             environment,
         )
         log_evaluation(result, boundary, environment, online=args.wandb)
         if args.checkpoint_retention == "compact":
             compact_checkpoints(run / "checkpoints", boundary)
+        publish(args, output)
     metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     last = next(row for row in reversed(metrics) if "train/warming" in row)
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):
         raise RuntimeError("pilot ended without calibrated PPO training; inspect warmup before extending")
-    if not args.tiny:
+    if not args.tiny and not (output / "held-out/results.json").is_file():
         final_protocol = output / "final-evaluation.json"
         raw = json.loads(protocol.read_text())
         raw["max_frames"] = 28924
@@ -390,6 +524,7 @@ def main(args: Args) -> None:
             environment,
         )
         log_evaluation(output / "held-out", updates, environment, online=args.wandb)
+    publish(args, output)
     print(f"O65 complete: {output}; inspect gameplay intervals before claiming a learning signal", flush=True)
 
 

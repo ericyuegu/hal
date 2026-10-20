@@ -126,7 +126,7 @@ def test_pilot_logs_existing_interval_names(tmp_path: Path, version: int) -> Non
 
 
 def write_boundary(directory: Path, update: int) -> Path:
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
     shards = []
     for role, suffix, content in (
         ("training", "rank0.pt", str(update).encode()),
@@ -141,8 +141,8 @@ def write_boundary(directory: Path, update: int) -> Path:
     path.write_text(
         json.dumps(
             {
-                "format": "hal.o65.training.v5",
-                "version": 5,
+                "format": "hal.o65.training.v6",
+                "version": 6,
                 "experiment": "065_selfplay_ppo",
                 "update": update,
                 "configuration_sha256": "c" * 64,
@@ -220,3 +220,47 @@ def test_compact_checkpoints_validates_before_removing_files(tmp_path: Path) -> 
     with pytest.raises(FileExistsError):
         _MODULE.compact_checkpoints(directory, 64)
     assert old.exists()
+
+
+def test_latest_resume_rejects_a_corrupt_latest_instead_of_falling_back(tmp_path: Path) -> None:
+    directory = tmp_path / "checkpoints"
+    write_boundary(directory, 32)
+    latest = write_boundary(directory, 64)
+    assert _MODULE.latest_checkpoint(directory) == latest
+    manifest = json.loads(latest.read_text())
+    (directory / manifest["shards"][0]["name"]).write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="corrupt shard"):
+        _MODULE.latest_checkpoint(directory)
+
+
+def test_publication_preserves_shards_before_manifests_and_compaction(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "o65_pilot_state", Path(__file__).parents[1] / "scripts/o65_pilot_state.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    stage_state = module.stage_state
+
+    source, destination = tmp_path / "source", tmp_path / "volume"
+    checkpoint = source / "train/checkpoints"
+    first = write_boundary(checkpoint, 32)
+    hashes = stage_state(source, destination)
+    assert "train/checkpoints/update-00000032.json" in hashes
+    assert _MODULE.latest_checkpoint(destination / "train/checkpoints").name == first.name
+    write_boundary(checkpoint, 64)
+    _MODULE.compact_checkpoints(checkpoint, 64)
+    stage_state(source, destination)
+    assert not (destination / "train/checkpoints" / first.name).exists()
+    assert (destination / "train/retired-checkpoints" / first.name).exists()
+    assert _MODULE.latest_checkpoint(destination / "train/checkpoints").name == "update-00000064.json"
+
+
+def test_resume_trims_uncommitted_metrics_and_preserves_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    path.write_text('{"global_step":32}\n{"global_step":33}\n{"global_')
+    _MODULE.trim_interrupted_metrics(path, 32)
+    assert path.read_text() == '{"global_step":32}\n'
+    evidence = list(tmp_path.glob("metrics-interrupted-*.jsonl"))
+    assert len(evidence) == 1 and evidence[0].read_text().endswith('{"global_')

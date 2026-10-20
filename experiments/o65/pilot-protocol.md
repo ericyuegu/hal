@@ -1,342 +1,238 @@
 # RTX PRO 6000 debug pilot
 
-This protocol qualifies the 17M O63 bootstrap30 loop. It does not qualify O64
-or production delays. Run [the driver](pilot.py) through
-[the launch script](../../scripts/launch_o65.sh). Do not extend a failed run
-or change its settings without recording a new treatment.
+This protocol qualifies the 17M O63 bootstrap30 loop on one Modal RTX PRO 6000.
+It does not qualify O64 or production delays. No job has been launched by the
+bigstep stream. The maintained entry point is
+[scripts/launch_o65_modal.py](../../scripts/launch_o65_modal.py), mode `pilot`.
 
-## Treatment, control and fixed inputs
+## Scientific treatment and control
 
-Treatment: joint PPO with the exact conditional KL reward and direct KL loss,
-one actor epoch, fresh Muon state, LR 1e-5, zero weight decay, clipping 0.2,
-gradient norm cap 1, 32 windows per step, and 16 decisions
-per window. The critic uses its own optimizer, LR 3e-4 and four epochs.
-The actor LR warms up over 32 optimizer steps. Discount is 0.99855 per frame;
-GAE lambda is 0.99 per frame. Keep the current reward, masks and detach points.
-No reward, precision or optimizer ablation is part of this launch.
+Treatment: joint PPO with exact conditional KL in the reward and the direct KL
+loss, one actor epoch, fresh Muon state, actor LR 1e-5, zero weight decay,
+PPO clipping 0.2, gradient norm cap 1, **512 windows per actor step**, and
+16 decisions per window. The previous pilot used 32 windows per step; that
+was a deviation from the plan. The actor LR still warms up over exactly 32
+optimizer steps. The critic still uses LR 3e-4 and four epochs. Discount is
+0.99855 per frame and GAE lambda is 0.99 per frame. Reward, precision, executed
+factor masks and detach points remain the specified treatment.
 
-Control: the frozen, hash-pinned base O63 model, pi_ref, under the same
-u*=0.95, identities, stage, character pair, cadence, port orientations and
-evaluation schedule. Training still uses its configured frozen reference and
-snapshot anchors. Evaluation always uses the base O63 anchor.
+The user chose **2,000 total updates**, replacing 512. Critic warmup is included
+in that total. The pool has four groups of 1,024 matches: 4,096 resident matches,
+16 native shards per group, 64 lanes per shard. Each group reserves 154 matches
+for anchors, with alternating anchor ports. Only student players train. With
+roughly 3,788 student windows, an update takes about eight actor steps. Each
+window enters one step. The last step is padded and its padding is excluded
+from decision selection, advantage normalization, loss and gradient reductions.
 
-Fixed inputs are [pilot-inputs.json](pilot-inputs.json),
-[pilot-sampler.json](pilot-sampler.json), its
-[count provenance](pilot-sampler-source.json), [pilot-evaluation.json](pilot-evaluation.json),
-the committed HAL source, uv.lock, and the pinned container digest in the launch
-script. The delivery schema is `hal.o65.delivery.v2`:
+The following are explicit scientific changes from the previous pilot:
 
-- MSL fork: `https://github.com/ericyuegu/melee-sim-light.git`,
-  commit `2dbca5e3214d88859ac80333cc19caa328d4be4a` on `o65-hal-parity`.
-  Verify the detached HEAD, a clean tracked tree and SHA-256 of `git archive`:
-  `3da991920685a9702cee22ae8b78184bb5b356acb0e1c90a9ead85d4298fc4d3`.
-- Base O63 checkpoint: the R2 key and hash in the plan and delivery manifest;
-  SHA-256 `65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6`.
-- Verify the input archive's size and hash before extraction. Verify statistics,
-  sampler, count provenance and the game manifest, then every raw game file.
-  The strict checkpoint loader checks feature statistics, recorded training
-  data identity and supervised offsets. No training corpus is downloaded.
-- Only D=8,R=4 and D=10,R=2 are admitted. Executed offsets are 9..12 and
-  11..12. Reject every unsupported offset; do not substitute a cadence.
-- Training seed: 65. Selection seeds: 17 and 29 on FD Fox/Falco. Held-out
-  seeds: 10017, 10029, 10041, 10053, 10067, 10079, 10093, 10111 on BF
-  Fox/Falco. Both port orientations run for each seed and cadence. Identity
-  0 is fixed for both evaluation players. The evaluated student lambda is 1;
-  this debug run does not select lambda or a checkpoint from a sweep.
+- Identities use the checkpoint's own pretraining sources, `cfg.source_names`.
+  The proxy uses ranked-anonymized-1-policy-world-v8 alone. Count player
+  appearances by character in its 112,188 training rows. Use tempering 1.0,
+  data floor 1, deployment rate 0, and mask 10% of players, matching
+  `identity_dropout=0.1`. Master remains in ordinary count-weighted draws.
+  Professional identities are not sampled for this proxy. The builder also
+  supports an O64 checkpoint's professional sources through its identity sidecar.
+  No gate rejects an otherwise valid table merely for changing the mix.
+- Both players independently draw episode percentile u from Beta(5.0, 1.3),
+  clipped to [0.1, 0.999], replacing fixed u=0.95. Student and pi_ref use the
+  same u on every scored state and conditional action path. Anchors draw from
+  the same distribution. The residual critic receives both players' u values.
+  Episode metadata and checkpoints preserve u.
+- Every episode starts at 0% for both players. The former pilot sampled
+  0, 30, 60 and 90%. Warmup and asynchronous episode ends supply phase diversity.
+  Every update records episode-age bins in frames.
+- Draw stages uniformly from the six stages in `hal.policy.INCLUDED_STAGES`.
+  Pokemon Stadium is frozen at the MSL boundary.
+- Draw unordered character pairs from `hal.eval.matchups.MATCHUP_PRIOR`: the
+  259 ranked train matchups with at least ten replays. Choose orientation
+  uniformly, then draw each identity conditional on its character. This replaces
+  the former FD Fox/Falco-only training sampler.
 
-The launcher's clean HEAD is the exact HAL SHA sent to the VM. The orchestrator
-must publish that SHA on `ericyuegu/hal` before launch. The VM checks the SHA
-after checkout. The handoff report records the final expected SHA. The launcher
-does not push. It never uses the upstream MSL remote.
+Control: the hash-pinned base O63 policy, with matched episode sampling and
+conditioning. All MSL and Dolphin **evaluations keep u=0.95**, masked identity,
+student lambda 1 and both cadences, to compare checkpoints directly.
 
-## Pool and throughput qualification
+## Fixed inputs and provenance
 
-Use one g4-standard-48: one 96 GB RTX PRO 6000, 48 vCPUs and 180 GB RAM,
-as listed in [Google's GPU table](https://docs.cloud.google.com/compute/docs/gpus).
-Use 16 native shard threads, two Torch CPU threads, and four groups. Begin
-with three separate, three-update qualifications at 256, 512 and 1,024 active
-matches (16, 32 and 64 lanes per shard), one group each. Exclude the first
-update from steady throughput. These are disposable timing runs with no
-warmup and default Torch algorithms; they do not select optimizer settings or
-learning checkpoints.
+Use [pilot-inputs.json](pilot-inputs.json), [pilot-sampler.json](pilot-sampler.json),
+[count provenance](pilot-sampler-source.json), and
+[pilot-evaluation.json](pilot-evaluation.json). Delivery schema is
+`hal.o65.delivery.v2`. MSL is the `ericyuegu/melee-sim-light` fork at
+`2dbca5e3214d88859ac80333cc19caa328d4be4a`, source archive SHA-256
+`3da991920685a9702cee22ae8b78184bb5b356acb0e1c90a9ead85d4298fc4d3`.
+The O63 checkpoint SHA-256 is
+`65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6`.
+The manifest pins the input archive, statistics, game manifest and sampler hashes.
+Verify every raw game file. Do not download the training corpus to the job.
 
-The planned training pool has 1,024 active and 4,096 resident matches.
-Each group reserves its first 154 matches for anchors, with alternating anchor
-ports. This is the fixed-lane treatment: 15.04% of matches have one frozen
-opponent. All other matches use two student players. A policy receives a fixed
-contiguous compute buffer; block-boundary gathers preserve logical stream ids.
-Snapshot weights stay fixed for an episode. Retired model storage is reused
-only after no episode owns that snapshot.
-The [local report](performance/report.md) measured 1,592 match-frames/s at
-256 and 1,839 at 512, with 8.04 and 11.12 GiB peak reserved, on a 12 GB RTX
-3060 with 12 shards. Native-only scaling measured 27,296, 131,713 and 166,045
-match-frames/s with 1, 6 and 12 shard threads. This suggests GPU work limits
-the complete path before simulator stepping does. It does not measure the VM.
+Only D=8,R=4 and D=10,R=2 are admitted: executed offsets 9..12 and 11..12.
+The loader rejects unsupported offsets. Training seed is 65. Selection uses
+seeds 17 and 29, FD Fox/Falco; held-out uses 10017, 10029, 10041, 10053,
+10067, 10079, 10093 and 10111, BF Fox/Falco. Each seed runs both port
+orientations and both cadences. The held-out set is used once.
 
-Assumption: the larger GPU can use 1,024 active matches efficiently, and 16
-server-vCPU shard threads can feed it. CPU models, SMT placement, graph sizes,
-deterministic kernels and resets can invalidate that assumption. The driver
-records its CPU list; check `lscpu -e` and `nvidia-smi topo -m` on the VM to
-interpret placement. Available CPU ids are not proof of physical core layout.
+Regenerate the identity table with the checkpoint's source replay manifests
+(one `<source-name>/manifest.jsonl` per source):
 
-Stop if the 1,024-match rate is over 10% below the best candidate, any measured
-rate is invalid, or any candidate reserves 80 GiB or more. Inspect
-throughput.json; do not silently choose another pool. Time checkpoints,
-evaluation and startup separately because update throughput excludes them.
+```sh
+uv run python -m scripts.build_o65_sampler \
+  --checkpoint runs/proxy/final.pt \
+  --manifests-root runs/bigstep/training-sources
+```
+
+The builder records manifest, checkpoint and sidecar hashes, training-row
+counts and the checkpoint's training-index hashes. It excludes validation and
+test rows. The delivery manifest's sampler hashes must then be updated.
 
 ## Warmup, training and evaluation
 
-1. Build MSL and the HAL adapter from verified source. Record compiler and
-   library hashes. Fetch the hash-checked Melee and Dolphin fixtures.
-2. Measure the base model against itself in both simulators with the selection
-   protocol. This establishes each simulator's baseline; it cannot establish
-   simulator correctness for distinct policies. The native replay and
-   controller parity gates remain required evidence.
-3. Train through 512 updates with default Torch algorithms. Each update collects
-   256 frames per active match. Critic warmup requires at least 172 updates,
-   at least 11,008 frames in every group, and a fresh-feature explained-variance
-   plateau (eight observations, tolerance 0.01). Only critic heads train then.
-   Calibrate lambda_max to three times the largest measured per-cadence
-   advantage spread, subject to the implementation's recorded bounds.
-   Lambda_min stays 0.01. Store the resolved maximum before PPO begins.
-   A failure to leave warmup is a failed debug stage, not permission to bypass it.
-4. Publish a checkpoint every 32 updates. At every boundary, stop the trainer
-   and run MSL selection evaluation against pi_ref. At 128, 256, 384 and 512,
-   also run Dolphin against that same reference. Evaluation uses the fixed
-   lambda=1 and both cadences. Selection matches have a 1,924-frame budget
-   (30 seconds of active play plus the countdown and final observation);
-   they diagnose progress and may not produce scored wins. The earlier prep
-   used 7,324 frames. Local eager evaluation measures about 17 total simulator
-   frames per wall second on 132-frame matches, so that budget would consume
-   most of a VM day. This shorter diagnostic budget is a provisional cost
-   choice. The full-match held-out learning criterion remains unchanged.
-   These jobs use the same GPU serially, so evaluation cannot exhaust training
-   memory or lag behind an unbounded child queue. Reopen the same checkpoint
-   and W&B run before the next training segment.
+1. Verify source and inputs, build MSL and the HAL adapter, and fetch verified
+   Melee and Dolphin fixtures. Record source SHA, environment and build hashes.
+2. Run the fixed base-versus-base control in MSL and Dolphin. This is a baseline,
+   not proof of simulator correctness for distinct policies. Replay and controller
+   parity gates remain required.
+3. Train through 2,000 total updates. Every update collects 256 frames per active
+   match. Warmup requires at least 172 updates, 11,008 frames in every group,
+   and eight fresh-feature explained-variance observations within tolerance 0.01.
+   Only critic heads train. Calibrate lambda_max to three times the largest
+   per-cadence advantage spread within the declared conditioner bounds. Keep
+   lambda_min=0.01. Record the calibrated maximum before PPO starts. Failure
+   to leave warmup fails this stage.
+4. Publish and evaluate every 32 updates, plus the final update 2,000. Run MSL
+   against the base and the three most recent 256-update snapshot anchors.
+   Also run Dolphin every 128 updates against those same anchors. Evaluation
+   uses 1,924 frames (30 active seconds plus countdown and final observation).
+   Budget stops are not wins. Training and evaluation use the GPU serially.
 5. At update 256, SIGKILL the trainer process group after atomic checkpoint
-   publication while it still has work left. Evaluate that durable snapshot,
-   then resume it to 288. At 288, run the resume verifier on the full pool.
-   Require exact restoration of model, both optimizers, scheduler, simulator
-   and pool state, sampler cursor, counter key, progress and every RNG state.
-   Repeat the next update twice as controls from the identical boundary, then
-   once from resume. Compare RMS error for the complete model
-   and each optimizer state family. Error may reach twice the measured
-   control spread plus eight dtype rounding units at the control scale
-   (minimum 1e-3). Keep maximum and per-tensor errors as diagnostics. Integer state and
-   scheduler progress remain exact.
-   Record all errors and tolerances. Batch hashes are diagnostic: reduction
-   noise can change categorical samples. Atomic adds and other nondeterministic
-   reductions are allowed, including in the verifier. Reject NaNs and infinities
-   in executed log-probs, KL, advantages, losses and gradients.
-   Restore the 288 boundary after the check and continue through 512 with the
-   same configuration and run id. The verifier uses training's graph paths and
-   execution mode. Checkpoints record deterministic mode and the cuBLAS workspace
-   setting; these execution settings do not bind resume identity.
-6. Evaluate only the final checkpoint once on the held-out grid in both
-   simulators, with a 28,924-frame budget. Keep the held-out claim and every
-   partial result, including on failure. No held-out retry or selection is
-   allowed under the same protocol.
+   publication while more work remains. Resume the same W&B run to 288.
+   At 288, require state-exact restoration and the noise-qualified next update:
+   repeat the same next update twice as controls, then once from resume.
+   Complete-model and optimizer-family RMS error may reach twice control spread
+   plus eight dtype rounding units at the control scale (minimum 1e-3).
+   Integer state and scheduler progress remain exact. Batch hashes and maxima
+   remain diagnostic. Finite checks are unchanged. Restore the 288 boundary
+   after verification and continue. Interrupted verification can rerun from
+   the preserved 288 checkpoint without advancing production training.
+6. Evaluate only the final checkpoint on the held-out grid, in both simulators,
+   with 28,924 frames. Preserve partial results and the held-out claim on failure.
+   No held-out retry or extension is allowed under this protocol.
 
-The driver writes resolved configuration, source/input hashes, per-update
-metrics, compiler/build logs, throughput.json, kill.json, resume-check.json,
-checkpoint manifests and paired match reports. Trainer and driver evaluation
-metrics resume the same online W&B run in project `hal-o65`, with global_step
-as data and one slash per metric key. Missing credentials or evaluation
-failures fail the job. Disk results remain the source of complete intervals
-and match outcomes.
+The first warmup update and first PPO update record peak allocated and reserved
+GPU bytes for rollout, preparation, reference, critic and actor as applicable.
+`phase-memory.json` is written as phases finish, including on CUDA OOM. An OOM
+fails with the phase name. The unmeasured 512-window step must fit directly:
+there is no accumulation, recomputation or automatic batch-size reduction.
+
+## Diagnostics
+
+W&B project is `hal-o65`. `global_step` is data, defined as the metric step;
+keys have one slash. Disk metrics and evaluation reports retain full evidence.
+Log pre-clip actor/critic gradient norms and cap-binding fractions, per-factor
+reference KL, KL per executed frame by cadence, lambda and u bin, entropy by u
+and factor, task reward components, episode age, and per-episode return and win
+rate by u. Parameter-group diagnostics include reference distance and update
+norm divided by the group's pre-update weight norm. Action distributions on
+the same sampled contexts report student/reference button press rates, trigger
+means and stick-magnitude bins (edges 0.01, 0.25, 0.5, 0.75, 1.01).
+
+The gradient-noise estimate uses pre-clip gradients across actor steps, with
+window-count weighting and finite-sample signal/noise correction. Its unit is
+windows. It reports signal and validity; a nonpositive estimated signal does
+not produce an infinite noise scale. Weights move between these samples, so
+this is an online diagnostic, not a controlled critical-batch measurement.
+
+Completed episodes report cumulative student KL cost per match and the initial
+value against the full discounted return, with and without KL. Costs follow the
+plan's live-rollout-tail convention. Truncations do not enter Monte Carlo error
+or win-rate metrics. These accumulators are part of exact resume state.
+
+Each evaluation cell identifies its anchor and reports match length, deaths
+by blast-zone death-animation onset (bottom 0, left 1, right 2, top 3..10),
+and an explicit zero-damage self-destruct proxy. The proxy counts a stock lost
+at 0% with no damage since respawn; it is not exact KO attribution. The native
+observation has no last-hit or KO-credit field.
+
+## Modal launch and durability
+
+Inspect the complete job without contacting Modal:
+
+```sh
+uv run python -m scripts.launch_o65_modal --mode pilot \
+  --name o65-bigstep-pilot --dry-run --output runs/modal-pilot
+```
+
+After publishing the clean `o65-bigstep` HEAD, the exact launch command is:
+
+```sh
+uv run python -m scripts.launch_o65_modal --mode pilot \
+  --name o65-bigstep-pilot --timeout-seconds 85500
+```
+
+The `hal` Modal Secret must contain the four AWS/R2 variables and
+`WANDB_API_KEY`. The job has one RTX PRO 6000, 17 physical CPU cores and
+64 GiB host memory. Sixteen distinct available CPU IDs drive the shards;
+Modal does not expose physical-core topology. No pool sweep runs by default.
+
+Compile artifacts use the async stream's persisted directory,
+`hal-o65-profile:/compile-cache`. Source, Torch, Triton, CUDA and GPU identity
+checks remain strict. These scientific/source changes require new compatible
+artifacts; old source entries are not loaded unsafely. Later 32-update segments
+and preemption resumes reuse the compatible persisted artifacts. CUDA graphs
+are recaptured in each process.
+
+The trainer writes atomic checkpoints on local POSIX storage. At each stopped
+training/evaluation boundary, the driver copies complete state to Modal Volume
+`hal-o65-profile:/<run-name>/pilot`, commits it, and backs up changed files to
+R2 `o65/pilot-results/<run-name>/state/`, publishing the hash index last.
+The latest resume state, updates 256 and 288, and all actor snapshots are kept.
+Retired manifests retain their hashes. Preemption reuses the same request and
+restores the latest complete checkpoint from the Volume. A corrupt latest
+checkpoint fails instead of falling back. Selection evaluation can resume by
+repeating a fixed-seed interrupted cell; its partial evidence is retained.
+A held-out claim prevents an interrupted held-out evaluation from retrying.
+
+The driver preserves W&B identity across segments and preemption. Metrics
+past the durable checkpoint are retained separately, then trimmed from the
+active disk log. The two-control resume verifier includes simulator state,
+queues, episode u, metric accumulators, optimizers, scheduler and every RNG.
+
+## Estimates and hard limit
+
+The old 1,024-match measurement was 11.4 s/update with 32-window actor steps.
+Using the async projection (rollout 6.704 s to 4.246..4.500 s), and an unmeasured
+0.6..1.2 s reduction in repeated step/optimizer overhead, gives **7.74..8.60
+s/update, estimated**. Model FLOPs are not divided by 16 when batch size grows.
+Charging all 2,000 updates at PPO cost gives **4.30..4.78 GPU-hours** and
+**$18.69..$20.75 compute**, before startup, evaluations, publication and process
+restarts. Critic warmup should cost less; this arithmetic gives it no credit.
+
+Allow **8..12 GPU-hours and $38..$55 compute** for the full protocol, estimated.
+The larger evaluation grid, compilation, new shapes, memory pressure and remote
+publication can invalidate that allowance. No new timing study was run locally.
+Rates checked 2026-10-20: GPU $0.000842/s, physical CPU $0.0000131/core/s,
+RAM $0.00000222/GiB/s ([Modal pricing](https://modal.com/pricing)). These figures
+exclude storage and egress beyond included allowances.
+
+Hard timeout: **85,500 seconds (23h45m)**, with 360 seconds reserved for startup
+and teardown. The absolute request deadline survives preemption; Modal's
+per-attempt timeout does not extend it. Maximum reserved compute, including
+$3 build allowance, is **$106.62**, under a separate $110/85,860-second pilot
+ledger. Timeout expiry fails completion and preserves the last published state.
+See [Modal timeout rules](https://modal.com/docs/guide/timeouts) and
+[preemption rules](https://modal.com/docs/guide/preemption).
 
 ## Success criteria
 
-The systems stage passes only if builds and input checks pass, all scheduled
-matches publish, warmup calibrates and exits, the actor takes PPO steps,
-W&B records both training and evaluations, and the forced kill plus state-exact
-resume and noise-qualified next update pass on the actual RTX PRO 6000. The hard cap expiring is a failed
-completion. Preserve its partial evidence.
+Systems success requires verified inputs, all scheduled evaluations, calibrated
+warmup exit, real PPO steps, W&B evidence, forced kill, and the state-exact and
+noise-qualified resume checks on the actual RTX PRO 6000. Required missing
+fixtures and hard-cap expiry are failures.
 
-The learning stage passes only if the final held-out MSL comparison has
-net_stock_lcb > 0 **and** the two-sided 95% win-rate interval's lower bound is
-above 0.5, in each cadence at the fixed lambda=1. Report mean net stocks/min
-with its 95% interval, raw match net stocks, terminal win rate with its interval,
-completed pairs, budget stops and timeouts. Treat paired seed/start units as
-samples. Missing bounds or incomplete win pairs mean inconclusive evidence;
-do not score a frame-budget stock lead as a win. The small held-out set can
-fail to resolve a real effect. Do not extend it after seeing the result.
-
-Dolphin is a periodic sanity check and a separate gameplay/latency benchmark.
-Report the same paired intervals and event statistics there. A clear reversal
-or a new failure pattern blocks a gameplay claim, even if MSL passes. A null
-Dolphin interval does not establish agreement. Diagnose distinct-policy MSL
-versus Dolphin event statistics before any production stage. Self-play win
-rate and offline loss cannot establish improvement over pi_ref.
-
-## Launch, monitoring and teardown
-
-The pilot uses the existing `hal-netplay-g4-1015-us-west4-a` instance in
-`us-west4-a`, project `centering-star-502613-k3`. The orchestrator starts it
-only after the user confirms netplay cleanup. The launcher rejects active
-netplay services or containers. It leaves their files in place.
-
-Before starting, publish the final HAL commit, check local gcloud
-authentication, and verify input availability in R2. The existing VM service
-account has Secret Accessor on the five credential secrets and Artifact
-Registry Reader on `hal-netplay`. The launcher checks secret metadata
-locally. The job reads secret values through the VM service account.
-The job uses the image digest in `scripts/launch_o65_existing.py`, replaces
-the image's HAL source with the requested commit, verifies HEAD, then runs
-`uv sync --locked`. Delivery still checks the MSL fork commit and source
-archive, checkpoint, input archive, statistics and raw game hashes.
-
-The read-only R2 size check passed for the input archive and checkpoint on
-2026-10-18. If the archive needs publication again, the orchestrator can
-verify and upload it from this worktree with:
-
-```sh
-uv run python - <<'PYTHON'
-from pathlib import Path
-from hal import r2
-from scripts.o65_delivery import read_manifest, verify_blob
-manifest = read_manifest(Path("experiments/o65/pilot-inputs.json"))
-archive = Path("runs/o65-prep-final-payloads/inputs.tar")
-verify_blob(archive, manifest.inputs)
-r2.client().upload_file(str(archive), r2.bucket(), manifest.inputs.key)
-PYTHON
-```
-
-After committing, render locally for inspection:
-
-```sh
-bash scripts/launch_o65.sh --dry-run --render runs/o65-existing-job.sh
-```
-
-The dry run writes the job script and prints the SCP and SSH commands.
-It makes no cloud requests. For the approved start, set a unique run name
-and use the same name for monitoring, stopping and result retrieval:
-
-```sh
-NAME="hal-o65-proxy-$(git rev-parse --short=8 HEAD)"
-bash scripts/launch_o65.sh --run-name "$NAME"
-```
-
-The launcher checks R2 input sizes and HAL publication before copying the
-rendered script with `gcloud compute scp`. Over SSH, it installs the script
-under `/var/lib/hal-o65/$NAME/`, starts `$NAME.service` with `systemd-run`,
-then returns. Systemd supervises the detached job after SSH disconnects.
-The transient unit has a 85,500-second runtime limit and a 900-second stop
-limit, so training ends at 23h45m and cleanup finishes within the remaining
-15 minutes. The limit starts with this job, irrespective of VM uptime.
-At the limit, systemd kills the job's host processes, then invokes
-`ExecStopPost` to remove its training container and upload results.
-Systemd also invokes this hook after normal exit, failed startup and a
-manual stop. See [the systemd service reference](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#ExecStopPost=).
-
-The post-stop script allows 810 seconds for container removal and upload,
-then 60 seconds for cleanup, with a five-second kill allowance on each.
-The upload container has its own 720-second limit. It writes a hash-indexed
-result tar, then publishes its manifest under
-`o65/pilot-results/$NAME/`. The tar contains logs, resolved settings,
-evaluation reports and retained checkpoints. Input delivery and scratch
-files stay out of the upload. After the attempt, the job removes its
-containers, secret files, delivery directory and scratch. It preserves
-local result files, exit status and the job script for inspection.
-An upload failure remains visible in `output/upload-exit-code` and the
-journal. A network or storage failure can prevent remote publication;
-local results remain available for recovery.
-
-The manual stop follows the same upload and cleanup path:
-
-```sh
-bash scripts/launch_o65.sh --action stop --run-name "$NAME"
-```
-
-This command waits for systemd's stop operation, including result upload.
-Stopping uses the original run name even if the local checkout has changed.
-The VM stays allocated after all exit paths. The launcher does not change
-instance metadata or scheduling. It does not install host packages or
-change Docker configuration.
-
-Monitor the job and retrieve results:
-
-```sh
-gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo systemctl status $NAME.service --no-pager"
-gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo journalctl -u $NAME.service -n 100 --no-pager"
-gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo tail -n 5 /var/lib/hal-o65/$NAME/output/pilot/train/metrics.jsonl"
-gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command "sudo grep -m 1 https://wandb.ai/ /var/lib/hal-o65/$NAME/output/pilot/train-00000032.log"
-gcloud compute ssh hal-netplay-g4-1015-us-west4-a --project centering-star-502613-k3 --zone us-west4-a --command 'df -h /; nvidia-smi'
-uv run python scripts/o65_results.py fetch --prefix "o65/pilot-results/$NAME" --root "runs/$NAME-results"
-```
-
-The W&B run id is `o65-debug-<HAL SHA prefix>-<output-path hash>`, in project
-`hal-o65`. Inside the training container, the output path includes the run
-name so separate jobs on the same HAL commit get separate W&B runs.
-The fetch command verifies the tar and every extracted file.
-The result directory remains on the VM after completion. Keep it until the
-retrieved evidence has been checked. Teardown consists of stopping the job
-if needed and allowing its cleanup to finish. The VM remains running.
-
-### Disk check
-
-Read-only inspection on 2026-10-18 found 48,176,799,744 bytes free
-(44.87 GiB) on the 100 GB boot disk. Docker already has the requested image
-digest, 9,056,653,301 bytes (8.43 GiB), and lists the NVIDIA container
-runtime. The driver is 580.178.04 with CUDA 13.0. The netplay runner,
-health service and overlay container were still active during inspection.
-The launcher requires a cached image and at least 40 GiB free before
-training. Docker runs use `--pull=never`; a missing image fails the job.
-
-For the 4,096-match pool, allow about 2 GiB per complete resume checkpoint,
-including frame history and compressed simulator state. This estimate
-extrapolates the local four-match checkpoint: 207.54 MiB of training state,
-66.28 MiB for its actor and 0.22 MiB of compressed simulator shards.
-It is a planning allowance, not a full-pool measurement. The compact
-retention mode keeps the latest resume checkpoint, update 256 and update
-288, plus all actor snapshots. After each completed selection evaluation,
-the driver moves older manifests to `retired-checkpoints/` and removes
-unreferenced training and simulator files. Historical manifests record
-hashes; they cannot resume the retired state. Training settings, evaluation
-boundaries and resume checks stay the same. Other callers retain all
-checkpoints by default.
-
-Budget 8 GiB for retained results and another 8 GiB for their upload tar.
-Allow 4 GiB for delivery and emulator fixtures, including both ISO copies
-made by the fixture fetcher, and 12 GiB for the checkout, environment
-updates, compiler and caches. This totals about 32 GiB beyond the cached
-image, leaving about 13 GiB at the inspected free-space level. Monitor disk
-use during qualification because full-pool serialization and compiler
-caches remain estimates. Retaining all 16 complete checkpoints would put
-the upload copy at risk of filling this disk.
-
-The start reads GitHub publication refs and local secret metadata, copies
-the script, creates a transient unit, reads five secret values on the VM,
-clones HAL and the MSL fork, resolves the locked environment, builds MSL
-and the adapter, fetches verified inputs and emulator fixtures, runs the
-fixed pilot, sends W&B metrics, uploads R2 results, then removes job scratch.
-The job installs its compiler inside its disposable container.
-
-Budget assumption: about 5,500 match-frames/s gives 48 seconds per
-1,024-match PPO update. Allow 12 to 24 hours for preparation, qualification,
-warmup, training, evaluations, resume checks and upload. This estimate
-has not been measured on this VM. The existing instance continues to incur
-charges after the job ends. A cap expiry preserves partial evidence and
-fails completion. Long held-out matches can still exhaust the cap.
-
-## Dense execution treatment
-
-The dense trainer defines PPO's old policy as the stored rollout behavior
-log-probabilities (`pi_old = mu`). It removes the student scoring pass and
-the truncated importance weight (now one). Student distributions, critic
-features, and decision values are stored during rollout. Model, reward,
-KL objective, decision-grid GAE, and optimizer families remain fixed.
-
-Precision qualification uses an all-FP32 reference with TF32 disabled, with
-identical weights and inputs. Candidate error must be at most 1.5 times
-default-path error plus a reported small absolute floor for factor log-probs,
-KL, values, and actor and critic gradients. Statistical comparisons with
-`aacdfee0` at 64 matches use match-level confidence intervals. These systems
-comparisons do not select a policy or establish gameplay improvement.
-
-
-Dense execution uses training checkpoint format v5 and pool snapshot format v3.
-The device RNG key is part of the resume identity. The verifier uses the training graphs and execution mode. It checks restored
-state exactly and the next update against the measured two-control spread. Earlier persisted formats are rejected. Numerical qualification
-and statistical comparison with Git commit `aacdfee0` remain required before a
-learning run.
+Learning success requires the final held-out MSL result to have net_stock_lcb>0
+and the two-sided 95% win-rate interval lower bound above 0.5, in each cadence,
+at fixed lambda 1. Paired seed/start units are the samples. Missing bounds,
+incomplete win pairs and frame-budget stock leads are inconclusive. Dolphin
+is a separate gameplay check: a clear reversal or new failure pattern blocks
+a gameplay claim. Neither self-play win rate nor offline loss establishes
+improvement. Do not extend the run after inspecting its results.
