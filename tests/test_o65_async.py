@@ -32,6 +32,9 @@ def test_simulator_floor_has_no_torch(tmp_path: Path) -> None:
     )
     result = json.loads(output.read_text())
     assert result["matches"] == 64 and result["frames"] == 256
+    assert result["warmup_frames"] == 256
+    assert result["start_frame_ids"] == [133] * 64
+    assert result["end_frame_ids"] == [389] * 64
     assert 0 < result["simulator_seconds"] <= result["wall_seconds"]
     assert result["settings"][0]["max_frame"] == 28800
 

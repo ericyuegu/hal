@@ -19,8 +19,9 @@ from numpy.typing import NDArray
 
 from hal.sim import native
 from hal.sim.inputs import native_controller_readback
+from hal.wire import ACTION_DIM
 
-STAGING_DTYPE = np.dtype([("records", native.FRAME_DTYPE), ("observed", np.float32, (2, 14))])
+STAGING_DTYPE = np.dtype([("records", native.FRAME_DTYPE), ("observed", np.float32, (2, ACTION_DIM))])
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +126,7 @@ class NativeShard:
             actions.dtype != np.float32
             or actions.ndim != 4
             or not 1 <= len(actions) <= 2
-            or actions.shape[1:] != (count, 2, 14)
+            or actions.shape[1:] != (count, 2, ACTION_DIM)
             or mask.dtype != np.bool_
             or mask.shape != (count,)
             or output.dtype != STAGING_DTYPE

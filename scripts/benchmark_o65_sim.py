@@ -14,6 +14,7 @@ import numpy as np
 
 from hal.sim import native
 from hal.sim import native_shard
+from hal.wire import ACTION_DIM
 
 
 def benchmark(data_dir: Path, cpu: int, *, matches: int = 64, frames: int = 256) -> dict[str, object]:
@@ -34,12 +35,17 @@ def benchmark(data_dir: Path, cpu: int, *, matches: int = 64, frames: int = 256)
         for lane in range(matches)
     )
     active = np.ones(matches, dtype=np.bool_)
-    actions = np.zeros((matches, 2, 14), dtype=np.float32)
+    actions = np.zeros((matches, 2, ACTION_DIM), dtype=np.float32)
     actions[:, 0, 0] = 0.5
     actions[:, 1, 0] = -0.5
     simulator = 0.0
     with native_shard.NativeShard(data_dir, matches, cpu=cpu) as shard:
         shard.reset(configurations, active).result()
+        for _ in range(256):
+            warm = shard.step(actions, active).result()
+            if (warm.terminated | warm.truncated).any():
+                raise ValueError("benchmark ended during warmup")
+        start_frames = warm.frame_id.copy().tolist()
         started = time.perf_counter()
         for _ in range(frames):
             result = shard.step(actions, active).result()
@@ -47,6 +53,7 @@ def benchmark(data_dir: Path, cpu: int, *, matches: int = 64, frames: int = 256)
             if (result.terminated | result.truncated).any():
                 raise ValueError("benchmark ended before its configured frame count")
         wall = time.perf_counter() - started
+        end_frames = result.frame_id.copy().tolist()
         states = shard.save_many(tuple(range(matches))).result()
         simulator_hash = shard.library_sha256
     if "torch" in sys.modules:
@@ -57,6 +64,9 @@ def benchmark(data_dir: Path, cpu: int, *, matches: int = 64, frames: int = 256)
         "cpu": cpu,
         "matches": matches,
         "frames": frames,
+        "warmup_frames": 256,
+        "start_frame_ids": start_frames,
+        "end_frame_ids": end_frames,
         "settings": [dataclasses.asdict(config) for config in configurations],
         "actions": "fixed inward half-stick; no policy inference",
         "wall_seconds": wall,
