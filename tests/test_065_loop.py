@@ -250,7 +250,7 @@ class ToyPolicy:
             torch.where(mask, logs, 0), tuple(p[..., g, :] for g in exp.DECODE_GROUP_INDICES), mask, features
         )
 
-    def evaluate_reference(self, batch: Any, positions: Any, *, windows_per_step: int) -> Any:
+    def evaluate_reference(self, batch: Any, positions: Any, window_order: Any) -> Any:
         return self.window_output(batch)
 
     def evaluate_values(self, batch: Any) -> torch.Tensor:
@@ -539,7 +539,7 @@ def test_critic_only_warmup_does_not_step_actor() -> None:
 def test_warmup_skips_reference_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     run = trainer(groups=1, warmup=100, anchor_rate=0)
 
-    def fail_evaluation(batch: Any, positions: Any, *, windows_per_step: int) -> Any:
+    def fail_evaluation(batch: Any, positions: Any, window_order: Any) -> Any:
         raise AssertionError("warmup must not evaluate the reference")
 
     monkeypatch.setattr(run.reference, "evaluate_reference", fail_evaluation)

@@ -1096,7 +1096,7 @@ class LoopPolicy(Protocol):
     def sample_tick(
         self, states: TickInputs, rng: CounterRng, layout: TickLayout, ring: ActionRing, *, clock: int
     ) -> None: ...
-    def evaluate_reference(self, batch: ReplayBatch, positions: Tensor, *, windows_per_step: int) -> ReplayOutput: ...
+    def evaluate_reference(self, batch: ReplayBatch, positions: Tensor, window_order: Tensor) -> ReplayOutput: ...
     def evaluate_values(self, batch: ReplayBatch) -> Tensor: ...
     def actor_step(
         self, batch: ReplayBatch, targets: ActorTargets, *, clip_epsilon: float
@@ -1740,16 +1740,18 @@ class TransformerPolicy:
         return concatenate_replays(batches, 0)
 
     @torch.no_grad()
-    def evaluate_reference(self, batch: ReplayBatch, positions: Tensor, *, windows_per_step: int) -> ReplayOutput:
+    def evaluate_reference(self, batch: ReplayBatch, positions: Tensor, window_order: Tensor) -> ReplayOutput:
         if torch.is_inference_mode_enabled():
             raise ValueError("reference replay requires autograd metadata outside inference_mode")
         if any(parameter.requires_grad for parameter in self.model.parameters()):
             raise ValueError("reference parameters must stay frozen")
         windows, slots = batch.rows.shape
         count = positions.shape[1] if positions.ndim == 2 else 0
+        windows_per_step = window_order.shape[1] if window_order.ndim == 2 else 0
         if (
-            type(windows_per_step) is not int
-            or windows_per_step < 1
+            windows_per_step < 1
+            or window_order.dtype != torch.long
+            or window_order.device != self.device
             or positions.shape != (windows, count)
             or not 1 <= count <= slots
             or positions.dtype != torch.long
@@ -1761,15 +1763,27 @@ class TransformerPolicy:
             (ordered_positions[:, 1:] == ordered_positions[:, :-1]).any()
         ):
             raise ValueError("reference positions must be distinct slots inside each window")
+        order = window_order.flatten()
+        live = order >= 0
+        used = order[live]
+        if bool(((order < -1) | (order >= windows)).any()) or len(used.unique()) != len(used):
+            raise ValueError("reference window order must contain distinct windows or -1 padding")
+        seen = torch.zeros(windows, dtype=torch.bool, device=self.device)
+        seen[used] = True
+        rest = torch.nonzero(~seen).flatten()
+        tail = torch.nn.functional.pad(rest, (0, (-len(rest)) % windows_per_step), value=-1)
+        order = torch.cat((order, tail))
+        live = order >= 0
+        window_inverse = torch.empty(windows, device=self.device, dtype=torch.long)
+        window_inverse[order[live]] = torch.arange(len(order), device=self.device)[live]
         priority = (torch.arange(slots, device=self.device)[None] + count).expand(windows, -1).clone()
         priority.scatter_(1, positions, torch.arange(count, device=self.device)[None].expand_as(positions))
         permutation = priority.argsort(-1)
         inverse = permutation.argsort(-1)
         padded_slots = math.ceil(slots / count) * count
         permutation = torch.nn.functional.pad(permutation, (0, padded_slots - slots))
-        padded_windows = math.ceil(windows / windows_per_step) * windows_per_step
-        indices = torch.arange(padded_windows, device=self.device)
-        packed = batch.take(indices, permutation, indices < windows)
+        padded_windows = len(order)
+        packed = batch.take(order, permutation, live)
         packed = dataclasses.replace(
             packed,
             slots=dataclasses.replace(
@@ -1798,7 +1812,7 @@ class TransformerPolicy:
 
         def reorder(value: Tensor) -> Tensor:
             index = inverse.reshape(windows, slots, *([1] * (value.ndim - 2)))
-            return value[:windows].gather(1, index.expand(windows, slots, *value.shape[2:]))
+            return value[window_inverse].gather(1, index.expand(windows, slots, *value.shape[2:]))
 
         return ReplayOutput(
             reorder(output.log_probs_WKF),
@@ -3073,9 +3087,7 @@ class Trainer:
                 None
                 if self.warming
                 else window_evaluation(
-                    self.reference.evaluate_reference(
-                        windows, placement.positions, windows_per_step=self.config.windows_per_step
-                    ),
+                    self.reference.evaluate_reference(windows, placement.positions, placement.windows),
                     old.actions,
                     compact,
                 )
@@ -3498,7 +3510,7 @@ def _configuration_digest(trainer: Trainer) -> str:
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["decision_kernels"] = "dense_tick_window_graph_v5"
-        identity["reference_kernels"] = "actor_shape_hidden_leaf_v1"
+        identity["reference_kernels"] = "actor_order_hidden_leaf_v2"
         identity["decoder_precision"] = trainer.policy.model.decoder_precision
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
@@ -4775,8 +4787,10 @@ def episode_diagnostics(
     windows = dataclasses.replace(windows, slots=dataclasses.replace(windows.slots, executed_WKF=full))
     old = _take_evaluation(table.evaluation, ids)
     positions = torch.arange(decisions_per_window, device=policy.device)[None].expand(len(rows), -1)
+    order = torch.arange(math.ceil(len(rows) / windows_per_step) * windows_per_step, device=policy.device)
+    order = torch.where(order < len(rows), order, -1).reshape(-1, windows_per_step)
     control = window_evaluation(
-        reference.evaluate_reference(windows, positions, windows_per_step=windows_per_step),
+        reference.evaluate_reference(windows, positions, order),
         old.actions,
         window_indices(ids, players),
     )

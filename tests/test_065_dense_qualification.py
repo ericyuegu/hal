@@ -170,7 +170,7 @@ def qualify(output: Path) -> dict[str, Any]:
         default = quantities(default_policy, default_ref, batch, behavior, window=False, fp32=False)
         print("dense precision: production actor", flush=True)
         full_reference = reference.evaluate_reference(
-            prepared.windows, prepared.placement.positions, windows_per_step=run.config.windows_per_step
+            prepared.windows, prepared.placement.positions, prepared.placement.windows
         )
         indices = exp.window_indices(windows.rows, table.players)
 
@@ -307,6 +307,13 @@ def qualify(output: Path) -> dict[str, Any]:
         torch.save(
             {
                 "windows": dataclasses.asdict(windows),
+                "reference_windows": dataclasses.asdict(prepared.windows),
+                "reference_positions": prepared.placement.positions,
+                "window_order": prepared.placement.windows,
+                "actor_features": dataclasses.asdict(actor_output.features),
+                "reference_features": dataclasses.asdict(ref_output.features),
+                "actor_distributions": tuple(p.detach() for p in actor_output.distributions),
+                "reference_distributions": tuple(p.detach() for p in ref_output.distributions),
                 "student": model.state_dict(),
                 "reference": reference.model.state_dict(),
                 "behavior": behavior,
@@ -329,7 +336,7 @@ def qualify(output: Path) -> dict[str, Any]:
             )
         }
         report["configuration"]["reference"] = (
-            "one CUDA graph; actor-sized windows and decision slots; detached hidden leaf"
+            "one CUDA graph; actor window order, padding and decision slots; detached hidden leaf"
         )
         (output / "precision.json").write_text(json.dumps(report, indent=2))
         if not all(row["passed"] for row in precision.values()):

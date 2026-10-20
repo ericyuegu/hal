@@ -391,7 +391,8 @@ def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> N
     windows = exp.replay_batch(run.policy, table, rows, table.valid[rows])
     positions = torch.stack([torch.randperm(64)[:count] for _ in range(len(rows))])
     expected = run.reference.window_forward(windows.inputs(), grad=False)
-    actual = run.reference.evaluate_reference(windows, positions, windows_per_step=3)
+    order = torch.tensor([[2, 0, -1]]) if count == 16 else torch.empty(0, 3, dtype=torch.long)
+    actual = run.reference.evaluate_reference(windows, positions, order)
     torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=3e-5, atol=5e-6)
     torch.testing.assert_close(actual.factor_mask_WKF, expected.factor_mask_WKF, rtol=0, atol=0)
     for first, second in zip(actual.distributions, expected.distributions, strict=True):
@@ -399,6 +400,8 @@ def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> N
         assert not first.requires_grad
     assert all(not p.requires_grad and p.grad is None for p in run.reference.model.parameters())
     with pytest.raises(ValueError, match="distinct slots"):
-        run.reference.evaluate_reference(windows, torch.zeros(len(rows), 2, dtype=torch.long), windows_per_step=3)
+        run.reference.evaluate_reference(windows, torch.zeros(len(rows), 2, dtype=torch.long), order)
     with pytest.raises(ValueError, match="actor shape"):
-        run.reference.evaluate_reference(windows, positions, windows_per_step=True)
+        run.reference.evaluate_reference(windows, positions, torch.zeros(2, 3, dtype=torch.bool))
+    with pytest.raises(ValueError, match="distinct windows"):
+        run.reference.evaluate_reference(windows, positions, torch.zeros(2, 3, dtype=torch.long))
