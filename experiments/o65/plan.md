@@ -203,10 +203,12 @@ are excluded from that comparison.
 
 During warmup, only critic heads train. We skip reference replay and zero KL
 terms while the student still equals pi_ref. Warmup requires at least 172
-updates, 11,008 frames in each group and eight stable fresh explained-variance
-observations at tolerance 0.01. We then set lambda_max to three times the
-largest per-cadence advantage spread within the conditioner bounds. We record
-that value before the first PPO update.
+updates and 11,008 frames in each group. It ends when the mean fresh explained
+variance of the last 32 updates gains less than 0.01 over the preceding 32
+updates. It ends at update 384 regardless of those conditions. We log whether
+the plateau or update limit ended warmup. We then set lambda_max to three
+times the largest per-cadence advantage spread within the conditioner bounds.
+We record that value before the first PPO update.
 
 ## Context and simulator execution
 

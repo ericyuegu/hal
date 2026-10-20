@@ -600,7 +600,7 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
     run = trainer(groups=1, warmup=1, anchor_rate=0)
     run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
     run.engine.sampler.lambda_max = 100
-    run.config = dataclasses.replace(run.config, plateau_patience=1, warmup_match_frames=0)
+    run.config = dataclasses.replace(run.config, critic_warmup_max_updates=1, warmup_match_frames=0)
     before = run.policy.model.logits.detach().clone()
     batch, _ = run.run_update()
     expected = 3 * max(
@@ -643,6 +643,33 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
     ).advantages.flatten()[ids]
     torch.testing.assert_close(following.advantages, unregularized.advantages + effect)
     torch.testing.assert_close(following.targets, unregularized.targets + effect)
+
+
+@pytest.mark.parametrize(
+    "improving,ready_at,exit_update", [(False, 0, 172), (False, 173, 173), (True, 0, 384), (True, 385, 384)]
+)
+def test_warmup_compares_noisy_window_means_and_has_a_hard_limit(
+    improving: bool, ready_at: int, exit_update: int
+) -> None:
+    run = trainer(groups=1, warmup=172, anchor_rate=0)
+    run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
+    run.engine.sampler.lambda_max = 100
+    batch = run.prepare(run.engine.collect(0))
+    sequence = [0.541 + (0.017 if index % 2 else -0.017) + (0.001 * index if improving else 0) for index in range(384)]
+    assert all(max(sequence[index : index + 8]) - min(sequence[index : index + 8]) > 0.01 for index in range(377))
+    for update, variance in enumerate(sequence, 1):
+        run.update = update - 1
+        # A plateau must still wait for every group's match-frame threshold.
+        run.engine.clocks = [0 if update < ready_at else 11008]
+        batch.metrics["critic/explained_variance"] = variance
+        metrics = run._warmup(batch)
+        if not run.warming:
+            break
+        assert update < exit_update
+    assert update == exit_update
+    reason = "limit" if improving else "plateau"
+    assert metrics[f"train/warmup_ended_{reason}"] == 1
+    assert metrics["critic/warmup_variance_gain"] == pytest.approx(0.032 if improving else 0)
 
 
 def test_actor_fit_rejects_missing_reference() -> None:
@@ -831,7 +858,7 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
     if warmup == 1:
         run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
         run.engine.sampler.lambda_max = 100
-        run.config = dataclasses.replace(run.config, plateau_patience=2, warmup_match_frames=0)
+        run.config = dataclasses.replace(run.config, critic_warmup_max_updates=2, warmup_match_frames=0)
     run.run_update()
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     result = json.loads((tmp_path / "resume-check.json").read_text())

@@ -2792,8 +2792,9 @@ class TrainConfig:
     warmup_steps: int = 32
     critic_warmup_updates: int = 172
     warmup_match_frames: int = 11008
-    plateau_patience: int = 8
+    plateau_window: int = 32
     plateau_tolerance: float = 0.01
+    critic_warmup_max_updates: int = 384
     lambda_spread_multiplier: float = 3.0
     snapshot_interval: int = 256
     snapshot_capacity: int = 3
@@ -2805,7 +2806,8 @@ class TrainConfig:
             "critic_epochs",
             "windows_per_step",
             "decisions_per_window",
-            "plateau_patience",
+            "plateau_window",
+            "critic_warmup_max_updates",
             "snapshot_interval",
             "snapshot_capacity",
             "checkpoint_interval",
@@ -2817,6 +2819,8 @@ class TrainConfig:
         for value in (self.warmup_steps, self.critic_warmup_updates, self.warmup_match_frames):
             if value < 0:
                 raise ValueError("warmup lengths must be nonnegative integers")
+        if self.critic_warmup_max_updates < self.critic_warmup_updates:
+            raise ValueError("maximum critic warmup must include the minimum warmup")
         for name in (
             "actor_lr",
             "critic_lr",
@@ -3742,7 +3746,7 @@ class Trainer:
         metrics.update(gradient_metrics("critic", critic_norms, cfg.gradient_clip))
         metrics.update(parameter_metrics("critic", self.critic_optimizer, critic_before, self.policy, self.reference))
         if self.warming:
-            self._warmup(batch)
+            metrics.update(self._warmup(batch))
             return metrics
         metrics["policy/empty_update"] = float(not batch.steps)
         if not batch.steps:
@@ -3847,7 +3851,7 @@ class Trainer:
         )
         return metrics
 
-    def _warmup(self, batch: PreparedUpdate) -> None:
+    def _warmup(self, batch: PreparedUpdate) -> dict[str, float]:
         for timing in self.engine.sampler.schedule.configurations:
             mask = (batch.decisions.delay_J == timing.delay) & (batch.decisions.replan_J == timing.replan)
             values = batch.advantages[mask].double()
@@ -3858,14 +3862,24 @@ class Trainer:
                 previous[2] + float(values.square().sum()),
             )
         self.fresh_variances.append(batch.metrics["critic/explained_variance"])
-        patience = self.config.plateau_patience
-        if self.update + 1 < self.config.critic_warmup_updates or len(self.fresh_variances) < patience:
-            return
-        if min(self.engine.clocks) < self.config.warmup_match_frames:
-            return
-        recent = self.fresh_variances[-patience:]
-        if not all(math.isfinite(x) for x in recent) or max(recent) - min(recent) > self.config.plateau_tolerance:
-            return
+        window = self.config.plateau_window
+        metrics: dict[str, float] = {}
+        plateau = False
+        if len(self.fresh_variances) >= 2 * window:
+            previous = self.fresh_variances[-2 * window : -window]
+            recent = self.fresh_variances[-window:]
+            if all(math.isfinite(x) for x in (*previous, *recent)):
+                gain = (math.fsum(recent) - math.fsum(previous)) / window
+                metrics["critic/warmup_variance_gain"] = gain
+                plateau = gain < self.config.plateau_tolerance
+        limited = self.update + 1 >= self.config.critic_warmup_max_updates
+        ready = (
+            self.update + 1 >= self.config.critic_warmup_updates
+            and min(self.engine.clocks) >= self.config.warmup_match_frames
+            and plateau
+        )
+        if not limited and not ready:
+            return metrics
         spreads = []
         for count, total, squares in self.warmup_moments.values():
             if count < 2:
@@ -3877,6 +3891,8 @@ class Trainer:
             raise ValueError("calibrated lambda_max is outside the declared conditioner range")
         sampler.lambda_max = maximum
         self.warming = False
+        metrics[f"train/warmup_ended_{'limit' if limited else 'plateau'}"] = 1.0
+        return metrics
 
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
         if self.updating:

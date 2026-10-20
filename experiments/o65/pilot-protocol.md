@@ -75,9 +75,11 @@ final grid. Update sampler hashes in the delivery manifest after regeneration.
 We verify delivery, build MSL and the HAL adapter, then record the source,
 environment and build hashes. Simulator parity tests remain required.
 
-Critic warmup lasts at least 172 updates, advances every group by at least
-11,008 frames and collects eight stable fresh-feature explained-variance
-observations within tolerance 0.01. We calibrate lambda_max to three times the
+Critic warmup lasts at least 172 updates and advances every group by at least
+11,008 frames. It ends when the mean fresh-feature explained variance of the
+last 32 updates gains less than 0.01 over the preceding 32 updates. It ends at
+update 384 regardless of those conditions. We log the gain and whether the
+plateau or update limit ended warmup. We calibrate lambda_max to three times the
 largest per-cadence advantage spread within the conditioner bounds. We retain
 lambda_min=0.01 and record the calibrated maximum before PPO. Failure to leave
 warmup fails this stage.
