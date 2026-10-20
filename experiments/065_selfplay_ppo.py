@@ -4328,6 +4328,22 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     for field in ("actor_steps", "sampler_cursor", "evaluation_cursor", "next_anchor"):
         if type(saved[field]) is not int or saved[field] < 0:
             raise ValueError("checkpoint progress counters must be nonnegative integers")
+    partial = saved.get("partial_episodes")
+    streams = {2 * match + side for matches in trainer.engine.group_matches for match in matches for side in (0, 1)}
+    if (
+        not isinstance(partial, list)
+        or any(
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or any(type(value) is not int or value < 0 for value in pair)
+            or pair[0] not in streams
+            or pair in saved["episode_metrics"]
+            for pair in partial
+        )
+        or len(set(partial)) != len(partial)
+        or (partial and not trainer.config.head_start_frames)
+    ):
+        raise ValueError("invalid checkpoint partial episodes")
     counter = saved.get("counter_rng")
     if (
         not isinstance(counter, dict)
@@ -4395,7 +4411,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.warming = saved["warming"]
     trainer.warmup_moments = saved["warmup_moments"]
     trainer.episode_metrics = saved["episode_metrics"]
-    trainer.partial_episodes = set(saved["partial_episodes"])
+    trainer.partial_episodes = set(cast(list[tuple[int, int]], partial))
     trainer.anchor_win_history = saved["anchor_win_history"]
     trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
     trainer.next_anchor = saved["next_anchor"]

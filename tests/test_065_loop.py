@@ -815,6 +815,25 @@ def test_resume_rejects_invalid_execution_metadata_before_model_mutation(tmp_pat
     assert exp._state_hash(run.policy.model.state_dict()) == before
 
 
+@pytest.mark.parametrize("partial", [None, [(True, 0)], [(0, -1)], [(99, 0)], [[0, 0]], [(0, 0)], [(0, 0), (0, 0)]])
+def test_resume_rejects_invalid_partial_episodes_before_model_mutation(tmp_path: Path, partial: object) -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    run.run_update()
+    manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+    raw = json.loads(manifest.read_text())
+    shard = next(row for row in raw["shards"] if row["role"] == "training")
+    state = torch.load(tmp_path / shard["name"], weights_only=False)
+    state["partial_episodes"] = partial
+    buffer = io.BytesIO()
+    torch.save(state, buffer)
+    shard["name"], shard["sha256"] = exp._durable_file(tmp_path, buffer.getvalue(), "rank0.pt")
+    manifest.write_text(json.dumps(raw))
+    before = exp._state_hash(run.policy.model.state_dict())
+    with pytest.raises(ValueError, match="partial episodes"):
+        exp.restore_checkpoint(run, manifest, PROVENANCE)
+    assert exp._state_hash(run.policy.model.state_dict()) == before
+
+
 @pytest.mark.parametrize(
     "field,message",
     [
