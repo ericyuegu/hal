@@ -169,6 +169,15 @@ def test_profile_rejects_nonboolean_nsys(value: object) -> None:
         gpu_profile.ProfileConfig(nsys=value)
 
 
+def test_nsys_rejection_cleans_up_partially_attached_recorder(tmp_path: Path) -> None:
+    from test_065_loop import trainer
+
+    run = trainer(groups=1, anchor_rate=0)
+    with pytest.raises(TypeError, match="TransformerPolicy"):
+        gpu_profile.profile_nsys(run, tmp_path)
+    assert run.profile is None and run.engine.profile is None
+
+
 def test_profile_rejects_cold_groups_and_misreported_update_count(tmp_path: Path) -> None:
     import dataclasses
 

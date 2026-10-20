@@ -4542,11 +4542,11 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
     for traced in (False, True):
         recorder = UpdateProfile(output, trainer.policy.device, traces=False)
         trainer.profile = trainer.engine.profile = recorder
-        for policy in (trainer.policy, *trainer.engine.anchors.values()):
-            if not isinstance(policy, TransformerPolicy):
-                raise TypeError("profiling requires TransformerPolicy")
-            policy.profile = recorder
         try:
+            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+                if not isinstance(policy, TransformerPolicy):
+                    raise TypeError("profiling requires TransformerPolicy")
+                policy.profile = recorder
             if traced:
                 torch.cuda.synchronize()
                 torch.cuda.profiler.start()
