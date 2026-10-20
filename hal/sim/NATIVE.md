@@ -9,8 +9,6 @@ is about to load.
 make -C ~/src/melee-sim-light native python-library validator -j2 \
   PY="$PWD/.venv/bin/python"
 uv run python -m hal.sim.native_build --native-source ~/src/melee-sim-light
-PYTHONPATH=~/src/melee-sim-light uv run python -m hal.sim.native_benchmark \
-  --data-dir ~/src/melee-sim-light/data --cpus 0 1 2 3 4 5
 ```
 
 MSL needs its extracted `data/raw` and real replay fixtures. A missing fixture
