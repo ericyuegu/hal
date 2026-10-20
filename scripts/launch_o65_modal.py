@@ -43,7 +43,6 @@ PILOT_MAX_USD = 50.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
-NSYS_VERSION_CHECK = 'test "$(nsys --version)" = "NVIDIA Nsight Systems version 2026.5.1.161-265138896106v0"'
 
 
 def require_modal_version(version: str) -> None:
@@ -402,14 +401,6 @@ def build_image(sha: str, secret: modal.Secret) -> modal.Image:
         modal.Image.from_registry(IMAGE)
         .entrypoint([])
         .apt_install("build-essential", "binutils")
-        .run_commands(
-            "if ! command -v nsys >/dev/null; then "
-            "curl -fL https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/"
-            "NsightSystems-linux-cli-public-2026.5.1.161-3889610.deb -o /var/tmp/nsys.deb && "
-            "echo '61829db6392e5c293ada1319df86a97c3356bc810335a1975cb551fcfe3eca08  /var/tmp/nsys.deb' | sha256sum -c - && "
-            "dpkg -i /var/tmp/nsys.deb && rm /var/tmp/nsys.deb; fi",
-            NSYS_VERSION_CHECK,
-        )
         .env({"PYTHONPATH": root, "UV_PROJECT_ENVIRONMENT": "/opt/venv"})
         .workdir(root)
         .run_commands(image_commands(sha), secrets=[secret])
