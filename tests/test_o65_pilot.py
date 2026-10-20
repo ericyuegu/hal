@@ -3,14 +3,47 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+import tyro
 
 _SPEC = importlib.util.spec_from_file_location("o65_pilot", Path(__file__).parents[1] / "experiments/o65/pilot.py")
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
+
+
+def test_final_evaluation_dispatches_a_paired_full_game_grid(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location("eval_o65", Path(__file__).parents[1] / "scripts/eval_o65.py")
+    assert spec is not None and spec.loader is not None
+    eval_o65 = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = eval_o65
+    spec.loader.exec_module(eval_o65)
+    command = _MODULE.evaluation_command(
+        tmp_path / "delivery",
+        tmp_path / "checkpoint.json",
+        Path("experiments/o65/pilot-evaluation.json"),
+        tmp_path / "results",
+    )
+    with patch.object(eval_o65, "evaluate", autospec=True) as evaluate:
+        eval_o65.main(tyro.cli(eval_o65.Args, args=command[2:]))
+    evaluate.assert_called_once()
+    settings = evaluate.call_args.kwargs
+    protocol = settings["protocol"]
+    grid = settings["condition_grid"]
+    matches = [
+        (start, seed, port, conditions)
+        for conditions in grid
+        for start in protocol.held_out.starts
+        for seed in protocol.held_out.seeds
+        for port in (1, 2)
+    ]
+    assert settings["split"] == "held_out" and settings["simulators"] == ("msl",)
+    assert len(matches) == 384
+    assert all((condition.delay, condition.replan) == (8, 4) for *_, pair in matches for condition in pair)
+    assert protocol.max_frames - 123 - 1 == 8 * 60 * 60
 
 
 def write_boundary(directory: Path, update: int) -> Path:

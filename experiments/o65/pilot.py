@@ -144,7 +144,6 @@ def evaluation_command(
         "held_out",
         "--cadence-grid",
         "8/4",
-        "10/2",
         "--lambda-grid",
         "1",
         "--device",

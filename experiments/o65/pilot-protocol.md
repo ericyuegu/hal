@@ -91,9 +91,11 @@ must fit directly; an OOM requires review of the experiment settings.
 
 We evaluate the final checkpoint once against pi_ref in MSL. The frozen grid
 draws 32 distinct matchups without replacement from training weights using
-seed 65095. We cross these draws with six stages, both port orientations and
-both cadences, producing 768 matches. We use game/policy seed 10017 and
-28,924 frames per match. We exclude timeouts and frame-budget stops from wins.
+seed 65095. We cross these draws with six stages and both port orientations,
+using (D=8,R=4) for 384 matches. We use game/policy seed 10017. Each game starts
+at four stocks and zero damage, then continues to a stockout or the eight-minute
+timeout. The 28,924-frame budget includes the countdown and timeout frame.
+We exclude timeouts and frame-budget stops from wins.
 We consume the held-out set before play and preserve partial results on
 failure. We do not retry or extend final evaluation after consumption.
 
@@ -187,7 +189,7 @@ For systems success, we require calibrated warmup exit, real PPO steps,
 W&B anchor metrics, complete checkpoint publication and final MSL evaluation.
 Missing required fixtures or timeout expiry fail validation.
 
-For learning success, each cadence at lambda=1 must have net_stock_lcb>0 and
+For learning success, (D=8,R=4) at lambda=1 must have net_stock_lcb>0 and
 a two-sided 95% win-rate interval with lower bound above 0.5. We use paired
 seed/start units. Missing bounds or incomplete win pairs leave the result
 inconclusive. Training metrics do not select the checkpoint or establish

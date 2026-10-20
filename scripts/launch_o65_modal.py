@@ -375,7 +375,7 @@ def pilot_estimate() -> dict[str, object]:
             6 * 3600 * rate + BUILD_RESERVE_USD,
             8 * 3600 * rate + BUILD_RESERVE_USD,
         ],
-        "assumptions": "async projection from performance.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, 32-update publication/restarts and one final 768-match MSL evaluation; no training evaluations or forced resume checks",
+        "assumptions": "async projection from performance.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, 32-update publication/restarts and a final 384-match MSL evaluation with four stocks and an eight-minute timer",
         "hard_timeout_seconds": PILOT_TIMEOUT_SECONDS,
         "maximum_compute_usd": (PILOT_TIMEOUT_SECONDS + 360) * rate + BUILD_RESERVE_USD,
         "excludes": "storage/egress beyond included allowances; build variation",

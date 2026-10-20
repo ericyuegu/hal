@@ -274,9 +274,11 @@ metric step, with one slash per metric key.
 
 We evaluate the final checkpoint once against pi_ref at u=0.95, lambda=1 and
 masked identity. A frozen grid uses 32 weighted training matchup draws, six
-stages, both orientations and both cadences: 768 MSL matches. We calculate
-confidence intervals over paired seed/start samples. We preserve partial
-results after failure and consume the held-out set before play.
+stages and both orientations at (D=8,R=4), for 384 MSL matches. Each match
+starts at four stocks and zero damage, then continues to a stockout or the
+eight-minute timeout. We calculate confidence intervals over paired seed/start
+samples. We preserve partial results after failure and consume the held-out
+set before play.
 
 - MSL parity on human replays does not establish transfer after RL visits new
   states. Production validation needs event statistics in MSL and Dolphin for
