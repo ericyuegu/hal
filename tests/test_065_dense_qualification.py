@@ -47,6 +47,8 @@ def frozen_rows(table: Any) -> Any:
 
 
 class QualificationSampler(exp.EpisodeSampler):
+    """Use u=0.95 for comparison with the recorded control."""
+
     def sample(self, match_id: int, episode: int, anchors: tuple[int, ...]) -> Any:
         sampled = super().sample(match_id, episode, anchors)
         left, right = sampled.players
@@ -338,6 +340,8 @@ def qualify(output: Path) -> dict[str, Any]:
             "control_commit": "aacdfee0",
             "configuration": {
                 "matches": 16,
+                "percentile": 0.95,
+                "windows_per_step": run.config.windows_per_step,
                 "actor_shape": list(valid.shape),
                 "tf32": False,
                 "bias_shift": [-0.1, 0.1],
