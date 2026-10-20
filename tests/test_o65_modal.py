@@ -136,6 +136,7 @@ def test_modal_sdk_rejects_unqualified_versions() -> None:
 
 def test_modal_commands_are_bounded_and_have_no_external_sink() -> None:
     profile = command(Request("test", "a" * 40), tuple(range(16)))
+    assert profile[profile.index("--compile-cache") + 1] == "/o65-results/compile-cache"
     assert profile[2] == "profile"
     assert profile[profile.index("--matches-per-shard") + 1] == "64"
     assert profile[profile.index("--groups") + 1] == "1"

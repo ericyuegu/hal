@@ -198,6 +198,8 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         str(request.matches // 16),
         "--groups",
         "1",
+        "--compile-cache",
+        str(RESULTS / "compile-cache"),
     ]
     if request.mode in ("profile", "floor"):
         argv.extend(("--warm-updates", "1"))
@@ -278,8 +280,6 @@ def run_child(request: Request, output: Path, started: float) -> int:
         WANDB_MODE="disabled",
         HAL_NATIVE_LIBRARY=str(REMOTE_ROOT / "delivery/libhal_native.so"),
         TMPDIR=str(output / "tmp"),
-        TORCHINDUCTOR_CACHE_DIR=str(output / "inductor"),
-        TRITON_CACHE_DIR=str(output / "triton"),
         TORCHINDUCTOR_COMPILE_THREADS="1",
         OMP_NUM_THREADS="2",
         MKL_NUM_THREADS="2",

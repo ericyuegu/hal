@@ -1,5 +1,6 @@
 """Explicit CUDA graph ownership for inference with persistent mutable state."""
 
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -99,6 +100,7 @@ class CapturedCall[T]:
         if any(value.device != self.device for value in (*inputs, *state)):
             raise ValueError("CUDA graph inputs and persistent state must use the declared device")
         self.inputs = inputs
+        preparation_started = time.perf_counter()
         with torch.cuda.device(self.device):
             self.graph = torch.cuda.CUDAGraph()
             current = torch.cuda.current_stream(self.device)
@@ -109,10 +111,16 @@ class CapturedCall[T]:
                 with torch.cuda.stream(capture):
                     for _ in range(2):
                         operation()
+                    warmup_done = torch.cuda.Event()
+                    warmup_done.record(capture)
+                    warmup_done.synchronize()
+                    self.preparation_seconds = time.perf_counter() - preparation_started
+                    capture_started = time.perf_counter()
                     if counter is not None:
                         counter.attempts += 1
                     with torch.cuda.graph(self.graph, stream=capture):
                         self.output = operation()
+                    self.capture_seconds = time.perf_counter() - capture_started
             finally:
                 current.wait_stream(capture)
                 for target, original in zip(state, saved, strict=True):

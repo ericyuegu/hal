@@ -47,6 +47,7 @@ from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import read_training_manifest
 from hal.eval.self_play_checkpoint import save_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import sha256
+from hal.inference import compile_cache
 from hal.inference.column_context import PackedColumnContextBuilder
 from hal.inference.cuda_graph import CapturedCall
 from hal.inference.cuda_graph import prepared_shape_compilation
@@ -4190,6 +4191,7 @@ class NativeCli:
     wandb_project: str | None = None
     profiling: ProfileConfig | None = None
     decoder_precision: DecoderPrecision = "bf16"
+    compile_cache: Path | None = None
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
@@ -4249,6 +4251,7 @@ def read_native_sampler(path: Path) -> SamplerConfig:
 
 
 def train_native(config: NativeCli) -> None:
+    startup_started = time.perf_counter()
     torch.set_num_threads(2)
     if config.training.deterministic:
         workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
@@ -4258,6 +4261,16 @@ def train_native(config: NativeCli) -> None:
             raise ValueError("configure deterministic execution before CUDA initialization")
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(config.training.deterministic)
+    cache_started = time.perf_counter()
+    cache = (
+        compile_cache.CompileCache(
+            config.compile_cache,
+            compile_cache.current_identity(Path(__file__).resolve().parents[1], torch.device(config.device)),
+        )
+        if config.compile_cache is not None
+        else None
+    )
+    cache_load_seconds = time.perf_counter() - cache_started
     if sha256(config.checkpoint) != PROXY_SHA256:
         raise ValueError("native development run requires the recorded O63 proxy")
     torch.manual_seed(config.training.seed)
@@ -4279,6 +4292,8 @@ def train_native(config: NativeCli) -> None:
     if config.output.exists() and config.resume is None:
         raise FileExistsError(config.output)
     with contextlib.ExitStack() as resources:
+        if cache is not None:
+            resources.callback(cache.save)
         groups = []
         next_match = 0
         for _ in range(config.groups):
@@ -4338,6 +4353,13 @@ def train_native(config: NativeCli) -> None:
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
+        native_config["startup_seconds"] = time.perf_counter() - startup_started
+        native_config["compile_cache_status"] = {
+            "directory": str(cache.directory) if cache is not None else None,
+            "loaded_artifacts": cache.loaded if cache is not None else False,
+            "loaded_counts": cache.loaded_counts if cache is not None else {},
+            "load_seconds": cache_load_seconds,
+        }
         if config.profiling is not None:
             try:
                 profile_native(trainer, config, provenance, native_config)
@@ -4831,6 +4853,57 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
                     policy.profile = None
 
 
+def compilation_report(engine: RolloutEngine) -> dict[str, object]:
+    ticks: list[dict[str, object]] = []
+    captures: list[dict[str, object]] = []
+    variants: set[tuple[int, int, int]] = set()
+    for name, policy in (
+        ("student", engine.policy),
+        *((f"anchor{key}", value) for key, value in engine.anchors.items()),
+    ):
+        if not isinstance(policy, TransformerPolicy):
+            raise TypeError("compilation report requires TransformerPolicy")
+        for ((_, (buffer, batch)), append, replan), graph in policy.tick_graphs.items():
+            variants.add((batch, replan, append))
+            ticks.append(
+                {
+                    "policy": name,
+                    "buffer": buffer,
+                    "batch": batch,
+                    "R": replan,
+                    "append": append,
+                    "compile_and_warmup_seconds": graph.preparation_seconds,
+                    "capture_seconds": graph.capture_seconds,
+                }
+            )
+        graphs: list[
+            tuple[
+                str, CapturedCall[ReplayOutput] | CapturedCall[Tensor] | CapturedCall[tuple[ActorLoss, ReplayOutput]]
+            ]
+        ] = [
+            *(("reference", graph) for graph in policy.reference_graphs.values()),
+            *(("value", graph) for graph in policy.value_graphs.values()),
+        ]
+        if policy.actor_graph is not None:
+            graphs.append(("actor", policy.actor_graph.captured))
+        for kind, graph in graphs:
+            captures.append(
+                {
+                    "policy": name,
+                    "kind": kind,
+                    "compile_and_warmup_seconds": graph.preparation_seconds,
+                    "capture_seconds": graph.capture_seconds,
+                }
+            )
+    return {
+        "format": "hal.o65.compilation-report.v1",
+        "tick_variants": ticks,
+        "distinct_tick_variants": len(variants),
+        "other_captures": captures,
+        "note": "preparation includes compilation, allocation and two warmup calls; graph capture is separate",
+    }
+
+
 def profile_native(
     trainer: Trainer,
     config: NativeCli,
@@ -4870,12 +4943,16 @@ def profile_native(
             sort_keys=True,
         )
     )
+    warmup_started = time.perf_counter()
     with (config.output / "warm.jsonl").open("x") as log:
         for _ in range(config.profiling.warm_updates):
             batch, metrics = trainer.run_update()
             del batch
             log.write(json.dumps(metrics) + "\n")
             log.flush()
+    compilation = compilation_report(trainer.engine)
+    compilation["warmup_seconds"] = time.perf_counter() - warmup_started
+    (config.output / "compilation.json").write_text(json.dumps(compilation, indent=2))
     if config.profiling.nsys:
         profile_nsys(trainer, config.output)
         return
@@ -4929,6 +5006,7 @@ class GpuProfileCli:
     warm_updates: int = 4
     decoder_precision: DecoderPrecision = "bf16"
     nsys: bool = False
+    compile_cache: Path | None = None
 
     def native(self) -> NativeCli:
         return NativeCli(
@@ -4943,6 +5021,7 @@ class GpuProfileCli:
             training=TrainConfig(critic_warmup_updates=0, windows_per_step=32),
             evaluation_every=0,
             profiling=ProfileConfig(self.warm_updates, self.nsys),
+            compile_cache=self.compile_cache,
             decoder_precision=self.decoder_precision,
         )
 
