@@ -79,3 +79,6 @@ measure the resulting runtime and memory use.
 The original reports and measurement JSON remain available in Git at the
 listed commits. Downloaded server results remain under `runs/modal-dense/`
 and `runs/modal-floor/`, with remote copies in Modal Volume `hal-o65-profile`.
+
+The earlier dense comparison against `aacdfee0`, recorded at `2ff3e77a`, found
+shifts in KL and trajectory medians. It did not establish statistical equivalence.

@@ -136,6 +136,11 @@ bootstrap uses 256 context frames, while the next first decision uses 129.
 We diagnose the resulting value gap by recomputing a subset. We retain each
 actual interval duration when discounting a terminal interval.
 
+For a timeout between decision ticks, we currently evaluate with the configured
+D-frame prefix. The committed queue can be longer until the next decision.
+We still need to choose a continuation value for that state. The earlier dense
+validation also records this open scientific choice at commit `2ff3e77a`.
+
 ### Actor
 
 We use stored behavior log-probabilities as pi_old, with no separate student

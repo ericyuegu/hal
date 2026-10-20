@@ -253,7 +253,19 @@ def load_evaluation_checkpoint(
             or saved["return_conditioning"] is not True
         ):
             raise ValueError("O63 representation or return conditioning differs")
-        cfg = ActionSequenceConfig(**saved["architecture"])
+        cfg = ActionSequenceConfig(
+            d_model=256,
+            n_layers=12,
+            n_heads=4,
+            temporal_d_model=256,
+            temporal_layers=6,
+            temporal_heads=4,
+            temporal_ff_dim=1024,
+            group_head_dim=256,
+            value_hidden_dim=128,
+        )
+        if saved["architecture"] != {name: getattr(cfg, name) for name in saved["architecture"]}:
+            raise ValueError("O63 proxy architecture differs")
         ranges = ConditioningRanges((math.log(0.01), math.log(100)), (8, 10), (2, 4))
         paths = source_stats_paths(tuple(saved["source_names"]), None)
         if len(paths) != 1:
