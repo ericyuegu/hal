@@ -1,6 +1,6 @@
 # Dense O65 hot path
 
-Development measurements use the O63 bootstrap30 proxy, BF16 decoder, seed 65,
+Initial development measurements use the O63 bootstrap30 proxy, BF16 decoder, seed 65,
 D=8/R=4 and D=10/R=2, one group, four shards on CPUs 0–3, and 256 rollout
 frames. Each profile warms one update, times one update, then traces bounded
 sites in a separate update. Local runs hold the shared GPU lock and use
@@ -543,3 +543,21 @@ tests lack their recorded fixture; those skips count as validation failures
 under AGENTS.md. No test fails. The preceding long-path run had three AF_UNIX
 path failures and a stale exact-Muon expectation, all resolved in the final
 run. Logs and historical failures are listed in the dense implementation report.
+
+
+Final expanded integration command:
+
+```
+HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra \
+  tests/test_roundtrip.py tests/test_session_cleanup.py \
+  tests/test_native_sim_integration.py tests/test_batched_self_play_integration.py \
+  -m integration --basetemp "$TMPDIR/i"
+```
+
+It reports 13 passed, 12 failed, 6 deselected and 8 warnings in 434.37 s.
+Every failure is the missing `zstandard` package required by MSL's .slpz reader.
+After installing the local test prerequisite `zstandard==0.25.0`, rerunning
+`tests/test_native_sim_integration.py -m integration` passes all 15 tests in
+58.93 s, with no skips. Both batched/serial native policy comparisons and all
+required Dolphin round-trip and cleanup cases passed in the expanded run.
+No source or repository dependency changed for this environment correction.

@@ -23,6 +23,7 @@ measured spread of two control repetitions; it uses training's execution mode.
 
 ## Commits
 
+- `d2079d65` Record dense qualification and buffer measurements
 - `490af376` Use vector RMS for numerical resume checks
 - `c4e26c27` Accept simulator frames once per buffer
 - `73c9ba1e` Reject critic loss overflow before stepping
@@ -73,7 +74,8 @@ commands set PYTHONPATH to the MSL source. Pytest basetemps use TMPDIR.
 - `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` plus every new Python file: pass, zero diagnostics. The additional dense/replay changed-test target also passes. An optional broader check of every changed Python file reports 13 existing diagnostics in unchanged lines of tests/test_action_sequence_attention.py; that pre-existing test is outside the maintained/new-file target. No runtime code is omitted from the required check.
 - `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/dense-handoff-qualified"`: 2608 passed, 4 failed, 8 skipped, 85 deselected, 30 warnings (783.77 s). One exact Muon test used nondeterministic mode; its deterministic-mode CPU retry passes. Three unrelated netplay failures were Unix socket paths longer than AF_UNIX permits. All 21 netplay checks pass under the shorter `$TMPDIR/n` base. The final short-path GPU run passes below.
 - Final full suite: `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/n"`: **2676 passed, 8 skipped, 85 deselected, 27 warnings**, 646.91 s. No test failures. Six missing-fixture skips remain validation failures under AGENTS.md. Log: runs/dense/dense-handoff-final-v5.log.
-- `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra tests/test_roundtrip.py tests/test_session_cleanup.py -m integration`: 8 passed, 6 deselected, 7 dependency warnings, no skips (58.47 s).
+- Required Dolphin integration: `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra tests/test_roundtrip.py tests/test_session_cleanup.py -m integration`: 8 passed, 6 deselected, 7 dependency warnings, no skips (58.47 s).
+- Final expanded integration command also includes tests/test_native_sim_integration.py and tests/test_batched_self_play_integration.py: 13 passed, 12 failed, 6 deselected, 8 warnings (434.37 s). All 12 failures require the missing zstandard package. Both shared-weight and distinct-weight batched/serial action and outcome comparisons pass. Installed local test prerequisite zstandard 0.25.0; native integration retry: **15 passed, no skips**, 58.93 s. No repository dependency or source changed. Logs: runs/dense/dense-integration-final-v5.log and dense-native-integration-retry.log.
 - Precision CLI: five complete attempts. Large-reference and shape-only paths failed the KL gate. The hidden-leaf path passed once, then failed the stricter recorded-student-layout repeat. The final read-only scoring copy passes all seven quantities on three actor replays. Floors were not relaxed.
 - Final `profile` commands at 16 and 64 native matches on eight shards: pass, one warm update each. All five steps and the before/after buffer follow-up have local measurements in dense.md.
 - Final buffer-focused checks: 144 passed, one CUDA-only diagnostic skip and 12 deselected on CPU; five passed and 64 deselected with CUDA, including live-lane continuation and native stream/reset/resume cases.
@@ -170,7 +172,7 @@ remaining ego actions is still needed; this rewrite does not silently change it.
 
 ## Remaining work
 
-Finish the integration retry after installing its missing compression dependency. Then push only o65-dense and
-run the one authorized 1,024-match Modal profile, within one GPU-hour and
-USD 10. No cloud job has been launched. Missing fixtures, statistical
-equivalence and the timeout bootstrap choice remain unresolved.
+Local validation is complete. Branch o65-dense is published. Run the single
+authorized 1,024-match Modal profile within one GPU-hour and USD 10. No cloud
+job has been launched. Missing fixtures, statistical equivalence and the
+timeout bootstrap choice remain unresolved.
