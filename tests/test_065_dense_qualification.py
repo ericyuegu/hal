@@ -223,14 +223,18 @@ def qualify(output: Path) -> dict[str, Any]:
         baseline_table.allocate_evaluation(model)
         ring = control.ActionRing(table.players // 2, engine.rings[0].capacity, policy.device)
         ring.controllers = torch.zeros_like(engine.rings[0].controllers)
-        meta = old_table.meta[: table.players]
+        student_slots = torch.nonzero(engine.owners[0] < 0).flatten()
+        meta = old_table.meta[student_slots.cpu().numpy()]
         layout = control.TickLayout(
             tuple(int(x) for x in meta[:, control.STREAM]), tuple(int(x) for x in meta[:, control.LANE])
         )
         print("dense precision: cached control", flush=True)
         with torch.no_grad():
             for tick in range(table.ticks):
-                ids = torch.arange(tick * table.players, (tick + 1) * table.players, device=policy.device)
+                ids = tick * table.players + student_slots
+                ids = ids[table.active[ids]]
+                if not len(ids):
+                    continue
                 ring.length_device.zero_()
                 ring.length.fill(0)
                 output_tick = default_policy.sample_tick(
@@ -300,7 +304,8 @@ def qualify(output: Path) -> dict[str, Any]:
                 "tf32": False,
                 "bias_shift": [-0.1, 0.1],
                 "critic_residual_std": 0.005,
-                "rollout_control": "recorded cached teacher-forced scoring of common actions; all player slots",
+                "rollout_control": "recorded student TickLayout with active rows and common teacher-forced actions",
+                "rollout_control_slots": len(student_slots),
             },
             "precision": precision,
         }
