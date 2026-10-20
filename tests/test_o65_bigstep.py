@@ -203,6 +203,17 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
     rollout = exp.Rollout(
         table, torch.arange(4), 0, 0, 6, 1, 1, 0.0, (completed(0, 1), completed(7, 0), completed(0, 0, timeout=True))
     )
+    assert exp.reward_component_metrics(rollout) == {
+        "return/damage_positive": 6.75,
+        "return/damage_negative": -8.5,
+        "return/damage_reward": -1.75,
+        "return/stock_positive": 90.0,
+        "return/stock_negative": -60.0,
+        "return/stock_reward": 30.0,
+        "return/win_positive": 0.0,
+        "return/win_negative": 0.0,
+        "return/win_reward": 0.0,
+    }
     metrics = run.anchor_metrics(rollout)
     assert metrics["gameplay/pi_ref_net_stocks_per_min"] == pytest.approx(720)
     assert metrics["gameplay/pi_ref_net_damage_per_min"] == pytest.approx(4320)
@@ -224,6 +235,20 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
     assert metrics["gameplay/pi_ref_win_rate_32_updates"] == 0
     metrics = run.anchor_metrics(empty)
     assert "gameplay/pi_ref_win_rate_32_updates" not in metrics
+
+    sampled = trainer(groups=1, length=3, anchor_rate=1)
+    sampled.engine.anchors[7] = sampled.policy.frozen_copy()
+    sampled.engine.anchor_candidates = (0, 7)
+    actual = sampled.engine.collect(0)
+    assert actual.resets > 0
+    meta = actual.table.integers[actual.ids]
+    for anchor, (match, episode_number, side) in zip(
+        actual.table.opponent_anchor[actual.ids].tolist(),
+        meta[:, [exp.MATCH, exp.EPISODE, exp.SIDE]].tolist(),
+        strict=True,
+    ):
+        episode = sampled.engine.sampler.sample(match, episode_number, (0,) if episode_number == 0 else (0, 7))
+        assert anchor == episode.players[1 - side].anchor
 
 
 def test_gradient_noise_estimate_uses_preclip_gradients_and_window_counts() -> None:

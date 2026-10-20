@@ -5672,6 +5672,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.next_anchor,
                 trainer.evaluation_cursor,
                 trainer.episode_metrics,
+                trainer.anchor_win_history,
             )
         ),
     }
