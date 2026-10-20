@@ -264,3 +264,59 @@ def test_resume_trims_uncommitted_metrics_and_preserves_evidence(tmp_path: Path)
     assert path.read_text() == '{"global_step":32}\n'
     evidence = list(tmp_path.glob("metrics-interrupted-*.jsonl"))
     assert len(evidence) == 1 and evidence[0].read_text().endswith('{"global_')
+
+
+def test_latest_resume_rejects_a_renamed_manifest(tmp_path: Path) -> None:
+    path = write_boundary(tmp_path, 32)
+    path.rename(path.with_name("update-00000064.json"))
+    with pytest.raises(ValueError, match="filename differs"):
+        _MODULE.latest_checkpoint(tmp_path)
+
+
+def test_publication_rejects_missing_and_overlapping_source_trees(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "o65_pilot_state_guard", Path(__file__).parents[1] / "scripts/o65_pilot_state.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    source = tmp_path / "pilot"
+    source.mkdir()
+    checkpoint = source / "state.pt"
+    checkpoint.write_bytes(b"preserve")
+    for destination in (tmp_path, source, source / "child"):
+        with pytest.raises(ValueError, match="separate trees"):
+            module.stage_state(source, destination)
+    with pytest.raises(ValueError, match="source directory is missing"):
+        module.stage_state(tmp_path / "absent", source)
+    assert checkpoint.read_bytes() == b"preserve"
+
+
+def test_failed_resume_report_cannot_be_bypassed_after_preemption(tmp_path: Path) -> None:
+    path = tmp_path / "resume-check.json"
+    assert not _MODULE.resume_verified(path)
+    path.write_text(json.dumps({"format": "hal.o65.resume-check.v5", "passed": False}))
+    with pytest.raises(RuntimeError, match="verification failed"):
+        _MODULE.resume_verified(path)
+    path.write_text(json.dumps({"format": "hal.o65.resume-check.v5", "passed": True}))
+    assert _MODULE.resume_verified(path)
+
+
+def test_published_held_out_consumption_blocks_a_retry(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "o65_pilot_state_claim", Path(__file__).parents[1] / "scripts/o65_pilot_state.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    source, volume = tmp_path / "local", tmp_path / "volume"
+    source.mkdir()
+    consumed = _MODULE.consume_held_out(source, 2000, tmp_path / "protocol.json")
+    (source / ".o65-held-out-claim.json").write_text("claim")
+    module.stage_state(source, volume)
+    assert (volume / consumed.name).read_bytes() == consumed.read_bytes()
+    assert (volume / ".o65-held-out-claim.json").read_text() == "claim"
+    with pytest.raises(RuntimeError, match="already consumed"):
+        _MODULE.consume_held_out(volume, 2000, tmp_path / "protocol.json")

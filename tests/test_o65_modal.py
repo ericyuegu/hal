@@ -226,3 +226,30 @@ def test_pilot_command_uses_durable_resume_cache_and_full_driver() -> None:
     assert argv[argv.index("--r2-prefix") + 1] == "o65/pilot-results/pilot"
     with pytest.raises(ValueError, match="reservation has expired"):
         launcher.remaining_seconds(request, request.created_unix + 85500 + 360)
+
+
+def test_interrupted_staging_keeps_the_previous_checkpoint_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = tmp_path / "source", tmp_path / "volume"
+    source.mkdir()
+    (source / "old.pt").write_bytes(b"old state")
+    (source / "update-00000032.json").write_text("old.pt")
+    launcher.stage_results(source, destination)
+    (source / "new.pt").write_bytes(b"new state")
+    (source / "update-00000064.json").write_text("new.pt")
+    copied = []
+    original = launcher.copy_result
+
+    def interrupt(source_path: str, destination_path: str) -> str:
+        copied.append(Path(source_path).name)
+        if Path(source_path).name == "update-00000064.json":
+            raise InterruptedError("preemption before manifest publication")
+        return original(source_path, destination_path)
+
+    monkeypatch.setattr(launcher, "copy_result", interrupt)
+    with pytest.raises(InterruptedError):
+        launcher.stage_results(source, destination)
+    assert copied.index("new.pt") < copied.index("update-00000064.json")
+    assert (destination / "old.pt").read_bytes() == b"old state"
+    assert not (destination / "update-00000064.json").exists()

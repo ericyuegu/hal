@@ -247,6 +247,8 @@ def latest_checkpoint(directory: Path) -> Path | None:
         return None
     latest = manifests[-1]
     manifest = read_training_manifest(latest)
+    if latest.name != f"update-{manifest['update']:08d}.json":
+        raise ValueError("latest checkpoint filename differs from its update")
     for shard in manifest["shards"]:
         path = directory / shard["name"]
         with path.open("rb") as source:
@@ -318,6 +320,26 @@ def trim_interrupted_metrics(path: Path, update: int) -> None:
 
 def terminate(_signal: int, _frame: object) -> None:
     raise SystemExit("pilot interrupted; resume from the latest published checkpoint")
+
+
+def resume_verified(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    report = json.loads(path.read_text())
+    if report.get("format") != "hal.o65.resume-check.v5" or report.get("passed") is not True:
+        raise RuntimeError("resume verification failed or has an unsupported report; do not continue training")
+    return True
+
+
+def consume_held_out(output: Path, update: int, protocol: Path) -> Path:
+    consumed = output / "held-out-consumed.json"
+    if consumed.exists():
+        raise RuntimeError("held-out evaluation was already consumed; preserve partial results without retry")
+    with consumed.open("x") as target:
+        json.dump(
+            {"update": update, "protocol": str(protocol), "reason": "consume before starting held-out play"}, target
+        )
+    return consumed
 
 
 def main(args: Args) -> None:
@@ -444,7 +466,7 @@ def main(args: Args) -> None:
             "preemption interrupted the forced-kill qualification; inspect its preserved boundary before continuing"
         )
     verify_boundary = kill_update + checkpoint_every
-    if restored_update >= verify_boundary and not (run / "resume-check.json").is_file():
+    if restored_update >= verify_boundary and not resume_verified(run / "resume-check.json"):
         check = command.copy()
         check[check.index("--updates") + 1] = str(verify_boundary + 1)
         check.extend(
@@ -507,6 +529,8 @@ def main(args: Args) -> None:
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):
         raise RuntimeError("pilot ended without calibrated PPO training; inspect warmup before extending")
     if not args.tiny and not (output / "held-out/results.json").is_file():
+        consume_held_out(output, updates, protocol)
+        publish(args, output)
         final_protocol = output / "final-evaluation.json"
         raw = json.loads(protocol.read_text())
         raw["max_frames"] = 28924

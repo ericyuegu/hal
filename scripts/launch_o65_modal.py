@@ -297,13 +297,18 @@ def copy_result(source: str, destination: str) -> str:
 def stage_results(source: Path, destination: Path) -> None:
     # Modal Volumes do not support the hard links used for atomic checkpoints.
     # Finish on local POSIX storage, then copy bytes into the durable Volume.
-    shutil.copytree(
-        source,
-        destination,
-        dirs_exist_ok=True,
-        copy_function=copy_result,
-        ignore=shutil.ignore_patterns("tmp", "inductor", "triton"),
-    )
+    files = [
+        path
+        for path in source.rglob("*")
+        if path.is_file()
+        and not path.name.endswith(".partial")
+        and not set(path.relative_to(source).parts).intersection(("tmp", "inductor", "triton"))
+    ]
+    files.sort(key=lambda path: (path.name.startswith("update-") and path.suffix == ".json", str(path)))
+    for path in files:
+        target = destination / path.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy_result(str(path), str(target))
 
 
 def run_child(request: Request, output: Path, started: float) -> int:
@@ -337,10 +342,16 @@ def run_child(request: Request, output: Path, started: float) -> int:
         "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
         "treatment": f"mode={request.mode}, active_matches={request.matches}; pilot: 512 windows, Beta u and pretraining identity prior",
-        "control": "unchanged o65-dense trainer at 1024 active matches",
+        "control": "hash-pinned O63 with matched episode sampling"
+        if request.mode == "pilot"
+        else "unchanged o65-dense trainer at 1024 active matches",
         "invariants": (
-            "seed 65, proxy, sampler, simulator, D/R, reward, optimizer, 16 shards, one group, "
-            "32 windows and 16 decisions per actor step, 64 reference slots"
+            "seed 65, proxy, simulator, D/R, reward, optimizer, 16 shards, 16 decisions per window; "
+            + (
+                "four groups, 512 windows per step"
+                if request.mode == "pilot"
+                else "one group, 32 windows per step, 64 reference slots"
+            )
         ),
     }
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
@@ -636,6 +647,10 @@ def main(args: Args) -> None:
         name,
         "--timeout-seconds",
         str(request.timeout_seconds),
+        "--secret",
+        args.secret,
+        "--output",
+        str(args.output),
     ]
     print(f"Launch: {shlex.join(launch_command)}", flush=True)
     if args.mode == "pilot":
@@ -670,7 +685,11 @@ def main(args: Args) -> None:
         print(f"Call: {call.object_id}; argv: {shlex.join(command(request, tuple(range(16))))}", flush=True)
         code = call.get()
     download(name, args.output)
-    charged = min(allowance, result_seconds(args.output / name / "result.json", code) + 360)
+    elapsed = result_seconds(args.output / name / "result.json", code)
+    if args.mode == "pilot":
+        # Include previous preempted attempts and builds in the conservative ledger.
+        elapsed = max(elapsed, time.time() - request.created_unix)
+    charged = min(allowance, elapsed + 360)
     record_budget(budget, name, charged - allowance, "completed call; retain startup and teardown allowance")
     if code:
         raise SystemExit(f"Modal job exited {code}; see {args.output / name / 'run.log'}")

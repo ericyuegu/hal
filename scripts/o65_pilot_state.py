@@ -22,8 +22,14 @@ class Args:
 
 
 def stage_state(source: Path, destination: Path) -> dict[str, str]:
-    if source.resolve() == destination.resolve() or source.resolve() in destination.resolve().parents:
-        raise ValueError("publication destination must be outside the local pilot state")
+    if not source.is_dir():
+        raise ValueError("pilot publication source directory is missing")
+    if (
+        source.resolve() == destination.resolve()
+        or source.resolve() in destination.resolve().parents
+        or destination.resolve() in source.resolve().parents
+    ):
+        raise ValueError("publication source and destination must be separate trees")
     destination.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
     files = [
@@ -31,7 +37,11 @@ def stage_state(source: Path, destination: Path) -> dict[str, str]:
         for path in source.rglob("*")
         if path.is_file()
         and path.name != "publication.json"
-        and not any(part in ("tmp", "delivery") or part.startswith(".") for part in path.relative_to(source).parts)
+        and not any(
+            part in ("tmp", "delivery")
+            or (part.startswith(".") and not (part.startswith(".o65-held-out-") and part.endswith(".json")))
+            for part in path.relative_to(source).parts
+        )
     ]
     # State manifests become visible only after every referenced shard is copied.
     files.sort(key=lambda path: (path.name.startswith("update-") and path.suffix == ".json", str(path)))

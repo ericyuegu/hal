@@ -137,7 +137,8 @@ the same sampled contexts report student/reference button press rates, trigger
 means and stick-magnitude bins (edges 0.01, 0.25, 0.5, 0.75, 1.01).
 
 The gradient-noise estimate uses pre-clip gradients across actor steps, with
-window-count weighting and finite-sample signal/noise correction. Its unit is
+trained-decision weighting and finite-sample signal/noise correction, then
+converts to windows using the observed decisions per window. Its unit is
 windows. It reports signal and validity; a nonpositive estimated signal does
 not produce an infinite noise scale. Weights move between these samples, so
 this is an online diagnostic, not a controlled critical-batch measurement.
@@ -190,7 +191,9 @@ Retired manifests retain their hashes. Preemption reuses the same request and
 restores the latest complete checkpoint from the Volume. A corrupt latest
 checkpoint fails instead of falling back. Selection evaluation can resume by
 repeating a fixed-seed interrupted cell; its partial evidence is retained.
-A held-out claim prevents an interrupted held-out evaluation from retrying.
+A held-out consumption marker is committed before starting held-out play.
+The evaluator's hidden claim is also preserved. Either marker prevents a retry
+after interruption. A failed resume-verification report also blocks continuation.
 
 The driver preserves W&B identity across segments and preemption. Metrics
 past the durable checkpoint are retained separately, then trimmed from the
