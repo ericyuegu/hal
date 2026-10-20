@@ -9,7 +9,7 @@ or change its settings without recording a new treatment.
 
 Treatment: joint PPO with the exact conditional KL reward and direct KL loss,
 one actor epoch, fresh Muon state, LR 1e-5, zero weight decay, clipping 0.2,
-importance cap 2, gradient norm cap 1, 32 windows per step, and 16 decisions
+gradient norm cap 1, 32 windows per step, and 16 decisions
 per window. The critic uses its own optimizer, LR 3e-4 and four epochs.
 The actor LR warms up over 32 optimizer steps. Discount is 0.99855 per frame;
 GAE lambda is 0.99 per frame. Keep the current reward, masks and detach points.

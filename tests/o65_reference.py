@@ -12,10 +12,10 @@ CONTROL_COMMIT = "aacdfee0"
 
 
 def load_control() -> ModuleType:
+    directory = Path(os.environ["TMPDIR"]) / "o65-control"
+    directory.mkdir(parents=True, exist_ok=True)
     override = os.environ.get("HAL_O65_CAPTURE_SOURCE")
     if override is None:
-        directory = Path(os.environ["TMPDIR"]) / "o65-control"
-        directory.mkdir(parents=True, exist_ok=True)
         source = directory / f"trainer-{CONTROL_COMMIT}.py"
         payload = subprocess.check_output(
             ["git", "show", f"{CONTROL_COMMIT}:experiments/065_selfplay_ppo.py"], cwd=ROOT
@@ -28,7 +28,7 @@ def load_control() -> ModuleType:
     # recorded dependency too; the maintained trainer has no import of it.
     name = "hal.inference.action_rng"
     if name not in sys.modules:
-        dependency = source.parent / f"action-rng-{CONTROL_COMMIT}.py"
+        dependency = directory / f"action-rng-{CONTROL_COMMIT}.py"
         dependency.write_bytes(
             subprocess.check_output(["git", "show", f"{CONTROL_COMMIT}:hal/inference/action_rng.py"], cwd=ROOT)
         )
