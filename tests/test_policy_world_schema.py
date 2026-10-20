@@ -1,4 +1,5 @@
 import functools
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,18 @@ from hal.wire import ITEM_FIELD_SUFFIXES
 from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
-_V7_TRAIN = (
-    Path(__file__).resolve().parents[1] / "data" / "processed" / "ranked-anonymized-1" / "mds-v7-sub4" / "train"
+_V7_TRAIN = Path(
+    os.environ.get(
+        "HAL_POLICY_WORLD_V7_TRAIN",
+        str(
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "processed"
+            / "ranked-anonymized-1"
+            / "mds-v7-sub4"
+            / "train"
+        ),
+    )
 )
 
 
@@ -34,6 +45,8 @@ def _prepare_streaming() -> None:
 @functools.lru_cache(maxsize=1)
 def _source() -> dict[str, object]:
     if not _V7_TRAIN.is_dir():
+        if "HAL_POLICY_WORLD_V7_TRAIN" in os.environ:
+            pytest.fail(f"requested v7 fixture is missing: {_V7_TRAIN}")
         pytest.skip("local v7 subset is not available")
     return dict(StreamingDataset(local=str(_V7_TRAIN), batch_size=1, shuffle=False)[0])
 
