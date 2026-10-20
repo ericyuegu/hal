@@ -398,6 +398,7 @@ def transformer_trainer(
         actor_optimizer="adam",
         actor_lr=1e-4,
         critic_epochs=1,
+        windows_per_step=4,
         critic_warmup_updates=0,
         warmup_steps=0,
         snapshot_interval=100,
