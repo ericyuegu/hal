@@ -17,6 +17,8 @@ import torch
 
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import load_consolidated_mixture_stats
+from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.schema import SCHEMA_VERSION
 from hal.inference.action_sequence_artifact import source_stats_paths
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.conditioning import ConditioningRanges
@@ -26,7 +28,6 @@ from hal.models.self_play import validate_decoder_precision
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
-PROXY_STATS_SHA256 = "6870bda6c0970826f6467407647cf9bb5901ef246b6947d87518db67252cdde3"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
 TRAINING_FORMAT = "hal.o65.training.v7"
 TRAINING_VERSION = 7
@@ -231,7 +232,7 @@ def _validate_provenance(value: dict[str, object]) -> None:
 def load_evaluation_checkpoint(
     path: Path, *, device: torch.device, decoder_precision: DecoderPrecision | None = None
 ) -> EvaluationCheckpoint:
-    """Read O65 precision from the artifact; select it explicitly for a BC proxy."""
+    """Read saved O65 precision, or select precision when converting BC weights."""
     if decoder_precision is not None:
         validate_decoder_precision(decoder_precision)
     if path.suffix == ".json":
@@ -240,40 +241,31 @@ def load_evaluation_checkpoint(
     raw = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(raw, dict):
         raise ValueError("evaluation checkpoint must be a mapping")
-    if digest == PROXY_SHA256:
+    is_bc = isinstance(raw.get("cfg"), dict) and raw["cfg"].get("experiment_id") == "063_percentile_conditioning_v1"
+    if is_bc:
         precision = "bf16" if decoder_precision is None else decoder_precision
         saved = raw["cfg"]
-        if (saved["experiment_id"], saved["checkpoint_format_version"], saved["arm"], raw["step"]) != (
-            "063_percentile_conditioning_v1",
-            5,
-            "bootstrap30",
-            16383,
+        if saved["checkpoint_format_version"] != 5:
+            raise ValueError("unsupported O63 checkpoint version")
+        if (
+            saved["mds_schema_version"] != SCHEMA_VERSION
+            or saved["policy_world_schema_version"] != POLICY_WORLD_SCHEMA_VERSION
+            or saved["return_conditioning"] is not True
         ):
-            raise ValueError("O63 proxy identity changed")
-        cfg = ActionSequenceConfig(
-            d_model=256,
-            n_layers=12,
-            n_heads=4,
-            temporal_d_model=256,
-            temporal_layers=6,
-            temporal_heads=4,
-            temporal_ff_dim=1024,
-            group_head_dim=256,
-            value_hidden_dim=128,
-        )
-        if saved["architecture"] != {name: getattr(cfg, name) for name in saved["architecture"]}:
-            raise ValueError("O63 proxy architecture changed")
+            raise ValueError("O63 representation or return conditioning differs")
+        cfg = ActionSequenceConfig(**saved["architecture"])
         ranges = ConditioningRanges((math.log(0.01), math.log(100)), (8, 10), (2, 4))
         paths = source_stats_paths(tuple(saved["source_names"]), None)
-        if len(paths) != 1 or sha256(paths[0]) != PROXY_STATS_SHA256:
-            raise ValueError("O63 proxy statistics differ from training")
-        stats = load_consolidated_mixture_stats(paths, (1.0,), expected_mds_schema_version=7)
+        if len(paths) != 1:
+            raise ValueError("O63 development requires a single statistics source")
+        statistics_digest = sha256(paths[0])
+        stats = load_consolidated_mixture_stats(paths, (1.0,), expected_mds_schema_version=SCHEMA_VERSION)
         provenance = {
             "reference_sha256": digest,
             "git_sha": raw["provenance"]["git_sha"],
-            "update": 16384,
+            "update": raw["step"] + 1,
             "data_manifests": raw["provenance"]["source_manifest_sha256"],
-            "statistics_sha256": PROXY_STATS_SHA256,
+            "statistics_sha256": statistics_digest,
         }
         queue, critic = 14, 128
     else:
@@ -326,7 +318,7 @@ def load_evaluation_checkpoint(
             raise ValueError("evaluation tensor dtype or identity changed")
         if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
             raise ValueError("evaluation tensors must be finite")
-    if digest == PROXY_SHA256:
+    if is_bc:
         model.load_bc_state_dict(state)
     else:
         model.load_state_dict(state, strict=True)

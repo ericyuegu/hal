@@ -1,14 +1,11 @@
 """Persisted decoder precision identity checks."""
 
-import dataclasses
 import io
 import json
-import os
 from pathlib import Path
 
 import pytest
 import torch
-from test_065_loop import exp
 
 
 def test_resume_rejects_a_changed_decoder_precision(tmp_path: Path) -> None:
@@ -23,15 +20,6 @@ def test_resume_rejects_a_changed_decoder_precision(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="configuration mismatch"):
         loop_exp.restore_checkpoint(other, manifest, PROVENANCE)
     assert run.policy.frozen_copy().model.decoder_precision == "bf16"
-
-
-def test_native_precision_is_validated_and_profile_preserves_it(tmp_path: Path) -> None:
-    cpu = min(os.sched_getaffinity(0))
-    profile = exp.GpuProfileCli(tmp_path, tmp_path, tmp_path, cpus=(cpu,), decoder_precision="fp32")
-    assert profile.native().decoder_precision == "fp32"
-    assert dataclasses.replace(profile, decoder_precision="bf16").native().decoder_precision == "bf16"
-    with pytest.raises(ValueError, match="decoder precision"):
-        dataclasses.replace(profile.native(), decoder_precision="fp16")
 
 
 def test_resume_rejects_a_mismatched_actor_precision_before_model_mutation(tmp_path: Path) -> None:

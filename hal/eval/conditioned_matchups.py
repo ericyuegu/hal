@@ -133,10 +133,7 @@ def read_protocol(path: Path) -> EvaluationProtocol:
     raw = json.loads(path.read_text())
     if not isinstance(raw, dict):
         raise ValueError("evaluation protocol schema changed")
-    expected = {"format", "held_out", "max_frames"}
-    if raw.get("format") == "hal.o65.protocol.v1":
-        expected.add("selection")
-    if raw.get("format") not in ("hal.o65.protocol.v1", "hal.o65.protocol.v2") or set(raw) != expected:
+    if raw.get("format") != "hal.o65.protocol.v2" or set(raw) != {"format", "held_out", "max_frames"}:
         raise ValueError("evaluation protocol schema changed")
 
     def dataset(name: str) -> EvaluationSet:
@@ -151,7 +148,7 @@ def read_protocol(path: Path) -> EvaluationProtocol:
         return EvaluationSet(tuple(value["seeds"]), tuple(starts))
 
     return EvaluationProtocol(
-        dataset("selection") if raw["format"] == "hal.o65.protocol.v1" else None,
+        None,
         dataset("held_out"),
         raw["max_frames"],
     )

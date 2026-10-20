@@ -1,13 +1,12 @@
 """Run the bounded O63 debug pilot with fixed inputs.
 
-Train without evaluation interruptions, publish checkpoints, and evaluate the
-final policy once in MSL. Resume the same configuration after preemption.
+Train the policy, publish checkpoints, then evaluate the final policy in MSL.
+Resume the recorded configuration after preemption.
 """
 
 import dataclasses
 import hashlib
 import json
-import math
 import os
 import signal
 import subprocess
@@ -38,7 +37,6 @@ class Args:
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
-    qualify_pool_sizes: bool = False
 
 
 def compact_checkpoints(directory: Path, latest: int) -> None:
@@ -117,32 +115,10 @@ def training_command(
         str(warmup),
         "--training.checkpoint-interval",
         str(checkpoint_every),
-        "--evaluation-every",
-        "0",
     ]
     if compile_cache is not None:
         command.extend(("--compile-cache", str(compile_cache)))
     return command
-
-
-def qualify_pool(rows: list[list[dict[str, float]]]) -> None:
-    if len(rows) != 3 or any(not run for run in rows):
-        raise ValueError("pool qualification requires three nonempty candidates")
-    rates = []
-    for run in rows:
-        samples = [row["systems/match_frames_per_second"] for row in run]
-        if any(not math.isfinite(rate) or rate <= 0 for rate in samples):
-            raise ValueError("pool qualification requires finite positive throughput")
-        memory = [row["systems/peak_reserved_bytes"] for row in run]
-        if any(not math.isfinite(value) or value < 0 for value in memory):
-            raise ValueError("pool qualification requires finite nonnegative memory")
-        if any(value >= 80 * 2**30 for value in memory):
-            raise ValueError("pool qualification exceeded the 80 GiB memory limit")
-        rates.append(sum(samples) / len(samples))
-    if rates[-1] < 0.9 * max(rates):
-        raise ValueError(
-            "the planned 1024-match pool is over 10% slower; review throughput.json before changing the pool"
-        )
 
 
 def evaluation_command(
@@ -180,9 +156,7 @@ def evaluation_command(
 
 def log_evaluation(path: Path, update: int, environment: dict[str, str], *, online: bool) -> None:
     result = json.loads((path / "results.json").read_text())
-    if result["format"] not in ("hal.o65.evaluation-results.v1", "hal.o65.evaluation-results.v2") or result[
-        "split"
-    ] not in ("selection", "held_out"):
+    if result["format"] != "hal.o65.evaluation-results.v2" or result["split"] not in ("selection", "held_out"):
         raise ValueError("unexpected pilot evaluation result")
     metrics: dict[str, float] = {"global_step": float(update)}
     for index, group in enumerate(result["groups"]):
@@ -342,30 +316,6 @@ def main(args: Args) -> None:
     environment["HAL_NATIVE_LIBRARY"] = str(delivery / "libhal_native.so")
     execute(["bash", str(ROOT / "docker/o65-build-msl.sh"), str(delivery)], output / "build.log", environment)
     protocol = ROOT / "experiments/o65/pilot-evaluation.json"
-    sizes = ((1, 2, 4) if args.tiny else (16, 32, 64)) if args.qualify_pool_sizes else ()
-    qualification = []
-    for size in sizes:
-        run = output / f"qualify-{size * len(cpus)}"
-        execute(
-            training_command(
-                delivery,
-                run,
-                cpus,
-                matches=size,
-                groups=1,
-                updates=3,
-                checkpoint_every=3,
-                warmup=0,
-            ),
-            output / f"qualify-{size * len(cpus)}.log",
-            environment,
-        )
-        metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
-        qualification.append({"matches": size * len(cpus), "steady_updates": metrics[1:]})
-    (output / "throughput.json").write_text(json.dumps(qualification, indent=2))
-    if qualification and not args.tiny:
-        qualify_pool([row["steady_updates"] for row in qualification])
-    # No automatic pool or optimizer sweep: each changes the experiment.
     run = output / "train"
     updates = 4 if args.tiny else 2000
     checkpoint_every = 1 if args.tiny else 32
@@ -384,7 +334,6 @@ def main(args: Args) -> None:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))
-    # Stop only to publish complete state on the existing checkpoint interval.
     boundaries = list(range(1, updates + 1)) if args.tiny else [*range(32, updates + 1, 32), updates]
     boundaries = sorted(set(boundaries))
     previous = latest_checkpoint(run / "checkpoints") if args.resume else None

@@ -24,17 +24,16 @@ def load_control() -> ModuleType:
             source.write_bytes(payload)
     else:
         source = Path(override)
-    # The frozen trainer imports its original sampler only on CUDA. Load that
-    # recorded dependency too; the maintained trainer has no import of it.
-    name = "hal.inference.action_rng"
-    if name not in sys.modules:
-        dependency = directory / f"action-rng-{CONTROL_COMMIT}.py"
+    for name in ("hal.inference.action_rng", "hal.eval.periodic_self_play"):
+        if name in sys.modules:
+            continue
+        dependency = directory / f"{name.rsplit('.', 1)[-1]}-{CONTROL_COMMIT}.py"
         dependency.write_bytes(
-            subprocess.check_output(["git", "show", f"{CONTROL_COMMIT}:hal/inference/action_rng.py"], cwd=ROOT)
+            subprocess.check_output(["git", "show", f"{CONTROL_COMMIT}:{name.replace('.', '/')}.py"], cwd=ROOT)
         )
         dependency_spec = importlib.util.spec_from_file_location(name, dependency)
         if dependency_spec is None or dependency_spec.loader is None:
-            raise ValueError("control sampler is not a Python module")
+            raise ValueError("control dependency is not a Python module")
         sampler = importlib.util.module_from_spec(dependency_spec)
         sys.modules[name] = sampler
         dependency_spec.loader.exec_module(sampler)

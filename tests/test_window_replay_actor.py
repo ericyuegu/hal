@@ -1,6 +1,7 @@
 """Joint PPO, direct KL and fixed-storage CUDA actor capture."""
 
 import dataclasses
+import itertools
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import replay_windows
 
@@ -32,6 +34,66 @@ def targets_for(output: ReplayOutput) -> ActorTargets:
         torch.tensor(1.3, device=device),
         output.factor_mask_WKF.any(-1).sum().float(),
     )
+
+
+@pytest.mark.parametrize("estimator", ["exact", "sampled"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_regularized_chain_gradient_matches_enumerated_return(estimator: str, device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    theta = torch.tensor(
+        [[0.5, -0.4], [0.1, 0.6], [-0.7, 0.2]], dtype=torch.float64, device=device, requires_grad=True
+    )
+    log_p = theta.log_softmax(-1)
+    log_q = theta.new_tensor([[-0.2, 0.4], [0.8, -0.1], [0.3, -0.2]]).log_softmax(-1)
+    coefficient, sigma = 0.7, 2.3
+    mask = torch.arange(16, device=device).reshape(1, 1, 16) < 8
+    features = ReplayCriticFeatures(
+        theta.new_zeros(1, 1, 1),
+        theta.new_zeros(1, 1, 1),
+        theta.new_zeros(1, 1, 4),
+        theta.new_zeros(1, 1, 4),
+        torch.zeros(1, 1, 1, 4, dtype=torch.long, device=device),
+        torch.zeros(1, 1, dtype=torch.long, device=device),
+    )
+    objective = theta.sum() * 0
+    estimate = theta.sum() * 0
+    score_only = theta.sum() * 0
+    for first, second in itertools.product(range(2), repeat=2):
+        logs = torch.cat((log_p[0, first].reshape(1), log_p[1 + first, second].reshape(1), theta.new_zeros(14)))
+        reference_logs = torch.stack((log_q[0, first], log_q[1 + first, second]))
+        distributions, references = [], []
+        for group in range(4):
+            active_p = log_p[0 if group == 0 else 1 + first].exp() if group < 2 else theta.new_tensor([1, 0])
+            active_q = log_q[0 if group == 0 else 1 + first].exp() if group < 2 else theta.new_tensor([1, 0])
+            padding = theta.new_tensor([[1, 0]]).expand(3, -1)
+            distributions.append(torch.cat((active_p[None], padding)).reshape(1, 1, 4, 2))
+            references.append(torch.cat((active_q[None], padding)).reshape(1, 1, 4, 2))
+        probability = logs[:2].sum().exp()
+        reward = float(2 * first - second + 3 * first * second)
+        sampled_kl = logs[:2].sum() - reference_logs.sum()
+        path_kl = sum((log_p[row].exp() * (log_p[row] - log_q[row])).sum() for row in (0, 1 + first))
+        objective = objective + probability * (reward - coefficient * sampled_kl)
+        advantage = (reward - coefficient * (path_kl if estimator == "exact" else sampled_kl)).detach()
+        output = ReplayOutput(logs.reshape(1, 1, 16), tuple(distributions), mask, features)
+        targets = ActorTargets(
+            output.log_probs_WKF.detach(),
+            advantage.reshape(1, 1),
+            mask.any(-1),
+            theta.new_full((1, 1), coefficient if estimator == "exact" else 0),
+            tuple(references),
+            theta.new_tensor(0.4),
+            theta.new_tensor(sigma),
+            theta.new_tensor(1),
+        )
+        loss = actor_loss(output, targets)
+        estimate = estimate + probability.detach() * loss.loss
+        score_only = score_only + probability.detach() * loss.policy_loss
+    expected = torch.autograd.grad(-objective / sigma, theta, retain_graph=True)[0]
+    actual = torch.autograd.grad(estimate, theta, retain_graph=True)[0]
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    if estimator == "exact":
+        assert not torch.allclose(torch.autograd.grad(score_only, theta)[0], expected, rtol=1e-3, atol=1e-3)
 
 
 def test_actor_joint_ratio_masks_and_stop_gradients() -> None:
@@ -295,3 +357,18 @@ def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
     positive = torch.nonzero((probabilities > 0) & output.factor_mask_WKF[..., 0::4, None])[0]
     target.reference_distributions[0][tuple(positive)] = 0
     assert bool(torch.isinf(actor_loss(output, target).kl_loss))
+
+
+def test_joint_log_ratio_subtracts_each_factor_before_reduction() -> None:
+    policy = model()
+    hidden, observed, slots = inputs(policy)
+    output = replay_windows(policy, hidden, observed, slots, grad=False)
+    old = torch.tensor([-1e8, -1.0] * 8).expand_as(output.log_probs_WKF).clone()
+    new = old.clone()
+    new[..., 1::2] += 0.01
+    output = dataclasses.replace(output, log_probs_WKF=new)
+    targets = dataclasses.replace(targets_for(output), behavior_log_probs_WKF=old)
+    mask = output.factor_mask_WKF & targets.selected_WK[..., None]
+    expected = torch.where(mask, new.double() - old.double(), 0).sum(-1).exp()
+    assert bool(((new.sum(-1) - old.sum(-1)).exp() == 1).all())
+    torch.testing.assert_close(actor_loss(output, targets).joint_ratio_WK.double(), expected)

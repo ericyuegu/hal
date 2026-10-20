@@ -2,7 +2,6 @@ import dataclasses
 import importlib.util
 import json
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,22 +16,6 @@ _SPEC.loader.exec_module(launcher)
 Request = launcher.Request
 command = launcher.command
 select_cpus = launcher.select_cpus
-
-
-@pytest.mark.parametrize(
-    "version, accepted",
-    [
-        ("NVIDIA Nsight Systems version 2026.5.1.161-265138896106v0", True),
-        ("NVIDIA Nsight Systems version 2026.5.1.161-other-build", False),
-        ("other version", False),
-    ],
-)
-def test_image_rejects_an_unqualified_preinstalled_nsys(tmp_path: Path, version: str, accepted: bool) -> None:
-    binary = tmp_path / "nsys"
-    binary.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(version) + "\n")
-    binary.chmod(0o755)
-    result = subprocess.run(["/bin/sh", "-c", launcher.NSYS_VERSION_CHECK], env={"PATH": str(tmp_path)})
-    assert (result.returncode == 0) == accepted
 
 
 def test_budget_reserves_failures_and_reconciles_completed_calls(tmp_path: Path) -> None:
@@ -134,57 +117,6 @@ def test_modal_sdk_rejects_unqualified_versions() -> None:
         launcher.require_modal_version("1.5.4")
 
 
-def test_modal_commands_are_bounded_and_have_no_external_sink() -> None:
-    profile = command(Request("test", "a" * 40), tuple(range(16)))
-    assert profile[profile.index("--compile-cache") + 1] == "/o65-results/compile-cache"
-    assert profile[2] == "profile"
-    assert profile[profile.index("--matches-per-shard") + 1] == "64"
-    assert profile[profile.index("--groups") + 1] == "1"
-    assert profile[profile.index("--warm-updates") + 1] == "1"
-    assert not any("chunk" in arg or arg == "--compiled" for arg in profile)
-    assert launcher.MAX_GPU_SECONDS == 7200 and launcher.MAX_USD == 20
-    smoke = command(Request("test", "a" * 40, mode="smoke", matches=16), tuple(range(16)))
-    assert smoke[2] == "train"
-    assert smoke[smoke.index("--updates") + 1] == "1"
-    assert smoke[smoke.index("--groups") + 1] == "1"
-    assert smoke[smoke.index("--evaluation-every") + 1] == "0"
-    assert not any("wandb" in arg or "upload" in arg for arg in profile + smoke)
-
-
-def test_floor_command_traces_one_complete_update() -> None:
-    floor = command(Request("test", "a" * 40, mode="floor"), tuple(range(16)))
-    assert "--nsys" in floor
-    wrapped = launcher.nsys_command(floor, Path("/work/update"))
-    assert "--capture-range=cudaProfilerApi" in wrapped
-    assert "--capture-range-end=stop" in wrapped
-    assert "--cuda-graph-trace=node" in wrapped
-    assert wrapped[-len(floor) :] == floor
-    for matches in (256, 1024, 2048, 4096):
-        argv = command(Request("test", "a" * 40, matches=matches), tuple(range(16)))
-        assert argv[argv.index("--groups") + 1] == "1"
-        assert argv[argv.index("--matches-per-shard") + 1] == str(matches // 16)
-    with pytest.raises(ValueError, match="matches"):
-        Request("test", "a" * 40, mode="floor", matches=256)
-
-
-def test_extra_model_command_requires_pinned_source_artifacts() -> None:
-    request = Request(
-        "extra",
-        "a" * 40,
-        mode="floor-extra",
-        source_name="baseline",
-        source_inputs_sha256="b" * 64,
-        source_layout_sha256="c" * 64,
-    )
-    argv = command(request, tuple(range(16)))
-    assert "--extra-only" in argv
-    assert argv[argv.index("--inputs") + 1] == "/o65-results/baseline/profile/floor-inputs.pt"
-    assert argv[argv.index("--expected-inputs-sha256") + 1] == "b" * 64
-    for changes in ({"source_name": None}, {"source_layout_sha256": "bad"}, {"mode": "profile"}):
-        with pytest.raises(ValueError):
-            dataclasses.replace(request, **changes)
-
-
 def test_cpu_selection_uses_distinct_available_ids() -> None:
     assert select_cpus(set(range(1, 37, 2))) == tuple(range(1, 35, 2))
     with pytest.raises(ValueError, match="17 available CPU IDs"):
@@ -214,18 +146,6 @@ def test_volume_staging_copies_checkpoint_bytes_and_excludes_caches(tmp_path: Pa
     assert (copied.parent / "linked.pt").read_bytes() == copied.read_bytes()
     assert copied.stat().st_ino != checkpoint.stat().st_ino
     assert not any((target / name).exists() for name in ("tmp", "inductor", "triton"))
-
-
-def test_pilot_command_uses_durable_resume_cache_and_full_driver() -> None:
-    request = Request("pilot", "a" * 40, mode="pilot", timeout_seconds=36000)
-    argv = command(request, tuple(range(16)))
-    assert argv[1] == "experiments/o65/pilot.py"
-    assert "--resume" in argv
-    assert argv[argv.index("--compile-cache") + 1] == "/o65-results/compile-cache"
-    assert argv[argv.index("--publish-directory") + 1] == "/o65-results/pilot/pilot"
-    assert argv[argv.index("--r2-prefix") + 1] == "o65/pilot-results/pilot"
-    with pytest.raises(ValueError, match="reservation has expired"):
-        launcher.remaining_seconds(request, request.created_unix + 36000 + 360)
 
 
 def test_interrupted_staging_keeps_the_previous_checkpoint_readable(

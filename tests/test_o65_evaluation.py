@@ -27,7 +27,6 @@ from hal.eval.conditioned_matchups import native_observation_rows
 from hal.eval.conditioned_matchups import pilot_protocol
 from hal.eval.conditioned_matchups import score_match
 from hal.eval.conditioned_matchups import summarize_matches
-from hal.eval.periodic_self_play import PeriodicEvaluator
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import save_evaluation_checkpoint
 from hal.eval.self_play_policy import PlayerCondition
@@ -397,31 +396,6 @@ def test_evaluation_snapshot_roundtrip_and_schema_rejection(tmp_path: Path, prec
         load_evaluation_checkpoint(path, device=torch.device("cpu"))
 
 
-def test_periodic_job_is_nonblocking_and_bounded(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "actor.pt"
-    checkpoint.write_bytes(b"actor")
-    job = PeriodicEvaluator(tmp_path / "jobs", every=2, arguments=("--anchors", str(checkpoint)))
-    assert not job.submit(checkpoint, update=1)
-    assert job.submit(checkpoint, update=2)
-    assert not job.submit(checkpoint, update=4)
-    process = job.process
-    assert process is not None
-    # Invalid actor must fail visibly, with no successful result publication.
-    process.wait(timeout=30)
-    with pytest.raises(RuntimeError, match="evaluation exited"):
-        job.poll()
-    assert job.process is None and job.log is None
-    job.close()
-
-
-@pytest.mark.parametrize("arguments", [("--split", "held_out"), ("--checkpoint=x",), ("--output", "x")])
-def test_periodic_job_cannot_consume_held_out_or_override_checkpoint(
-    tmp_path: Path, arguments: tuple[str, ...]
-) -> None:
-    with pytest.raises(ValueError, match="owns"):
-        PeriodicEvaluator(tmp_path, every=1, arguments=arguments)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA cache type requires GPU")
 def test_cuda_evaluation_cache_matches_model_type() -> None:
     model = small_model().cuda()
@@ -447,9 +421,9 @@ def test_protocol_schema_and_separate_start_sets(tmp_path: Path) -> None:
 
     from hal.eval.conditioned_matchups import read_protocol
 
-    protocol = pilot_protocol(max_frames=720)
+    protocol = replace(pilot_protocol(max_frames=720), selection=None)
     path = tmp_path / "protocol.json"
-    raw = {"format": "hal.o65.protocol.v1", **asdict(protocol)}
+    raw = {"format": "hal.o65.protocol.v2", "held_out": asdict(protocol.held_out), "max_frames": protocol.max_frames}
     path.write_text(json.dumps(raw))
     assert read_protocol(path) == protocol
     raw["ignored"] = True
@@ -772,3 +746,27 @@ def test_zero_damage_proxy_excludes_previous_stocks_death_animation() -> None:
         wall_seconds=1,
     )
     assert scored.events["ego_zero_damage_self_destruct_rate"] == 0.5
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("mds_schema_version", -1), ("policy_world_schema_version", -1), ("return_conditioning", False)],
+)
+def test_bc_loader_rejects_representation_changes_before_loading_weights(
+    tmp_path: Path, field: str, value: int | bool
+) -> None:
+    from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+    from hal.data.schema import SCHEMA_VERSION
+
+    config = {
+        "experiment_id": "063_percentile_conditioning_v1",
+        "checkpoint_format_version": 5,
+        "mds_schema_version": SCHEMA_VERSION,
+        "policy_world_schema_version": POLICY_WORLD_SCHEMA_VERSION,
+        "return_conditioning": True,
+    }
+    config[field] = value
+    path = tmp_path / "bc.pt"
+    torch.save({"cfg": config}, path)
+    with pytest.raises(ValueError, match="representation or return conditioning"):
+        load_evaluation_checkpoint(path, device=torch.device("cpu"))

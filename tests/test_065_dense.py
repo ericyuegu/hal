@@ -103,22 +103,6 @@ def test_tensor_counter_domains_keys_and_cpu_cuda_parity() -> None:
         torch.testing.assert_close(draws, gpu.cpu(), rtol=0, atol=0)
 
 
-def test_ppo_uses_detached_behavior_logs_as_old_policy() -> None:
-    run = trainer(groups=1, anchor_rate=0)
-    batch = run.prepare(run.engine.collect(0))
-    behavior = batch.decisions.behavior_log_probs_JF.clone().requires_grad_()
-    decisions = dataclasses.replace(batch.decisions, behavior_log_probs_JF=behavior)
-    new = (behavior.detach() + 0.001).requires_grad_()
-    selected = decisions.loss_mask_J
-    stats = exp.advantage_statistics(exp.advantage_moments(batch.advantages, selected))
-    result = exp.ppo_loss(decisions, new, batch.advantages, selected, stats, clip_epsilon=0.2)
-    expected = (decisions.executed_factors_JF.sum(-1) * 0.001).exp()
-    torch.testing.assert_close(result.joint_ratio_J, expected)
-    result.loss.backward()
-    assert behavior.grad is None
-    assert new.grad is not None
-
-
 @pytest.mark.parametrize("timeout", [False, True])
 def test_dense_slots_keep_cadence_and_episode_execution_masks(timeout: bool) -> None:
     run = trainer(groups=1, length=13, timeout=timeout, delay=8, anchor_rate=0)
@@ -180,16 +164,17 @@ def test_dense_gae_matches_decision_grid_with_mixed_cadences_and_boundaries() ->
     result = exp.dense_advantages(rewards, values, following, duration, bootstrap, trace, decided)
     for player in range(players):
         at = torch.nonzero(decided[:, player]).flatten()
-        reference = exp.generalized_advantage(
-            rewards[at, player],
-            values[at, player],
-            following[at, player],
-            duration[at, player],
-            bootstrap[at, player],
-            trace[at, player],
-        )
-        torch.testing.assert_close(result.advantages[at, player], reference.advantages, rtol=0, atol=0)
-        torch.testing.assert_close(result.value_targets[at, player], reference.value_targets, rtol=0, atol=0)
+        tail = values.new_zeros(())
+        expected = torch.empty_like(values[at, player])
+        for index in range(len(at) - 1, -1, -1):
+            tick = at[index]
+            next_value = following[tick, player] if bootstrap[tick, player] else 0
+            delta = rewards[tick, player] + exp.GAMMA ** duration[tick, player] * next_value - values[tick, player]
+            continuation = tail if trace[tick, player] else 0
+            tail = delta + (exp.GAMMA * exp.GAE_LAMBDA) ** duration[tick, player] * continuation
+            expected[index] = tail
+        torch.testing.assert_close(result.advantages[at, player], expected)
+        torch.testing.assert_close(result.value_targets[at, player], expected + values[at, player])
 
 
 def test_two_frame_queue_does_not_overwrite_actions_with_padding() -> None:

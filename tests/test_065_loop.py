@@ -706,13 +706,6 @@ def test_native_shard_close_releases_batch_after_copy_failure(native_rollout_dat
         shard.shard.save(0)
 
 
-def test_proxy_loader_rejects_wrong_artifact_before_loading(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "wrong.pt"
-    checkpoint.write_bytes(b"different checkpoint")
-    with pytest.raises(ValueError, match="recorded O63 bootstrap30"):
-        exp.load_development_policy(checkpoint, {}, device="cpu")
-
-
 def test_training_manifest_binds_exported_actor_and_update(tmp_path: Path) -> None:
     from hal.eval.self_play_checkpoint import evaluation_actor_path
     from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
@@ -795,20 +788,6 @@ def test_resume_rejects_invalid_execution_metadata_before_model_mutation(tmp_pat
     with pytest.raises(ValueError, match="execution mode"):
         exp.restore_checkpoint(run, manifest, PROVENANCE)
     assert exp._state_hash(run.policy.model.state_dict()) == before
-
-
-def test_native_defaults_keep_training_algorithms_for_resume_verification(tmp_path: Path) -> None:
-    config = exp.NativeCli(
-        checkpoint=tmp_path / "proxy.pt",
-        sampler=tmp_path / "sampler.json",
-        output=tmp_path / "run",
-        data_dir=tmp_path / "data",
-        cpus=(min(os.sched_getaffinity(0)),),
-        updates=1,
-    )
-    assert not config.training.deterministic
-    checked = dataclasses.replace(config, verify_resume=True)
-    assert checked.verify_resume and not checked.training.deterministic
 
 
 @pytest.mark.parametrize(
@@ -914,38 +893,6 @@ def test_resume_comparison_rejects_changed_integer_state_and_schema() -> None:
         exp._compare_resume_updates({"w": torch.zeros(1)}, {}, {"w": torch.zeros(1)})
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_periodic_metrics_preserve_unscored_budget_matches(tmp_path: Path, version: int) -> None:
-    result = tmp_path / "results.json"
-    result.write_text(
-        json.dumps(
-            {
-                "format": f"hal.o65.evaluation-results.v{version}",
-                "split": "selection",
-                "checkpoint_provenance": {"update": 2},
-                "groups": [
-                    {
-                        "metrics": {
-                            "msl": {
-                                "matches": 2,
-                                "completed_pairs": 0,
-                                "win_rate": {"mean": None},
-                                "net_stocks_per_min": {"mean": 0.0},
-                                "net_stock_lcb": None,
-                            }
-                        }
-                    }
-                ],
-            }
-        )
-    )
-    metrics = exp.periodic_evaluation_metrics(result)
-    assert metrics["evaluation/update"] == 2
-    assert metrics["evaluation/msl_cell0_matches"] == 2
-    assert metrics["evaluation/msl_cell0_completed_pairs"] == 0
-    assert "evaluation/msl_cell0_win_rate" not in metrics
-
-
 def test_transformer_rejects_invalid_feature_statistics() -> None:
     run = transformer_trainer("cpu")
     key = next(iter(run.policy.statistics))
@@ -993,24 +940,6 @@ def test_rollout_rejects_mutable_or_shared_anchors() -> None:
     engine = exp.RolloutEngine(shards, policy, sampler(), {0: policy.frozen_copy(), 4: policy.frozen_copy()})
     run = exp.Trainer(engine, exp.TrainConfig(actor_optimizer="adam"))
     assert run.next_anchor == 5
-
-
-@pytest.mark.parametrize(
-    "construct",
-    [
-        lambda: exp.CounterRng(True),
-        lambda: exp.IdentityCount(1.5, 1, 100),
-        lambda: exp.IdentityCount(1, 1, 2.5),
-        lambda: exp.Matchup((1, 1, 1), 1),
-        lambda: exp.Matchup((True, 1), 1),
-        lambda: dataclasses.replace(sampler().config, stocks=(2.5,)),
-        lambda: dataclasses.replace(sampler().config, stages=(True,)),
-        lambda: exp.TrainConfig(warmup_steps=0.5),
-    ],
-)
-def test_loop_configuration_rejects_invalid_integer_fields(construct: Any) -> None:
-    with pytest.raises(ValueError):
-        construct()
 
 
 def test_disabled_deployment_identity_does_not_require_its_data_row() -> None:

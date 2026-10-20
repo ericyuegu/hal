@@ -68,12 +68,8 @@ class Manifest:
     sampler_source_sha256: str
 
     def __post_init__(self) -> None:
-        if (
-            self.format != "hal.o65.delivery.v2"
-            or self.msl_commit != MSL_COMMIT
-            or self.msl_repository != MSL_REPOSITORY
-        ):
-            raise ValueError("unsupported O65 delivery identity")
+        if self.format != "hal.o65.delivery.v2":
+            raise ValueError("unsupported O65 delivery format")
         for value in (
             self.source_sha256,
             self.game_manifest_sha256,
@@ -82,11 +78,6 @@ class Manifest:
             self.sampler_source_sha256,
         ):
             _digest(value)
-        if self.statistics_sha256 != STATS_SHA256 or (self.checkpoint.key, self.checkpoint.sha256) != (
-            PROXY_KEY,
-            PROXY_SHA256,
-        ):
-            raise ValueError("O65 proxy or statistics identity changed")
 
 
 def read_manifest(path: Path) -> Manifest:

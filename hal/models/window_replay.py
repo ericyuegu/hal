@@ -16,14 +16,10 @@ from hal.models.self_play import validate_executed_offsets
 
 @dataclass(frozen=True, slots=True)
 class ReplaySlots:
-    """W windows, K slots, L history frames, D forced frames, Q opponent frames.
+    """Store controller indices in codec order and masks in frame-major decode order.
 
-    Controller tensors use codec order (buttons, main stick, C-stick, triggers).
-    F=16 uses frame-major decode order (C-stick, main stick, triggers, buttons).
-    Conditions are normalized [log lambda, delay, replan, 2*u-1]. Invalid slots and
-    unexecuted factors never enter a loss reduction. All indices are int64,
-    masks bool, and conditions float32. Validate once before compiled replay.
-    """
+    Normalize conditions as [log lambda, delay, replan, 2*u-1]. Validate before
+    compiled replay, then mask invalid slots and unexecuted factors during reduction."""
 
     positions_WK: Tensor
     valid_WK: Tensor
@@ -41,8 +37,6 @@ class ReplaySlots:
 
 @dataclass(frozen=True, slots=True)
 class ReplayCriticFeatures:
-    """Detached critic inputs per [W, K] slot; d/t are trunk/decoder widths."""
-
     trunk_WKd: Tensor
     decoder_WKt: Tensor
     condition_WK4: Tensor
@@ -53,12 +47,10 @@ class ReplayCriticFeatures:
 
 @dataclass(frozen=True, slots=True)
 class ReplayOutput:
-    """FP32 factor logs [W,K,16], group probabilities [W,K,4,V_group].
+    """Return FP32 logs and probabilities in decode order.
 
-    Both outputs use decode order. Log-probs are zero outside executed_WKF and
-    valid_WK. Distributions retain the normalized conditional support, including
-    unexecuted sampled frames; reductions must use factor_mask_WKF.
-    """
+    Mask reductions with factor_mask_WKF, because distributions include unexecuted
+    sampled frames."""
 
     log_probs_WKF: Tensor
     distributions: tuple[Tensor, ...]
@@ -108,11 +100,7 @@ def _check_shapes(model: SelfPlayTransformer, hidden: Tensor, observed: Tensor, 
 def validate_replay_inputs(
     model: SelfPlayTransformer, hidden_WLd: Tensor, observed_WL4: Tensor, slots: ReplaySlots
 ) -> None:
-    """Validate data at assembly time, outside compiled/captured replay.
-
-    Invalid slots and queue padding can contain arbitrary values. Window actions
-    must all be legal. Live slots need supported offsets and prefix execution.
-    """
+    """Check assembled inputs before compiled replay. Ignore invalid slots and queue padding."""
     _check_shapes(model, hidden_WLd, observed_WL4, slots)
     if any(parameter.dtype != torch.float32 for parameter in model.temporal.parameters()):
         raise ValueError("window replay requires FP32 decoder parameters")
@@ -183,16 +171,11 @@ def replay_windows(
     *,
     grad: bool,
 ) -> ReplayOutput:
-    """Replay previously validated slots with static shapes and shared history K/V.
+    """Replay decisions after encoding each window once.
 
-    The caller runs the trunk once per window. With grad=True its autograd
-    history is preserved. This function owns decoder precision, as the rollout
-    decoder does. On Torch 2.11, compile in default mode with
-    triton.cudagraphs=False and emulate_precision_casts=True before explicit
-    CUDA capture. Cast preservation prevents gradient/no-gradient BF16 drift;
-    remove it only after the proxy FP32-reference gate passes without it.
-    Critic features never carry actor gradients.
-    """
+    Preserve trunk autograd history when grad=True and detach critic features.
+    For Torch 2.11 CUDA capture, compile with triton.cudagraphs=False and
+    emulate_precision_casts=True to meet the proxy FP32-reference limits."""
     if grad and not torch.compiler.is_compiling() and torch.is_inference_mode_enabled():
         raise ValueError("gradient replay requires autograd outside inference_mode")
     _check_shapes(model, hidden_WLd, observed_WL4, slots)

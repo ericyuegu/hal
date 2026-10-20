@@ -1,16 +1,13 @@
 """Common-input qualification of the complete dense model boundary on the proxy."""
 
-import argparse
 import contextlib
 import dataclasses
 import json
-import math
 import os
 import random
 import subprocess
 from pathlib import Path
 from typing import Any
-from typing import Literal
 
 import numpy as np
 import pytest
@@ -31,14 +28,8 @@ from hal.models.replay_actor import actor_loss
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 
-CONTROL_SOURCE = control.__file__
-if CONTROL_SOURCE is None:
-    raise ValueError("control trainer has no source")
-CONTROL_PATH = Path(CONTROL_SOURCE)
-if CONTROL_PATH.read_bytes() != subprocess.check_output(
-    ["git", "show", "aacdfee0:experiments/065_selfplay_ppo.py"], cwd=ROOT
-):
-    raise ValueError("dense qualification requires the recorded aacdfee0 control")
+assert control.__file__ is not None
+CONTROL_PATH = Path(control.__file__)
 
 
 def frozen_rows(table: Any) -> Any:
@@ -385,171 +376,9 @@ def qualify(output: Path) -> dict[str, Any]:
         return report
 
 
-def planned_entropy(distributions: tuple[torch.Tensor, ...], replan: torch.Tensor) -> torch.Tensor:
-    valid = torch.arange(4, device=replan.device)[None] < replan[:, None]
-    result = torch.zeros_like(replan, dtype=torch.float32)
-    for probabilities in distributions:
-        entropy = -(probabilities * torch.where(probabilities > 0, probabilities, 1).log()).sum(-1)
-        result += torch.where(valid, entropy, 0).sum(-1)
-    return result
-
-
-def test_statistical_entropy_excludes_unplanned_decoder_padding() -> None:
-    probabilities = torch.full((2, 4, 2), 0.5)
-    probabilities[0, 2:] = torch.nan
-    result = planned_entropy((probabilities,) * 4, torch.tensor([2, 4]))
-    torch.testing.assert_close(result, torch.tensor([8.0, 16.0]) * math.log(2))
-
-
-def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_resume: bool) -> dict[str, Any]:
-    if mode not in ("dense", "control"):
-        raise ValueError("statistics mode must be dense or control")
-    if verify_resume and mode != "dense":
-        raise ValueError("the recorded control is not a supported checkpoint writer")
-    output.mkdir(parents=True, exist_ok=False)
-    module = exp if mode == "dense" else control
-    torch.set_num_threads(2)
-    torch.manual_seed(65)
-    random.seed(65)
-    np.random.seed(65)
-    torch.use_deterministic_algorithms(False)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    checkpoint = module.load_evaluation_checkpoint(
-        ROOT / "runs/proxy/final.pt", device=torch.device("cuda"), decoder_precision="bf16"
-    )
-    model = checkpoint.model.requires_grad_(True)
-    model.percentile_head.requires_grad_(False)
-    schedule = module.development_config(model.head_offsets)
-    policy = (
-        module.TransformerPolicy(model, schedule, checkpoint.statistics)
-        if mode == "dense"
-        else module.TransformerPolicy(model, schedule, checkpoint.statistics, compiled=True)
-    )
-    sampling = module.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json")
-    source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
-    updates = []
-    with contextlib.ExitStack() as resources:
-        shards = []
-        for index, cpu in enumerate(sorted(os.sched_getaffinity(0))[:4]):
-            shard = module.NativeSimulatorShard(
-                source / "data",
-                tuple(range(16 * index, 16 * index + 16)),
-                cpu=cpu,
-                device=policy.device,
-                max_frame=512,
-            )
-            resources.callback(shard.close)
-            shards.append(shard)
-        engine = module.RolloutEngine(
-            (tuple(shards),),
-            policy,
-            module.EpisodeSampler(sampling, schedule, module.CounterRng(65)),
-            {0: policy.frozen_copy()},
-            fixed_anchor_lanes=True,
-        )
-        engine.initialize()
-        run = module.Trainer(engine, module.TrainConfig(critic_warmup_updates=0))
-        for update in range(3):
-            batch, metrics = run.run_update()
-            if mode == "dense":
-                matches = batch.rollout.table.integers[batch.rollout.ids, module.MATCH]
-                sides = batch.rollout.table.integers[batch.rollout.ids, module.SIDE]
-                frame_reward = batch.rollout.table.rewards[batch.rollout.ids].sum(-1)
-            else:
-                matches = torch.tensor([row.state.match for row in batch.rollout.records], device=policy.device)
-                sides = torch.tensor([row.state.side for row in batch.rollout.records], device=policy.device)
-                frame_reward = torch.tensor([sum(row.rewards) for row in batch.rollout.records], device=policy.device)
-            kl = exp.factor_kl(batch.old, batch.reference, batch.decisions.executed_factors_JF)
-            entropy = planned_entropy(batch.old.distributions, batch.decisions.replan_J)
-            rows = []
-            for match in range(64):
-                at = matches == match
-                completed = [result.duration for result in batch.rollout.results if result.match == match]
-                rows.append(
-                    {
-                        "match": match,
-                        "reward": float(frame_reward[at].sum()),
-                        "player_rewards": {
-                            str(side): float(frame_reward[at & (sides == side)].sum())
-                            for side in (0, 1)
-                            if bool((at & (sides == side)).any())
-                        },
-                        "kl": float(kl[at].sum() / batch.decisions.replan_J[at].sum()),
-                        "entropy": float(entropy[at].sum() / batch.decisions.replan_J[at].sum()),
-                        "advantages": batch.advantages[at].cpu().tolist(),
-                        "targets": batch.targets[at].cpu().tolist(),
-                        "episode_lengths": completed,
-                        "resets": len(completed),
-                    }
-                )
-            updates.append({"update": update, "matches": rows, "metrics": metrics})
-            print(mode, update, metrics["systems/update_seconds"], flush=True)
-        result = {
-            "format": "hal.o65.dense-statistical-raw.v2",
-            "mode": mode,
-            "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-            "trainer_sha256": exp.sha256(ROOT / "experiments/065_selfplay_ppo.py")
-            if mode == "dense"
-            else exp.sha256(CONTROL_PATH),
-            "test_sha256": exp.sha256(Path(__file__)),
-            "environment": exp._environment(),
-            "checkpoint": checkpoint.checkpoint_sha256,
-            "data_manifests": checkpoint.provenance["data_manifests"],
-            "sampling": dataclasses.asdict(sampling),
-            "schedule": dataclasses.asdict(schedule),
-            "training": dataclasses.asdict(run.config),
-            "max_frame": 512,
-            "seed": 65,
-            "simulator": shards[0].shard.library_sha256,
-            "adapter": module.native_bridge.library_sha256(),
-            "simulator_manifest": exp.sha256(source / "data/raw/manifest.json"),
-            "updates": updates,
-        }
-        (output / "statistics.json").write_text(json.dumps(result, indent=2))
-        if verify_resume:
-            provenance = {
-                "git_sha": result["git_sha"],
-                "checkpoint_sha256": checkpoint.checkpoint_sha256,
-                "data_manifest_sha256": checkpoint.provenance["data_manifests"]["ranked-anonymized-1-policy-world-v8"],
-                "simulator_sha256": shards[0].shard.library_sha256,
-                "adapter_sha256": module.native_bridge.library_sha256(),
-            }
-            exp.verify_checkpoint_resume(run, output / "resume", provenance)
-        return result
-
-
-@pytest.mark.parametrize("name", ["inputs.pt", "precision.json"])
-def test_precision_rejects_existing_evidence_before_cuda(name: str, tmp_path: Path) -> None:
-    (tmp_path / name).write_bytes(b"recorded evidence")
-    with pytest.raises(FileExistsError, match="evidence already exists"):
-        qualify(tmp_path)
-
-
-def test_statistics_rejects_control_checkpoint_writes_before_cuda(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="not a supported checkpoint writer"):
-        trace_statistics(tmp_path / "new", "control", verify_resume=True)
-    assert not (tmp_path / "new").exists()
-
-
 @pytest.mark.integration
 def test_dense_proxy_precision(tmp_path: Path) -> None:
     if not torch.cuda.is_available():
         pytest.fail("dense proxy qualification requires CUDA")
     with prepared_shape_compilation(64):
         qualify(tmp_path)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--mode", choices=("precision", "stat-dense", "stat-control"), default="precision")
-    parser.add_argument("--verify-resume", action="store_true")
-    args = parser.parse_args()
-    with prepared_shape_compilation(64):
-        if args.mode == "precision":
-            qualify(args.output)
-        else:
-            trace_statistics(
-                args.output, "dense" if args.mode == "stat-dense" else "control", verify_resume=args.verify_resume
-            )

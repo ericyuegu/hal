@@ -13,59 +13,6 @@ sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 
 
-def test_qualification_rejects_bad_scaling_and_memory() -> None:
-    def row(rate: float, gib: int = 20) -> list[dict[str, float]]:
-        return [{"systems/match_frames_per_second": rate, "systems/peak_reserved_bytes": float(gib * 2**30)}]
-
-    _MODULE.qualify_pool([row(3000), row(5000), row(5100)])
-    with pytest.raises(ValueError, match="over 10% slower"):
-        _MODULE.qualify_pool([row(3000), row(5000), row(4000)])
-    with pytest.raises(ValueError, match="80 GiB"):
-        _MODULE.qualify_pool([row(3000), row(5000), row(5100, 80)])
-    with pytest.raises(ValueError, match="finite positive"):
-        _MODULE.qualify_pool([row(3000), row(5000), row(float("nan"))])
-    with pytest.raises(ValueError, match="finite nonnegative memory"):
-        _MODULE.qualify_pool(
-            [
-                row(3000),
-                row(5000),
-                [{"systems/match_frames_per_second": 5000, "systems/peak_reserved_bytes": float("nan")}],
-            ]
-        )
-    with pytest.raises(ValueError, match="nonempty candidates"):
-        _MODULE.qualify_pool([row(3000), [], row(5000)])
-
-
-@pytest.mark.parametrize("version", [1, 2])
-def test_pilot_logs_existing_interval_names(tmp_path: Path, version: int) -> None:
-    interval = {"mean": 0.6, "low": 0.5, "high": 0.7}
-    (tmp_path / "results.json").write_text(
-        json.dumps(
-            {
-                "format": f"hal.o65.evaluation-results.v{version}",
-                "split": "selection",
-                "groups": [
-                    {
-                        "metrics": {
-                            "msl": {
-                                "net_stocks_per_min": interval,
-                                "win_rate": interval,
-                                "matches": 4,
-                                "completed_pairs": 2,
-                                "net_stock_lcb": 0.2,
-                            }
-                        }
-                    }
-                ],
-            }
-        )
-    )
-    _MODULE.log_evaluation(tmp_path, 32, {}, online=False)
-    metrics = json.loads((tmp_path / "wandb-metrics.json").read_text())
-    assert metrics["evaluation/selection_msl_cell0_win_rate_low"] == 0.5
-    assert metrics["evaluation/selection_msl_cell0_net_stocks_per_min_high"] == 0.7
-
-
 def write_boundary(directory: Path, update: int) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     shards = []

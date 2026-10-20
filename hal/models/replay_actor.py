@@ -10,7 +10,7 @@ from hal.models.window_replay import ReplayOutput
 
 @dataclass(frozen=True, slots=True)
 class ActorTargets:
-    """Detached targets; denominator is the decision count (global/DDP world size)."""
+    """Detach targets and divide local sums by the global decision count per gradient-averaging rank."""
 
     behavior_log_probs_WKF: Tensor
     advantages_WK: Tensor
@@ -83,12 +83,10 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
 
 
 def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: float = 0.2) -> ActorLoss:
-    """Joint ratio against stored behavior and lambda/sigma direct KL.
+    """Calculate joint PPO and direct KL from stored behavior and reference probabilities.
 
-    This small objective duplicates the experiment math for a graphable model
-    boundary. Inputs must pass validate_actor_targets before capture. Every
-    target is detached; only current policy probabilities receive gradients.
-    """
+    Validate targets before capture. Detach all targets so gradients flow only
+    through the current policy."""
     if not 0 < clip_epsilon < 1:
         raise ValueError("clip epsilon must be finite and between zero and one")
     selected = targets.selected_WK & output.factor_mask_WKF.any(-1)

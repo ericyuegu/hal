@@ -1,9 +1,4 @@
-"""Train a self-play actor with decision-grid rewards and KL-regularized PPO.
-
-Flatten each frame's factors in decode order: C-stick, main stick, triggers,
-buttons. Pad mixed cadences to four frames. Mask execution at match ends,
-retain live rollout tails, and compute GAE from every decision's value.
-"""
+"""Train a self-play actor with delayed actions and KL-regularized PPO."""
 
 import contextlib
 import copy
@@ -39,9 +34,7 @@ from torch import Tensor
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import Rank
-from hal.eval.periodic_self_play import PeriodicEvaluator
 from hal.eval.self_play_checkpoint import EVALUATION_FORMAT
-from hal.eval.self_play_checkpoint import PROXY_SHA256
 from hal.eval.self_play_checkpoint import TRAINING_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_VERSION
 from hal.eval.self_play_checkpoint import evaluation_actor_path
@@ -57,7 +50,6 @@ from hal.inference.decision_decoder import DecisionDecoder
 from hal.inference.graphed_actor import GraphedActorStep
 from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
-from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.attention import KVMemory
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
@@ -71,7 +63,6 @@ from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
-from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 from hal.sim import native
 from hal.sim import native_bridge
 from hal.sim import native_shard
@@ -92,9 +83,9 @@ class DelayReplan:
     replan: int
 
     def __post_init__(self) -> None:
-        if type(self.delay) is not int or self.delay < 0:
+        if self.delay < 0:
             raise ValueError("delay must be a non-negative integer")
-        if type(self.replan) is not int or self.replan not in (2, 4):
+        if self.replan not in (2, 4):
             raise ValueError("replan must be 2 or 4")
         if self.delay + self.replan > 24:
             raise ValueError("delay + replan must not exceed 24")
@@ -111,11 +102,11 @@ class ScheduleConfig:
             raise ValueError("configurations must be nonempty and unique")
         if (
             not self.supervised_offsets
-            or any(type(offset) is not int or offset < 1 for offset in self.supervised_offsets)
+            or any(offset < 1 for offset in self.supervised_offsets)
             or tuple(sorted(set(self.supervised_offsets))) != self.supervised_offsets
         ):
             raise ValueError("supervised offsets must be positive, ordered, unique integers")
-        if type(self.rollout_frames) is not int or self.rollout_frames < 1:
+        if self.rollout_frames < 1:
             raise ValueError("rollout_frames must be a positive integer")
         for config in self.configurations:
             if self.rollout_frames % config.replan:
@@ -193,13 +184,7 @@ def executed_factor_mask(delay_J: Tensor, replan_J: Tensor, frames_remaining_J: 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DecisionBatch:
-    """Decision rows, with all action indices stored in FACTOR_ORDER.
-
-    The prefix is padded to [J, 24, 4]; only its first D frames are read.
-    Sampled indices and behavior log-probs are padded to [J, 16]. The execution
-    mask consists of complete frames and can be shorter than the sampled chunk.
-    Observation/decision frames use the same clock. Lambda belongs to ego.
-    """
+    """Store actions in decode order, padding prefixes to [J,24,4] and sampled factors to [J,16]."""
 
     observation_frame_J: Tensor
     decision_frame_J: Tensor
@@ -272,43 +257,10 @@ class DecisionBatch:
         return self.executed_factors_JF.any(-1)
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class ControllerLogits:
-    """Categorical logits [J, 4, K_group], in decoder order."""
-
-    c_stick: Tensor
-    main_stick: Tensor
-    triggers: Tensor
-    buttons: Tensor
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class FactorEvaluation:
-    log_probs_JF: Tensor
-    reference_log_probs_JF: Tensor
-    exact_kl_JF: Tensor
-
-
-def categorical_log_probs(logits: Tensor, invalid_mask: Tensor | None = None) -> Tensor:
-    """Apply the same support mask before normalizing either policy."""
-    if not logits.is_floating_point() or logits.ndim < 1 or logits.shape[-1] < 1:
-        raise ValueError("logits must be floating point with a nonempty category dimension")
-    if invalid_mask is None:
-        invalid_mask = torch.zeros_like(logits, dtype=torch.bool)
-    _check_tensor("category mask", invalid_mask, tuple(logits.shape), "bool", logits.device)
-    if bool(invalid_mask.all(-1).any()):
-        raise ValueError("a categorical distribution needs a legal category")
-    _check_finite("legal logits", logits[~invalid_mask])
-    return _loss_precision(logits).masked_fill(invalid_mask, -torch.inf).log_softmax(-1)
-
-
 def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
-    """Exact forward KL; the reference is always a stop-gradient target.
+    """Sum forward KL on shared support, detaching the reference.
 
-    Inputs must be normalized log-probabilities with identical support. Illegal
-    categories have log-probability -inf; they contribute zero, including in
-    the backward pass.
-    """
+    Illegal categories use -inf log-probabilities and contribute zero gradients."""
     _check_tensor("reference", reference_log_probs, tuple(log_probs.shape), "float", log_probs.device)
     if not log_probs.is_floating_point() or log_probs.ndim < 1 or log_probs.shape[-1] < 1:
         raise ValueError("log-probs must have a category dimension")
@@ -324,53 +276,6 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
             raise ValueError("log-probs must be normalized")
     difference = torch.where(legal, log_probs, 0) - torch.where(legal, reference_log_probs, 0)
     return (log_probs.exp() * difference).sum(-1)
-
-
-def evaluate_factors(
-    policy: ControllerLogits,
-    reference: ControllerLogits,
-    sampled_indices_JF: Tensor,
-    button_mask_JRK: Tensor,
-) -> FactorEvaluation:
-    """Evaluate sampled contexts, applying one trigger-derived button mask.
-
-    The caller supplies logits conditioned on the identical forced prefix and
-    earlier sampled factors. The mask uses HAL's convention: True is illegal.
-    """
-    if policy.c_stick.ndim != 3:
-        raise ValueError("controller logits must have shape [J, 4, K_group]")
-    j = policy.c_stick.shape[0]
-    _check_tensor("sampled indices", sampled_indices_JF, (j, 16), "int", policy.c_stick.device)
-    indices = sampled_indices_JF.reshape(j, 4, 4)
-    log_probs: list[Tensor] = []
-    reference_log_probs: list[Tensor] = []
-    kls: list[Tensor] = []
-    groups = (
-        (policy.c_stick, reference.c_stick),
-        (policy.main_stick, reference.main_stick),
-        (policy.triggers, reference.triggers),
-        (policy.buttons, reference.buttons),
-    )
-    for group, (logits, ref_logits) in enumerate(groups):
-        if logits.ndim != 3 or logits.shape[:2] != (j, 4):
-            raise ValueError("controller logits must have shape [J, 4, K_group]")
-        _check_tensor("reference logits", ref_logits, tuple(logits.shape), "float", logits.device)
-        mask = button_mask_JRK if group == 3 else None
-        log_p = categorical_log_probs(logits, mask)
-        log_ref = categorical_log_probs(ref_logits.detach(), mask)
-        picks = indices[:, :, group, None]
-        if bool(((picks < 0) | (picks >= logits.shape[-1])).any()):
-            raise ValueError("sampled index outside categorical support")
-        sampled = log_p.gather(-1, picks).squeeze(-1)
-        _check_finite("sampled log-probs", sampled)
-        log_probs.append(sampled)
-        reference_log_probs.append(log_ref.gather(-1, picks).squeeze(-1))
-        kls.append(categorical_kl(log_p, log_ref))
-    return FactorEvaluation(
-        torch.stack(log_probs, -1).flatten(1),
-        torch.stack(reference_log_probs, -1).flatten(1),
-        torch.stack(kls, -1).flatten(1),
-    )
 
 
 def _masked_factors(values_JF: Tensor, executed_JF: Tensor) -> Tensor:
@@ -399,65 +304,10 @@ def regularized_reward(
     return rewards.sum(-1) - decisions.kl_coefficient_J * kl
 
 
-@torch.no_grad()
-def sampled_kl_penalty(decisions: DecisionBatch, reference_log_probs_JF: Tensor) -> Tensor:
-    """The k1 cross-check uses log mu, with no differentiable KL loss."""
-    behavior = _masked_factors(decisions.behavior_log_probs_JF, decisions.executed_factors_JF)
-    reference = _masked_factors(reference_log_probs_JF, decisions.executed_factors_JF)
-    return decisions.kl_coefficient_J * (behavior - reference).sum(-1)
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class AdvantageTargets:
     advantages: Tensor
     value_targets: Tensor
-
-
-@torch.no_grad()
-def generalized_advantage(
-    rewards: Tensor,
-    values: Tensor,
-    next_values: Tensor,
-    durations: Tensor,
-    bootstrap_mask: Tensor,
-    trace_mask: Tensor,
-    *,
-    gamma: float = GAMMA,
-    gae_lambda: float = GAE_LAMBDA,
-) -> AdvantageTargets:
-    """Time-major GAE [T, ...], with explicit pre-reset and rollout-end values.
-
-    next_values is V' for every interval, not a shifted tensor spanning resets.
-    The final trace mask must be false. Terminal next-values may be NaN because
-    the bootstrap mask removes them before arithmetic.
-    """
-    _check_discount("gamma", gamma)
-    _check_discount("gae_lambda", gae_lambda)
-    if rewards.ndim < 1 or rewards.shape[0] == 0:
-        raise ValueError("GAE needs a nonempty time dimension")
-    shape = tuple(rewards.shape)
-    for name, value in (("rewards", rewards), ("values", values), ("next_values", next_values)):
-        _check_tensor(name, value, shape, "float", rewards.device)
-    _check_tensor("durations", durations, shape, "int", rewards.device)
-    for name, value in (("bootstrap mask", bootstrap_mask), ("trace mask", trace_mask)):
-        _check_tensor(name, value, shape, "bool", rewards.device)
-    if bool(((durations < 1) | (durations > MAX_REPLAN)).any()):
-        raise ValueError("durations must be in [1, 4]")
-    if bool(trace_mask[-1].any()) or bool((trace_mask & ~bootstrap_mask).any()):
-        raise ValueError("traces must stop at terminals and rollout end")
-    _check_finite("rewards", rewards)
-    _check_finite("values", values)
-    _check_finite("bootstrap values", next_values[bootstrap_mask])
-    values = _loss_precision(values)
-    next_values = torch.where(bootstrap_mask, _loss_precision(next_values), 0)
-    delta = _loss_precision(rewards) + gamma ** durations.to(values.dtype) * next_values - values
-    trace_discount = (gamma * gae_lambda) ** durations.to(values.dtype)
-    advantages = torch.empty_like(delta)
-    tail = torch.zeros_like(delta[-1])
-    for t in range(len(delta) - 1, -1, -1):
-        tail = delta[t] + trace_discount[t] * torch.where(trace_mask[t], tail, 0)
-        advantages[t] = tail
-    return AdvantageTargets(advantages, advantages + values)
 
 
 @torch.no_grad()
@@ -519,11 +369,7 @@ class AdvantageStatistics:
 
 @torch.no_grad()
 def advantage_statistics(global_moments: Tensor, *, minimum_sigma: float = 1e-8) -> AdvantageStatistics:
-    """Population standard deviation with an explicit numerical floor.
-
-    The actor and differentiable KL must use this same sigma. Moments cover
-    exactly the selected training decisions across all ranks.
-    """
+    """Normalize PPO and direct KL with the same sigma over selected decisions."""
     if global_moments.shape != (3,) or not global_moments.is_floating_point():
         raise ValueError("global moments must have shape [3] and floating dtype")
     _check_finite("global moments", global_moments)
@@ -543,18 +389,14 @@ def advantage_statistics(global_moments: Tensor, *, minimum_sigma: float = 1e-8)
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DecisionReduction:
-    """External global count and the number of ranks averaging gradients.
-
-    DDP averages rank gradients, so each local sum is scaled by world_size / J.
-    A critic whose gradients are SUM-reduced instead uses gradient_average_ranks=1.
-    """
+    """Scale local sums by gradient_average_ranks/global_count before gradient averaging."""
 
     global_count: Tensor
     gradient_average_ranks: int = 1
 
     def __post_init__(self) -> None:
         _check_positive_count(self.global_count)
-        if type(self.gradient_average_ranks) is not int or self.gradient_average_ranks < 1:
+        if self.gradient_average_ranks < 1:
             raise ValueError("gradient_average_ranks must be a positive integer")
 
 
@@ -572,68 +414,6 @@ def _decision_mean(values_J: Tensor, selected_J: Tensor, reduction: DecisionRedu
     )
 
 
-def _training_mask(
-    decisions: DecisionBatch,
-    selected_J: Tensor,
-    statistics: AdvantageStatistics,
-    reduction: DecisionReduction | None,
-) -> None:
-    _check_tensor("selected decisions", selected_J, tuple(decisions.delay_J.shape), "bool", decisions.delay_J.device)
-    if bool((selected_J & ~decisions.loss_mask_J).any()):
-        raise ValueError("cannot train a decision with no executed factors")
-    count = selected_J.sum() if reduction is None else reduction.global_count
-    if bool(statistics.count.to(count.device) != count):
-        raise ValueError("advantage statistics and loss must use the same global decision count")
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class PolicyLoss:
-    loss: Tensor
-    joint_ratio_J: Tensor
-
-
-def ppo_loss(
-    decisions: DecisionBatch,
-    new_log_probs_JF: Tensor,
-    advantages_J: Tensor,
-    selected_J: Tensor,
-    statistics: AdvantageStatistics,
-    *,
-    clip_epsilon: float,
-    reduction: DecisionReduction | None = None,
-) -> PolicyLoss:
-    """Joint PPO on selected decisions using detached global advantage statistics."""
-    _training_mask(decisions, selected_J, statistics, reduction)
-    if not math.isfinite(clip_epsilon) or not 0 < clip_epsilon < 1:
-        raise ValueError("clip_epsilon must be in (0, 1)")
-    _check_tensor("advantages", advantages_J, tuple(decisions.delay_J.shape), "float", decisions.delay_J.device)
-    executed = decisions.executed_factors_JF & selected_J[:, None]
-    new = _masked_factors(new_log_probs_JF, executed)
-    old = _masked_factors(decisions.behavior_log_probs_JF.detach(), executed)
-    # Subtract per factor before summing to preserve small kernel differences.
-    ratio = (new - old).sum(-1).exp()
-    _check_finite("joint ratio", ratio)
-    advantages = torch.where(selected_J, advantages_J.detach(), 0)
-    normalized = (advantages - statistics.mean.detach()) / statistics.sigma.detach()
-    surrogate = torch.minimum(ratio * normalized, ratio.clamp(1 - clip_epsilon, 1 + clip_epsilon) * normalized)
-    return PolicyLoss(_decision_mean(-surrogate, selected_J, reduction), ratio)
-
-
-def differentiable_kl_loss(
-    decisions: DecisionBatch,
-    factor_kl_JF: Tensor,
-    selected_J: Tensor,
-    statistics: AdvantageStatistics,
-    *,
-    reduction: DecisionReduction | None = None,
-) -> Tensor:
-    """Direct KL derivative on the same decisions and sigma used by PPO."""
-    _training_mask(decisions, selected_J, statistics, reduction)
-    kl = _factor_sum(factor_kl_JF, decisions.executed_factors_JF & selected_J[:, None])
-    weighted = decisions.kl_coefficient_J.detach() / statistics.sigma.detach() * kl
-    return _decision_mean(weighted, selected_J, reduction)
-
-
 def critic_loss(
     values_J: Tensor,
     targets_J: Tensor,
@@ -642,11 +422,7 @@ def critic_loss(
     value_scale: float = 150.0,
     reduction: DecisionReduction | None = None,
 ) -> Tensor:
-    """O64's mean squared error in beta=150 reward units; targets are detached.
-
-    Selection includes all valid critic decisions, even ones with no executed
-    factors. Cached critic features must be detached by the model boundary.
-    """
+    """Fit detached targets at O64 reward scale, including decisions with no executed factors."""
     if not math.isfinite(value_scale) or value_scale <= 0:
         raise ValueError("value_scale must be finite and positive")
     if not values_J.is_floating_point():
@@ -671,8 +447,6 @@ class CounterRng:
     key: int = dataclasses.field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if type(self.seed) is not int:
-            raise ValueError("counter RNG seed must be an integer")
         digest = hashlib.blake2b(str(self.seed).encode(), digest_size=8, person=b"hal-o65-key-v3").digest()
         object.__setattr__(self, "key", int.from_bytes(digest, "little") & 0x7FFFFFFFFFFFFFFF)
 
@@ -751,7 +525,6 @@ class SamplerConfig:
     anchor_rate: float = 0.15
     percentile_alpha: float = 5.0
     percentile_beta: float = 1.3
-    fixed_percentile: float | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -788,10 +561,6 @@ class SamplerConfig:
             raise ValueError("starting percents must be finite and nonnegative")
         if any(not math.isfinite(x) or x <= 0 for x in (self.percentile_alpha, self.percentile_beta)):
             raise ValueError("percentile Beta parameters must be finite and positive")
-        if self.fixed_percentile is not None and (
-            not math.isfinite(self.fixed_percentile) or not 0.1 <= self.fixed_percentile <= 0.999
-        ):
-            raise ValueError("fixed percentile must be in [0.1, 0.999]")
         for matchup in self.matchups:
             for character in matchup.characters:
                 rows = [row for row in self.identities if row.character == character and row.count >= self.data_floor]
@@ -882,17 +651,15 @@ class EpisodeSampler:
                 if not anchors:
                     raise ValueError("anchor sampling requires a reference policy")
                 anchor = anchors[rng.choice([1.0] * len(anchors), "anchor", stream, episode, 0)]
-            percentile = cfg.fixed_percentile
-            if percentile is None:
-                percentile = float(
-                    np.clip(
-                        betaincinv(
-                            cfg.percentile_alpha, cfg.percentile_beta, rng.uniform("percentile", stream, episode, 0)
-                        ),
-                        0.1,
-                        0.999,
-                    )
+            percentile = float(
+                np.clip(
+                    betaincinv(
+                        cfg.percentile_alpha, cfg.percentile_beta, rng.uniform("percentile", stream, episode, 0)
+                    ),
+                    0.1,
+                    0.999,
                 )
+            )
             players.append(PlayerEpisode(identity, character, log_lambda, timing, stocks, percent, anchor, percentile))
         self.cursor += 1
         seed = int(rng.uniform("simulator_seed", match_id, episode, 0) * 2**32)
@@ -914,7 +681,7 @@ class DeviceFrameBlock:
 
 
 class SimulatorShard(Protocol):
-    """Return borrowed whole-shard frames, stopping at the first active episode end."""
+    """Return borrowed shard frames through the first active episode end."""
 
     @property
     def match_ids(self) -> tuple[int, ...]: ...
@@ -935,11 +702,7 @@ class ShardTiming:
 
 
 class NativeSimulatorShard:
-    """Step native matches with pinned buffers and batch their device transfers.
-
-    Wait for the previous GPU copy before writing output again. The rollout owns
-    each batch's observations after it copies them into its group storage.
-    """
+    """Step native matches using pinned buffers for device transfers."""
 
     def __init__(
         self, data_dir: Path, match_ids: tuple[int, ...], *, cpu: int, device: torch.device, max_frame: int = 28800
@@ -1181,7 +944,7 @@ class TickLayout:
     buffer: int = 0
 
     def __post_init__(self) -> None:
-        if type(self.buffer) is not int or self.buffer not in (0, 1):
+        if self.buffer not in (0, 1):
             raise ValueError("tick buffer must be zero or one")
         if not self.streams or len(self.streams) != len(self.lanes):
             raise ValueError("tick layout lanes must match nonempty streams")
@@ -1352,7 +1115,7 @@ class MatchState:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Rollout:
-    """Dense group storage stays valid until that group is collected again."""
+    """Retain group tensors until the next collection from that group."""
 
     table: DenseRollout
     ids: Tensor
@@ -1807,8 +1570,7 @@ class TransformerPolicy:
         ):
             context, observed = self._packed_context(inputs[:5])
             hidden = self.model(context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed)
-        # Torch 2.11 whole-trunk compilation failed the proxy precision gate.
-        # Capture the eager trunk together with the compiled shared-history decoder.
+        # Keep the trunk eager to meet the Torch 2.11 proxy precision limits.
         return self.window_replay(self.model, hidden, observed, ReplaySlots(*inputs[5:]), grad=grad)
 
     def reference_forward(self, inputs: tuple[Tensor, ...], windows_per_step: int, count: int) -> ReplayOutput:
@@ -3038,8 +2800,6 @@ class TrainConfig:
     deterministic: bool = False
 
     def __post_init__(self) -> None:
-        if type(self.deterministic) is not bool:
-            raise ValueError("deterministic must be a boolean")
         for name in (
             "critic_epochs",
             "windows_per_step",
@@ -3049,12 +2809,12 @@ class TrainConfig:
             "snapshot_capacity",
             "checkpoint_interval",
         ):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+            if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
         if not 1 <= self.decisions_per_window <= 16:
             raise ValueError("at most 16 decisions can train per window")
         for value in (self.warmup_steps, self.critic_warmup_updates, self.warmup_match_frames):
-            if type(value) is not int or value < 0:
+            if value < 0:
                 raise ValueError("warmup lengths must be nonnegative integers")
         for name in (
             "actor_lr",
@@ -3154,8 +2914,6 @@ class PreparedUpdate:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ReplayBatch:
-    """Packed windows and their fixed decision slots; rows index dense storage."""
-
     records: Tensor
     applied_actions: Tensor
     sides: Tensor
@@ -3346,11 +3104,9 @@ def gradient_metrics(name: str, norms: Sequence[Tensor], cap: float) -> dict[str
 
 
 class GradientNoise:
-    """Online window-scale estimate from pre-clip gradients across actor steps.
+    """Estimate gradient noise from pre-clip gradients and trained counts.
 
-    Consecutive gradients use moving weights. This cheap diagnostic is not a
-    fixed-weight measurement; report signal and validity with the estimate.
-    """
+    Weights change between samples, so this is a training diagnostic."""
 
     def __init__(self, parameters: tuple[torch.nn.Parameter, ...]) -> None:
         self.parameters = parameters
@@ -3757,7 +3513,6 @@ class Trainer:
             self.config.windows_per_step,
         )
         compact = window_indices(ids, players)
-        assert table.evaluation is not None
         old = _take_evaluation(table.evaluation, ids)
         with (
             self.memory.phase("reference"),
@@ -3781,7 +3536,6 @@ class Trainer:
         frame_rewards = table.rewards[ids]
         rewards = regularized_reward(decisions, frame_rewards, kl)
         values = table.values[ids]
-        next_values = torch.zeros_like(values)
         following = table.following[ids]
         terminal = table.terminal[ids]
         boundary = table.boundary[ids]
@@ -4002,7 +3756,6 @@ class Trainer:
         table = batch.rollout.table
         dense_advantage = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
-        assert batch.reference is not None
         reference_dense = tuple(
             value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions
         )
@@ -4291,12 +4044,10 @@ def _configuration_digest(trainer: Trainer) -> str:
 
 
 def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str]) -> Path:
-    """Publish one manifest after the model and every simulator shard are durable.
+    """Publish a manifest after every referenced file is durable.
 
-    No cache is saved: every resumed rollout prefills under restored weights.
-    Filenames are content hashes, so an interrupted replacement cannot corrupt
-    a checkpoint which already has a manifest.
-    """
+    Use content-hash filenames to preserve published checkpoints during interruption.
+    Resume rebuilds caches from restored weights."""
     import io
 
     if torch.are_deterministic_algorithms_enabled() != trainer.config.deterministic:
@@ -4401,11 +4152,9 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         raise ValueError("resume environment or checkpoint mismatch")
     paths: dict[str, Path] = {}
     for shard in manifest["shards"]:
-        if set(shard) != {"name", "sha256", "role"} or Path(shard["name"]).name != shard["name"]:
-            raise ValueError("invalid checkpoint shard entry")
         path = manifest_path.parent / shard["name"]
-        if shard["role"] in paths or sha256(path) != shard["sha256"]:
-            raise ValueError("checkpoint shard hash mismatch or duplicate role")
+        if sha256(path) != shard["sha256"]:
+            raise ValueError("checkpoint shard hash mismatch")
         paths[shard["role"]] = path
     expected_roles = {"training"} | {
         f"simulator_{g}_{s}" for g, group in enumerate(trainer.engine.groups) for s in range(len(group))
@@ -4517,54 +4266,6 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         torch.cuda.set_rng_state_all(saved["cuda_rng"])
 
 
-def load_development_policy(
-    checkpoint: Path,
-    statistics: dict[str, FeatureStats],
-    *,
-    lambda_min: float = 0.01,
-    lambda_max: float = 100.0,
-    device: str = "cuda",
-    decoder_precision: DecoderPrecision = "bf16",
-) -> TransformerPolicy:
-    """Load the recorded O63 bootstrap30 checkpoint with fresh RL optimizer state."""
-    if sha256(checkpoint) != PROXY_SHA256:
-        raise ValueError("development checkpoint is not the recorded O63 bootstrap30 final.pt")
-    saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    config = saved["cfg"]
-    if (config["experiment_id"], config["checkpoint_format_version"], config["arm"], saved["step"]) != (
-        "063_percentile_conditioning_v1",
-        5,
-        "bootstrap30",
-        16383,
-    ):
-        raise ValueError("development checkpoint identity mismatch")
-    cfg = ActionSequenceConfig(
-        d_model=256,
-        n_layers=12,
-        n_heads=4,
-        temporal_d_model=256,
-        temporal_layers=6,
-        temporal_heads=4,
-        temporal_ff_dim=1024,
-        group_head_dim=256,
-        value_hidden_dim=128,
-    )
-    if config["architecture"] != {name: getattr(cfg, name) for name in config["architecture"]}:
-        raise ValueError("development checkpoint architecture mismatch")
-    offsets = tuple(config["architecture"]["head_offsets"])
-    schedule = development_config(offsets)
-    if not 0 < lambda_min < lambda_max or not math.isfinite(lambda_max):
-        raise ValueError("invalid development lambda range")
-    state = saved["model"]
-    vocabulary = vocabulary_from_checkpoint_buffer(state["player_code_bytes"].numpy())
-    ranges = ConditioningRanges((math.log(lambda_min), math.log(lambda_max)), (8, 10), (2, 4))
-    model = SelfPlayTransformer(
-        cfg, ranges, vocabulary, max_opponent_queue=14, critic_hidden_dim=128, decoder_precision=decoder_precision
-    )
-    model.load_bc_state_dict(state)
-    return TransformerPolicy(model.to(device).eval(), schedule, statistics)
-
-
 def run_training(
     trainer: Trainer,
     updates: int,
@@ -4572,19 +4273,12 @@ def run_training(
     provenance: dict[str, str],
     *,
     wandb_project: str | None = None,
-    evaluation_shards: tuple[SimulatorShard, ...] | None = None,
-    evaluation_config: EvaluationConfig | None = None,
-    evaluation_interval: int = 128,
-    periodic_evaluator: PeriodicEvaluator | None = None,
     run_configuration: dict[str, object] | None = None,
 ) -> None:
-    """Train from initialized shards, publish checkpoints, and collect periodic results."""
     import wandb
 
     if updates <= trainer.update:
         raise ValueError("updates must exceed the restored update cursor")
-    if (evaluation_shards is None) != (evaluation_config is None) or evaluation_interval < 1:
-        raise ValueError("evaluation needs dedicated shards, a configuration, and a positive interval")
     output.mkdir(parents=True, exist_ok=True)
     trainer.memory.output = output
     resolved: dict[str, object] = {
@@ -4595,11 +4289,6 @@ def run_training(
         "sampler": dataclasses.asdict(trainer.engine.sampler.config),
         "schedule": dataclasses.asdict(trainer.engine.sampler.schedule),
         "treatment": "KL-regularized joint PPO; independent per-player clipped Beta(5,1.3) u",
-        "actor_step_change": {
-            "old_windows_per_step": 32,
-            "windows_per_step": trainer.config.windows_per_step,
-            "actor_epochs": 1,
-        },
         "control": "frozen pi_ref with matched sampling, starts, episode u, and schedules",
         "invariants": "BC checkpoint, representation, data, simulator, adapter, reward, evaluation seeds",
         "run": run_configuration,
@@ -4614,20 +4303,6 @@ def run_training(
             while trainer.update < updates:
                 batch, metrics = trainer.run_update()
                 del batch
-                if periodic_evaluator is not None:
-                    completed = periodic_evaluator.poll()
-                    if completed is not None:
-                        metrics.update(periodic_evaluation_metrics(completed))
-                    if trainer.update % periodic_evaluator.every == 0:
-                        manifest = save_checkpoint(trainer, output / "checkpoints", provenance)
-                        if periodic_evaluator.submit(manifest, update=trainer.update):
-                            trainer.evaluation_cursor += 1
-                if (
-                    evaluation_shards is not None
-                    and evaluation_config is not None
-                    and trainer.update % evaluation_interval == 0
-                ):
-                    metrics.update(evaluate_anchors(trainer, evaluation_shards, evaluation_config))
                 resolved["calibrated_lambda_max"] = trainer.engine.sampler.lambda_max
                 (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
                 wandb.log(metrics)
@@ -4636,34 +4311,6 @@ def run_training(
                 if trainer.update % trainer.config.checkpoint_interval == 0:
                     save_checkpoint(trainer, output / "checkpoints", provenance)
             save_checkpoint(trainer, output / "checkpoints", provenance)
-            if periodic_evaluator is not None:
-                completed = periodic_evaluator.finish()
-                if completed is not None:
-                    metrics = {"global_step": float(trainer.update), **periodic_evaluation_metrics(completed)}
-                    wandb.log(metrics)
-                    log.write(json.dumps(metrics, sort_keys=True) + "\n")
-
-
-def periodic_evaluation_metrics(path: Path) -> dict[str, float]:
-    result = json.loads(path.read_text())
-    if (
-        result.get("format") not in ("hal.o65.evaluation-results.v1", "hal.o65.evaluation-results.v2")
-        or result.get("split") != "selection"
-    ):
-        raise ValueError("unsupported periodic evaluation result identity")
-    metrics = {"evaluation/update": float(result["checkpoint_provenance"]["update"])}
-    for index, group in enumerate(result["groups"]):
-        for simulator, values in group["metrics"].items():
-            prefix = f"evaluation/{simulator}_cell{index}"
-            metrics[f"{prefix}_matches"] = float(values["matches"])
-            metrics[f"{prefix}_completed_pairs"] = float(values["completed_pairs"])
-            for key in ("win_rate", "net_stocks_per_min"):
-                value = values[key]["mean"]
-                if value is not None:
-                    metrics[f"{prefix}_{key}"] = float(value)
-            if values["net_stock_lcb"] is not None:
-                metrics[f"{prefix}_net_stock_lcb"] = float(values["net_stock_lcb"])
-    return metrics
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4689,10 +4336,6 @@ class NativeCli:
     max_frame: int = 28800
     resume: Path | None = None
     training: TrainConfig = TrainConfig()
-    evaluation_every: int = 128
-    evaluation_protocol: Path | None = None
-    evaluation_simulators: tuple[Literal["msl", "dolphin"], ...] = ("msl", "dolphin")
-    evaluation_device: str = "cpu"
     verify_resume: bool = False
     verify_only: bool = False
     fixed_anchor_lanes: bool = True
@@ -4709,26 +4352,19 @@ class NativeCli:
             self.device != "cuda"
             or self.training.critic_warmup_updates
             or self.resume is not None
-            or self.evaluation_every
             or self.wandb_project is not None
             or self.verify_resume
         ):
-            raise ValueError(
-                "profiling requires CUDA, warmup off, fresh state, no evaluation, no uploads, and no resume check"
-            )
-        if type(self.fixed_anchor_lanes) is not bool:
-            raise ValueError("fixed_anchor_lanes must be a boolean")
+            raise ValueError("profiling requires CUDA, warmup off, fresh state, disabled W&B, and no resume check")
         if (
             not self.cpus
             or len(set(self.cpus)) != len(self.cpus)
             or any(cpu not in os.sched_getaffinity(0) for cpu in self.cpus)
         ):
             raise ValueError("native runs need distinct available CPUs")
-        if any(type(value) is not int or value < 1 for value in (self.groups, self.matches_per_shard, self.updates)):
+        if any(value < 1 for value in (self.groups, self.matches_per_shard, self.updates)):
             raise ValueError("groups, matches per shard, and updates must be positive integers")
-        if type(self.evaluation_every) is not int or self.evaluation_every < 0:
-            raise ValueError("evaluation interval must be nonnegative")
-        if self.max_frame != -1 and (type(self.max_frame) is not int or self.max_frame < 0):
+        if self.max_frame != -1 and self.max_frame < 0:
             raise ValueError("max frame must be -1 or nonnegative")
         if self.profiling is not None and (
             self.profiling.warm_updates < self.groups or self.updates != self.profiling.warm_updates + 2
@@ -4810,8 +4446,6 @@ def train_native(config: NativeCli) -> None:
         else None
     )
     cache_load_seconds = time.perf_counter() - cache_started
-    if sha256(config.checkpoint) != PROXY_SHA256:
-        raise ValueError("native development run requires the recorded O63 proxy")
     torch.manual_seed(config.training.seed)
     checkpoint = load_evaluation_checkpoint(
         config.checkpoint, device=torch.device(config.device), decoder_precision=config.decoder_precision
@@ -4825,8 +4459,6 @@ def train_native(config: NativeCli) -> None:
         if row.identity >= policy.model.cfg.player_vocab_size:
             raise ValueError("sampler identity is outside the checkpoint vocabulary")
     manifests = checkpoint.provenance["data_manifests"]
-    if not isinstance(manifests, dict) or set(manifests) != {"ranked-anonymized-1-policy-world-v8"}:
-        raise ValueError("development checkpoint data manifests changed")
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if config.output.exists() and config.resume is None:
         raise FileExistsError(config.output)
@@ -4848,7 +4480,7 @@ def train_native(config: NativeCli) -> None:
             groups.append(tuple(shards))
         provenance = {
             "git_sha": git_sha,
-            "checkpoint_sha256": PROXY_SHA256,
+            "checkpoint_sha256": checkpoint.checkpoint_sha256,
             "data_manifest_sha256": str(cast(dict[str, object], manifests)["ranked-anonymized-1-policy-world-v8"]),
             "simulator_sha256": groups[0][0].shard.library_sha256,
             "adapter_sha256": native_bridge.library_sha256(),
@@ -4868,30 +4500,6 @@ def train_native(config: NativeCli) -> None:
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)
             return
-        evaluator = None
-        if config.evaluation_every:
-            arguments = [
-                "--anchors",
-                str(config.checkpoint.resolve()),
-                "--data-dir",
-                str(config.data_dir.resolve()),
-                "--simulators",
-                *config.evaluation_simulators,
-                "--device",
-                config.evaluation_device,
-                "--decoder-precision",
-                config.decoder_precision,
-                "--cadence-grid",
-                "8/4",
-                "10/2",
-            ]
-            if config.evaluation_protocol is not None:
-                arguments.extend(("--protocol", str(config.evaluation_protocol.resolve())))
-            evaluator = PeriodicEvaluator(
-                config.output / "evaluation", every=config.evaluation_every, arguments=tuple(arguments)
-            )
-            evaluator.last_update = trainer.update
-            resources.callback(evaluator.close)
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
@@ -4916,7 +4524,6 @@ def train_native(config: NativeCli) -> None:
             config.output,
             provenance,
             wandb_project=config.wandb_project,
-            periodic_evaluator=evaluator,
             run_configuration=native_config,
         )
         if config.verify_resume:
@@ -4937,10 +4544,8 @@ class ProfileConfig:
     nsys: bool = False
 
     def __post_init__(self) -> None:
-        if type(self.warm_updates) is not int or self.warm_updates < 1:
+        if self.warm_updates < 1:
             raise ValueError("profiling requires at least one warm update")
-        if type(self.nsys) is not bool:
-            raise ValueError("nsys must be a boolean")
 
 
 def interval_union(intervals: list[tuple[float, float]]) -> float:
@@ -4952,7 +4557,7 @@ def interval_union(intervals: list[tuple[float, float]]) -> float:
 
 
 def summarize_trace(path: Path) -> dict[str, object]:
-    """Count device activities, not CPU operators that launch those activities."""
+    """Count GPU activities through their correlated runtime launches."""
     events = cast(list[TraceEvent], json.loads(path.read_text())["traceEvents"])
     roots = [
         (event["ts"], event["ts"] + event["dur"])
@@ -5032,11 +4637,10 @@ def summarize_trace(path: Path) -> dict[str, object]:
 
 
 class UpdateProfile:
-    """Measure one update, then trace bounded samples in a separate update.
+    """Time an update, then trace bounded samples in a separate update.
 
-    CUDA event spans contain idle gaps. Only trace interval unions measure busy
-    time. Extrapolated samples remain estimates and are stored separately.
-    """
+    Use unions of trace intervals for device busy time. CUDA event spans include
+    idle gaps; scaled samples estimate only their recorded sites."""
 
     def __init__(self, output: Path, device: torch.device, *, traces: bool) -> None:
         self.output = output
@@ -5337,55 +4941,6 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
                 )
             )
             if not traced:
-                windows = batch.windows.take(batch.steps[0], batch.placement.positions, batch.steps[0] >= 0)
-                policy = trainer.policy
-                assert isinstance(policy, TransformerPolicy)
-                features, observed = policy._packed_context(windows.inputs()[:5])
-                torch.save(
-                    {
-                        "format": "hal.o65.floor-inputs.v2",
-                        "features": {key: value.cpu() for key, value in features.items()},
-                        "observed": observed.cpu(),
-                        "slots": {
-                            field.name: getattr(windows.slots, field.name).cpu()
-                            for field in dataclasses.fields(windows.slots)
-                        },
-                        "model": {key: value.cpu() for key, value in policy.model.state_dict().items()},
-                    },
-                    output / "floor-inputs.pt",
-                )
-                layouts = [
-                    {"buffer": buffer, "anchor": anchor, "batch": len(layout.streams)}
-                    for (buffer, anchor), layout in trainer.engine.tick_layouts.items()
-                ]
-                (output / "floor-layout.json").write_text(
-                    json.dumps(
-                        {
-                            "format": "hal.o65.floor-layout.v1",
-                            "tick_layouts": layouts,
-                            "actor_steps": len(batch.steps),
-                            "actor_windows": trainer.config.windows_per_step,
-                            "actor_slots": trainer.config.decisions_per_window,
-                            "reference_windows": int(recorder.work["reference/trunk_tokens"] // 256),
-                            "reference_slots": 64,
-                            "frames": batch.rollout.frames,
-                            "decisions": len(batch.rollout.ids),
-                            "matches": len(trainer.engine.group_matches[batch.rollout.group]),
-                            "critic_parameters": [
-                                list(parameter.shape) for parameter in trainer.policy.critic_parameters()
-                            ],
-                            "optimizer_groups": [
-                                {
-                                    "use_muon": group["use_muon"],
-                                    "logical_splits": group.get("logical_splits", 1),
-                                    "shapes": [list(parameter.shape) for parameter in group["params"]],
-                                }
-                                for group in trainer.actor_optimizer.param_groups
-                            ],
-                        },
-                        indent=2,
-                    )
-                )
                 (output / "allocator.json").write_text(json.dumps(torch.cuda.memory_snapshot()))
             del batch
         finally:
@@ -5561,7 +5116,6 @@ class GpuProfileCli:
             groups=self.groups,
             matches_per_shard=self.matches_per_shard,
             training=TrainConfig(critic_warmup_updates=0, windows_per_step=32),
-            evaluation_every=0,
             profiling=ProfileConfig(self.warm_updates, self.nsys),
             compile_cache=self.compile_cache,
             decoder_precision=self.decoder_precision,
@@ -5874,14 +5428,14 @@ def qualify_development(config: ProxyCli) -> None:
     stats = {
         name: FeatureStats(value["mean"], value["std"], value["min"], value["max"]) for name, value in raw.items()
     }
-    policy = load_development_policy(
-        config.checkpoint,
-        stats,
-        device=config.device,
-        decoder_precision=config.decoder_precision,
+    loaded = load_evaluation_checkpoint(
+        config.checkpoint, device=torch.device(config.device), decoder_precision=config.decoder_precision
     )
+    model = loaded.model.requires_grad_(True)
+    model.percentile_head.requires_grad_(False)
+    policy = TransformerPolicy(model, development_config(model.head_offsets), stats)
     report = {
-        "checkpoint_sha256": PROXY_SHA256,
+        "checkpoint_sha256": sha256(config.checkpoint),
         "schedule": dataclasses.asdict(policy.schedule),
         "parameters": sum(p.numel() for p in policy.model.parameters()),
         "actor_parameters": sum(p.numel() for p in policy.actor_parameters()),
@@ -5892,203 +5446,6 @@ def qualify_development(config: ProxyCli) -> None:
     }
     config.output.parent.mkdir(parents=True, exist_ok=True)
     config.output.write_text(json.dumps(report, sort_keys=True, indent=2))
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class EvaluationConfig:
-    lambdas: tuple[float, ...]
-    seed: int
-    matches_per_cell: int
-    max_rollouts: int = 64
-
-    def __post_init__(self) -> None:
-        if not self.lambdas or any(not math.isfinite(x) or x <= 0 for x in self.lambdas):
-            raise ValueError("evaluation lambdas must be finite and positive")
-        if min(self.matches_per_cell, self.max_rollouts) < 1:
-            raise ValueError("evaluation needs positive match and rollout counts")
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class EpisodeDiagnostics:
-    metadata: Tensor
-    rewards: Tensor
-    duration: Tensor
-    coefficient: Tensor
-    values: Tensor
-    factor_kl: Tensor
-
-
-@torch.no_grad()
-def episode_diagnostics(
-    policy: LoopPolicy,
-    reference: LoopPolicy,
-    rollout: Rollout,
-    wanted: Tensor,
-    *,
-    windows_per_step: int,
-    decisions_per_window: int,
-) -> EpisodeDiagnostics:
-    table, ids = rollout.table, rollout.ids
-    if table.evaluation is None:
-        raise ValueError("evaluation rollout is missing its behavior distributions")
-    players, ticks = table.players, table.ticks
-    rows = torch.arange(ticks * players, device=policy.device).reshape(-1, 64, players).transpose(1, 2).reshape(-1, 64)
-    windows = replay_batch(policy, table, rows, table.valid[rows])
-    full = (torch.arange(4, device=policy.device) < windows.slots.replan_WK[..., None]).repeat_interleave(4, -1)
-    windows = dataclasses.replace(windows, slots=dataclasses.replace(windows.slots, executed_WKF=full))
-    old = _take_evaluation(table.evaluation, ids)
-    positions = torch.arange(decisions_per_window, device=policy.device)[None].expand(len(rows), -1)
-    order = torch.arange(math.ceil(len(rows) / windows_per_step) * windows_per_step, device=policy.device)
-    order = torch.where(order < len(rows), order, -1).reshape(-1, windows_per_step)
-    control = window_evaluation(
-        reference.evaluate_reference(windows, positions, order),
-        old.actions,
-        window_indices(ids, players),
-    )
-    meta = table.integers[ids]
-    mask = (torch.arange(4, device=policy.device) < meta[:, REPLAN, None]).repeat_interleave(4, -1)
-    kl = factor_kl(old, control, mask)
-    keep = (meta[:, EPISODE] == 0) & torch.isin(meta[:, MATCH], wanted)
-    selected = ids[keep]
-    return EpisodeDiagnostics(
-        meta[keep],
-        table.rewards[selected],
-        table.duration[selected],
-        table.coefficients[selected],
-        table.values[selected],
-        kl[keep],
-    )
-
-
-def _episode_diagnostics(chunks: Sequence[EpisodeDiagnostics], results: dict[int, EpisodeResult]) -> dict[str, float]:
-    if not chunks:
-        raise ValueError("evaluation episode diagnostics are empty")
-    metadata = torch.cat([chunk.metadata for chunk in chunks])
-    device = metadata.device
-    matches = sorted(results)
-    match_ids = torch.tensor(matches, device=device)
-    lengths = torch.tensor([results[match].duration for match in matches], device=device)
-    terminal = torch.tensor([not results[match].timeout for match in matches], device=device)
-    at = torch.searchsorted(match_ids, metadata[:, MATCH])
-    remaining = lengths[at] - metadata[:, CLOCK]
-    executed = executed_factor_mask(metadata[:, DELAY].contiguous(), metadata[:, REPLAN].contiguous(), remaining)
-    kl = torch.where(executed, torch.cat([chunk.factor_kl for chunk in chunks]), 0).sum(-1)
-    coefficients = torch.cat([chunk.coefficient for chunk in chunks])
-    metrics = {
-        "kl_cost": float((kl * coefficients).sum()) / len(results),
-        "kl_per_frame": float(kl.sum()) / sum(result.duration for result in results.values()),
-    }
-    duration = torch.cat([chunk.duration for chunk in chunks])
-    frames = torch.arange(4, device=device)
-    rewards = torch.cat([chunk.rewards for chunk in chunks])
-    discounted = torch.where(frames < duration[:, None], rewards * GAMMA**frames, 0).sum(-1) - coefficients * kl
-    _, streams = torch.unique(metadata[:, STREAM], return_inverse=True)
-    ticks = metadata[:, CLOCK] // 2
-    shape = (int(ticks.max()) + 1, int(streams.max()) + 1)
-    dense_rewards = torch.zeros(shape, device=device)
-    discount = torch.ones(shape, device=device)
-    decided = torch.zeros(shape, device=device, dtype=torch.bool)
-    dense_rewards[ticks, streams] = discounted
-    discount[ticks, streams] = GAMMA**duration
-    decided[ticks, streams] = True
-    targets = torch.zeros(shape, device=device)
-    tail = torch.zeros(shape[1], device=device)
-    for tick in range(shape[0] - 1, -1, -1):
-        tail = torch.where(decided[tick], dense_rewards[tick] + discount[tick] * tail, tail)
-        targets[tick] = torch.where(decided[tick], tail, 0)
-    selected = terminal[at]
-    metrics["monte_carlo_count"] = float(selected.sum())
-    if bool(selected.any()):
-        values = torch.cat([chunk.values for chunk in chunks])[selected]
-        target = targets[ticks, streams][selected]
-        metrics["monte_carlo_rmse"] = float((values - target).square().mean().sqrt())
-        metrics["monte_carlo_explained_variance"] = explained_variance(values, target)
-    return metrics
-
-
-@torch.no_grad()
-def evaluate_anchors(
-    trainer: Trainer, shards: tuple[SimulatorShard, ...], config: EvaluationConfig
-) -> dict[str, float]:
-    """Fixed first-episode seeds and starts, separate from every training lane.
-
-    Every cell uses the same logical matches at matched D and R. An incomplete
-    cell is an error, rather than a selection biased toward short matches.
-    The caller supplies dedicated shards and controls the evaluation interval.
-    """
-    if any(shard is training for shard in shards for group in trainer.engine.groups for training in group):
-        raise ValueError("evaluation cannot step a training shard")
-    ids = sorted(match for shard in shards for match in shard.match_ids)
-    if len(ids) < config.matches_per_cell:
-        raise ValueError("evaluation requires one lane per fixed initial match")
-    wanted = set(ids[: config.matches_per_cell])
-    metrics: dict[str, float] = {}
-    for anchor_id in trainer.engine.anchor_candidates:
-        for timing in trainer.engine.sampler.schedule.configurations:
-            for bin_id, coefficient in enumerate(config.lambdas):
-                sampler_config = dataclasses.replace(
-                    trainer.engine.sampler.config,
-                    lambda_min=coefficient,
-                    lambda_max=coefficient,
-                    anchor_rate=1.0,
-                    fixed_percentile=0.95,
-                )
-                schedule = ScheduleConfig((timing,), trainer.engine.sampler.schedule.supervised_offsets)
-                evaluation_seed = int(CounterRng(config.seed).uniform("evaluation", 0, 0, 0) * 2**63)
-                sampling = EpisodeSampler(sampler_config, schedule, CounterRng(evaluation_seed))
-                policy = trainer.policy.frozen_copy()
-                anchors = {0: trainer.engine.anchors[anchor_id].frozen_copy()}
-                engine = RolloutEngine((shards,), policy, sampling, anchors)
-                engine.initialize()
-                results: dict[int, EpisodeResult] = {}
-                chunks: list[EpisodeDiagnostics] = []
-                wanted_ids = torch.tensor(sorted(wanted), device=policy.device)
-                for update in range(config.max_rollouts):
-                    rollout = engine.collect(update)
-                    chunks.append(
-                        episode_diagnostics(
-                            policy,
-                            trainer.reference,
-                            rollout,
-                            wanted_ids,
-                            windows_per_step=trainer.config.windows_per_step,
-                            decisions_per_window=trainer.config.decisions_per_window,
-                        )
-                    )
-                    for result in rollout.results:
-                        if result.match in wanted and result.episode.number == 0:
-                            results[result.match] = result
-                    if set(results) == wanted:
-                        break
-                if set(results) != wanted:
-                    raise ValueError("evaluation cell did not finish all fixed matches")
-                scores: list[float] = []
-                lengths: list[float] = []
-                stocks: list[float] = []
-                wins: list[float] = []
-                for result in results.values():
-                    student = 0 if result.episode.players[0].anchor is None else 1
-                    scores.append(result.returns[student])
-                    lengths.append(float(result.duration))
-                    if result.stocks is None:
-                        raise ValueError("gameplay evaluation requires stock columns")
-                    stock = result.stocks[student] - result.stocks[1 - student]
-                    initial = result.episode.players[student].stocks - result.episode.players[1 - student].stocks
-                    stocks.append(float(stock - initial))
-                    if not result.timeout:
-                        wins.append(float(stock > 0) + 0.5 * float(stock == 0))
-                suffix = f"a{anchor_id}_d{timing.delay}_r{timing.replan}_lambda{bin_id}"
-                metrics[f"eval/return_{suffix}"] = float(np.mean(scores))
-                metrics[f"eval/match_frames_{suffix}"] = float(np.mean(lengths))
-                metrics[f"eval/net_stocks_{suffix}"] = float(np.mean(stocks))
-                metrics[f"eval/timeout_fraction_{suffix}"] = 1 - len(wins) / len(results)
-                if wins:
-                    metrics[f"eval/win_rate_{suffix}"] = float(np.mean(wins))
-                diagnostics = _episode_diagnostics(chunks, results)
-                for name, value in diagnostics.items():
-                    metrics[f"eval/{name}_{suffix}"] = value
-    trainer.evaluation_cursor += 1
-    return metrics
 
 
 def main() -> None:

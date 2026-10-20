@@ -15,12 +15,10 @@ from hal.wire import MASK_INT32
 
 
 class ColumnContextBuilder:
-    """Resolve column routes and normalization once, outside frame loops.
+    """Resolve feature routes and normalization before frame loops.
 
-    Applied actions belong to the observed post-frame, as in BC. At an actual
-    reset there is no preceding input, so the ego controller is neutral.
-    Player ids can be per-frame when a training window spans different episodes.
-    """
+    Use the applied action from the observed post-frame, as in BC. At an episode
+    start, substitute a neutral controller. Read per-frame ids across resets."""
 
     def __init__(self, stats: dict[str, FeatureStats], controlled_port: int) -> None:
         if controlled_port not in (1, 2):
@@ -101,12 +99,10 @@ class ColumnContextBuilder:
 
 
 class PackedColumnContextBuilder:
-    """Build current-episode features from adapter words with batched column operations.
+    """Build features from packed adapter columns on the device.
 
-    Each row contains one episode and uses HAL's fixed port convention. Padding
-    follows the valid frames. The caller validates sides, identities and history spans.
-    Integer and float columns occupy one little-endian 32-bit word each.
-    """
+    Read each integer or float column from a little-endian 32-bit word. Validate
+    sides, identities and history lengths before calling; pad after valid frames."""
 
     def __init__(self, stats: dict[str, FeatureStats], fields: tuple[str, ...], device: torch.device) -> None:
         routes = [ColumnContextBuilder(stats, port).routes for port in (1, 2)]

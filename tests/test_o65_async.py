@@ -1,45 +1,10 @@
 """Host staging must preserve every frame and keep CUDA off simulator threads."""
 
-import json
 import os
-import subprocess
-import sys
 from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
-
-
-@pytest.mark.integration
-def test_simulator_floor_has_no_torch(tmp_path: Path) -> None:
-    source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
-    assert (source / "data/raw/manifest.json").is_file(), "required MSL data fixture missing"
-    output = tmp_path / "floor.json"
-    env = dict(
-        os.environ, PYTHONPATH=f".:{source}", MSL_CORE_LIBRARY=str(source / "build/melee_core/python/libmelee_core.so")
-    )
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "scripts.benchmark_o65_sim",
-            "--data-dir",
-            str(source / "data"),
-            "--output",
-            str(output),
-        ],
-        env=env,
-        check=True,
-    )
-    result = json.loads(output.read_text())
-    assert result["matches"] == 64 and result["frames"] == 256
-    assert result["warmup_frames"] == 256
-    assert result["start_frame_ids"] == [133] * 64
-    assert result["end_frame_ids"] == [389] * 64
-    assert 0 < result["simulator_seconds"] <= result["wall_seconds"]
-    assert result["settings"][0]["max_frame"] == 28800
-    assert len(result["adapter_sha256"]) == len(result["benchmark_source_sha256"]) == 64
-    assert len(result["git_sha"]) == 40
 
 
 @pytest.mark.integration

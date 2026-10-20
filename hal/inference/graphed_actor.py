@@ -36,20 +36,13 @@ def _targets(tensors: tuple[Tensor, ...]) -> ActorTargets:
 
 
 class GraphedActorStep:
-    """Own static inputs and gradient buffers; leave optimizer steps to the caller.
+    """Capture replay and backward with persistent inputs and gradient buffers.
 
-    forward receives a tuple of static tensor inputs and must run the trunk and
-    replay_windows(..., grad=True). It must not close over differentiable trunk
-    outputs computed before capture. Compile replay_windows in default mode with
-    triton.cudagraphs=False and emulate_precision_casts=True, then call it from
-    forward. Keep the trunk eager inside this capture: whole-trunk compilation
-    failed the proxy precision gate on Torch 2.11. CUDA flex attention requires
-    compilation, and BF16 replay needs cast preservation. Parameters and input storage keep
-    their identity for this helper's lifetime. Call backward once per step;
-    gradient clipping and Muon run afterwards. Outputs are cloned before return.
-    Validate each new payload at its assembly boundary before backward.
-    Release earlier eager autograd graphs before constructing this helper:
-    Torch's retained leaf gradient nodes carry their original CUDA stream.
+    Compile the decoder with triton.cudagraphs=False and
+    emulate_precision_casts=True. Keep the trunk eager to meet Torch 2.11 proxy
+    precision limits. Release earlier eager autograd graphs before capture,
+    because their leaf gradient nodes retain the original CUDA stream.
+    Validate new inputs before backward, then clip and step the optimizer.
     """
 
     def __init__(
@@ -78,8 +71,7 @@ class GraphedActorStep:
         self.static_inputs = static
         with torch.no_grad():
             validate_actor_targets(forward(static[: self.input_count]), _targets(static[self.input_count :]))
-        # Capture writes these buffers in place. An optimizer must not set them
-        # to None; verify their identity before every replay.
+        # Graph replay writes into these gradient buffers at fixed addresses.
         original_gradients = tuple(p.grad for p in parameters)
         self.gradients = tuple(torch.zeros_like(p) for p in parameters)
         for parameter, gradient in zip(parameters, self.gradients, strict=True):

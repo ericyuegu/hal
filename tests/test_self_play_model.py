@@ -350,15 +350,6 @@ def test_decision_decoder_rejects_reduced_precision_parameters() -> None:
         DecisionDecoder(model().bfloat16(), ((8, 4), (10, 2)), compiled=False)
 
 
-def test_decoder_precision_defaults_to_bf16_and_rejects_other_values() -> None:
-    assert (
-        SelfPlayTransformer(config(), RANGES, max_opponent_queue=14, critic_hidden_dim=16).decoder_precision == "bf16"
-    )
-    for invalid in ("fp16", "BF16", "", None):
-        with pytest.raises(ValueError, match="decoder precision"):
-            model(cast(DecoderPrecision, invalid))
-
-
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @torch.no_grad()
 def test_bf16_readouts_preserve_small_bias_changes(device: str) -> None:

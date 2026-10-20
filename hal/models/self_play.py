@@ -28,7 +28,7 @@ def validate_decoder_precision(value: str) -> DecoderPrecision:
 
 
 class QueueResidualHead(nn.Module):
-    """A baseline on detached policy features, before any ego action is drawn."""
+    """Predict a residual baseline from detached features before the ego draw."""
 
     def __init__(self, cfg: ActionSequenceConfig, max_queue: int, hidden_dim: int) -> None:
         super().__init__()
@@ -75,8 +75,6 @@ class QueueResidualHead(nn.Module):
 
 
 class SelfPlayTransformer(ActionSequenceTransformer):
-    """O63/O64 architecture with explicit conditioning and independent critic heads."""
-
     def __init__(
         self,
         cfg: ActionSequenceConfig,
@@ -102,11 +100,9 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         return self._decoder_precision
 
     def load_bc_state_dict(self, state: Mapping[str, Tensor]) -> None:
-        """Load BC tensors and widen the conditioner with zero-valued input columns.
+        """Add zero conditioner columns while loading BC weights.
 
-        Validate the checkpoint identity and architecture before calling. Check every
-        BC key and tensor size before applying the converted state.
-        """
+        Validate BC keys and tensor sizes before applying the converted state."""
         expected = {name for name in self.state_dict() if not name.startswith("critic_residual.")}
         if state.keys() != expected:
             raise ValueError(
