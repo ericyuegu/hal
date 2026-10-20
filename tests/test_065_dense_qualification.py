@@ -205,6 +205,38 @@ def qualify(output: Path) -> dict[str, Any]:
                 ]
             ).clone(),
         }
+        repeated = {name: [value] for name, value in candidate.items()}
+        for _ in range(2):
+            again = reference.evaluate_reference(
+                prepared.windows, prepared.placement.positions, prepared.placement.windows
+            )
+            repeated_target = dataclasses.replace(
+                target, reference_distributions=tuple(take(p) for p in again.distributions)
+            )
+            _, output_again = policy.actor_step(windows, repeated_target, clip_epsilon=run.config.clip_epsilon)
+            mask_again = output_again.factor_mask_WKF
+            repeated["log_probs"].append(output_again.log_probs_WKF[mask_again].detach().clone())
+            repeated["kl"].append(
+                actor_loss(output_again, dataclasses.replace(repeated_target, selected_WK=mask_again.any(-1)))
+                .factor_kl_WKF[mask_again]
+                .detach()
+                .clone()
+            )
+            repeated["actor_gradients"].append(
+                torch.cat(
+                    [
+                        (torch.zeros_like(p) if p.grad is None else p.grad).detach().flatten()
+                        for p in policy.actor_parameters()
+                    ]
+                ).clone()
+            )
+        scoring = reference.reference_forward_model
+        if (
+            scoring is None
+            or any(p.grad is not None for p in scoring.parameters())
+            or any(p.requires_grad or p.grad is not None for p in reference.model.parameters())
+        ):
+            raise ValueError("reference scoring changed frozen parameters or accumulated gradients")
         print("dense precision: FP32 reference", flush=True)
         high_models = []
         for weights in (model.state_dict(), reference.model.state_dict()):
@@ -279,13 +311,16 @@ def qualify(output: Path) -> dict[str, Any]:
         for name, value in candidate.items():
             baseline_error, candidate_error = error(default[name], high[name]), error(value, high[name])
             floor = 1e-6 if "gradients" in name else 1e-5
+            replay_errors = [error(item, high[name]) for item in repeated.get(name, [value])]
             passed = all(
-                candidate_error[key] <= 1.5 * baseline_error[key] + (1e-5 if key == "relative_l2" else floor)
-                for key in candidate_error
+                errors[key] <= 1.5 * baseline_error[key] + (1e-5 if key == "relative_l2" else floor)
+                for errors in replay_errors
+                for key in errors
             )
             precision[name] = {
                 "default": baseline_error,
                 "candidate": candidate_error,
+                "candidate_replays": replay_errors,
                 "absolute_floor": floor,
                 "relative_l2_floor": 1e-5,
                 "passed": passed,
