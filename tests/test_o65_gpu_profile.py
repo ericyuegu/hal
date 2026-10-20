@@ -93,9 +93,18 @@ def test_profile_cli_uses_pilot_layout_and_rejects_training_side_effects(tmp_pat
     assert native.groups == 4 and native.matches_per_shard == 64
     assert native.training.critic_warmup_updates == 0
     assert native.training.windows_per_step == 32 and native.updates == 6
+    assert native.profiling is not None and not native.profiling.nsys
+    nsys = dataclasses.replace(cli, nsys=True).native().profiling
+    assert nsys is not None and nsys.nsys
     for change in ({"wandb_project": "oops"}, {"evaluation_every": 1}, {"resume": tmp_path}):
         with pytest.raises(ValueError, match="profiling requires"):
             dataclasses.replace(native, **change)
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_profile_rejects_nonboolean_nsys(value: object) -> None:
+    with pytest.raises(ValueError, match="nsys must be a boolean"):
+        gpu_profile.ProfileConfig(nsys=value)
 
 
 def test_profile_rejects_cold_groups_and_misreported_update_count(tmp_path: Path) -> None:

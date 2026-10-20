@@ -1681,7 +1681,14 @@ class TransformerPolicy:
             if captured is None:
                 tick()
             else:
-                captured(inputs)
+                with (
+                    torch.cuda.nvtx.range(
+                        f"hal.o65.TransformerPolicy.sample_tick/B{len(states)}/append{appended}/R{count}"
+                    )
+                    if self.profile is not None
+                    else contextlib.nullcontext()
+                ):
+                    captured(inputs)
 
     def _tensor_action_uniforms(self, meta: Tensor, rng: CounterRng) -> Tensor:
         offsets = meta[:, DELAY][None, None] + torch.arange(1, 5, device=self.device)[:, None, None]
@@ -3387,7 +3394,8 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )
-                    self.actor_optimizer.step()
+                    with sample(self.profile, "muon", limit=0):
+                        self.actor_optimizer.step()
                     self.scheduler.step()
                     self.actor_steps += 1
                     policy_losses.append(result.policy_loss.detach())
@@ -4157,10 +4165,13 @@ class TraceEvent(TypedDict, total=False):
 @dataclasses.dataclass(frozen=True, slots=True)
 class ProfileConfig:
     warm_updates: int = 4
+    nsys: bool = False
 
     def __post_init__(self) -> None:
         if type(self.warm_updates) is not int or self.warm_updates < 1:
             raise ValueError("profiling requires at least one warm update")
+        if type(self.nsys) is not bool:
+            raise ValueError("nsys must be a boolean")
 
 
 def interval_union(intervals: list[tuple[float, float]]) -> float:
@@ -4281,9 +4292,11 @@ class UpdateProfile:
         cpu_started = time.thread_time()
         started_unix = time.time()
         start_event.record()
+        torch.cuda.nvtx.range_push(f"o65/{name}")
         try:
             yield
         finally:
+            torch.cuda.nvtx.range_pop()
             stop_event.record()
             stop_event.synchronize()
             self.phases[name] = {
@@ -4439,7 +4452,12 @@ def sample(
     limit: int = 1,
     skip: int = 0,
 ) -> Iterator[None]:
-    with profile.sample(name, work=work, limit=limit, skip=skip) if profile is not None else contextlib.nullcontext():
+    with (
+        torch.cuda.nvtx.range(f"o65/{profile.phase_name}/{name}")
+        if profile is not None and profile.device.type == "cuda"
+        else contextlib.nullcontext(),
+        profile.sample(name, work=work, limit=limit, skip=skip) if profile is not None else contextlib.nullcontext(),
+    ):
         yield
 
 
@@ -4514,6 +4532,87 @@ def validate_profile_sites(sites: set[str], *, bootstrap: bool) -> None:
         raise ValueError(f"profile is missing required sites: {sorted(missing)}")
 
 
+def profile_nsys(trainer: Trainer, output: Path) -> None:
+    """Keep CUPTI ownership in nsys; trace one complete warmed update only."""
+    for traced in (False, True):
+        recorder = UpdateProfile(output, trainer.policy.device, traces=False)
+        trainer.profile = trainer.engine.profile = recorder
+        for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            if not isinstance(policy, TransformerPolicy):
+                raise TypeError("profiling requires TransformerPolicy")
+            policy.profile = recorder
+        try:
+            if traced:
+                torch.cuda.synchronize()
+                torch.cuda.profiler.start()
+            try:
+                batch, metrics = trainer.run_update()
+            finally:
+                if traced:
+                    torch.cuda.profiler.stop()
+            name = "nsys" if traced else "timed"
+            (output / f"{name}.json").write_text(
+                json.dumps({"phases": recorder.phases, "metrics": metrics, "work": recorder.work}, indent=2)
+            )
+            if not traced:
+                windows = batch.windows.take(batch.steps[0], batch.placement.positions, batch.steps[0] >= 0)
+                policy = trainer.policy
+                assert isinstance(policy, TransformerPolicy)
+                features, observed = policy._packed_context(windows.inputs()[:5])
+                torch.save(
+                    {
+                        "format": "hal.o65.floor-inputs.v1",
+                        "features": {key: value.cpu() for key, value in features.items()},
+                        "observed": observed.cpu(),
+                        "slots": {
+                            field.name: getattr(windows.slots, field.name).cpu()
+                            for field in dataclasses.fields(windows.slots)
+                        },
+                        "model": {key: value.cpu() for key, value in policy.model.state_dict().items()},
+                    },
+                    output / "floor-inputs.pt",
+                )
+                layouts = [
+                    {"buffer": buffer, "anchor": anchor, "batch": len(layout.streams)}
+                    for (buffer, anchor), layout in trainer.engine.tick_layouts.items()
+                ]
+                (output / "floor-layout.json").write_text(
+                    json.dumps(
+                        {
+                            "format": "hal.o65.floor-layout.v1",
+                            "tick_layouts": layouts,
+                            "actor_steps": len(batch.steps),
+                            "actor_windows": trainer.config.windows_per_step,
+                            "actor_slots": trainer.config.decisions_per_window,
+                            "reference_windows": recorder.work["reference/trunk_tokens"] // 256,
+                            "reference_slots": 64,
+                            "frames": batch.rollout.frames,
+                            "decisions": len(batch.rollout.ids),
+                            "matches": len(trainer.engine.group_matches[batch.rollout.group]),
+                            "critic_parameters": [
+                                list(parameter.shape) for parameter in trainer.policy.critic_parameters()
+                            ],
+                            "optimizer_groups": [
+                                {
+                                    "use_muon": group["use_muon"],
+                                    "logical_splits": group.get("logical_splits", 1),
+                                    "shapes": [list(parameter.shape) for parameter in group["params"]],
+                                }
+                                for group in trainer.actor_optimizer.param_groups
+                            ],
+                        },
+                        indent=2,
+                    )
+                )
+                (output / "allocator.json").write_text(json.dumps(torch.cuda.memory_snapshot()))
+            del batch
+        finally:
+            trainer.profile = trainer.engine.profile = None
+            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+                if isinstance(policy, TransformerPolicy):
+                    policy.profile = None
+
+
 def profile_native(
     trainer: Trainer,
     config: NativeCli,
@@ -4559,6 +4658,9 @@ def profile_native(
             del batch
             log.write(json.dumps(metrics) + "\n")
             log.flush()
+    if config.profiling.nsys:
+        profile_nsys(trainer, config.output)
+        return
     recorders: list[UpdateProfile] = []
     try:
         for traces in (False, True):
@@ -4608,6 +4710,7 @@ class GpuProfileCli:
     groups: int = 4
     warm_updates: int = 4
     decoder_precision: DecoderPrecision = "bf16"
+    nsys: bool = False
 
     def native(self) -> NativeCli:
         return NativeCli(
@@ -4621,7 +4724,7 @@ class GpuProfileCli:
             matches_per_shard=self.matches_per_shard,
             training=TrainConfig(critic_warmup_updates=0, windows_per_step=32),
             evaluation_every=0,
-            profiling=ProfileConfig(self.warm_updates),
+            profiling=ProfileConfig(self.warm_updates, self.nsys),
             decoder_precision=self.decoder_precision,
         )
 
