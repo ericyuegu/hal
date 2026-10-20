@@ -67,6 +67,15 @@ pi_ref or a recent frozen snapshot, with its own sampled episode conditions.
 Only student players contribute training windows. We preserve anchor identity
 through the episode and retain snapshot weights while a match uses them.
 
+Before critic warmup, the pilot draws an independent integer head start from
+0 through 1,200 frames per match using a separate counter domain. Both players
+use pi_ref. We delay initial starts so each match has played its offset when
+the pool reaches frame 1,280, a rollout boundary. Finished games reset normally.
+Head starts produce no training samples or optimizer steps. Warmup retains the
+observations and committed queues. We record elapsed time and the resulting
+episode-age distribution. Episodes already in progress are excluded from
+full-episode critic diagnostics until their next reset.
+
 ## Decisions and delayed execution
 
 At observation frame t_j, the player replays its D committed actions at offsets
@@ -203,8 +212,8 @@ are excluded from that comparison.
 
 During warmup, only critic heads train. We skip reference replay and zero KL
 terms while the student still equals pi_ref. Warmup lasts exactly 32 updates,
-independent of explained variance and group clocks. We then set lambda_max to three
-times the largest per-cadence advantage spread within the conditioner bounds.
+independent of explained variance and group clocks. We then set lambda_max to
+three times the largest per-cadence advantage spread within the conditioner bounds.
 We record that value before the first PPO update.
 
 ## Context and simulator execution
@@ -237,12 +246,18 @@ epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
 Training format v8 retains pool snapshot v4 and removes the variance history
-used by the former warmup rule. A checkpoint records model,
+used by the former warmup rule. It records partial episodes from head starts
+and validates group progress from the initial pool clock. A checkpoint records model,
 optimizers, scheduler, compressed simulator states, the last 129 frame records,
 committed queues, group clocks, episode conditions and ids, pool position,
 snapshots, metric accumulators and the last 32 anchor win counts. Each rank
 writes durable files before publishing an atomic manifest with hashes.
 We reject earlier formats and mismatched resume settings.
+
+One trainer process runs the whole pilot. It saves every 32 updates and at the
+final update. A background worker copies immutable snapshots to the Modal
+Volume and R2. At most two snapshots can be active or queued. A failed worker
+or full queue fails the run. Resume uses the latest published checkpoint.
 
 We derive independent counter draws from run seed, domain, logical stream id,
 episode, frame, offset and factor. We separate action draws, reset choices,

@@ -84,6 +84,8 @@ def training_command(
         "65",
         "--training.critic-warmup-updates",
         str(warmup),
+        "--training.head-start-frames",
+        "1200",
         "--training.checkpoint-interval",
         str(checkpoint_every),
     ]

@@ -325,6 +325,7 @@ def test_pilot_dispatches_one_trainer_with_in_process_publication(
     )
     assert len(commands) == 1
     assert commands[0].updates == 4 and commands[0].training.checkpoint_interval == 1
+    assert commands[0].training.head_start_frames == 1200
     assert commands[0].resume == previous
     assert commands[0].publication == self_play_publication.Args(
         output, tmp_path / "volume", "test", "o65/pilot-results/test"

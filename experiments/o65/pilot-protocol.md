@@ -75,6 +75,17 @@ final grid. Update sampler hashes in the delivery manifest after regeneration.
 We verify delivery, build MSL and the HAL adapter, then record the source,
 environment and build hashes. Simulator parity tests remain required.
 
+Before warmup, each match draws an independent integer offset uniformly from
+0 through 1,200 frames. Both players use pi_ref. Initial starts wait until
+frame 1,280 minus the offset; odd starts take one neutral frame before joining
+the two-frame loop. The pool then advances to frame 1,280. Games that end reset
+on normal block boundaries. The head start trains neither actor nor critic.
+Warmup retains observations and committed actions. We log duration, match FPS
+and episode-age quantiles to W&B, and write every offset and resulting age to
+head-start.json. Partial episodes do not enter full-episode critic diagnostics.
+The server target is under two minutes at about 45k match-frames/s; local tests
+do not qualify PRO 6000 timing.
+
 Critic warmup lasts exactly 32 updates, independent of explained variance and
 group clocks. At the end of update 32, we calibrate lambda_max to three times the
 largest per-cadence advantage spread within the conditioner bounds. We retain
@@ -121,7 +132,8 @@ metrics retain the same results. Each update records anchor 0 under
 We include unfinished matches and countdown frames in exposure, exclude reset
 waits and truncation wins, preserve each episode's anchor id through reset
 processing. Training format v8 retains rolling counts through resume and removes
-the variance history used by the former warmup rule.
+the variance history used by the former warmup rule. It also preserves partial
+episodes from head starts and accounts for the initial 1,280-frame pool advance.
 
 We also record pre-clip gradient norms, cap fractions, conditional KL, entropy,
 reward components, episode-age/u coverage, parameter movement, action counts,

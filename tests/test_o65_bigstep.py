@@ -1,6 +1,7 @@
 """Pilot sampling, partial actor steps, conditioning, and cheap diagnostics."""
 
 import dataclasses
+import json
 import math
 from pathlib import Path
 
@@ -15,6 +16,71 @@ from test_065_loop import transformer_trainer
 
 from hal.models.action_sequence import RETURN_SCALE
 from hal.models.replay_actor import ActorTargets
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class HeadStartRng(exp.CounterRng):
+    offsets: tuple[int, ...] = (0, 1, 127, 1200)
+    maximum: int = 1200
+
+    def uniform(self, domain: str, stream: int, episode: int, frame: int, offset: int = 0, factor: int = 0) -> float:
+        if domain == "head_start":
+            return (self.offsets[stream] + 0.5) / (self.maximum + 1)
+        return exp.CounterRng.uniform(self, domain, stream, episode, frame, offset, factor)
+
+
+def test_head_start_preserves_offsets_queues_and_next_update_on_resume(tmp_path: Path) -> None:
+    run = trainer(groups=2, anchor_rate=0, development=True)
+    run.config = dataclasses.replace(run.config, head_start_frames=1200)
+    run.engine.sampler.rng = HeadStartRng(65)
+    before = exp._state_hash(run.policy.model.state_dict())
+    result = run.head_start()
+    assert result.offsets == (0, 1, 127, 1200)
+    assert result.episode_ages == (0, 1, 127, 1200)
+    assert run.engine.clocks == [1280, 1280] and run.engine.cursor == 0
+    assert run.update == run.actor_steps == 0 and run.engine.completed_update == -1
+    assert not run.actor_optimizer.state and not run.critic_optimizer.state
+    assert exp._state_hash(run.policy.model.state_dict()) == before
+    assert run.partial_episodes == {(stream, 0) for stream in range(2, 8)}
+    assert not run.episode_metrics and not run.anchor_win_history
+    assert result.metrics()["coverage/head_start_age_max"] == 1200
+    for group, matches in zip(run.engine.groups, ((0, 1), (2, 3)), strict=True):
+        assert [int(shard.ticks[0]) for shard in group] == [result.offsets[match] for match in matches]
+    exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+    assert json.loads((tmp_path / "resume-check.json").read_text())["passed"]
+    assert run.partial_episodes == {(stream, 0) for stream in range(2, 8)}
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_head_start_handles_ends_and_excludes_partial_monte_carlo_episodes(timeout: bool) -> None:
+    run = trainer(groups=2, length=129, timeout=timeout, development=True, anchor_rate=0)
+    run.engine.sampler.rng = HeadStartRng(65)
+    run.config = dataclasses.replace(run.config, head_start_frames=1200)
+    result = run.head_start()
+    assert all(0 <= age <= 129 for age in result.episode_ages)
+    for update in range(4):
+        _, metrics = run.run_update()
+        assert metrics["critic/monte_carlo_episode_count"] == (0 if timeout else (2 if update < 2 else 4))
+    assert not run.partial_episodes
+
+
+@pytest.mark.parametrize("maximum", [-1, 1.5, True])
+def test_head_start_rejects_invalid_lengths(maximum: int) -> None:
+    with pytest.raises(ValueError, match="nonnegative integers"):
+        exp.TrainConfig(head_start_frames=maximum)
+
+
+@pytest.mark.parametrize("offset", [3, 4, 5, 6])
+def test_staggered_first_decision_matches_uncached_reference(offset: int) -> None:
+    run = transformer_trainer("cpu", development=True, decoder_precision="fp32")
+    run.engine.groups[0][0].length = 1000000
+    run.engine.sampler.rng = HeadStartRng(65, (offset,), 8)
+    run.engine.stagger_starts(8)
+    rollout = run.engine.collect(-1)
+    batch = run.prepare(rollout)
+    assert batch.reference is not None and len(rollout.ids)
+    valid = batch.decisions.executed_factors_JF
+    torch.testing.assert_close(batch.old.log_probs[valid], batch.reference.log_probs[valid], rtol=1e-5, atol=1e-5)
 
 
 def test_episode_sampling_matches_character_prior_identity_counts_and_beta() -> None:

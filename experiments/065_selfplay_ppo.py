@@ -1488,7 +1488,20 @@ class TransformerPolicy:
 
                 def tick() -> None:
                     with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False):
-                        context, observed = self._packed_context(static[:5])
+                        packed = static[:5]
+                        if not restart:
+                            # A staggered first episode can begin between block boundaries.
+                            young = static[5][:, LENGTH] <= 2
+                            cache.cache.positions.masked_fill_(young[:, None], -1)
+                            cache.cache.next_position.copy_(
+                                torch.where(young, static[5][:, LENGTH] - appended, cache.cache.next_position)
+                            )
+                            records, actions, sides, identities, lengths = packed
+                            single = lengths == 1
+                            records = torch.where(single[:, None, None], records.flip(1), records)
+                            actions = torch.where(single[:, None, None, None], actions.flip(1), actions)
+                            packed = (records, actions, sides, identities, torch.full_like(lengths, appended))
+                        context, observed = self._packed_context(packed)
                         tokens = self.model.context_tokens(context, observed)
                         hidden = forward_tokens_with_kv_cache(self.model, tokens, cache.cache)
                         cache.frames_in_block.add_(appended)
@@ -1951,6 +1964,7 @@ class RolloutEngine:
         self.cursor = 0
         self.matches: dict[int, MatchState] = {}
         self._initialized = False
+        self.staggering = False
         self.completed_update = -1
         self.results: list[EpisodeResult] = []
         self.group_matches = tuple(tuple(match for shard in group for match in shard.match_ids) for group in groups)
@@ -2113,6 +2127,66 @@ class RolloutEngine:
                 for lane, match in enumerate(shard.match_ids):
                     self._reset(shard, lane, match, 0, 0)
         self._initialized = True
+
+    def stagger_starts(self, maximum: int) -> tuple[int, ...]:
+        """Wait before each initial episode so its age at the common end is uniform.
+
+        Odd starts take their first neutral frame here, then join the two-frame
+        tick loop. Their observations and queues are identical to stepping that
+        frame at its logical clock. No policy decision occurs on the odd frame.
+        """
+        if not self._initialized or self.staggering or any(self.clocks) or self.completed_update != -1:
+            raise ValueError("head start requires a fresh initialized pool")
+        if type(maximum) is not int or maximum < 1:
+            raise ValueError("head start maximum must be a positive integer")
+        self.staggering = True
+        count = self.sampler.schedule.rollout_frames
+        end = math.ceil(maximum / count) * count
+        offsets = []
+        for group, shards in enumerate(self.groups):
+            store = FrameStore(2, len(self.group_matches[group]), self.policy.device)
+            previous = self.stores[group]
+            if previous is None:
+                raise ValueError("pool has no initial frame storage")
+            for target, source in (
+                (store.records, previous.records),
+                (store.actions, previous.actions),
+                (store.rewards, previous.rewards),
+                (store.flags, previous.flags),
+            ):
+                target[0].copy_(source[0])
+            self.stores[group] = store
+            ring = self.rings[group]
+            for shard in shards:
+                odd = np.zeros(len(shard.match_ids), dtype=np.bool_)
+                for lane, match in enumerate(shard.match_ids):
+                    offset = int(self.sampler.rng.uniform("head_start", match, 0, 0) * (maximum + 1))
+                    offsets.append(offset)
+                    start = end - offset
+                    at = self.locations[match][1]
+                    state = self.matches[match]
+                    state.episode_start = start
+                    self._publish_episode(group, at, match, 0, state.episode, start)
+                    ring.length_device[at] = torch.tensor(
+                        [p.timing.delay + (-start) % p.timing.replan for p in state.episode.players],
+                        device=self.policy.device,
+                    )
+                    odd[lane] = bool(start % 2)
+                if odd.any():
+                    neutral = ring.controllers[self.device_lanes[id(shard)], :, 0].unsqueeze(0)
+                    frames = shard.step(neutral, odd)
+                    if len(frames) != 1 or ((frames[0].terminal | frames[0].timeout) & odd).any():
+                        raise ValueError("initial neutral head-start frame must remain live")
+                    source = torch.from_numpy(np.flatnonzero(odd)).to(self.policy.device)
+                    lanes = self.device_lanes[id(shard)][source]
+                    store.write(torch.ones_like(lanes), lanes, frames[0], source)
+                    self.stops[group][lanes] += 1
+                    self.observed_clocks[group][lanes] += 1
+                    ring.head[lanes] = 1
+                    ring.length_device[lanes] -= 1
+            self.active[group].zero_()
+            self.live_host[group].fill(False)
+        return tuple(offsets)
 
     def _reset(self, shard: SimulatorShard, lane: int, match: int, clock: int, number: int) -> None:
         if clock % 128:
@@ -2571,7 +2645,7 @@ class RolloutEngine:
         table.opponent[ids] = torch.where((offsets < meta[:, OPP_LENGTH, None])[..., None], opponent, 0)
 
     def _reset_waiting(self, shards: Sequence[SimulatorShard], clock: int) -> int:
-        if clock % 128:
+        if clock % 128 and not self.staggering:
             return 0
         resets = 0
         for shard in shards:
@@ -2579,8 +2653,14 @@ class RolloutEngine:
             for lane in waiting:
                 match = shard.match_ids[lane]
                 state = self.matches[match]
-                self._reset(shard, int(lane), match, clock, state.episode.number + 1)
-                resets += 1
+                at = self.locations[match][1]
+                if state.end_clock is None:
+                    if clock >= state.episode_start + state.episode_start % 2:
+                        self.active[self.cursor][at] = True
+                        self.live_host[self.cursor][at] = True
+                elif clock % 128 == 0:
+                    self._reset(shard, int(lane), match, clock, state.episode.number + 1)
+                    resets += 1
         return resets
 
     def _active(self, shard: SimulatorShard) -> NDArray[np.bool_]:
@@ -2792,6 +2872,7 @@ class TrainConfig:
     value_scale: float = 150.0
     warmup_steps: int = 32
     critic_warmup_updates: int = 32
+    head_start_frames: int = 0
     lambda_spread_multiplier: float = 3.0
     snapshot_interval: int = 256
     snapshot_capacity: int = 3
@@ -2811,8 +2892,8 @@ class TrainConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if not 1 <= self.decisions_per_window <= 16:
             raise ValueError("at most 16 decisions can train per window")
-        for value in (self.warmup_steps, self.critic_warmup_updates):
-            if value < 0:
+        for value in (self.warmup_steps, self.critic_warmup_updates, self.head_start_frames):
+            if type(value) is not int or value < 0:
                 raise ValueError("warmup lengths must be nonnegative integers")
         for name in (
             "actor_lr",
@@ -2828,6 +2909,28 @@ class TrainConfig:
             raise ValueError("invalid clip epsilon")
         if self.actor_optimizer not in ("muon", "adam"):
             raise ValueError("unsupported actor optimizer")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class HeadStart:
+    offsets: tuple[int, ...]
+    episode_ages: tuple[int, ...]
+    match_frames: int
+    seconds: float
+
+    def metrics(self) -> dict[str, float]:
+        return {
+            "systems/head_start_seconds": self.seconds,
+            "systems/head_start_match_fps": self.match_frames / self.seconds,
+            **{
+                f"coverage/head_start_age_{name}": float(value)
+                for name, value in zip(
+                    ("min", "p25", "median", "p75", "max"),
+                    np.quantile(self.episode_ages, [0, 0.25, 0.5, 0.75, 1]),
+                    strict=True,
+                )
+            },
+        }
 
 
 def make_actor_optimizer(policy: LoopPolicy, config: TrainConfig) -> torch.optim.Optimizer:
@@ -3352,7 +3455,41 @@ class Trainer:
         self.evaluation_cursor = 0
         self.updating = False
         self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+        self.partial_episodes: set[tuple[int, int]] = set()
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
+
+    @torch.no_grad()
+    def head_start(self) -> HeadStart:
+        if self.update or self.actor_steps or self.critic_optimizer.state or self.actor_optimizer.state:
+            raise ValueError("head start must precede training")
+        if _state_hash(self.policy.model.state_dict()) != _state_hash(self.reference.model.state_dict()):
+            raise ValueError("head start requires pi_ref weights")
+        started = time.perf_counter()
+        offsets = self.engine.stagger_starts(self.config.head_start_frames)
+        frames = self.engine.sampler.schedule.rollout_frames
+        end = math.ceil(self.config.head_start_frames / frames) * frames
+        stepped = sum(offset % 2 for offset in offsets)
+        while min(self.engine.clocks) < end:
+            rollout = self.engine.collect(-1)
+            stepped += rollout.frames
+            del rollout
+        ages = []
+        for group, matches in enumerate(self.engine.group_matches):
+            for lane, match in enumerate(matches):
+                state = self.engine.matches[match]
+                age = int(self.engine.observed_clocks[group][lane]) - state.episode_start
+                ages.append(age)
+                if age:
+                    self.partial_episodes.update(
+                        (2 * match + side, state.episode.number)
+                        for side, player in enumerate(state.episode.players)
+                        if player.anchor is None
+                    )
+        self.engine.results.clear()
+        self.engine.staggering = False
+        if self.policy.device.type == "cuda":
+            torch.cuda.synchronize(self.policy.device)
+        return HeadStart(offsets, tuple(ages), stepped, time.perf_counter() - started)
 
     @torch.no_grad()
     def anchor_metrics(self, rollout: Rollout) -> dict[str, float]:
@@ -3445,6 +3582,8 @@ class Trainer:
         packed = torch.cat((totals, table.values[ids[first], None], age[first, None]), -1).cpu().tolist()
         for key, row in zip(pairs.cpu().tolist(), packed, strict=True):
             identity = (int(key[0]), int(key[1]))
+            if identity in self.partial_episodes:
+                continue
             previous = self.episode_metrics.get(identity)
             if previous is None and row[4] != 0:
                 raise ValueError("episode metrics lost the episode's initial state")
@@ -3462,9 +3601,11 @@ class Trainer:
             for side, player in enumerate(result.episode.players):
                 if player.anchor is not None:
                     continue
-                discounted_return, cost, value, discounted_cost = self.episode_metrics.pop(
-                    (2 * result.match + side, result.episode.number)
-                )
+                identity = (2 * result.match + side, result.episode.number)
+                if identity in self.partial_episodes:
+                    self.partial_episodes.remove(identity)
+                    continue
+                discounted_return, cost, value, discounted_cost = self.episode_metrics.pop(identity)
                 match_cost += cost
                 if result.timeout:
                     continue
@@ -4045,7 +4186,12 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
 
     if torch.are_deterministic_algorithms_enabled() != trainer.config.deterministic:
         raise ValueError("checkpoint execution mode differs from the trainer configuration")
-    if not trainer.engine._initialized or trainer.updating or trainer.engine.completed_update != trainer.update - 1:
+    if (
+        not trainer.engine._initialized
+        or trainer.engine.staggering
+        or trainer.updating
+        or trainer.engine.completed_update != trainer.update - 1
+    ):
         raise ValueError("checkpoint requires a complete update boundary")
     required = {"git_sha", "checkpoint_sha256", "data_manifest_sha256", "simulator_sha256", "adapter_sha256"}
     if set(provenance) != required or any(not value for value in provenance.values()):
@@ -4075,6 +4221,7 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "warming": trainer.warming,
         "warmup_moments": trainer.warmup_moments,
         "episode_metrics": trainer.episode_metrics,
+        "partial_episodes": sorted(trainer.partial_episodes),
         "anchor_win_history": trainer.anchor_win_history,
         "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
         "next_anchor": trainer.next_anchor,
@@ -4166,7 +4313,10 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         raise ValueError("checkpoint shard identity mismatch")
     groups = len(trainer.engine.groups)
     frames = trainer.engine.sampler.schedule.rollout_frames
-    expected_clocks = [((saved["update"] + groups - 1 - group) // groups) * frames for group in range(groups)]
+    initial_clock = math.ceil(trainer.config.head_start_frames / frames) * frames
+    expected_clocks = [
+        initial_clock + ((saved["update"] + groups - 1 - group) // groups) * frames for group in range(groups)
+    ]
     if (
         not isinstance(saved["clocks"], list)
         or any(type(clock) is not int for clock in saved["clocks"])
@@ -4245,6 +4395,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.warming = saved["warming"]
     trainer.warmup_moments = saved["warmup_moments"]
     trainer.episode_metrics = saved["episode_metrics"]
+    trainer.partial_episodes = set(saved["partial_episodes"])
     trainer.anchor_win_history = saved["anchor_win_history"]
     trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
     trainer.next_anchor = saved["next_anchor"]
@@ -4266,6 +4417,7 @@ def run_training(
     wandb_project: str | None = None,
     run_configuration: dict[str, object] | None = None,
     publisher: self_play_publication.CheckpointPublisher | None = None,
+    head_start: HeadStart | None = None,
 ) -> None:
     import wandb
 
@@ -4291,6 +4443,13 @@ def run_training(
     with wandb.init(project=wandb_project, mode="disabled" if wandb_project is None else "online", config=resolved):
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
+        if head_start is not None:
+            metrics = head_start.metrics()
+            (output / "head-start.json").write_text(
+                json.dumps({**dataclasses.asdict(head_start), "metrics": metrics}, indent=2)
+            )
+            wandb.log({"global_step": 0, **metrics})
+            print(json.dumps(metrics, sort_keys=True), flush=True)
         with (output / "metrics.jsonl").open("a") as log:
             while trainer.update < updates:
                 if publisher is not None:
@@ -4498,8 +4657,11 @@ def train_native(config: NativeCli) -> None:
             fixed_anchor_lanes=config.fixed_anchor_lanes,
         )
         trainer = Trainer(engine, config.training)
+        head_start = None
         if config.resume is None:
             engine.initialize()
+            if config.training.head_start_frames:
+                head_start = trainer.head_start()
         else:
             restore_checkpoint(trainer, config.resume, provenance)
         if config.verify_only:
@@ -4536,6 +4698,7 @@ def train_native(config: NativeCli) -> None:
             wandb_project=config.wandb_project,
             run_configuration=native_config,
             publisher=publisher,
+            head_start=head_start,
         )
         if config.verify_resume:
             verify_checkpoint_resume(trainer, config.output, provenance)
@@ -5237,6 +5400,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.next_anchor,
                 trainer.evaluation_cursor,
                 trainer.episode_metrics,
+                sorted(trainer.partial_episodes),
                 trainer.anchor_win_history,
             )
         ),
