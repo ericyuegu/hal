@@ -171,27 +171,17 @@ fuse several. The absolute minimum is one kernel per dependent call, which is
 too weak to explain the observed time. No phase has an established complete
 floor or a justified claim of being within 2x of it.
 
-| Phase, whole update | GEMM TFLOPs | GEMM operand GB | GEMM kernels in decomposition | Partial floor s | Bare s | Trainer s | Limit / missing work |
+Time cells below give **seconds (frames/s; decisions/s)**. Muon's trainer cell
+uses traced host time, marked T; a separate clean Muon time was not saved.
+
+| Phase, whole update | GEMM TFLOPs | GEMM operand GB | GEMM kernels in decomposition | Partial floor | Bare | Trainer | Limit / missing work |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Rollout tick, plus prefills | 55.191 | 336.899 | 127,782 | 0.686270 | 3.380142 | 6.703817 | Attention bandwidth, sampling, host waits; buffers overlap |
-| Reference | 60.045 | 369.435 | 41,280 | 0.406875 | 1.143505 | 1.038549 | Attention/elementwise latency; bare padding differs |
-| Preparation excluding reference | 10.580 | 57.766 | 218 | 0.044988 | 0.233756 | 0.344829 | Bootstrap compute, GAE/data traffic |
-| Critic | 0.867 | 22.332 | 84 | 0.022943 | 0.119196 | 0.123855 | FP32 compute and bandwidth |
-| Actor, excluding optimizer in bare/floor | 83.694 | 487.814 | 42,007 | 0.515157 | 2.041313 | 3.211275 incl. optimizer | Backward, attention and host dispatch |
-| Muon plus auxiliary Adam | 11.582 | 118.795 | 10,710 | 0.082408 | 0.630601 | 0.753907 traced host only | Small matrix/elementwise kernels and eager dispatch |
-
-For rechecking rates beside these seconds, the following gives phase capacity
-at the partial floor, bare time and clean trainer time. Muon has no separately
-saved clean host time; its last capacity uses traced host time and is marked T.
-
-| Phase | Partial-floor frames/s; decisions/s | Bare frames/s; decisions/s | Trainer frames/s; decisions/s |
-| --- | ---: | ---: | ---: |
-| Rollout | 381,984; 264,292 | 77,554; 53,659 | 39,104; 27,056 |
-| Reference | 644,287; 445,779 | 229,246; 158,614 | 252,414; 174,644 |
-| Preparation | 5,826,970; 4,031,648 | 1,121,441; 775,919 | 760,214; 525,988 |
-| Critic | 11,425,760; 7,905,421 | 2,199,270; 1,521,663 | 2,116,542; 1,464,424 |
-| Actor | 508,862; 352,079 | 128,419; 88,853 | 81,632; 56,481 |
-| Muon | 3,181,070; 2,200,965 | 415,705; 287,624 | 347,714; 240,581 T |
+| Rollout tick, plus prefills | 55.191 | 336.899 | 127,782 | 0.686270 (381,984; 264,292) | 3.380142 (77,554; 53,659) | 6.703817 (39,104; 27,056) | Attention bandwidth, sampling, host waits; buffers overlap |
+| Reference | 60.045 | 369.435 | 41,280 | 0.406875 (644,287; 445,779) | 1.143505 (229,246; 158,614) | 1.038549 (252,414; 174,644) | Attention/elementwise latency; bare padding differs |
+| Preparation excluding reference | 10.580 | 57.766 | 218 | 0.044988 (5,826,970; 4,031,648) | 0.233756 (1,121,441; 775,919) | 0.344829 (760,214; 525,988) | Bootstrap compute, GAE/data traffic |
+| Critic | 0.867 | 22.332 | 84 | 0.022943 (11,425,760; 7,905,421) | 0.119196 (2,199,270; 1,521,663) | 0.123855 (2,116,542; 1,464,424) | FP32 compute and bandwidth |
+| Actor, excluding optimizer in bare/floor | 83.694 | 487.814 | 42,007 | 0.515157 (508,862; 352,079) | 2.041313 (128,419; 88,853) | 3.211275 incl. optimizer (81,632; 56,481) | Backward, attention and host dispatch |
+| Muon plus auxiliary Adam | 11.582 | 118.795 | 10,710 | 0.082408 (3,181,070; 2,200,965) | 0.630601 (415,705; 287,624) | 0.753907 T (347,714; 240,581) | Small matrix/elementwise kernels and eager dispatch |
 
 For KV size, the trainer already stores BF16. Three policy batches total 2,048
 rows. The 12 trunk layers plus history attention require
@@ -248,3 +238,13 @@ this a more direct target than a decoder rewrite. Decoder fusion still needs
 the fixed FP32 precision gate and a complete numerical review. Moving reference
 scoring into rollout changes memory and scheduling substantially. Dropping
 overlap is not justified: rollout kernel sums exceed their interval union.
+No trainer optimization is implemented: the complete floor and exact reference
+benchmark remain prerequisites.
+
+Numerical thresholds are unchanged. In `dense-precision.json`'s accepted
+`valid_support_sampler` result, the actor KL maximum error is
+`4.12575900554657e-5`, below the fixed `8.393956184387207e-5` limit. Rollout KL
+maximum error is `0.001804528757929802`, below `0.002708897384107113`.
+The existing absolute and relative-L2 floors remain fixed. Instrumentation
+does not change the numerical path; no new precision or statistical equivalence
+claim is made.
