@@ -76,6 +76,7 @@ def test_compilation_listener_rejects_silent_removal() -> None:
 def test_failed_graph_capture_counts_attempt_without_completion(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch.cuda, "device", lambda _device: nullcontext())
     monkeypatch.setattr(torch.cuda, "CUDAGraph", Mock)
+    monkeypatch.setattr(torch.cuda, "Event", Mock)
     monkeypatch.setattr(torch.cuda, "current_stream", Mock(return_value=Mock()))
     monkeypatch.setattr(torch.cuda, "Stream", Mock(return_value=Mock()))
     monkeypatch.setattr(torch.cuda, "stream", lambda _stream: nullcontext())
@@ -94,6 +95,7 @@ def test_graph_capture_binds_the_declared_device() -> None:
     call = CapturedCall(partial(_increment_state, state), (), (state,), device=device, counter=counter)
     assert call.device == device
     assert counter.snapshot() == CaptureCounts(attempts=1, completed=1)
+    assert call.preparation_seconds > 0 and call.capture_seconds > 0
     assert state.item() == 0
     assert call(()).item() == 1
     assert call(()).item() == 2
