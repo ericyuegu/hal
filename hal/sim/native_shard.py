@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import threading
 import time
 from collections.abc import Callable
 from collections.abc import Sequence
@@ -112,7 +111,7 @@ class NativeShard:
         actions: NDArray[np.float32],
         mask: NDArray[np.bool_],
         output: NDArray,
-        ready: threading.Event,
+        ready: Future[None],
     ) -> Future[PackedStep]:
         """Borrow disjoint host slices until completion; never access a GPU.
 
@@ -137,10 +136,10 @@ class NativeShard:
         return self._executor.submit(self._step_packed, actions, mask.copy(), output, ready)
 
     def _step_packed(
-        self, actions: NDArray[np.float32], active: NDArray[np.bool_], output: NDArray, ready: threading.Event
+        self, actions: NDArray[np.float32], active: NDArray[np.bool_], output: NDArray, ready: Future[None]
     ) -> PackedStep:
         started = time.perf_counter()
-        ready.wait()
+        ready.result()
         input_wait = time.perf_counter() - started
         simulator = packing = 0.0
         count = 0

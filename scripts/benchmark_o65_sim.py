@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from hal.sim import native
+from hal.sim import native_bridge
 from hal.sim import native_shard
 from hal.wire import ACTION_DIM
 
@@ -20,7 +22,7 @@ from hal.wire import ACTION_DIM
 def benchmark(data_dir: Path, cpu: int, *, matches: int = 64, frames: int = 256) -> dict[str, object]:
     if matches < 1 or frames < 1:
         raise ValueError("matches and frames must be positive")
-    # O65 pilot: frozen Stadium, Fox/Falco, four stocks and sampled starting percents.
+    # O65 pilot: Final Destination, Fox/Falco, four stocks and sampled starting percents.
     configurations = tuple(
         native.NativeMatch(
             25,
@@ -61,6 +63,11 @@ def benchmark(data_dir: Path, cpu: int, *, matches: int = 64, frames: int = 256)
     return {
         "format": "hal.o65.simulator-floor.v1",
         "host": platform.platform(),
+        "git_sha": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1], text=True
+        ).strip(),
+        "benchmark_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "adapter_sha256": native_bridge.library_sha256(),
         "cpu": cpu,
         "matches": matches,
         "frames": frames,

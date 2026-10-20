@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,8 @@ def test_simulator_floor_has_no_torch(tmp_path: Path) -> None:
     assert result["end_frame_ids"] == [389] * 64
     assert 0 < result["simulator_seconds"] <= result["wall_seconds"]
     assert result["settings"][0]["max_frame"] == 28800
+    assert len(result["adapter_sha256"]) == len(result["benchmark_source_sha256"]) == 64
+    assert len(result["git_sha"]) == 40
 
 
 @pytest.mark.integration
@@ -173,12 +176,14 @@ def test_failed_tick_releases_host_waiters() -> None:
 
     engine = trainer(groups=1).engine
     staging = exp.BufferStaging(1, engine.policy.device)
-    staging.ready.clear()
+    staging.ready = Future()
     buffer = engine.buffers[0][0]
     engine.staging[id(buffer)] = staging
     with pytest.raises(RuntimeError, match="failed inference"), engine._host_transfers((buffer,)):
         raise RuntimeError("failed inference")
-    assert staging.ready.is_set()
+    assert staging.ready.done()
+    with pytest.raises(RuntimeError, match="failed inference"):
+        staging.ready.result()
 
 
 @pytest.mark.integration
@@ -191,8 +196,62 @@ def test_staging_keeps_fp32_controller_bits() -> None:
     source = np.random.default_rng(65).uniform(-1, 1, (2, 8, 2, 14)).astype(np.float32)
     source[0, 0, 0, 0] = -0.0
     staging = exp.BufferStaging(8, torch.device("cuda"))
-    staging.ready.clear()
+    staging.ready = Future()
     staging.inputs.copy_(torch.from_numpy(source).cuda(), non_blocking=True)
     staging.input_copied.record()
     staging.release_inputs()
     np.testing.assert_array_equal(staging.host_inputs.view(np.uint32), source.view(np.uint32))
+
+
+def test_failed_copy_cancels_both_buffers() -> None:
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    class FailedCopy:
+        def synchronize(self) -> None:
+            raise RuntimeError("copy failed")
+
+    engine = trainer(groups=1).engine
+    buffers = engine.buffers[0]
+    for buffer in buffers:
+        staging = exp.BufferStaging(1, engine.policy.device)
+        staging.ready = Future()
+        staging.input_copied = FailedCopy()
+        engine.staging[id(buffer)] = staging
+    with pytest.raises(RuntimeError, match="copy failed"), engine._host_transfers(buffers):
+        pass
+    for buffer in buffers:
+        ready = engine.staging[id(buffer)].ready
+        assert ready.done()
+        with pytest.raises(RuntimeError, match="copy failed"):
+            ready.result()
+
+
+@pytest.mark.integration
+def test_cancelled_inputs_do_not_step_native(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
+    from hal.sim import native
+    from hal.sim import native_build
+    from hal.sim import native_shard
+
+    source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
+    monkeypatch.syspath_prepend(str(source))
+    monkeypatch.setenv("MSL_CORE_LIBRARY", str(source / "build/melee_core/python/libmelee_core.so"))
+    monkeypatch.setenv("HAL_NATIVE_LIBRARY", str(native_build.build(source, tmp_path / "adapter.so")))
+    with native_shard.NativeShard(source / "data", 1, cpu=min(os.sched_getaffinity(0))) as shard:
+        active = np.ones(1, dtype=np.bool_)
+        match = native.NativeMatch(25, (native.NativePlayer(1, 1), native.NativePlayer(2, 22)), 65)
+        shard.reset((match,), active).result()
+        before = shard.save(0).result()
+        ready: Future[None] = Future()
+        ready.set_exception(RuntimeError("copy failed"))
+        future = shard.step_packed(
+            np.zeros((2, 1, 2, 14), dtype=np.float32),
+            active,
+            np.empty((2, 1), dtype=native_shard.STAGING_DTYPE),
+            ready,
+        )
+        with pytest.raises(RuntimeError, match="copy failed"):
+            future.result(timeout=5)
+        assert shard.save(0).result(timeout=5) == before

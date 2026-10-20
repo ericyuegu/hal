@@ -1191,8 +1191,8 @@ class BufferStaging:
         self.host_inputs = self.inputs.numpy()
         self.host_output = self.output.numpy().view(native_shard.STAGING_DTYPE).reshape(2, lanes)
         self.device_output = torch.empty(self.output.shape, dtype=torch.uint8, device=device)
-        self.ready = threading.Event()
-        self.ready.set()
+        self.ready: Future[None] = Future()
+        self.ready.set_result(None)
         self.input_copied = torch.cuda.Event() if pinned else None
         self.output_copied = torch.cuda.Event() if pinned else None
         self.output_pending = False
@@ -1202,12 +1202,12 @@ class BufferStaging:
         self.output_reuse_wait = 0.0
 
     def release_inputs(self) -> None:
-        if self.ready.is_set():
+        if self.ready.done():
             return
         started = time.perf_counter()
         if self.input_copied is not None:
             self.input_copied.synchronize()
-        self.ready.set()
+        self.ready.set_result(None)
         self.input_event_wait = time.perf_counter() - started
 
 
@@ -2513,11 +2513,17 @@ class RolloutEngine:
     def _host_transfers(self, buffers: tuple[RolloutBuffer, ...]) -> Iterator[None]:
         try:
             yield
-        finally:
             for buffer in buffers:
                 staging = self.staging.get(id(buffer))
-                if staging is not None and not staging.ready.is_set():
+                if staging is not None:
                     staging.release_inputs()
+        except BaseException as error:
+            # A failed copy must wake every pending worker without exposing its input bytes.
+            for buffer in buffers:
+                staging = self.staging.get(id(buffer))
+                if staging is not None and not staging.ready.done():
+                    staging.ready.set_exception(error)
+            raise
 
     def _submit_buffer(self, workers: ThreadPoolExecutor, buffer: RolloutBuffer) -> list[PendingStep]:
         pending: list[PendingStep] = []
@@ -2539,7 +2545,7 @@ class RolloutEngine:
         if staging.output_pending and staging.output_copied is not None:
             staging.output_copied.synchronize()
         staging.output_reuse_wait = time.perf_counter() - staging.started
-        staging.ready = threading.Event()
+        staging.ready = Future()
         staging.output.zero_()
         copying_started = time.perf_counter()
         staging.inputs.copy_(self._controller_inputs(self.buffer_device_lanes[id(buffer)], 2), non_blocking=True)
