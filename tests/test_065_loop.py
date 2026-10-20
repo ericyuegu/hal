@@ -672,6 +672,12 @@ def test_warmup_compares_noisy_window_means_and_has_a_hard_limit(
     assert metrics["critic/warmup_variance_gain"] == pytest.approx(0.032 if improving else 0)
 
 
+@pytest.mark.parametrize("maximum", [0, 171])
+def test_warmup_rejects_a_limit_before_the_minimum(maximum: int) -> None:
+    with pytest.raises(ValueError, match="positive integer|maximum critic warmup"):
+        exp.TrainConfig(critic_warmup_max_updates=maximum)
+
+
 def test_actor_fit_rejects_missing_reference() -> None:
     run = trainer(groups=1, anchor_rate=0)
     batch = run.prepare(run.engine.collect(0))

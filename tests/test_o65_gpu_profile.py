@@ -152,9 +152,18 @@ def test_profile_rejects_training_side_effects(tmp_path: Path) -> None:
 
     from test_065_loop import exp
 
+    from hal.training.self_play_publication import Args
+
     cli = exp.GpuProfileCli(tmp_path / "final.pt", tmp_path / "data", tmp_path / "output", cpus=(0,))
     native = cli.native()
-    for change in ({"wandb_project": "oops"}, {"resume": tmp_path}):
+    for change in (
+        {"wandb_project": "oops"},
+        {"resume": tmp_path},
+        {
+            "output": tmp_path / "pilot/train",
+            "publication": Args(tmp_path / "pilot", tmp_path / "volume", "test", "o65/pilot-results/test"),
+        },
+    ):
         with pytest.raises(ValueError, match="profiling requires"):
             dataclasses.replace(native, **change)
 
