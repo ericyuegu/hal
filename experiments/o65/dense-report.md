@@ -11,7 +11,11 @@ Final eight-shard updates take 3.157 s at 16 matches and 4.875 s at 64 matches.
 At 64 matches, buffer acceptance cuts rollout CPU from 1.788 to 1.001 s and
 rollout wall time from 3.992 to 3.211 s. Launch counts stay flat from 16 to 64.
 The sampler fix passes the complete FP32-reference precision gate for all seven quantities,
-including three actor graph replays. See [phase measurements](performance/dense.md)
+including three actor graph replays. The one Modal profile passes: 11.399 s
+per update at 1,024 matches, versus the supplied 67 s baseline. Rollout is
+6.669 s and misses its target; actor is 3.260 s and other preparation is
+0.346 s. The function used 0.371 GPU-hours; conservative allowance is USD 5.05.
+See [phase measurements](performance/dense.md)
 and [numerical evidence](performance/dense-precision.json).
 
 The compiled sampler's parallel CDF scan could select a masked class near an
@@ -23,6 +27,8 @@ measured spread of two control repetitions; it uses training's execution mode.
 
 ## Commits
 
+- Final evidence commit: Record 1024-match dense Modal profile
+- `1a920ac7` Record completed dense validation
 - `d2079d65` Record dense qualification and buffer measurements
 - `490af376` Use vector RMS for numerical resume checks
 - `c4e26c27` Accept simulator frames once per buffer
@@ -76,7 +82,8 @@ commands set PYTHONPATH to the MSL source. Pytest basetemps use TMPDIR.
 - Final full suite: `uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/n"`: **2676 passed, 8 skipped, 85 deselected, 27 warnings**, 646.91 s. No test failures. Six missing-fixture skips remain validation failures under AGENTS.md. Log: runs/dense/dense-handoff-final-v5.log.
 - Required Dolphin integration: `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q -ra tests/test_roundtrip.py tests/test_session_cleanup.py -m integration`: 8 passed, 6 deselected, 7 dependency warnings, no skips (58.47 s).
 - Final expanded integration command also includes tests/test_native_sim_integration.py and tests/test_batched_self_play_integration.py: 13 passed, 12 failed, 6 deselected, 8 warnings (434.37 s). All 12 failures require the missing zstandard package. Both shared-weight and distinct-weight batched/serial action and outcome comparisons pass. Installed local test prerequisite zstandard 0.25.0; native integration retry: **15 passed, no skips**, 58.93 s. No repository dependency or source changed. Logs: runs/dense/dense-integration-final-v5.log and dense-native-integration-retry.log.
-- Precision CLI: five complete attempts. Large-reference and shape-only paths failed the KL gate. The hidden-leaf path passed once, then failed the stricter recorded-student-layout repeat. The final read-only scoring copy passes all seven quantities on three actor replays. Floors were not relaxed.
+- Initial precision qualification: five complete attempts. Final sampler and buffer follow-ups also pass all seven gates. Large-reference and shape-only paths failed the KL gate. The hidden-leaf path passed once, then failed the stricter recorded-student-layout repeat. The final read-only scoring copy passes all seven quantities on three actor replays. Floors were not relaxed.
+- Single Modal profile: exit 0, 1,024 matches, 16 shards, one warm update; all three updates report finite metrics. All 21 artifact hashes and trainer source hash verify. The container is stopped; no smoke or retry ran. Timings, counts, cost allowance and unresolved rollout limit are in dense-modal.json and dense.md. One monitoring CLI call failed due to a missing argument separator; the corrected command passed. A final monitoring read reached the already stopped container and reported successful task completion.
 - Final `profile` commands at 16 and 64 native matches on eight shards: pass, one warm update each. All five steps and the before/after buffer follow-up have local measurements in dense.md.
 - Final buffer-focused checks: 144 passed, one CUDA-only diagnostic skip and 12 deselected on CPU; five passed and 64 deselected with CUDA, including live-lane continuation and native stream/reset/resume cases.
 - Final resume comparison unit checks: 17 passed, 71 deselected. The scalar critic-overflow regression failed before the check and passes after it. Sampling regressions: two compiled failures before the fix, 15 passed after; the endpoint-only attempted fix still failed both compiled cases.
@@ -114,7 +121,7 @@ checks of the stream's changes against aacdfee0 and the merged replay boundary.
 Checked offsets, execution masks, mixed cadence, queue snapshots before either
 policy decides, reset and bootstrap ordering, GAE holes, stop-gradients,
 parameter sets, padding and placement, captured-storage ownership and resume.
-All 25 changed JSON evidence files parse. An AST scan of all 71 changed Python
+All 26 changed JSON evidence files parse. An AST scan of all 71 changed Python
 files confirms the model/simulator import boundary.
 
 - Clear stale reward padding before reusing a rollout table. GAE already masked it; summary metrics did not. A two-rollout regression covers the fix.
@@ -123,7 +130,7 @@ files confirms the model/simulator import boundary.
 - Compute timeout and final bootstrap states before reset. Validate following-state stream, episode, clock and write mask.
 - Clear execution caches on restore, evict obsolete tick layouts and preserve controller lookup storage addresses.
 - Reject float-valued counter fields before mutating restored state.
-- Run strict Muon parameter equality in deterministic mode, as required by the new resume contract. Restore the process mode after the test.
+- Replace strict Muon update equality with exact restored-state hashes and measured vector RMS in normal training mode. Integer state and scheduler remain exact; maxima are diagnostic.
 - Remove the stale pilot `--compiled` argument and parse the real generated CLI in its regression test.
 - Match actor reference window order, padding, slot shape and full forward gradient metadata. The stored reference stays frozen. Its independent scoring copy has no optimizer, no backward and no gradient buffers. Three complete precision replays pass.
 
@@ -153,7 +160,7 @@ no further implementation defect. Statistical differences remain a stated limit.
 
 This host has only 12 logical CPUs. Its distinct-CPU contract prevents a
 16-shard local run. Local measurements use eight shards for the requested
-16/64 match sizes; the single Modal profile will use 16 distinct shard CPUs.
+16/64 match sizes; the single Modal profile used 16 distinct shard CPUs.
 
 The plan supplies no numerical equivalence margin for statistical parity.
 The final 64-match comparison shifts KL and the median advantage and value
@@ -172,7 +179,9 @@ remaining ego actions is still needed; this rewrite does not silently change it.
 
 ## Remaining work
 
-Local validation is complete. Branch o65-dense is published. Run the single
-authorized 1,024-match Modal profile within one GPU-hour and USD 10. No cloud
-job has been launched. Missing fixtures, statistical equivalence and the
-timeout bootstrap choice remain unresolved.
+Implementation, local validation and the single Modal profile are complete.
+Rollout and total-update time still miss their targets (6.669 and 11.399 s).
+The trace points to outer-worker CPU and transfer synchronization as the next
+investigation, without establishing a pure simulator limit. The six missing
+fixtures, statistical equivalence and timeout bootstrap choice remain open.
+No further cloud job is running or planned. Branch o65-dense is published.

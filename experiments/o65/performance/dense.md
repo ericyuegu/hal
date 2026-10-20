@@ -561,3 +561,79 @@ After installing the local test prerequisite `zstandard==0.25.0`, rerunning
 58.93 s, with no skips. Both batched/serial native policy comparisons and all
 required Dolphin round-trip and cleanup cases passed in the expanded run.
 No source or repository dependency changed for this environment correction.
+
+
+## Single authorized Modal profile
+
+The profile of published `1a920ac7` completed with exit code 0 on one RTX PRO
+6000 Blackwell Server Edition at 1,024 matches, 16 shards and one group. It used
+the existing pinned image and Volume, one warm update, one timing update and one
+bounded trace update. There was no smoke run or retry. App
+`ap-SLJhVzIi3mRTDf5w8YjlSM`, call `fc-01M5BRH5K2TW7MG5X9S5BX6QSD`.
+The container has stopped. Raw results are under
+`runs/modal-dense/dense-1024-1a920ac7-20261019` and the same run name on
+Volume `hal-o65-profile`.
+
+```
+uv run python -m scripts.launch_o65_modal --mode profile --matches 1024 \
+  --timeout-seconds 2400 --name dense-1024-1a920ac7-20261019 \
+  --output runs/modal-dense
+```
+
+Trainer SHA-256 is
+`302bc1159515840598bb57693694e7a8032f064844c4586b39368902f67946f5`.
+The checkpoint is `65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6`;
+simulator SHA is `8fde568fb65ff4d0919bd71048808421c6b1a6c174d0d87cb83975696e3f75a8`.
+The source hash and all 21 downloaded artifact hashes verify. The resolved
+configuration, environment, artifact hashes, warm metrics, timing and launch
+estimates are in [dense-modal.json](dense-modal.json). All reported metrics in
+all three updates are finite; the training finite-value checks also run.
+
+| Phase | Wall s | Main-thread CPU s | Eager launches, estimated | Graph launches, estimated | Kernels, estimated |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| rollout | 6.669 | 1.300 | 77,146 | 384 | 600,034 |
+| reference | 0.993 | 0.970 | 159 | 1 | 254,442 |
+| other preparation | 0.346 | 0.350 | 74 | 1 | 1,234 |
+| critic | 0.126 | 0.120 | 613 | 0 | 665 |
+| actor | 3.260 | 3.210 | 117,453 | 119 | 585,718 |
+
+The complete update takes **11.399 s**, versus the supplied 67 s baseline
+(5.88x faster). This is one measured update, not a confidence interval or an
+isolated attribution of every earlier change. Other preparation and actor work
+meet their targets. Rollout misses 2–4 s, and the complete update misses
+5–10 s. The 3.580 s rollout projection underestimated the measured complete
+path. The 4.009 s actor projection is conservative against the measured 3.260 s.
+
+Sampled launch estimates total 195,445 eager launches, 505 graph launches and
+1,442,093 kernel executions. They exclude untraced gaps. Policy/tick-state main
+CPU time is 3.906 ms/tick; full rollout main CPU time is 10.156 ms/tick. The
+extra shard input work raises eager rollout counts from the local eight-shard
+66,182 to 77,146 on 16 shards. Kernel counts remain close to the local 64-match
+596,952 despite the larger batch.
+
+The rollout trace estimates 3.22 s of device busy time against 6.67 s wall time;
+main-thread CPU is 1.30 s. Non-boundary ticks include an estimated 4,032 event
+synchronizations and 2,142 stream synchronizations. Native shard timers range
+from 4.49 to 5.34 s, but include device-to-host inputs, futures and GPU-copy
+fences, so they do not measure pure simulator compute. Over a 6.169 s host
+sample, pinned simulator threads use 13.83 CPU seconds in aggregate (14.0% of
+each of 16 cores on average); the 16 unpinned outer workers dominate the
+34.83 other-thread CPU seconds. This suggests worker/transfer synchronization
+and its CPU work remain material; it does not prove a simulator throughput
+limit. This is the next rollout performance investigation. The local per-buffer
+acceptance profile and this bounded Modal trace are retained; no extra cloud
+run was launched after the miss.
+
+Peak PyTorch allocation is 24.98 GB and reservation is 49.73 GB (decimal).
+The cold warm update takes 1,283.886 s; the whole function takes 1,335.510 s
+(0.371 GPU-hours). Image build steps take 168.75 s before GPU startup. The
+2,400 s timeout reserved 2,760 s including startup/teardown. Completion reduces
+the ledger to 1,695.510 s. At the launcher's recorded rates, with its retained
+360 s margin and USD 3 build reserve, the conservative total allowance is
+**USD 5.05**, below USD 10. This estimate is not a provider bill. The stopped
+container list is empty.
+
+One monitoring command initially lacked Click's `--` argument separator and
+failed to parse `-n`; its corrected form succeeded. A final monitoring read
+arrived after the container stopped and reported that the task had already
+finished successfully. Neither command launched another GPU job.
