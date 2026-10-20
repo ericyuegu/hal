@@ -64,6 +64,16 @@ def test_head_start_handles_ends_and_excludes_partial_monte_carlo_episodes(timeo
     assert not run.partial_episodes
 
 
+def test_partial_episodes_do_not_report_zero_complete_match_kl_costs() -> None:
+    run = trainer(groups=1, length=129, development=True, anchor_rate=0)
+    run.engine.sampler.rng = HeadStartRng(65, (127, 127))
+    run.config = dataclasses.replace(run.config, head_start_frames=1200)
+    run.head_start()
+    _, metrics = run.run_update()
+    assert metrics["critic/monte_carlo_episode_count"] == 0
+    assert "return/completed_match_kl_cost" not in metrics
+
+
 @pytest.mark.parametrize("maximum", [-1, 1.5, True])
 def test_head_start_rejects_invalid_lengths(maximum: int) -> None:
     with pytest.raises(ValueError, match="nonnegative integers"):

@@ -3598,12 +3598,14 @@ class Trainer:
         bins: dict[int, list[tuple[float, float]]] = defaultdict(list)
         for result in rollout.results:
             match_cost = 0.0
+            complete = True
             for side, player in enumerate(result.episode.players):
                 if player.anchor is not None:
                     continue
                 identity = (2 * result.match + side, result.episode.number)
                 if identity in self.partial_episodes:
                     self.partial_episodes.remove(identity)
+                    complete = False
                     continue
                 discounted_return, cost, value, discounted_cost = self.episode_metrics.pop(identity)
                 match_cost += cost
@@ -3616,7 +3618,8 @@ class Trainer:
                     bins[percentile_bin(player.percentile)].append(
                         (result.returns[side], float(result.stocks[side] > result.stocks[1 - side]))
                     )
-            costs_done.append(match_cost)
+            if complete:
+                costs_done.append(match_cost)
         metrics["critic/monte_carlo_episode_count"] = float(len(values))
         if values:
             v, target = torch.tensor(values, dtype=torch.float64), torch.tensor(returns, dtype=torch.float64)
