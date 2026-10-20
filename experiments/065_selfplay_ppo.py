@@ -5258,7 +5258,7 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
                 features, observed = policy._packed_context(windows.inputs()[:5])
                 torch.save(
                     {
-                        "format": "hal.o65.floor-inputs.v1",
+                        "format": "hal.o65.floor-inputs.v2",
                         "features": {key: value.cpu() for key, value in features.items()},
                         "observed": observed.cpu(),
                         "slots": {

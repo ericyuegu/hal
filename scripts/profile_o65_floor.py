@@ -649,7 +649,7 @@ def main(args: Args) -> None:
     if (
         not isinstance(raw, dict)
         or set(raw) != {"format", "features", "observed", "slots", "model"}
-        or raw["format"] != "hal.o65.floor-inputs.v1"
+        or raw["format"] != "hal.o65.floor-inputs.v2"
     ):
         raise ValueError("unsupported floor model inputs")
     torch.set_num_threads(2)
