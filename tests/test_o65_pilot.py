@@ -297,6 +297,7 @@ def test_pilot_dispatches_one_trainer_with_in_process_publication(
         if command[1] != str(_MODULE.ROOT / "experiments/065_selfplay_ppo.py"):
             return
         config = tyro.cli(exp.NativeCli, args=command[3:])
+        assert environment["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
         commands.append(config)
         write_boundary(config.output / "checkpoints", config.updates)
         (config.output / "metrics.jsonl").write_text('{"global_step":4,"train/warming":0}\n')

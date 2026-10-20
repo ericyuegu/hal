@@ -92,7 +92,10 @@ drains publication before final evaluation.
 Training progress comes from existing anchor matches. After a real preemption,
 we resume from the latest complete checkpoint. The first warmup and PPO
 updates record allocated and reserved bytes by phase. We preserve partial
-memory records in phase-memory.json after an OOM. The 512-window actor step
+memory records in phase-memory.json after an OOM. The trainer uses
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. A three-update, 16-match
+RTX 3060 check passed graph capture and replay with this setting. It does not
+qualify the full pilot memory fit. The 512-window actor step
 must fit directly; an OOM requires review of the experiment settings.
 
 We evaluate the final checkpoint once against pi_ref in MSL. The frozen grid

@@ -268,7 +268,12 @@ def main(args: Args) -> None:
         if len(available) < 17 or torch.cuda.device_count() != 1 or "RTX PRO 6000" not in torch.cuda.get_device_name():
             raise ValueError("the hardware pilot requires one RTX PRO 6000 and at least 17 available vCPUs")
     environment = dict(os.environ)
-    environment.update(OMP_NUM_THREADS="2", MKL_NUM_THREADS="2", TORCHINDUCTOR_COMPILE_THREADS="1")
+    environment.update(
+        OMP_NUM_THREADS="2",
+        MKL_NUM_THREADS="2",
+        TORCHINDUCTOR_COMPILE_THREADS="1",
+        PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+    )
     delivery = args.local_delivery.resolve() if args.local_delivery is not None else output / "delivery"
     if args.local_delivery is None:
         execute(
