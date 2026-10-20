@@ -15,6 +15,7 @@ from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from typing import TextIO
 
 import modal
 import tyro
@@ -33,8 +34,8 @@ MEMORY_MIB = 65536
 GPU_USD_SECOND = 0.000842
 CPU_USD_SECOND = 0.0000131
 MEMORY_USD_GIB_SECOND = 0.00000222
-MAX_GPU_SECONDS = 3600
-MAX_USD = 10.0
+MAX_GPU_SECONDS = 7200
+MAX_USD = 20.0
 BUILD_RESERVE_USD = 3.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
@@ -106,7 +107,7 @@ def result_seconds(path: Path, exit_code: int) -> float:
 class Request:
     name: str
     git_sha: str
-    mode: Literal["smoke", "profile"] = "profile"
+    mode: Literal["smoke", "profile", "floor"] = "profile"
     matches: int = 1024
     timeout_seconds: int = 1800
 
@@ -114,14 +115,15 @@ class Request:
         validate_name(self.name)
         if re.fullmatch(r"[0-9a-f]{40}", self.git_sha) is None:
             raise ValueError("expected a full published HAL Git SHA")
-        if self.mode not in ("smoke", "profile"):
+        if self.mode not in ("smoke", "profile", "floor"):
             raise ValueError("unsupported run mode")
-        # Four-group KV storage alone needs 105.22 GiB at 4096 matches.
-        allowed = (16,) if self.mode == "smoke" else (256, 1024)
+        allowed = (16,) if self.mode == "smoke" else (256, 1024, 2048, 4096)
+        if self.mode == "floor":
+            allowed = (1024,)
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
-        if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= 3600:
-            raise ValueError("timeout must be 60 to 3600 seconds")
+        if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= 6600:
+            raise ValueError("timeout must be 60 to 6600 seconds")
 
 
 def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
@@ -147,8 +149,10 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         "--groups",
         "1",
     ]
-    if request.mode == "profile":
+    if request.mode in ("profile", "floor"):
         argv.extend(("--warm-updates", "1"))
+    if request.mode == "floor":
+        argv.append("--nsys")
     if request.mode == "smoke":
         argv.extend(
             (
@@ -253,6 +257,8 @@ def run_child(request: Request, output: Path, started: float) -> int:
         log.flush()
         subprocess.run(["nvidia-smi", "-q"], stdout=log, stderr=subprocess.STDOUT, check=True)
     with (output / "run.log").open("w") as log:
+        if request.mode == "floor":
+            return run_floor(request, output, env, cpus[:16], log)
         result = subprocess.run(
             argv,
             cwd=REMOTE_ROOT,
@@ -262,6 +268,83 @@ def run_child(request: Request, output: Path, started: float) -> int:
             timeout=request.timeout_seconds - 30,
         )
     return result.returncode
+
+
+def nsys_command(argv: list[str], output: Path) -> list[str]:
+    return [
+        "nsys",
+        "profile",
+        "--trace=cuda,nvtx,osrt",
+        "--sample=none",
+        "--cpuctxsw=none",
+        "--cuda-graph-trace=node",
+        "--capture-range=cudaProfilerApi",
+        "--capture-range-end=stop",
+        "--force-overwrite=true",
+        f"--output={output}",
+        *argv,
+    ]
+
+
+def run_floor(request: Request, output: Path, env: dict[str, str], cpus: tuple[int, ...], log: TextIO) -> int:
+    deadline = time.monotonic() + request.timeout_seconds - 60
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        log.write(shlex.join(argv) + "\n")
+        log.flush()
+        return subprocess.run(
+            argv,
+            cwd=REMOTE_ROOT,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            timeout=max(1, deadline - time.monotonic()),
+        )
+
+    result = run(nsys_command(command(request, cpus), output / "update"))
+    if result.returncode:
+        return result.returncode
+    result = run(
+        [
+            "nsys",
+            "export",
+            "--type=sqlite",
+            "--force-overwrite=true",
+            f"--output={output / 'update.sqlite'}",
+            str(output / "update.nsys-rep"),
+        ]
+    )
+    if result.returncode:
+        return result.returncode
+    result = run(
+        [
+            "/opt/venv/bin/python",
+            "-m",
+            "scripts.profile_o65_floor",
+            "--checkpoint",
+            str(REMOTE_ROOT / "delivery/payloads/final.pt"),
+            "--inputs",
+            str(output / "profile/floor-inputs.pt"),
+            "--layout",
+            str(output / "profile/floor-layout.json"),
+            "--output",
+            str(output / "bare"),
+        ]
+    )
+    if result.returncode:
+        return result.returncode
+    for matches in (256, 2048, 4096):
+        arm = dataclasses.replace(request, mode="profile", matches=matches)
+        argv = command(arm, cpus)
+        argv[argv.index("--output") + 1] = str(output / f"sweep-{matches}")
+        result = run(argv)
+        (output / f"sweep-{matches}-exit.json").write_text(
+            json.dumps({"matches": matches, "exit_code": result.returncode})
+        )
+        if result.returncode:
+            # Preserve a failed larger arm; do not substitute another configuration.
+            return result.returncode
+    return 0
 
 
 def image_commands(sha: str) -> list[str]:
@@ -284,6 +367,14 @@ def build_image(sha: str, secret: modal.Secret) -> modal.Image:
         modal.Image.from_registry(IMAGE)
         .entrypoint([])
         .apt_install("build-essential", "binutils")
+        .run_commands(
+            "if ! command -v nsys >/dev/null; then "
+            "curl -fL https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/"
+            "NsightSystems-linux-cli-public-2026.5.1.161-3889610.deb -o /var/tmp/nsys.deb && "
+            "echo '61829db6392e5c293ada1319df86a97c3356bc810335a1975cb551fcfe3eca08  /var/tmp/nsys.deb' | sha256sum -c - && "
+            "dpkg -i /var/tmp/nsys.deb && rm /var/tmp/nsys.deb; fi",
+            "nsys --version",
+        )
         .env({"PYTHONPATH": root, "UV_PROJECT_ENVIRONMENT": "/opt/venv"})
         .workdir(root)
         .run_commands(image_commands(sha), secrets=[secret])
@@ -318,7 +409,7 @@ def download(name: str, local: Path) -> None:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    mode: Literal["smoke", "profile", "download"] = "profile"
+    mode: Literal["smoke", "profile", "floor", "download"] = "profile"
     name: str | None = None
     matches: int = 1024
     timeout_seconds: int = 1800
@@ -336,8 +427,8 @@ def main(args: Args) -> None:
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise ValueError("commit changes before launching published source")
     branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip()
-    if branch not in ("o65-modal", "o65-dense"):
-        raise ValueError("only branch o65-modal or o65-dense can launch this job")
+    if branch != "o65-floor":
+        raise ValueError("only branch o65-floor can launch this job")
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     published = subprocess.check_output(["git", "ls-remote", "origin", f"refs/heads/{branch}"], cwd=ROOT, text=True)
     if published.split()[:1] != [sha]:
@@ -345,7 +436,8 @@ def main(args: Args) -> None:
     name = args.name or f"{args.mode}-{args.matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
     request = Request(name, sha, args.mode, args.matches, args.timeout_seconds)
     args.output.mkdir(parents=True, exist_ok=True)
-    budget = args.output / "budget.jsonl"
+    budget = ROOT / "runs/modal-floor/budget.jsonl"
+    budget.parent.mkdir(parents=True, exist_ok=True)
     # Reserve the full timeout for each call, including failures and client loss.
     allowance = request.timeout_seconds + 360
     reserved = reserved_seconds(budget) + allowance

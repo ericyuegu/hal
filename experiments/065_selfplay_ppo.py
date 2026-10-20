@@ -4139,7 +4139,12 @@ def train_native(config: NativeCli) -> None:
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
         if config.profiling is not None:
-            profile_native(trainer, config, provenance, native_config)
+            try:
+                profile_native(trainer, config, provenance, native_config)
+            except torch.cuda.OutOfMemoryError:
+                (config.output / "oom-allocator.json").write_text(json.dumps(torch.cuda.memory_snapshot()))
+                (config.output / "oom-memory.txt").write_text(torch.cuda.memory_summary())
+                raise
             return
         run_training(
             trainer,
@@ -4584,7 +4589,7 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
                             "actor_steps": len(batch.steps),
                             "actor_windows": trainer.config.windows_per_step,
                             "actor_slots": trainer.config.decisions_per_window,
-                            "reference_windows": recorder.work["reference/trunk_tokens"] // 256,
+                            "reference_windows": int(recorder.work["reference/trunk_tokens"] // 256),
                             "reference_slots": 64,
                             "frames": batch.rollout.frames,
                             "decisions": len(batch.rollout.ids),

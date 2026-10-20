@@ -98,7 +98,7 @@ def test_image_delivery_commands_match_the_real_cli() -> None:
     "field,value",
     [
         ("matches", 64),
-        ("matches", 4096),
+        ("matches", True),
         ("name", "../x"),
         ("git_sha", "HEAD"),
         ("timeout_seconds", 0),
@@ -122,13 +122,29 @@ def test_modal_commands_are_bounded_and_have_no_external_sink() -> None:
     assert profile[profile.index("--groups") + 1] == "1"
     assert profile[profile.index("--warm-updates") + 1] == "1"
     assert not any("chunk" in arg or arg == "--compiled" for arg in profile)
-    assert launcher.MAX_GPU_SECONDS == 3600 and launcher.MAX_USD == 10
+    assert launcher.MAX_GPU_SECONDS == 7200 and launcher.MAX_USD == 20
     smoke = command(Request("test", "a" * 40, mode="smoke", matches=16), tuple(range(16)))
     assert smoke[2] == "train"
     assert smoke[smoke.index("--updates") + 1] == "1"
     assert smoke[smoke.index("--groups") + 1] == "1"
     assert smoke[smoke.index("--evaluation-every") + 1] == "0"
     assert not any("wandb" in arg or "upload" in arg for arg in profile + smoke)
+
+
+def test_floor_command_traces_one_complete_update() -> None:
+    floor = command(Request("test", "a" * 40, mode="floor"), tuple(range(16)))
+    assert "--nsys" in floor
+    wrapped = launcher.nsys_command(floor, Path("/work/update"))
+    assert "--capture-range=cudaProfilerApi" in wrapped
+    assert "--capture-range-end=stop" in wrapped
+    assert "--cuda-graph-trace=node" in wrapped
+    assert wrapped[-len(floor) :] == floor
+    for matches in (256, 1024, 2048, 4096):
+        argv = command(Request("test", "a" * 40, matches=matches), tuple(range(16)))
+        assert argv[argv.index("--groups") + 1] == "1"
+        assert argv[argv.index("--matches-per-shard") + 1] == str(matches // 16)
+    with pytest.raises(ValueError, match="matches"):
+        Request("test", "a" * 40, mode="floor", matches=256)
 
 
 def test_cpu_selection_uses_distinct_available_ids() -> None:
