@@ -265,8 +265,8 @@ The trainer now uses only dense tick/player tensors, packed shard frames and
 fixed actor steps. The old decision objects, sequence adapters, grouped sampler,
 per-decision evaluator, CPU wire conversion, chunk options and BLAKE2b action
 sampler are removed. Training checkpoint v5 owns pool snapshot v3 and validates
-the device counter key. The deterministic verifier uses the training graphs
-and compares the next batch, optimizer, scheduler, parameters and all RNGs.
+the device counter key. The verifier uses the training graphs and execution mode. It checks restored
+state exactly and the next update against measured control noise.
 
 Review found stale reward padding in reused rollout storage. GAE masked those
 cells, but summary metrics could read the prior rollout's values. Clearing the
@@ -365,3 +365,181 @@ fixed batches to 129. Eager launches cost 14 us and remaining graph kernels
 cost 5 us. The whole-preparation diagnostic projects about 0.05 s of host
 cost. These are host-count projections, not measurements of GPU work or
 measured 1,024-match times. The final Modal profile must test them.
+
+### Resume contract and non-finite sampling fix
+
+The resume verifier keeps training's execution mode. Report v5 checks the
+restored model, both optimizers, scheduler, simulator and pool, sampler cursor,
+counter key, progress and all RNG states exactly. It repeats the next update
+twice as controls from the same boundary and compares a third resumed update.
+For the model and each optimizer state family, RMS error may reach twice the
+control spread plus eight dtype rounding units (minimum scale 1e-3). Maximum
+and per-tensor errors are diagnostic. Integer state and scheduler progress
+stay exact. Batch hashes are diagnostic because roundoff can change samples.
+This replaces the failed bit-exact claim. Compiled decoder backward variation
+is not a failure by itself.
+
+The first native noise check restored every state hash, batch and scheduler
+exactly, but failed the initial 1.5x per-tensor maximum-error rule in 70 of 426
+tensors. Maximum parameter error was 2.69860e-5 against a control maximum of
+1.77175e-5. That initial rule was an engineering choice, not the user's
+precision criterion; it is retained in [dense-resume-initial.json](dense-resume-initial.json).
+A second check used complete vectors with separate optimizer moment scales.
+It passed before buffer coalescing, but a later repetition failed only the
+maximum-error rule for Adam second moments; every RMS comparison passed.
+Those results remain in dense-resume-prebatch.json and dense-resume-max.json.
+The final rule uses RMS acceptance; isolated maxima remain diagnostic. Its
+2x-spread rule was fixed before the final native check. It also
+compares integer tensors without converting them to float, so low bits above
+2^53 remain exact. Tests reject wrong restores, large update errors, mixed
+optimizer scales, integer changes and overflow in error statistics.
+
+The earlier 8-shard profile rejected a non-finite behavior log-probability on
+its first rollout. A retry and a 12-update diagnostic did not reproduce it.
+A forced upper-draw probe exposed the sampler defect: Torch 2.11.0's compiled
+parallel prefix sum gives unequal cumulative values across zero-probability
+classes. The probe found terminal-plateau drift up to 2.38419e-7. Counting CDF
+entries then selected masked classes, whose recorded log-probability is -inf.
+Of 8,192 BF16 rows at draw 1-2^-24, 2,434 selected masked classes; eager sampling
+selected none. Enabling cast preservation still left 1,653 failures on those
+rows. Setting only the normalized endpoint to one also failed because other
+entries in the plateau differed.
+
+The sampler now takes the first positive-probability crossing and assigns the
+last positive class the exact endpoint. No non-finite score is replaced. The
+compiled FP32 and BF16 regression failed before the fix and passes after it;
+all 15 sampling tests pass. Dense GAE now rejects non-finite inputs and output
+overflow. KL rejects invalid probabilities before support conversion. Actor
+losses, KL and joint ratios are checked before the optimizer; gradient norm
+checks reject invalid actor and critic gradients. The focused fault tests pass
+44 cases, including all three non-finite values and GAE overflow. Additional
+verifier tests admit measured noise, reject larger errors, and detect inexact
+restoration.
+
+The complete FP32-reference gate was rerun after the sampler fix at `694d75a1`
+(trainer SHA-256 `467d65fb27bb9cc76c1bd64b0aa4424175b4d05e695362ddeadde083d1beaee6`).
+All seven quantities pass, including all three actor replays, with the same
+floors. Actor gradient RMSE is 1.66533e-5 versus control 2.24041e-5; the largest
+of the three candidate RMSEs is 1.69370e-5. Raw evidence is in
+`runs/dense/precision-valid-support` and the `valid_support_sampler` entry in
+[dense-precision.json](dense-precision.json).
+
+This local host exposes 12 logical CPUs (6 physical cores). The trainer rejects
+repeated or unavailable shard CPUs. Sixteen local shards therefore cannot run;
+the final local profiles use eight shards at 16 and 64 total matches. The Modal
+profile retains 16 distinct shard CPUs. This hardware limit does not relax the
+configuration check.
+
+
+### Final eight-shard measurement and acceptance follow-up
+
+The first complete eight-shard profile after the sampler fix projected rollout
+above the 4 s target. The local trace showed repeated GPU acceptance work for
+each simulator shard. Acceptance now concatenates each buffer's shard frames
+and updates dense state once per buffer per frame. It preserves mixed cadence,
+unsorted match IDs, first-frame terminations and remaining live lanes. CPU and
+CUDA serial-versus-batched parity tests pass, including bootstrap and GAE.
+
+| Matches | Rollout version | Wall s | Main-thread CPU s | Eager launches | Graph launches | Kernels |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | per-shard acceptance | 3.080 | 1.743 | 145,030 | 384 | 668,026 |
+| 64 | per-shard acceptance | 3.992 | 1.788 | 145,030 | 384 | 675,800 |
+| 16 | per-buffer acceptance | 2.301 | 0.951 | 66,182 | 384 | 589,178 |
+| 64 | per-buffer acceptance | 3.211 | 1.001 | 66,182 | 384 | 596,952 |
+
+The source-verified final profiles use `c4e26c27`, trainer SHA-256
+`178625eb8d5db0f04cbeb1d6664f30022b9760bcbb53e0d34b68f828e462af72`.
+The subsequent resume diagnostic change does not change the training hot path.
+Raw profiles are `runs/dense/step5-batched8s-final{16,64}`; the preceding
+profiles are `step5-qualified8s-final{16,64}`. Both are retained in the JSON.
+Counts below are estimates extrapolated from the profiler's sampled phases.
+
+| Matches | Phase | Wall s | Main-thread CPU s | Eager launches | Graph launches | Kernels |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | rollout | 2.301 | 0.951 | 66,182 | 384 | 589,178 |
+| 16 | reference | 0.283 | 0.283 | 148 | 1 | 9,995 |
+| 16 | preparation | 0.074 | 0.074 | 74 | 1 | 1,230 |
+| 16 | critic | 0.019 | 0.014 | 617 | 0 | 629 |
+| 16 | actor | 0.480 | 0.480 | 4,168 | 4 | 19,452 |
+| 64 | rollout | 3.211 | 1.001 | 66,182 | 384 | 596,952 |
+| 64 | reference | 0.506 | 0.506 | 148 | 1 | 17,863 |
+| 64 | preparation | 0.153 | 0.153 | 74 | 1 | 1,230 |
+| 64 | critic | 0.045 | 0.040 | 609 | 0 | 625 |
+| 64 | actor | 0.958 | 0.958 | 8,336 | 8 | 38,904 |
+
+Complete updates take 3.157 and 4.875 s. Policy and tick-state CPU time is
+2.912 and 3.199 ms/tick. Complete rollout main-thread CPU time is 7.426 and
+7.817 ms/tick. Rollout launches stay flat as matches grow from 16 to 64.
+The critic also rejects a non-finite scalar loss before backward: a focused
+regression demonstrates that finite squared elements can overflow on reduction
+while their gradients remain finite. This check adds 16 launches per update.
+
+Using 14 us per eager launch and 5 us per remaining graphed kernel, the final
+**1,024-match host-count projection** is 3.580 s rollout and 4.009 s actor
+(119 steps). Reference projection is about 1.27 s. The whole-preparation trace
+projects 0.05 s of host work; measured local other preparation is 0.153 s.
+The projected update is about 9 s. Sixteen shards add simulator-input host
+work relative to the eight-shard local trace. These are projections, not PRO
+6000 measurements.
+
+The final precision rerun (`precision-batched`, source `c4e26c27`) passes all
+seven quantities and all three actor graph repetitions. Actor gradient RMSE is
+1.67232e-5 versus control 2.23592e-5; the largest candidate repetition RMSE is
+1.74655e-5. Full per-quantity errors are retained as `batched_frames` in
+[dense-precision.json](dense-precision.json). Neither thresholds nor floors
+changed.
+
+The native 64-match resume check at `490af376` passes. Every restored state
+hash matches the boundary on all three repetitions. Next scheduler/progress
+hashes match exactly. Model update RMS error is 1.57611e-7 versus control
+spread 1.43917e-7; maximum error is 2.78503e-5 (diagnostic). Actor first-moment
+RMS is 3.90981e-6 versus 3.37266e-6; second-moment RMS is 5.16790e-8 versus
+5.95293e-8; Muon momentum RMS is 7.83312e-7 versus 7.20621e-7. Critic optimizer
+errors are zero. See [dense-resume.json](dense-resume.json).
+
+### Trajectory comparison
+
+Three 64-match updates compare the recorded `aacdfee0` trainer with the final
+dense trainer, seed 65, the same proxy, sampler and native simulator. Both arms
+use the current shared model libraries and corrected categorical sampler.
+The paired bootstrap resamples 64 logical matches, keeping all three updates
+in each match, with 10,000 repetitions. These are descriptive 95% intervals;
+no equivalence margin was specified. The 512-frame limit includes countdown,
+so reported completed episode length is 635 frames.
+
+| Quantity | Control mean | Dense mean | 95% CI for dense minus control |
+| --- | ---: | ---: | --- |
+| KL per planned frame | 4.01438e-5 | 5.60193e-5 | [1.31667e-5, 1.87136e-5] |
+| Entropy | 0.678647 | 0.677336 | [-0.034458, 0.033325] |
+| Student return | -0.696875 | -1.513292 | [-10.768838, 8.292590] |
+| Return spread | 55.201119 | 44.414950 | [-25.737427, 3.977830] |
+| Advantage mean | -0.387575 | 0.295786 | [-0.411113, 1.833391] |
+| Advantage median | -1.057242 | -0.020970 | [0.016542, 2.105633] |
+| Value-target mean | 0.453358 | 2.363468 | [-0.516575, 4.522853] |
+| Value-target median | 0.011478 | 2.450914 | [0.019312, 4.964797] |
+| Episode length | 635 | 635 | [0, 0] |
+| Resets per match | 1 | 1 | [0, 0] |
+
+KL and the two medians differ. This short, single-seed comparison does not
+establish statistical equivalence. The precision gate independently passes.
+The earlier pre-buffer run also shifted return spread and tails; it is retained
+in dense-statistical-prebatch.json, rather than discarded. An initial entropy
+report included R=2 decoder padding; the corrected report masks unexecuted
+frames and has a regression test. All means, spreads, quantiles, source hashes
+and invariants are in [dense-statistical.json](dense-statistical.json).
+
+
+### Final local handoff
+
+`uv run ruff format --check .` passes (393 files); `uv run ruff check .`
+passes. The required `ty` command plus every new Python file passes with zero
+diagnostics. An optional check of every changed test file reports 13 existing
+diagnostics on unchanged lines of test_action_sequence_attention.py.
+
+`uv run pytest -q -ra -m "not integration" --basetemp "$TMPDIR/n"` completes
+with **2676 passed, 8 skipped, 85 deselected, 27 warnings**, in 646.91 s.
+Two production netplay hardware checks are disabled. Six legacy v7 dataset
+tests lack their recorded fixture; those skips count as validation failures
+under AGENTS.md. No test fails. The preceding long-path run had three AF_UNIX
+path failures and a stale exact-Muon expectation, all resolved in the final
+run. Logs and historical failures are listed in the dense implementation report.

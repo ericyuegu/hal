@@ -1,0 +1,522 @@
+{
+  "configuration": {
+    "acceptance": "descriptive confidence intervals; the plan supplies no equivalence margin",
+    "bootstrap_replicates": 10000,
+    "confidence": 0.95,
+    "entropy": "mean per planned action frame across the three updates",
+    "kl": "mean per planned frame across the three updates",
+    "matches": 64,
+    "max_frame": 512,
+    "resampling_unit": "paired logical match, retaining all three updates",
+    "resets": "completed episodes across three updates",
+    "reward": "per-match student returns across three updates; mean/std/quantiles before match clustering",
+    "seed": 65,
+    "trajectory_statistics": "per-match pooled decisions; means of match-level mean/std/quantiles",
+    "updates": 3
+  },
+  "control_git_sha": "537139e16e7c497d057c9ad1e9cf5435a6e4c613",
+  "control_source_commit": "aacdfee0",
+  "control_trainer_sha256": "8c2be502100f1637f281219d1f14b21d80dd6e4db15f5ed749fdba92e87fe981",
+  "dense_git_sha": "490af376bbb63cceaf0b1d5b2a562ac3753f9d99",
+  "dense_trainer_sha256": "302bc1159515840598bb57693694e7a8032f064844c4586b39368902f67946f5",
+  "format": "hal.o65.dense-statistical-comparison.v2",
+  "invariants": {
+    "adapter": "e9e2bf2ee60a3cf31034f65a12505f29e06af010971d20d569c44b2849c5feb2",
+    "checkpoint": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "environment": {
+      "cuda": "13.0",
+      "device": "NVIDIA GeForce RTX 3060",
+      "numpy": "2.1.3",
+      "python": "3.14.4",
+      "tf32_cudnn": "False",
+      "tf32_matmul": "False",
+      "torch": "2.11.0+cu130",
+      "world_size": "1"
+    },
+    "max_frame": 512,
+    "sampling": {
+      "anchor_rate": 0.15,
+      "data_floor": 100,
+      "deployment_identity": 3,
+      "deployment_rate": 0.225,
+      "identities": [
+        {
+          "character": 1,
+          "count": 22172,
+          "identity": 1
+        },
+        {
+          "character": 22,
+          "count": 21118,
+          "identity": 1
+        },
+        {
+          "character": 1,
+          "count": 13481,
+          "identity": 2
+        },
+        {
+          "character": 22,
+          "count": 13761,
+          "identity": 2
+        },
+        {
+          "character": 1,
+          "count": 18152,
+          "identity": 3
+        },
+        {
+          "character": 22,
+          "count": 11536,
+          "identity": 3
+        }
+      ],
+      "lambda_max": 100.0,
+      "lambda_min": 0.01,
+      "masked_rate": 0.1,
+      "matchups": [
+        {
+          "characters": [
+            1,
+            22
+          ],
+          "weight": 1.0
+        }
+      ],
+      "percents": [
+        0.0,
+        30.0,
+        60.0,
+        90.0
+      ],
+      "stages": [
+        25
+      ],
+      "stocks": [
+        4
+      ],
+      "tempering": 0.5
+    },
+    "schedule": {
+      "configurations": [
+        {
+          "delay": 8,
+          "replan": 4
+        },
+        {
+          "delay": 10,
+          "replan": 2
+        }
+      ],
+      "rollout_frames": 256,
+      "supervised_offsets": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        16,
+        20,
+        24,
+        28
+      ]
+    },
+    "seed": 65,
+    "simulator": "9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a",
+    "simulator_manifest": "4c2b074e872a7ad55176b63a3971fd6a3bbf09dd1988240d1dbdaf61a63616cb"
+  },
+  "raw_inputs": [
+    "runs/dense/statistics-noise-qualified-control/statistics.json",
+    "runs/dense/statistics-final-dense/statistics.json"
+  ],
+  "shared_libraries": "Current model and corrected categorical sampler in both arms",
+  "statistics": {
+    "advantages/mean": {
+      "control_match_quantiles": [
+        -3.8992329120342357,
+        -0.08389385703456545,
+        3.3119150392872934
+      ],
+      "control_mean": -0.3875752336565068,
+      "dense_match_quantiles": [
+        -4.121873522842374,
+        0.133499869527409,
+        5.779338145018571
+      ],
+      "dense_mean": 0.2957864311721256,
+      "includes_zero": true,
+      "mean_difference": 0.6833616648286325,
+      "paired_match_bootstrap_95ci": [
+        -0.41111310815952157,
+        1.8333913696747
+      ]
+    },
+    "advantages/q05": {
+      "control_match_quantiles": [
+        -54.87640199661255,
+        -34.55533990859985,
+        -19.178223590850838
+      ],
+      "control_mean": -35.1591464407742,
+      "dense_match_quantiles": [
+        -58.766403627395626,
+        -29.126551818847656,
+        -17.69150434494019
+      ],
+      "dense_mean": -32.48662442713976,
+      "includes_zero": true,
+      "mean_difference": 2.6725220136344428,
+      "paired_match_bootstrap_95ci": [
+        -1.2836070337705314,
+        6.503667263630773
+      ]
+    },
+    "advantages/q50": {
+      "control_match_quantiles": [
+        -6.253912568092345,
+        -0.7056400328874588,
+        3.153948926925659
+      ],
+      "control_mean": -1.057242106180638,
+      "dense_match_quantiles": [
+        -3.2485743403434753,
+        -0.07973860949277878,
+        4.6902135133743235
+      ],
+      "dense_mean": -0.020969885867089033,
+      "includes_zero": false,
+      "mean_difference": 1.036272220313549,
+      "paired_match_bootstrap_95ci": [
+        0.016541571239940895,
+        2.105633097869576
+      ]
+    },
+    "advantages/q95": {
+      "control_match_quantiles": [
+        18.88557563304901,
+        34.68632869720456,
+        58.598217926025384
+      ],
+      "control_mean": 36.195820201933365,
+      "dense_match_quantiles": [
+        18.102642564773557,
+        30.771892690658564,
+        55.45210058212278
+      ],
+      "dense_mean": 33.14637128412723,
+      "includes_zero": true,
+      "mean_difference": -3.0494489178061426,
+      "paired_match_bootstrap_95ci": [
+        -7.889064486660055,
+        1.63907244320959
+      ]
+    },
+    "advantages/std": {
+      "control_match_quantiles": [
+        12.707206802844365,
+        21.25758089706919,
+        31.30699234475818
+      ],
+      "control_mean": 21.401031008703804,
+      "dense_match_quantiles": [
+        12.486000264856532,
+        18.22925300681903,
+        31.783042889413498
+      ],
+      "dense_mean": 19.74357181713005,
+      "includes_zero": true,
+      "mean_difference": -1.657459191573753,
+      "paired_match_bootstrap_95ci": [
+        -3.730185487562346,
+        0.4320244697525798
+      ]
+    },
+    "entropy": {
+      "control_match_quantiles": [
+        0.5361239338914553,
+        0.6811413168907166,
+        0.8230784128109614
+      ],
+      "control_mean": 0.6786469055029253,
+      "dense_match_quantiles": [
+        0.5482100397348404,
+        0.6564668317635853,
+        0.8102169175942739
+      ],
+      "dense_mean": 0.6773361628875136,
+      "includes_zero": true,
+      "mean_difference": -0.0013107426154116827,
+      "paired_match_bootstrap_95ci": [
+        -0.0344575183504882,
+        0.033325133558052285
+      ]
+    },
+    "episode_length": {
+      "control_match_quantiles": [
+        635.0,
+        635.0,
+        635.0
+      ],
+      "control_mean": 635.0,
+      "dense_match_quantiles": [
+        635.0,
+        635.0,
+        635.0
+      ],
+      "dense_mean": 635.0,
+      "includes_zero": true,
+      "mean_difference": 0.0,
+      "paired_match_bootstrap_95ci": [
+        0.0,
+        0.0
+      ]
+    },
+    "kl": {
+      "control_match_quantiles": [
+        2.9778755985413835e-05,
+        3.976960882331089e-05,
+        5.2546876941050864e-05
+      ],
+      "control_mean": 4.014375196940516e-05,
+      "dense_match_quantiles": [
+        4.361328111978461e-05,
+        5.4947044797396906e-05,
+        7.213429125840774e-05
+      ],
+      "dense_mean": 5.60192503134734e-05,
+      "includes_zero": false,
+      "mean_difference": 1.5875498344068244e-05,
+      "paired_match_bootstrap_95ci": [
+        1.3166702319011848e-05,
+        1.8713616135930997e-05
+      ]
+    },
+    "resets": {
+      "control_match_quantiles": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "control_mean": 1.0,
+      "dense_match_quantiles": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dense_mean": 1.0,
+      "includes_zero": true,
+      "mean_difference": 0.0,
+      "paired_match_bootstrap_95ci": [
+        0.0,
+        0.0
+      ]
+    },
+    "reward": {
+      "control_match_quantiles": [
+        -21.560003471374507,
+        0.0,
+        0.0
+      ],
+      "control_mean": -0.6968752890825272,
+      "dense_match_quantiles": [
+        -11.046500778198242,
+        0.0,
+        20.958499145507677
+      ],
+      "dense_mean": -1.5132915526628494,
+      "includes_zero": true,
+      "mean_difference": -0.8164162635803223,
+      "paired_match_bootstrap_95ci": [
+        -10.768838496506214,
+        8.292590316757558
+      ]
+    },
+    "reward/q05": {
+      "control_match_quantiles": [
+        -137.02499999999998,
+        -27.661500549316408,
+        -4.1292715907096875
+      ],
+      "control_mean": -50.37788211591542,
+      "dense_match_quantiles": [
+        -131.26500000000001,
+        -25.078501510620118,
+        20.958499145507677
+      ],
+      "dense_mean": -41.48674615547061,
+      "includes_zero": true,
+      "mean_difference": 8.891135960444808,
+      "paired_match_bootstrap_95ci": [
+        -7.91578477397561,
+        25.107280628764997
+      ]
+    },
+    "reward/q50": {
+      "control_match_quantiles": [
+        -21.560003471374507,
+        0.0,
+        0.0
+      ],
+      "control_mean": -0.6968752890825272,
+      "dense_match_quantiles": [
+        -11.046500778198242,
+        0.0,
+        20.958499145507677
+      ],
+      "dense_mean": -1.5132915526628494,
+      "includes_zero": true,
+      "mean_difference": -0.8164162635803223,
+      "paired_match_bootstrap_95ci": [
+        -10.768838496506214,
+        8.292590316757558
+      ]
+    },
+    "reward/q95": {
+      "control_match_quantiles": [
+        -21.560003471374507,
+        26.356498360633847,
+        137.73093921661373
+      ],
+      "control_mean": 48.98413153775036,
+      "dense_match_quantiles": [
+        -11.046500778198242,
+        25.314999389648435,
+        124.80435070037841
+      ],
+      "dense_mean": 38.460163050144914,
+      "includes_zero": true,
+      "mean_difference": -10.523968487605451,
+      "paired_match_bootstrap_95ci": [
+        -27.26740030099638,
+        5.433564429963008
+      ]
+    },
+    "reward/std": {
+      "control_match_quantiles": [
+        0.0,
+        28.8249990940094,
+        152.24999999999997
+      ],
+      "control_mean": 55.20111869648099,
+      "dense_match_quantiles": [
+        0.0,
+        24.694997787475586,
+        138.67150077819824
+      ],
+      "dense_mean": 44.41494955867529,
+      "includes_zero": true,
+      "mean_difference": -10.7861691378057,
+      "paired_match_bootstrap_95ci": [
+        -25.737426981516183,
+        3.9778296280652268
+      ]
+    },
+    "targets/mean": {
+      "control_match_quantiles": [
+        -10.180840989113292,
+        0.02802124479421499,
+        12.463558782805265
+      ],
+      "control_mean": 0.4533578961878174,
+      "dense_match_quantiles": [
+        -6.208803719968696,
+        2.0634931961611684,
+        12.460758232684757
+      ],
+      "dense_mean": 2.3634683365863136,
+      "includes_zero": true,
+      "mean_difference": 1.9101104403984963,
+      "paired_match_bootstrap_95ci": [
+        -0.516575449746083,
+        4.52285264972209
+      ]
+    },
+    "targets/q05": {
+      "control_match_quantiles": [
+        -83.49165388107299,
+        -39.58635387420654,
+        -14.87257637739182
+      ],
+      "control_mean": -44.61811784282327,
+      "dense_match_quantiles": [
+        -86.63547031402588,
+        -35.01162223815918,
+        -8.612844781875628
+      ],
+      "dense_mean": -41.170178283751014,
+      "includes_zero": true,
+      "mean_difference": 3.447939559072256,
+      "paired_match_bootstrap_95ci": [
+        -4.2601263934373845,
+        11.148615690805011
+      ]
+    },
+    "targets/q50": {
+      "control_match_quantiles": [
+        -12.349604296684262,
+        0.039729028940200806,
+        10.465640664100638
+      ],
+      "control_mean": 0.011478477157652378,
+      "dense_match_quantiles": [
+        -8.639429426193237,
+        1.7175796031951904,
+        13.311497735977172
+      ],
+      "dense_mean": 2.4509135712869465,
+      "includes_zero": false,
+      "mean_difference": 2.439435094129294,
+      "paired_match_bootstrap_95ci": [
+        0.019311615964397854,
+        4.964797345921396
+      ]
+    },
+    "targets/q95": {
+      "control_match_quantiles": [
+        8.377864570617676,
+        41.52786140441894,
+        87.29155044555662
+      ],
+      "control_mean": 44.45530027002095,
+      "dense_match_quantiles": [
+        14.754763908386229,
+        40.05623035430905,
+        74.35501157760619
+      ],
+      "dense_mean": 42.192052266374205,
+      "includes_zero": true,
+      "mean_difference": -2.2632480036467446,
+      "paired_match_bootstrap_95ci": [
+        -10.011542846020316,
+        5.565739177465406
+      ]
+    },
+    "targets/std": {
+      "control_match_quantiles": [
+        10.353454814518203,
+        24.405438174221565,
+        45.11757131701369
+      ],
+      "control_mean": 26.069889579810997,
+      "dense_match_quantiles": [
+        10.214691297863578,
+        24.19717308403134,
+        43.283605365622414
+      ],
+      "dense_mean": 25.353584230051418,
+      "includes_zero": true,
+      "mean_difference": -0.7163053497595795,
+      "paired_match_bootstrap_95ci": [
+        -4.493657102121396,
+        3.049297108142824
+      ]
+    }
+  }
+}

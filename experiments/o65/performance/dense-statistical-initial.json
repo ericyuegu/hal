@@ -1,0 +1,518 @@
+{
+  "accepted": false,
+  "configuration": {
+    "acceptance": "descriptive confidence intervals; the plan supplies no equivalence margin",
+    "bootstrap_replicates": 10000,
+    "confidence": 0.95,
+    "entropy": "mean per planned action frame across the three updates",
+    "kl": "mean per planned frame across the three updates",
+    "matches": 64,
+    "max_frame": 512,
+    "resampling_unit": "paired logical match, retaining all three updates",
+    "resets": "completed episodes across three updates",
+    "reward": "per-match student returns across three updates; mean/std/quantiles before match clustering",
+    "seed": 65,
+    "trajectory_statistics": "per-match pooled decisions; means of match-level mean/std/quantiles",
+    "updates": 3
+  },
+  "control_git_sha": "694d75a169306316e48855ba91e15cab1cf02457",
+  "control_trainer_sha256": "8c2be502100f1637f281219d1f14b21d80dd6e4db15f5ed749fdba92e87fe981",
+  "dense_git_sha": "694d75a169306316e48855ba91e15cab1cf02457",
+  "dense_trainer_sha256": "467d65fb27bb9cc76c1bd64b0aa4424175b4d05e695362ddeadde083d1beaee6",
+  "format": "hal.o65.dense-statistical-comparison.v2",
+  "invariants": {
+    "adapter": "e9e2bf2ee60a3cf31034f65a12505f29e06af010971d20d569c44b2849c5feb2",
+    "checkpoint": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+    "environment": {
+      "cuda": "13.0",
+      "device": "NVIDIA GeForce RTX 3060",
+      "numpy": "2.1.3",
+      "python": "3.14.4",
+      "tf32_cudnn": "False",
+      "tf32_matmul": "False",
+      "torch": "2.11.0+cu130",
+      "world_size": "1"
+    },
+    "max_frame": 512,
+    "sampling": {
+      "anchor_rate": 0.15,
+      "data_floor": 100,
+      "deployment_identity": 3,
+      "deployment_rate": 0.225,
+      "identities": [
+        {
+          "character": 1,
+          "count": 22172,
+          "identity": 1
+        },
+        {
+          "character": 22,
+          "count": 21118,
+          "identity": 1
+        },
+        {
+          "character": 1,
+          "count": 13481,
+          "identity": 2
+        },
+        {
+          "character": 22,
+          "count": 13761,
+          "identity": 2
+        },
+        {
+          "character": 1,
+          "count": 18152,
+          "identity": 3
+        },
+        {
+          "character": 22,
+          "count": 11536,
+          "identity": 3
+        }
+      ],
+      "lambda_max": 100.0,
+      "lambda_min": 0.01,
+      "masked_rate": 0.1,
+      "matchups": [
+        {
+          "characters": [
+            1,
+            22
+          ],
+          "weight": 1.0
+        }
+      ],
+      "percents": [
+        0.0,
+        30.0,
+        60.0,
+        90.0
+      ],
+      "stages": [
+        25
+      ],
+      "stocks": [
+        4
+      ],
+      "tempering": 0.5
+    },
+    "schedule": {
+      "configurations": [
+        {
+          "delay": 8,
+          "replan": 4
+        },
+        {
+          "delay": 10,
+          "replan": 2
+        }
+      ],
+      "rollout_frames": 256,
+      "supervised_offsets": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        16,
+        20,
+        24,
+        28
+      ]
+    },
+    "seed": 65,
+    "simulator": "9f16aefd23377abf4a94a185b702bc34033cf890d63b88e79f410ef5efb7c78a",
+    "simulator_manifest": "4c2b074e872a7ad55176b63a3971fd6a3bbf09dd1988240d1dbdaf61a63616cb"
+  },
+  "statistics": {
+    "advantages/mean": {
+      "control_match_quantiles": [
+        -4.123827481679747,
+        -0.538114237667447,
+        2.5797362133706887
+      ],
+      "control_mean": -0.40166216206313354,
+      "dense_match_quantiles": [
+        -6.135619847977292,
+        0.10815151035173497,
+        5.330906506080995
+      ],
+      "dense_mean": -0.06025992612159792,
+      "includes_zero": true,
+      "mean_difference": 0.3414022359415356,
+      "paired_match_bootstrap_95ci": [
+        -0.6654913580284132,
+        1.3490188088071517
+      ]
+    },
+    "advantages/q05": {
+      "control_match_quantiles": [
+        -55.31422057151794,
+        -32.96903781890869,
+        -22.685558643341064
+      ],
+      "control_mean": -34.27598112523555,
+      "dense_match_quantiles": [
+        -63.653553800582884,
+        -30.930531597137453,
+        -19.803610277175917
+      ],
+      "dense_mean": -34.38276605755091,
+      "includes_zero": true,
+      "mean_difference": -0.10678493231534936,
+      "paired_match_bootstrap_95ci": [
+        -3.4988533301651477,
+        3.202169992849231
+      ]
+    },
+    "advantages/q50": {
+      "control_match_quantiles": [
+        -4.1678211212158205,
+        -0.5425010323524475,
+        2.4484660506248463
+      ],
+      "control_mean": -0.6842178024817258,
+      "dense_match_quantiles": [
+        -5.387207984924316,
+        -0.27735477685928345,
+        3.505197298526763
+      ],
+      "dense_mean": -0.2004911775002256,
+      "includes_zero": true,
+      "mean_difference": 0.4837266249815002,
+      "paired_match_bootstrap_95ci": [
+        -0.4432794373948127,
+        1.417214316583704
+      ]
+    },
+    "advantages/q95": {
+      "control_match_quantiles": [
+        18.676978178024246,
+        31.49640011787413,
+        52.38570061683643
+      ],
+      "control_mean": 34.034963338077056,
+      "dense_match_quantiles": [
+        20.13804379940033,
+        30.188175678253174,
+        54.96012603759765
+      ],
+      "dense_mean": 33.43949088975786,
+      "includes_zero": true,
+      "mean_difference": -0.5954724483191904,
+      "paired_match_bootstrap_95ci": [
+        -5.289076148606827,
+        3.839321359097961
+      ]
+    },
+    "advantages/std": {
+      "control_match_quantiles": [
+        13.162243722309634,
+        18.832409060125304,
+        30.744047513343258
+      ],
+      "control_mean": 20.34219128221834,
+      "dense_match_quantiles": [
+        13.762115557284679,
+        18.451643400922457,
+        32.53995768262458
+      ],
+      "dense_mean": 20.313412339781724,
+      "includes_zero": true,
+      "mean_difference": -0.02877894243661766,
+      "paired_match_bootstrap_95ci": [
+        -1.8670246924553342,
+        1.8336925251605154
+      ]
+    },
+    "entropy": {
+      "control_match_quantiles": [
+        0.6488492538531622,
+        1.1172159711519876,
+        1.6256769438584644
+      ],
+      "control_mean": 1.0977313984185457,
+      "dense_match_quantiles": [
+        0.6081339031457901,
+        0.8748195618391037,
+        1.2204338073730465
+      ],
+      "dense_mean": 0.8929150973757107,
+      "includes_zero": false,
+      "mean_difference": -0.20481630104283494,
+      "paired_match_bootstrap_95ci": [
+        -0.2635912332877828,
+        -0.14745907256146898
+      ]
+    },
+    "episode_length": {
+      "control_match_quantiles": [
+        635.0,
+        635.0,
+        635.0
+      ],
+      "control_mean": 635.0,
+      "dense_match_quantiles": [
+        635.0,
+        635.0,
+        635.0
+      ],
+      "dense_mean": 635.0,
+      "includes_zero": true,
+      "mean_difference": 0.0,
+      "paired_match_bootstrap_95ci": [
+        0.0,
+        0.0
+      ]
+    },
+    "kl": {
+      "control_match_quantiles": [
+        2.7936896397780705e-05,
+        3.97474529260459e-05,
+        5.050640168822914e-05
+      ],
+      "control_mean": 3.884687304397024e-05,
+      "dense_match_quantiles": [
+        4.381338875039849e-05,
+        5.522379312120999e-05,
+        6.85076210478049e-05
+      ],
+      "dense_mean": 5.5748652741272053e-05,
+      "includes_zero": false,
+      "mean_difference": 1.6901779697301812e-05,
+      "paired_match_bootstrap_95ci": [
+        1.4498269782829236e-05,
+        1.9452014767296075e-05
+      ]
+    },
+    "resets": {
+      "control_match_quantiles": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "control_mean": 1.0,
+      "dense_match_quantiles": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dense_mean": 1.0,
+      "includes_zero": true,
+      "mean_difference": 0.0,
+      "paired_match_bootstrap_95ci": [
+        0.0,
+        0.0
+      ]
+    },
+    "reward": {
+      "control_match_quantiles": [
+        -30.203003501892084,
+        0.0,
+        4.0531158447265354e-07
+      ],
+      "control_mean": -0.40625014156103134,
+      "dense_match_quantiles": [
+        -13.097001647949218,
+        0.0,
+        4.632484436035125
+      ],
+      "dense_mean": -1.6801669746637344,
+      "includes_zero": true,
+      "mean_difference": -1.273916833102703,
+      "paired_match_bootstrap_95ci": [
+        -11.960265253670514,
+        8.654226466827094
+      ]
+    },
+    "reward/q05": {
+      "control_match_quantiles": [
+        -135.495,
+        -34.00199892520905,
+        -1.0714500617981022
+      ],
+      "control_mean": -47.267086601629856,
+      "dense_match_quantiles": [
+        -130.98806030273437,
+        -30.41999952793121,
+        4.632484436035125
+      ],
+      "dense_mean": -42.45052473172545,
+      "includes_zero": true,
+      "mean_difference": 4.816561869904398,
+      "paired_match_bootstrap_95ci": [
+        -13.374593259943648,
+        23.167366224145507
+      ]
+    },
+    "reward/q50": {
+      "control_match_quantiles": [
+        -30.203003501892084,
+        0.0,
+        4.0531158447265354e-07
+      ],
+      "control_mean": -0.40625014156103134,
+      "dense_match_quantiles": [
+        -13.097001647949218,
+        0.0,
+        4.632484436035125
+      ],
+      "dense_mean": -1.6801669746637344,
+      "includes_zero": true,
+      "mean_difference": -1.273916833102703,
+      "paired_match_bootstrap_95ci": [
+        -11.960265253670514,
+        8.654226466827094
+      ]
+    },
+    "reward/q95": {
+      "control_match_quantiles": [
+        -30.203003501892084,
+        32.102998352050776,
+        137.0781005179882
+      ],
+      "control_mean": 46.45458631850778,
+      "dense_match_quantiles": [
+        -13.097001647949218,
+        31.518000411987302,
+        122.76809932708738
+      ],
+      "dense_mean": 39.09019078239798,
+      "includes_zero": true,
+      "mean_difference": -7.364395536109804,
+      "paired_match_bootstrap_95ci": [
+        -25.735157498456534,
+        10.590128032360216
+      ]
+    },
+    "reward/std": {
+      "control_match_quantiles": [
+        0.0,
+        34.31999969482422,
+        150.54999999999998
+      ],
+      "control_mean": 52.067596066743135,
+      "dense_match_quantiles": [
+        0.0,
+        26.380001068115234,
+        136.40899925231932
+      ],
+      "dense_mean": 45.300397507846355,
+      "includes_zero": true,
+      "mean_difference": -6.76719855889678,
+      "paired_match_bootstrap_95ci": [
+        -23.690527302026748,
+        10.08001072257757
+      ]
+    },
+    "targets/mean": {
+      "control_match_quantiles": [
+        -9.885477922365158,
+        0.18724199180307605,
+        9.112507312341286
+      ],
+      "control_mean": 0.2128372923299528,
+      "dense_match_quantiles": [
+        -13.961037553159734,
+        2.133797777267758,
+        13.120041562078223
+      ],
+      "dense_mean": 1.7725173679937685,
+      "includes_zero": true,
+      "mean_difference": 1.5596800756638158,
+      "paired_match_bootstrap_95ci": [
+        -0.7396549317186307,
+        3.7558262224333325
+      ]
+    },
+    "targets/q05": {
+      "control_match_quantiles": [
+        -84.09214626312254,
+        -35.638779640197754,
+        -16.174526972770696
+      ],
+      "control_mean": -43.45555874854327,
+      "dense_match_quantiles": [
+        -92.89991937637328,
+        -36.219786643981934,
+        -13.496119384765624
+      ],
+      "dense_mean": -42.27515239529312,
+      "includes_zero": true,
+      "mean_difference": 1.180406353250146,
+      "paired_match_bootstrap_95ci": [
+        -7.083672964153812,
+        9.285057214973495
+      ]
+    },
+    "targets/q50": {
+      "control_match_quantiles": [
+        -8.479917955398559,
+        0.07975077629089355,
+        9.292237997055038
+      ],
+      "control_mean": 0.16258564568124712,
+      "dense_match_quantiles": [
+        -11.171003103256226,
+        1.5530447959899902,
+        13.23223395347595
+      ],
+      "dense_mean": 1.7442537751048803,
+      "includes_zero": true,
+      "mean_difference": 1.5816681294236332,
+      "paired_match_bootstrap_95ci": [
+        -0.6509940068761352,
+        3.873816067451844
+      ]
+    },
+    "targets/q95": {
+      "control_match_quantiles": [
+        3.961274478435518,
+        40.05277328491209,
+        81.46002128601071
+      ],
+      "control_mean": 41.855446876958,
+      "dense_match_quantiles": [
+        15.231036279201508,
+        38.96423482894896,
+        85.08878501892086
+      ],
+      "dense_mean": 43.38822646830229,
+      "includes_zero": true,
+      "mean_difference": 1.5327795913442943,
+      "paired_match_bootstrap_95ci": [
+        -6.116574144656776,
+        9.451096165985794
+      ]
+    },
+    "targets/std": {
+      "control_match_quantiles": [
+        9.80384349428113,
+        22.042946945572535,
+        42.64286592374396
+      ],
+      "control_mean": 24.613603419719418,
+      "dense_match_quantiles": [
+        11.327410590556287,
+        24.135215029304696,
+        46.70600107912745
+      ],
+      "dense_mean": 25.865635194471842,
+      "includes_zero": true,
+      "mean_difference": 1.2520317747524268,
+      "paired_match_bootstrap_95ci": [
+        -2.6235463182406558,
+        5.214441724892937
+      ]
+    }
+  },
+  "superseded_reason": "Entropy report included unplanned R=2 decoder padding; rerun with planned frame mask."
+}

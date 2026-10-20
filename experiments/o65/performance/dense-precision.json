@@ -1,6 +1,7 @@
 {
   "attempts": {
     "actor_order_reference": {
+      "accepted": false,
       "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
       "configuration": {
         "actor_shape": [
@@ -153,6 +154,7 @@
       "trainer_sha256": "6df2ead8205512adc817d784c6dfc0e5e1aa7fdc855c9bfb22c75267d3ac0b45"
     },
     "actor_shape_reference": {
+      "accepted": false,
       "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
       "configuration": {
         "actor_shape": [
@@ -304,7 +306,239 @@
       "test_sha256": "be5f19ef15307e82d1d5ecc4da9f66c8931485e7109a4d627611ce041bf64ed7",
       "trainer_sha256": "037461e12f170e251253a6c236b12b769c921a25fad3744780b5a975fc4446ce"
     },
+    "batched_frames": {
+      "accepted": true,
+      "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+      "configuration": {
+        "actor_shape": [
+          32,
+          16
+        ],
+        "bias_shift": [
+          -0.1,
+          0.1
+        ],
+        "critic_residual_std": 0.005,
+        "matches": 16,
+        "reference": "one CUDA graph; actor window order, padding and decision slots; read-only autograd scoring copy",
+        "rollout_control": "recorded student TickLayout with active rows and common teacher-forced actions",
+        "rollout_control_slots": 30,
+        "tf32": false
+      },
+      "control_commit": "aacdfee0",
+      "control_sha256": "8c2be502100f1637f281219d1f14b21d80dd6e4db15f5ed749fdba92e87fe981",
+      "environment": {
+        "cuda": "13.0",
+        "device": "NVIDIA GeForce RTX 3060",
+        "numpy": "2.1.3",
+        "python": "3.14.4",
+        "tf32_cudnn": "False",
+        "tf32_matmul": "False",
+        "torch": "2.11.0+cu130",
+        "world_size": "1"
+      },
+      "format": "hal.o65.dense-precision.v1",
+      "git_sha": "c4e26c27d7d4e1d64a4502c2c467865f35c3ddee",
+      "inputs_sha256": "a66c6c987294a543b43d4e3b28d5a8f3e70fb3ef87969bb61ca7d88dd2c02ce6",
+      "precision": {
+        "actor_gradients": {
+          "absolute_floor": 1e-06,
+          "candidate": {
+            "max": 0.003142302855849266,
+            "relative_l2": 0.02916548996458393,
+            "rmse": 1.672324913886576e-05
+          },
+          "candidate_replays": [
+            {
+              "max": 0.003142302855849266,
+              "relative_l2": 0.02916548996458393,
+              "rmse": 1.672324913886576e-05
+            },
+            {
+              "max": 0.003142302855849266,
+              "relative_l2": 0.03004677418485463,
+              "rmse": 1.7228570173953274e-05
+            },
+            {
+              "max": 0.0035298392176628113,
+              "relative_l2": 0.030459997348068254,
+              "rmse": 1.746550889559872e-05
+            }
+          ],
+          "default": {
+            "max": 0.005615927278995514,
+            "relative_l2": 0.03899459946233743,
+            "rmse": 2.2359178696151647e-05
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "kl": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 4.114583134651184e-05,
+            "relative_l2": 0.010551652174168518,
+            "rmse": 3.206678080349995e-06
+          },
+          "candidate_replays": [
+            {
+              "max": 4.114583134651184e-05,
+              "relative_l2": 0.010551652174168518,
+              "rmse": 3.206678080349995e-06
+            },
+            {
+              "max": 4.114583134651184e-05,
+              "relative_l2": 0.010551652174168518,
+              "rmse": 3.206678080349995e-06
+            },
+            {
+              "max": 4.114583134651184e-05,
+              "relative_l2": 0.010551652174168518,
+              "rmse": 3.206678080349995e-06
+            }
+          ],
+          "default": {
+            "max": 4.929304122924805e-05,
+            "relative_l2": 0.012910220914447684,
+            "rmse": 3.923454046389446e-06
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "log_probs": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 0.08792638778686523,
+            "relative_l2": 0.006580217088861689,
+            "rmse": 0.0046267943822176655
+          },
+          "candidate_replays": [
+            {
+              "max": 0.08792638778686523,
+              "relative_l2": 0.006580217088861689,
+              "rmse": 0.0046267943822176655
+            },
+            {
+              "max": 0.08792638778686523,
+              "relative_l2": 0.006580217088861689,
+              "rmse": 0.0046267943822176655
+            },
+            {
+              "max": 0.08792638778686523,
+              "relative_l2": 0.006580217088861689,
+              "rmse": 0.0046267943822176655
+            }
+          ],
+          "default": {
+            "max": 0.0963125228881836,
+            "relative_l2": 0.008098854065115407,
+            "rmse": 0.005694604294181258
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_critic_gradients": {
+          "absolute_floor": 1e-06,
+          "candidate": {
+            "max": 6.311014294624329e-05,
+            "relative_l2": 0.008572257247330739,
+            "rmse": 9.054666762971261e-07
+          },
+          "candidate_replays": [
+            {
+              "max": 6.311014294624329e-05,
+              "relative_l2": 0.008572257247330739,
+              "rmse": 9.054666762971261e-07
+            }
+          ],
+          "default": {
+            "max": 0.00010426156222820282,
+            "relative_l2": 0.012675418472639642,
+            "rmse": 1.338873613326293e-06
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_kl": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 0.0018045324832201004,
+            "relative_l2": 0.3603075849970481,
+            "rmse": 0.00010949853352477743
+          },
+          "candidate_replays": [
+            {
+              "max": 0.0018045324832201004,
+              "relative_l2": 0.3603075849970481,
+              "rmse": 0.00010949853352477743
+            }
+          ],
+          "default": {
+            "max": 0.0017992649227380753,
+            "relative_l2": 0.36552958611342523,
+            "rmse": 0.00011108551500426175
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_log_probs": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 0.07594847679138184,
+            "relative_l2": 0.005976984624809624,
+            "rmse": 0.004202639291563927
+          },
+          "candidate_replays": [
+            {
+              "max": 0.07594847679138184,
+              "relative_l2": 0.005976984624809624,
+              "rmse": 0.004202639291563927
+            }
+          ],
+          "default": {
+            "max": 0.11095476150512695,
+            "relative_l2": 0.006926970068961512,
+            "rmse": 0.004870609247088732
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_values": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 1.1110141277313232,
+            "relative_l2": 0.01825606201073589,
+            "rmse": 0.29684934993638
+          },
+          "candidate_replays": [
+            {
+              "max": 1.1110141277313232,
+              "relative_l2": 0.01825606201073589,
+              "rmse": 0.29684934993638
+            }
+          ],
+          "default": {
+            "max": 2.722606062889099,
+            "relative_l2": 0.030426069022714768,
+            "rmse": 0.4947375181570297
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        }
+      },
+      "sources": {
+        "hal/inference/graphed_actor.py": "95fc7548f5518920ac78383920330434d8e178fbcea82546dc35ff5232b2e752",
+        "hal/models/action_sequence.py": "fc5a436f11d20f023bbdd9ef4e6d4b9d6326604e2132e512d2288308c64d0d9d",
+        "hal/models/replay_actor.py": "8582f3688f5da04afc5ca863975d4bcb7f070b199553fc2f86b42990f402556d",
+        "hal/models/window_replay.py": "df7d342a3b4dffd0180127a654aff822b8e220b597b4f993e05d26ff3180fd29",
+        "tests/o65_reference.py": "dcd714baf44dd3b3e34f9e15b612934c7179bc5805860ad604e39abc98be9071",
+        "tests/test_window_replay_proxy.py": "b56383b35157ad355377038891b3ea8ec8a8417d0c38aac40de9cfdedc6c1898"
+      },
+      "test_sha256": "96dd9b3338de7d19d3533a3f3b1a005be98a474ddc1d0f47501cc25d6ab7f07a",
+      "trainer_sha256": "178625eb8d5db0f04cbeb1d6664f30022b9760bcbb53e0d34b68f828e462af72"
+    },
     "large_reference": {
+      "accepted": false,
       "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
       "configuration": {
         "actor_shape": [
@@ -446,6 +680,7 @@
       "trainer_sha256": "410c3904ee87c1ec0deaf5fb79c962ff79013e40f81f8959d161d2f9680ef39e"
     },
     "readonly_reference_copy": {
+      "accepted": true,
       "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
       "configuration": {
         "actor_shape": [
@@ -678,6 +913,7 @@
       "trainer_sha256": "50269b65282245702246105f51b7baf8ecd45e4f6d6fd7abec6eeb6a4e975483"
     },
     "recorded_student_layout": {
+      "accepted": false,
       "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
       "configuration": {
         "actor_shape": [
@@ -829,6 +1065,237 @@
       },
       "test_sha256": "4272b39d7238509fe5303fb8feb9936dea7994f4e4d68c9bf5d8fe0ab5beba4a",
       "trainer_sha256": "2db325058e22a9c0cd675215f24677f0e63b2a8cd13fc17e7e2309305ffe5f2b"
+    },
+    "valid_support_sampler": {
+      "accepted": true,
+      "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+      "configuration": {
+        "actor_shape": [
+          32,
+          16
+        ],
+        "bias_shift": [
+          -0.1,
+          0.1
+        ],
+        "critic_residual_std": 0.005,
+        "matches": 16,
+        "reference": "one CUDA graph; actor window order, padding and decision slots; read-only autograd scoring copy",
+        "rollout_control": "recorded student TickLayout with active rows and common teacher-forced actions",
+        "rollout_control_slots": 30,
+        "tf32": false
+      },
+      "control_commit": "aacdfee0",
+      "control_sha256": "8c2be502100f1637f281219d1f14b21d80dd6e4db15f5ed749fdba92e87fe981",
+      "environment": {
+        "cuda": "13.0",
+        "device": "NVIDIA GeForce RTX 3060",
+        "numpy": "2.1.3",
+        "python": "3.14.4",
+        "tf32_cudnn": "False",
+        "tf32_matmul": "False",
+        "torch": "2.11.0+cu130",
+        "world_size": "1"
+      },
+      "format": "hal.o65.dense-precision.v1",
+      "git_sha": "694d75a169306316e48855ba91e15cab1cf02457",
+      "inputs_sha256": "3828dc424f01fbcdba721734a8aaa48210cb562cbc5da3317870a05ecfa8383b",
+      "precision": {
+        "actor_gradients": {
+          "absolute_floor": 1e-06,
+          "candidate": {
+            "max": 0.0030941180884838104,
+            "relative_l2": 0.02904344045738764,
+            "rmse": 1.6653278650933902e-05
+          },
+          "candidate_replays": [
+            {
+              "max": 0.0030941180884838104,
+              "relative_l2": 0.02904344045738764,
+              "rmse": 1.6653278650933902e-05
+            },
+            {
+              "max": 0.0030941180884838104,
+              "relative_l2": 0.029037088096772357,
+              "rmse": 1.6649636257686012e-05
+            },
+            {
+              "max": 0.0030941180884838104,
+              "relative_l2": 0.029538226090172058,
+              "rmse": 1.6936984812651453e-05
+            }
+          ],
+          "default": {
+            "max": 0.005611807107925415,
+            "relative_l2": 0.03907288162387864,
+            "rmse": 2.24040807538658e-05
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "kl": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 4.12575900554657e-05,
+            "relative_l2": 0.010538723222166323,
+            "rmse": 3.2027489338710364e-06
+          },
+          "candidate_replays": [
+            {
+              "max": 4.12575900554657e-05,
+              "relative_l2": 0.010538723222166323,
+              "rmse": 3.2027489338710364e-06
+            },
+            {
+              "max": 4.12575900554657e-05,
+              "relative_l2": 0.010538723222166323,
+              "rmse": 3.2027489338710364e-06
+            },
+            {
+              "max": 4.12575900554657e-05,
+              "relative_l2": 0.010538723222166323,
+              "rmse": 3.2027489338710364e-06
+            }
+          ],
+          "default": {
+            "max": 4.929304122924805e-05,
+            "relative_l2": 0.012910220914447684,
+            "rmse": 3.923454046389446e-06
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "log_probs": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 0.08792638778686523,
+            "relative_l2": 0.006582395519803908,
+            "rmse": 0.004628326117707452
+          },
+          "candidate_replays": [
+            {
+              "max": 0.08792638778686523,
+              "relative_l2": 0.006582395519803908,
+              "rmse": 0.004628326117707452
+            },
+            {
+              "max": 0.08792638778686523,
+              "relative_l2": 0.006582395519803908,
+              "rmse": 0.004628326117707452
+            },
+            {
+              "max": 0.08792638778686523,
+              "relative_l2": 0.006582395519803908,
+              "rmse": 0.004628326117707452
+            }
+          ],
+          "default": {
+            "max": 0.0963125228881836,
+            "relative_l2": 0.008098854065115407,
+            "rmse": 0.005694604294181258
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_critic_gradients": {
+          "absolute_floor": 1e-06,
+          "candidate": {
+            "max": 6.311386823654175e-05,
+            "relative_l2": 0.008567557418049916,
+            "rmse": 9.054723553682894e-07
+          },
+          "candidate_replays": [
+            {
+              "max": 6.311386823654175e-05,
+              "relative_l2": 0.008567557418049916,
+              "rmse": 9.054723553682894e-07
+            }
+          ],
+          "default": {
+            "max": 0.00010426575317978859,
+            "relative_l2": 0.012668899092818176,
+            "rmse": 1.3389274610905709e-06
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_kl": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 0.001804528757929802,
+            "relative_l2": 0.3600110982715113,
+            "rmse": 0.00010940843033792359
+          },
+          "candidate_replays": [
+            {
+              "max": 0.001804528757929802,
+              "relative_l2": 0.3600110982715113,
+              "rmse": 0.00010940843033792359
+            }
+          ],
+          "default": {
+            "max": 0.0017992649227380753,
+            "relative_l2": 0.36552958611342523,
+            "rmse": 0.00011108551500426175
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_log_probs": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 0.07594847679138184,
+            "relative_l2": 0.005976984624809624,
+            "rmse": 0.004202639291563927
+          },
+          "candidate_replays": [
+            {
+              "max": 0.07594847679138184,
+              "relative_l2": 0.005976984624809624,
+              "rmse": 0.004202639291563927
+            }
+          ],
+          "default": {
+            "max": 0.11095476150512695,
+            "relative_l2": 0.006926970068961512,
+            "rmse": 0.004870609247088732
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        },
+        "rollout_values": {
+          "absolute_floor": 1e-05,
+          "candidate": {
+            "max": 1.1110141277313232,
+            "relative_l2": 0.01825606201073589,
+            "rmse": 0.29684934993638
+          },
+          "candidate_replays": [
+            {
+              "max": 1.1110141277313232,
+              "relative_l2": 0.01825606201073589,
+              "rmse": 0.29684934993638
+            }
+          ],
+          "default": {
+            "max": 2.722606062889099,
+            "relative_l2": 0.030426069022714768,
+            "rmse": 0.4947375181570297
+          },
+          "passed": true,
+          "relative_l2_floor": 1e-05
+        }
+      },
+      "sources": {
+        "hal/inference/graphed_actor.py": "95fc7548f5518920ac78383920330434d8e178fbcea82546dc35ff5232b2e752",
+        "hal/models/action_sequence.py": "fc5a436f11d20f023bbdd9ef4e6d4b9d6326604e2132e512d2288308c64d0d9d",
+        "hal/models/replay_actor.py": "8582f3688f5da04afc5ca863975d4bcb7f070b199553fc2f86b42990f402556d",
+        "hal/models/window_replay.py": "df7d342a3b4dffd0180127a654aff822b8e220b597b4f993e05d26ff3180fd29",
+        "tests/o65_reference.py": "dcd714baf44dd3b3e34f9e15b612934c7179bc5805860ad604e39abc98be9071",
+        "tests/test_window_replay_proxy.py": "b56383b35157ad355377038891b3ea8ec8a8417d0c38aac40de9cfdedc6c1898"
+      },
+      "test_sha256": "7a95c09aa5e749d1f93b2a3a555e3c520f0777941d8e5f6176d189107891af53",
+      "trainer_sha256": "467d65fb27bb9cc76c1bd64b0aa4424175b4d05e695362ddeadde083d1beaee6"
     }
   },
   "diagnosis": {
