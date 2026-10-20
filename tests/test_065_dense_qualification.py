@@ -97,6 +97,8 @@ class ForcedControl(control.TransformerPolicy):
 
 def qualify(output: Path) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
+    if any((output / name).exists() for name in ("inputs.pt", "precision.json")):
+        raise FileExistsError("precision evidence already exists")
     print("dense precision: initialize", flush=True)
     random.seed(65)
     np.random.seed(65)
@@ -338,6 +340,8 @@ def qualify(output: Path) -> dict[str, Any]:
 def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_resume: bool) -> dict[str, Any]:
     if mode not in ("dense", "control"):
         raise ValueError("statistics mode must be dense or control")
+    if verify_resume and mode != "dense":
+        raise ValueError("the recorded control is not a supported checkpoint writer")
     output.mkdir(parents=True, exist_ok=False)
     module = exp if mode == "dense" else control
     torch.set_num_threads(2)
@@ -433,8 +437,6 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
         }
         (output / "statistics.json").write_text(json.dumps(result, indent=2))
         if verify_resume:
-            if mode != "dense":
-                raise ValueError("the recorded control is not a supported checkpoint writer")
             provenance = {
                 "git_sha": result["git_sha"],
                 "checkpoint_sha256": checkpoint.checkpoint_sha256,
@@ -444,6 +446,19 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
             }
             exp.verify_checkpoint_resume(run, output / "resume", provenance)
         return result
+
+
+@pytest.mark.parametrize("name", ["inputs.pt", "precision.json"])
+def test_precision_rejects_existing_evidence_before_cuda(name: str, tmp_path: Path) -> None:
+    (tmp_path / name).write_bytes(b"recorded evidence")
+    with pytest.raises(FileExistsError, match="evidence already exists"):
+        qualify(tmp_path)
+
+
+def test_statistics_rejects_control_checkpoint_writes_before_cuda(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not a supported checkpoint writer"):
+        trace_statistics(tmp_path / "new", "control", verify_resume=True)
+    assert not (tmp_path / "new").exists()
 
 
 @pytest.mark.integration
