@@ -203,6 +203,8 @@ def graph_call(operation: Callable[[], object]) -> Callable[[], object]:
 
 
 def profile_shapes(operation: Callable[[], object], output: Path) -> Counter[Gemm]:
+    operation()
+    torch.cuda.synchronize()
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         record_shapes=True,
