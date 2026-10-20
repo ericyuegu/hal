@@ -1,0 +1,355 @@
+{
+  "format": "hal.o65.async-artifacts.v1",
+  "artifacts": [
+    {
+      "path": "runs/async/before16-clean/allocator.json",
+      "bytes": 400335,
+      "sha256": "6fd93b1068a36e43041c7f27e902ef5941cf40d3ff07a3fb7830b5a04bed4ecd"
+    },
+    {
+      "path": "runs/async/before16-clean/resolved.json",
+      "bytes": 3338,
+      "sha256": "43d972cbf56532500496e12d9ed037dca61f40c1513a11e7ce8e92ec59c5f695"
+    },
+    {
+      "path": "runs/async/before16-clean/floor-layout.json",
+      "bytes": 8065,
+      "sha256": "67194426187e681d73a63673c2d6af4a29e2c1af9fac5df2f3808855d7b639e9"
+    },
+    {
+      "path": "runs/async/before16-clean/timed.json",
+      "bytes": 273890,
+      "sha256": "3c0ac3d3846f48224963123089559c7dbc2e3c636ed7d06de5b76538b3ccb1b5"
+    },
+    {
+      "path": "runs/async/before16-clean/nsys.json",
+      "bytes": 274661,
+      "sha256": "417ed26e494fe06738dda09293e55555f52d6a8e55bbb41b10c0878adbfa3db2"
+    },
+    {
+      "path": "runs/async/before16-clean/warm.jsonl",
+      "bytes": 4571,
+      "sha256": "ff0c120d7419b2b3478298d05634f9336626077a235d80c8b794277de9bd2190"
+    },
+    {
+      "path": "runs/async/before16-clean.sqlite",
+      "bytes": 85463040,
+      "sha256": "4a3b61689b2ebbfa1141cb7f7b954a7d500a5d70a5701fed13d91f327223887f"
+    },
+    {
+      "path": "runs/async/before16-clean.nsys-rep",
+      "bytes": 26894769,
+      "sha256": "b7ba0d349fa0a651259f61c0fafa4207517dfa01a0a0b0d38483b47771e90f7e"
+    },
+    {
+      "path": "runs/async/before16-clean-ticks.json",
+      "bytes": 26867,
+      "sha256": "a9284a2a4455f5c1f3bc6211c39ebf7866b83f847f8c94bc186aad871ed919c5"
+    },
+    {
+      "path": "runs/async/before16-clean-process.json",
+      "bytes": 999,
+      "sha256": "c360fd32ffc1da35dffac0513a1b91c5e9006db7b8e7c4d0df91f1ff1dce6a9f"
+    },
+    {
+      "path": "runs/async/before64-clean/allocator.json",
+      "bytes": 440995,
+      "sha256": "f02d637b22e3cd21862d53e003b0e2433531cde19de6aad552ee8424e87d7e49"
+    },
+    {
+      "path": "runs/async/before64-clean/resolved.json",
+      "bytes": 3338,
+      "sha256": "723fe123f38605d22096ae41bc02eb24f0cd68e21c8f094692bc0d5e90a341a5"
+    },
+    {
+      "path": "runs/async/before64-clean/floor-layout.json",
+      "bytes": 8068,
+      "sha256": "3833320003ff4534e01bedaba60570ae30c8bbe30ca8626fabaa5175c230f007"
+    },
+    {
+      "path": "runs/async/before64-clean/timed.json",
+      "bytes": 273962,
+      "sha256": "71b3973b4e1d8ab20a9996fbb53fcb57bc52b9fd4203beac583576c8c4d474c1"
+    },
+    {
+      "path": "runs/async/before64-clean/nsys.json",
+      "bytes": 273468,
+      "sha256": "5970ca83aea0f5069018c4f56031b467266d9fd08ca9183ebb11a8ee264d756c"
+    },
+    {
+      "path": "runs/async/before64-clean/warm.jsonl",
+      "bytes": 5014,
+      "sha256": "b69fce0796d6e2b205d408bc8de84a0e2a76cf3a078b0dee872ee21d42c6be71"
+    },
+    {
+      "path": "runs/async/before64-clean.sqlite",
+      "bytes": 93249536,
+      "sha256": "9e3b212a1bdb6b64339db1efa2c7998411376da341ed737cc7a0c060cb6897e2"
+    },
+    {
+      "path": "runs/async/before64-clean.nsys-rep",
+      "bytes": 29145373,
+      "sha256": "44a0274738f1a34e432f82308b4fdcbfe698c80e494439df4818710580285d60"
+    },
+    {
+      "path": "runs/async/before64-clean-ticks.json",
+      "bytes": 26871,
+      "sha256": "7e6460f25305b524ac97a9edfb6f7235cb8e691a032656902f39d14f35d9acb6"
+    },
+    {
+      "path": "runs/async/before64-clean-process.json",
+      "bytes": 999,
+      "sha256": "9432b5af9ca0aac2e3998f5891faf2ae2928ae102d6aa39f8bbe51f9a545f09f"
+    },
+    {
+      "path": "runs/async/after16-cold/allocator.json",
+      "bytes": 400567,
+      "sha256": "5f27d9c4c147491bf1fbc97c7035670f770f53a05d05ec63509ef194f55bd23d"
+    },
+    {
+      "path": "runs/async/after16-cold/compilation.json",
+      "bytes": 2677,
+      "sha256": "2fb10772b0041434f2d449e7e9269fc0424d0a85fc62acfa3d87b27fad3bab4d"
+    },
+    {
+      "path": "runs/async/after16-cold/resolved.json",
+      "bytes": 3739,
+      "sha256": "945b76a0dbcc807d4c7f3e154b3c2bb8111582b47cdf42115737293e34bc26ec"
+    },
+    {
+      "path": "runs/async/after16-cold/floor-layout.json",
+      "bytes": 8065,
+      "sha256": "67194426187e681d73a63673c2d6af4a29e2c1af9fac5df2f3808855d7b639e9"
+    },
+    {
+      "path": "runs/async/after16-cold/timed.json",
+      "bytes": 354883,
+      "sha256": "145079356f1e2458137cfe4f6655951bf79f3a15851154e3b11ee28e639343b5"
+    },
+    {
+      "path": "runs/async/after16-cold/nsys.json",
+      "bytes": 355179,
+      "sha256": "1f4765106bc989fd9628bc70bb90d05d9e62f3f1ecde5756d6181e020f5545ce"
+    },
+    {
+      "path": "runs/async/after16-cold/warm.jsonl",
+      "bytes": 4574,
+      "sha256": "5b6c381feb48c747664c6643065d6235f5ea17ce273cf56ae99608ef7f9f8643"
+    },
+    {
+      "path": "runs/async/after16-cold.sqlite",
+      "bytes": 76201984,
+      "sha256": "32604cdb463ccc41f832798f9447b5fb1569bb6440f71ba0559dda5e57757865"
+    },
+    {
+      "path": "runs/async/after16-cold.nsys-rep",
+      "bytes": 24476060,
+      "sha256": "7ff32bc0f62cb72609ae636ea216fc426724016f34e6e6921bb0484bf22ac4fb"
+    },
+    {
+      "path": "runs/async/after16-cold-ticks.json",
+      "bytes": 26855,
+      "sha256": "dc17bd6136e091873bfc6db4ae2a5df04b5b5598b22d0c0fb120cd104a908781"
+    },
+    {
+      "path": "runs/async/after16-cold-process.json",
+      "bytes": 1088,
+      "sha256": "2b7cdb56c438a57d03cb12cc5b2bbd4ee1baafa8852e256056bd635afae5c5df"
+    },
+    {
+      "path": "runs/async/after16-warm/allocator.json",
+      "bytes": 400748,
+      "sha256": "dec81f98ed7377aa6d98cc1c4d4141e6490700f1d3c67c5dfe2e55fc8627eaad"
+    },
+    {
+      "path": "runs/async/after16-warm/compilation.json",
+      "bytes": 2679,
+      "sha256": "f28315e86601ceb059e6de5ad579259ba37c4a45bd854a22a2f1d0ef0aa75499"
+    },
+    {
+      "path": "runs/async/after16-warm/resolved.json",
+      "bytes": 3821,
+      "sha256": "a5d4025da46b21768c83fbb04f78ebf18da3f744cbac6d6bbb9fe1887b12b9b6"
+    },
+    {
+      "path": "runs/async/after16-warm/floor-layout.json",
+      "bytes": 8065,
+      "sha256": "67194426187e681d73a63673c2d6af4a29e2c1af9fac5df2f3808855d7b639e9"
+    },
+    {
+      "path": "runs/async/after16-warm/timed.json",
+      "bytes": 354904,
+      "sha256": "5343ee264858ac9ff24c7137caadd9891f3dc2299093d29a15aa87849e32c10f"
+    },
+    {
+      "path": "runs/async/after16-warm/nsys.json",
+      "bytes": 355090,
+      "sha256": "5643b8b6e74ff88a961430138aae7e41713d265453dc5d72d8703e45d8d62360"
+    },
+    {
+      "path": "runs/async/after16-warm/warm.jsonl",
+      "bytes": 4565,
+      "sha256": "fb52b39a54338d3dd066c5948b71d0c740fb8d38a745e75518f881f0c66cb027"
+    },
+    {
+      "path": "runs/async/after16-warm.sqlite",
+      "bytes": 76021760,
+      "sha256": "db7279941b4e76976ee71a339244850c99c4169d971addc3313674cfd0a571a4"
+    },
+    {
+      "path": "runs/async/after16-warm.nsys-rep",
+      "bytes": 24557810,
+      "sha256": "acc2f302b6afc114fb470e4e5f38f5079b6ebe4634c43598245b7b73d584430d"
+    },
+    {
+      "path": "runs/async/after16-warm-ticks.json",
+      "bytes": 26863,
+      "sha256": "1662801665060bc6e4fa85c28cce921aaf15ce427646dfb12cb2700b33ad5fd6"
+    },
+    {
+      "path": "runs/async/after16-warm-process.json",
+      "bytes": 1088,
+      "sha256": "5e9558d90a67a493f214251e0e2aa094d26fe28050b5fff875c91db1e3100e0d"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/allocator.json",
+      "bytes": 440114,
+      "sha256": "b302a586b96ecfe0859bb53e25414735aaa13427a2274ed7c4ed57cd14bcad35"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/compilation.json",
+      "bytes": 2840,
+      "sha256": "b9d88798812b34b7fe013f651a7dfc7e47d3b2b53d5bb0d06ce82d59531334d3"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/resolved.json",
+      "bytes": 3826,
+      "sha256": "c49280c1c2bad61ca0c806baf1e913e25a11d3cb2f3c31ebecb82c96108c55e8"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/floor-layout.json",
+      "bytes": 8068,
+      "sha256": "3833320003ff4534e01bedaba60570ae30c8bbe30ca8626fabaa5175c230f007"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/timed.json",
+      "bytes": 354844,
+      "sha256": "bd75d8299d33836fa063631e9a941d180fdfb74f886a5e0c6e8db26ebfa34376"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/nsys.json",
+      "bytes": 354699,
+      "sha256": "acda6e9cebdf92a7467a31ccfa1b2e30a79c9f99781dd05fa811bf31a11bff1b"
+    },
+    {
+      "path": "runs/async/after64-new-shapes/warm.jsonl",
+      "bytes": 5007,
+      "sha256": "fb465c71fd152c0e382c4d509c6f491fe4a9c94348ff837d9732820eb34ba4f6"
+    },
+    {
+      "path": "runs/async/after64-new-shapes.sqlite",
+      "bytes": 82128896,
+      "sha256": "9c3984e626ac2ed9faf6821a8658cdd9484ab3970a7f9a3748fac21a38c2d772"
+    },
+    {
+      "path": "runs/async/after64-new-shapes.nsys-rep",
+      "bytes": 26764357,
+      "sha256": "5560faec65f8859fdc7177dd3c032e6a9e8169a81fbf04276f2df67f548f529c"
+    },
+    {
+      "path": "runs/async/after64-new-shapes-ticks.json",
+      "bytes": 26863,
+      "sha256": "9e978a4fe4677eef9d08a51cd9204a7f067e3fb6cf9fc79426cd1c0928d7a3f3"
+    },
+    {
+      "path": "runs/async/after64-new-shapes-process.json",
+      "bytes": 1106,
+      "sha256": "1f2950e6783995fec1730dac7cfd92ed8a6af1e45e87d7d3d145adf4d609405f"
+    },
+    {
+      "path": "runs/async/after64-warm/allocator.json",
+      "bytes": 439962,
+      "sha256": "fe24ab62bbe2371f4c23a6a0c288a8bd4702ce6eb96f6b202f89f739f4876d78"
+    },
+    {
+      "path": "runs/async/after64-warm/compilation.json",
+      "bytes": 2845,
+      "sha256": "619af5c03c4bef920cebc51ea8c4dfdb0d74589284ed4b8732843b2373f85245"
+    },
+    {
+      "path": "runs/async/after64-warm/resolved.json",
+      "bytes": 3821,
+      "sha256": "2baf8e23fad3b2a6755c2bd0c8bfb146806b452e56617ee2d52945a3a59d78f5"
+    },
+    {
+      "path": "runs/async/after64-warm/floor-layout.json",
+      "bytes": 8068,
+      "sha256": "3833320003ff4534e01bedaba60570ae30c8bbe30ca8626fabaa5175c230f007"
+    },
+    {
+      "path": "runs/async/after64-warm/timed.json",
+      "bytes": 354929,
+      "sha256": "bdc1fd666cebee2066cc5c59c6acbc1fad28aef033cb96d3ed9abd9e1e7b0edc"
+    },
+    {
+      "path": "runs/async/after64-warm/nsys.json",
+      "bytes": 354668,
+      "sha256": "2505f8a1b91405cf5fd8b2516287a7e8d356b3577814839d520f575ac0b99e1a"
+    },
+    {
+      "path": "runs/async/after64-warm/warm.jsonl",
+      "bytes": 5011,
+      "sha256": "2b02f957f94c441578f6a63e2df390faf14dc2cc88a97a50a091e20c97a36761"
+    },
+    {
+      "path": "runs/async/after64-warm.sqlite",
+      "bytes": 81838080,
+      "sha256": "ec727e4e05bdf4a2c0cfbd438666d48b1ce95d1595ecb7c749b992156e523923"
+    },
+    {
+      "path": "runs/async/after64-warm.nsys-rep",
+      "bytes": 26789395,
+      "sha256": "aeb87bc66e28e487e78e1efd38715c0559a8e2fc7c5c1baa5625c62a0c9d6cb9"
+    },
+    {
+      "path": "runs/async/after64-warm-ticks.json",
+      "bytes": 26871,
+      "sha256": "d12d7867467ff15376a24c71a20cf40b51c2c7b3cb6702a0c73eed77083d9650"
+    },
+    {
+      "path": "runs/async/after64-warm-process.json",
+      "bytes": 1088,
+      "sha256": "41d338914d030d12be04b5a5a27edbeaabeebe8a1b0948d30d154d0b0f09fc1c"
+    },
+    {
+      "path": "runs/async/native-resume16/resume-check.json",
+      "bytes": 113365,
+      "sha256": "32c4d33d72c5e43b716d4c1e085317134e01adc4c1b8f9b4a5fef7bb6ea9cb16"
+    },
+    {
+      "path": "runs/async/native-resume16-process.json",
+      "bytes": 876,
+      "sha256": "535ece3c6f2e41974813dfbdd801a129056ad4c637f35ab56d272aad4a7e2798"
+    },
+    {
+      "path": "runs/async/simulator-floor.json",
+      "bytes": 34968,
+      "sha256": "3d8b170c8f95dcc4f3b6577d5b13bb1628b1b0ee4f654448e21d862afd7c5666"
+    },
+    {
+      "path": "runs/async/simulator-floor-warm.json",
+      "bytes": 36196,
+      "sha256": "82f9576ec308c24bca456493e229ffe6b722a5c1258407ad0d688b7cd228321b"
+    },
+    {
+      "path": "runs/async/baseline.py",
+      "bytes": 248891,
+      "sha256": "a647269ab3d5824b5f82c0b4987f87ec5001c6f5aebe84b9beccedd71ad17dfe"
+    },
+    {
+      "path": "experiments/o65/performance/async-baseline.patch",
+      "bytes": 661,
+      "sha256": "34cad95bab8371137528fd6bf0af7a68dfcc06056ac48a0fc980a686b6b027f9"
+    }
+  ]
+}
