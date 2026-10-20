@@ -396,6 +396,8 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
     random.seed(65)
     np.random.seed(65)
     torch.use_deterministic_algorithms(False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     checkpoint = module.load_evaluation_checkpoint(
         ROOT / "runs/proxy/final.pt", device=torch.device("cuda"), decoder_precision="bf16"
     )
