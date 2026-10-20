@@ -619,11 +619,10 @@ mode as training. It checks exact restoration of model, both optimizers,
 scheduler, pool and simulator state, sampler cursor, counter key, progress and
 every RNG state. It repeats the next update twice as controls, rewinding the
 same boundary between them, then compares a third resumed update. For the
-model and each optimizer state family, RMS and maximum error may each reach
-twice the corresponding control spread plus eight dtype rounding units at the
-control scale (minimum scale 1e-3). Per-tensor errors remain diagnostic because
+model and each optimizer state family, RMS error may reach twice the control spread plus eight dtype rounding units at the
+control scale (minimum scale 1e-3). Maximum and per-tensor errors remain diagnostic because
 reduction noise can move between tensors. Integer update state and scheduler
-progress must match exactly. Report v4 records the errors and tolerances.
+progress must match exactly. Report v5 records the errors and tolerances.
 
 ### Random numbers
 

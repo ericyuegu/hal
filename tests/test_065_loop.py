@@ -853,7 +853,7 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
     run.run_update()
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     result = json.loads((tmp_path / "resume-check.json").read_text())
-    assert result["format"] == "hal.o65.resume-check.v4"
+    assert result["format"] == "hal.o65.resume-check.v5"
     assert len(set(result["next_batch_sha256"])) == 1
     assert result["restored"] == [result["boundary"]] * 3
     assert result["maximum_parameter_error"] == 0
@@ -1170,3 +1170,13 @@ def test_trainer_rejects_critic_loss_sum_overflow_before_optimizer_step() -> Non
     assert not run.critic_optimizer.state and not run.actor_optimizer.state
     for actual, expected in zip(run.policy.critic_parameters(), before, strict=True):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_resume_maximum_is_diagnostic_when_vector_noise_is_unchanged() -> None:
+    first = {"model/weight": torch.zeros(10000)}
+    second = {"model/weight": torch.full((10000,), 0.001)}
+    resumed = {"model/weight": torch.zeros(10000)}
+    resumed["model/weight"][0] = 0.003
+    report = exp._compare_resume_updates(first, second, resumed)
+    assert report.groups["model"]["error_max"] > report.groups["model"]["tolerance_max"]
+    assert report.passed

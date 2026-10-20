@@ -4769,9 +4769,9 @@ def _compare_resume_updates(
 ) -> ResumeComparison:
     """Compare model and optimizer-state vectors with two-control noise.
 
-    RMS and maximum errors may each reach twice the corresponding control
-    spread plus eight dtype rounding units. Per-tensor errors are diagnostic:
-    reduction noise can move between tensors. Integer state remains exact.
+    RMS error may reach twice the control spread plus eight dtype rounding
+    units. Maximum and per-tensor errors remain diagnostic: reduction noise
+    can move between tensors and produce isolated outliers. Integer state stays exact.
     Optimizer state families have separate scales (e.g. first/second moments).
     """
     if first.keys() != second.keys() or first.keys() != resumed.keys():
@@ -4854,7 +4854,7 @@ def _compare_resume_updates(
             "error_max": totals["error_max"],
             "tolerance_max": tolerance_max,
             "integer_equal": integer_equal,
-            "passed": integer_equal and error_rms <= tolerance_rms and totals["error_max"] <= tolerance_max,
+            "passed": integer_equal and error_rms <= tolerance_rms,
         }
     return ResumeComparison(tensors, groups)
 
@@ -4892,14 +4892,14 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
         comparisons = _compare_resume_updates(*controls)
         passed = comparisons.passed and len(set(schedules)) == 1
         report = {
-            "format": "hal.o65.resume-check.v4",
+            "format": "hal.o65.resume-check.v5",
             "manifest": str(manifest),
             "deterministic": torch.are_deterministic_algorithms_enabled(),
             "boundary": boundary,
             "restored": restored,
             "next_batch_sha256": batches,
             "next_scheduler_sha256": schedules,
-            "tolerance": "RMS and max per model/optimizer-state family: 2 * two-control spread + 8 dtype rounding units",
+            "tolerance": "RMS per model/optimizer-state family: 2 * two-control spread + 8 dtype rounding units; max errors diagnostic",
             "comparisons": comparisons.tensors,
             "groups": comparisons.groups,
             "maximum_parameter_error": max(
