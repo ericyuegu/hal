@@ -149,6 +149,24 @@ def test_floor_command_traces_one_complete_update() -> None:
         Request("test", "a" * 40, mode="floor", matches=256)
 
 
+def test_extra_model_command_requires_pinned_source_artifacts() -> None:
+    request = Request(
+        "extra",
+        "a" * 40,
+        mode="floor-extra",
+        source_name="baseline",
+        source_inputs_sha256="b" * 64,
+        source_layout_sha256="c" * 64,
+    )
+    argv = command(request, tuple(range(16)))
+    assert "--extra-only" in argv
+    assert argv[argv.index("--inputs") + 1] == "/o65-results/baseline/profile/floor-inputs.pt"
+    assert argv[argv.index("--expected-inputs-sha256") + 1] == "b" * 64
+    for changes in ({"source_name": None}, {"source_layout_sha256": "bad"}, {"mode": "profile"}):
+        with pytest.raises(ValueError):
+            dataclasses.replace(request, **changes)
+
+
 def test_cpu_selection_uses_distinct_available_ids() -> None:
     assert select_cpus(set(range(1, 37, 2))) == tuple(range(1, 35, 2))
     with pytest.raises(ValueError, match="17 available CPU IDs"):

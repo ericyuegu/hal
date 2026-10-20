@@ -87,3 +87,22 @@ def test_layout_rejects_schema_and_shape_changes(tmp_path: Path, change: dict[st
             floor.read_layout(path)
     else:
         assert floor.read_layout(path)["tick_layouts"][0]["batch"] == 8
+
+
+@pytest.mark.parametrize("bad", ["inputs", "layout"])
+def test_extra_probes_reject_changed_input_bytes_before_cuda(tmp_path: Path, bad: str) -> None:
+    inputs, layout = tmp_path / "inputs.pt", tmp_path / "layout.json"
+    inputs.write_bytes(b"model inputs")
+    layout.write_bytes(b"layout")
+    args = floor.Args(
+        checkpoint=tmp_path / "unused.pt",
+        inputs=inputs,
+        layout=layout,
+        output=tmp_path / "out",
+        extra_only=True,
+        expected_inputs_sha256="0" * 64 if bad == "inputs" else floor.sha256(inputs),
+        expected_layout_sha256="0" * 64 if bad == "layout" else floor.sha256(layout),
+    )
+    with pytest.raises(ValueError, match="identity mismatch"):
+        floor.main(args)
+    assert not args.output.exists()

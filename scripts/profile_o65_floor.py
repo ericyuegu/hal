@@ -27,6 +27,7 @@ from hal.eval.self_play_checkpoint import sha256
 from hal.inference.cuda_graph import CapturedCall
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.decision_decoder import DecisionDecoder
+from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import KVCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
 from hal.models.action_sequence import DecisionOutput
@@ -494,6 +495,83 @@ def critic_benchmark(
     }, shapes
 
 
+def prefill_benchmark(
+    model: SelfPlayTransformer, batch: int, directory: Path
+) -> tuple[dict[str, object], Counter[Gemm]]:
+    cache = BlockRestartCache(model, batch, torch.device("cuda"), dtype=torch.bfloat16)
+    tokens = torch.randn(batch, 128, model.cfg.d_model, device="cuda", dtype=torch.bfloat16)
+    lengths = torch.full((batch,), 128, device="cuda", dtype=torch.long)
+
+    @torch.no_grad()
+    def prefill() -> None:
+        with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+            cache.restart(tokens, lengths)
+
+    shapes = profile_shapes(prefill, directory / f"prefill-b{batch}.json")
+    return {
+        "batch": batch,
+        "frames": 128,
+        "execution": "eager, matching the trainer's validated block restart",
+        "latency": dataclasses.asdict(measure(prefill)),
+        "gemms": [{**dataclasses.asdict(s), "calls": n} for s, n in sorted(shapes.items())],
+    }, shapes
+
+
+def bootstrap_benchmark(
+    model: SelfPlayTransformer,
+    features: dict[str, Tensor],
+    observed: Tensor,
+    slots: ReplaySlots,
+    count: int,
+    directory: Path,
+) -> tuple[dict[str, object], Counter[Gemm]]:
+    indices = torch.arange(count, device="cuda") % len(observed)
+    features = {name: value[indices] for name, value in features.items()}
+    observed = observed[indices]
+    ctx_pad = torch.zeros(count, device="cuda", dtype=torch.long)
+    positions = slots.positions_WK[indices, :1].contiguous()
+    starts = slots.history_starts_WL[indices].contiguous()
+    prefix = slots.forced_queue_WKD4[indices, :1].contiguous()
+    delay = slots.delay_WK[indices, :1].contiguous()
+    condition = slots.condition_WK3[indices, :1].contiguous()
+    opponent_condition = slots.opponent_condition_WK3[indices, 0].contiguous()
+    queue = slots.opponent_queue_WKQ4[indices, 0].contiguous()
+    lengths = slots.opponent_lengths_WK[indices, 0].contiguous()
+    compiled_queue = torch.compile(
+        model.temporal.replay_window_queue_state,
+        fullgraph=True,
+        dynamic=False,
+        options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+    )
+
+    @torch.no_grad()
+    def forward(*, shapes: bool = False) -> Tensor:
+        with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+            hidden = model(features, ctx_pad, observed)
+            operation = model.temporal.replay_window_queue_state if shapes else compiled_queue
+            state = operation(hidden.float(), observed, positions, starts, prefix, delay, condition)
+        rows = torch.arange(count, device="cuda")
+        return model.self_play_value(
+            hidden[rows, positions[:, 0]],
+            state[:, 0],
+            condition[:, 0],
+            opponent_condition,
+            queue,
+            lengths,
+            validate=False,
+        )
+
+    shapes = profile_shapes(partial(forward, shapes=True), directory / f"bootstrap-b{count}.json")
+    with prepared_shape_compilation(64):
+        operation = graph_call(forward)
+        latency = measure(operation)
+    return {
+        "batch": count,
+        "latency": dataclasses.asdict(latency),
+        "gemms": [{**dataclasses.asdict(s), "calls": n} for s, n in sorted(shapes.items())],
+    }, shapes
+
+
 def muon_benchmark(groups: list[OptimizerGroup], directory: Path) -> tuple[dict[str, object], Counter[Gemm]]:
     parameters = []
     for group in groups:
@@ -524,9 +602,17 @@ class Args:
     inputs: Path
     layout: Path
     output: Path
+    extra_only: bool = False
+    expected_inputs_sha256: str | None = None
+    expected_layout_sha256: str | None = None
 
 
 def main(args: Args) -> None:
+    if args.extra_only and (args.expected_inputs_sha256 is None or args.expected_layout_sha256 is None):
+        raise ValueError("extra probes require pinned input and layout hashes")
+    for path, expected in ((args.inputs, args.expected_inputs_sha256), (args.layout, args.expected_layout_sha256)):
+        if expected is not None and sha256(path) != expected:
+            raise ValueError(f"floor input identity mismatch: {path}")
     if sha256(args.checkpoint) != PROXY_SHA256:
         raise ValueError("floor measurements require the recorded O63 proxy")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -547,6 +633,7 @@ def main(args: Args) -> None:
     model.load_state_dict(raw["model"], strict=True)
     result: dict[str, object] = {
         "format": "hal.o65.floor-model.v1",
+        "mode": "extra" if args.extra_only else "all",
         "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "gpu": torch.cuda.get_device_name(),
         "torch": str(torch.__version__),
@@ -561,9 +648,36 @@ def main(args: Args) -> None:
         "tick_input": "BF16 trunk tokens; KV at position 192; queue and draws synthetic; shapes from warmed trainer",
         "actor_backward": "fixed scalar cotangents on log-probabilities and full distributions; no PPO or optimizer",
         "muon_graph": "fixed bias-correction step; performance probe only, never used for training",
+        "extra_inputs": "synthetic prefill tokens; recorded actor histories tiled to the bootstrap batch shapes",
     }
     (args.output / "rates.json").write_text(json.dumps(result, indent=2))
     shapes: set[Gemm] = set()
+    if args.extra_only:
+        prefills = []
+        for batch in sorted({row["batch"] for row in layout["tick_layouts"]}):
+            row, observed_shapes = prefill_benchmark(model, batch, args.output)
+            prefills.append(row)
+            shapes.update(observed_shapes)
+            result["prefills"] = prefills
+            (args.output / "rates.json").write_text(json.dumps(result, indent=2, allow_nan=False))
+            gc.collect()
+            torch.cuda.empty_cache()
+        bootstraps = []
+        for count in sorted({32, layout["matches"] * 2}):
+            row, observed_shapes = bootstrap_benchmark(
+                model, raw["features"], raw["observed"], ReplaySlots(**raw["slots"]), count, args.output
+            )
+            bootstraps.append(row)
+            shapes.update(observed_shapes)
+            result["bootstraps"] = bootstraps
+            (args.output / "rates.json").write_text(json.dumps(result, indent=2, allow_nan=False))
+            gc.collect()
+            torch.cuda.empty_cache()
+        result["prefills"], result["bootstraps"] = prefills, bootstraps
+        result["gemms"] = hardware_gemms(shapes)
+        (args.output / "rates.json").write_text(json.dumps(result, indent=2, allow_nan=False))
+        print("prefill and bootstrap model probes complete", flush=True)
+        return
     ticks = []
     for batch in sorted({int(row["batch"]) for row in layout["tick_layouts"]}):
         for count in (2, 4):

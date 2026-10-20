@@ -107,19 +107,22 @@ def result_seconds(path: Path, exit_code: int) -> float:
 class Request:
     name: str
     git_sha: str
-    mode: Literal["smoke", "profile", "floor"] = "profile"
+    mode: Literal["smoke", "profile", "floor", "floor-extra"] = "profile"
     matches: int = 1024
     timeout_seconds: int = 1800
     created_unix: float = dataclasses.field(default_factory=time.time)
+    source_name: str | None = None
+    source_inputs_sha256: str | None = None
+    source_layout_sha256: str | None = None
 
     def __post_init__(self) -> None:
         validate_name(self.name)
         if re.fullmatch(r"[0-9a-f]{40}", self.git_sha) is None:
             raise ValueError("expected a full published HAL Git SHA")
-        if self.mode not in ("smoke", "profile", "floor"):
+        if self.mode not in ("smoke", "profile", "floor", "floor-extra"):
             raise ValueError("unsupported run mode")
         allowed = (16,) if self.mode == "smoke" else (256, 1024, 2048, 4096)
-        if self.mode == "floor":
+        if self.mode in ("floor", "floor-extra"):
             allowed = (1024,)
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
@@ -131,6 +134,17 @@ class Request:
             or self.created_unix <= 0
         ):
             raise ValueError("launch time must be a finite positive timestamp")
+        if self.mode == "floor-extra":
+            if self.source_name is None:
+                raise ValueError("extra model probes require a completed source run")
+            validate_name(self.source_name)
+            for digest in (self.source_inputs_sha256, self.source_layout_sha256):
+                if digest is None or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                    raise ValueError("extra model probes require pinned source input hashes")
+        elif any(
+            value is not None for value in (self.source_name, self.source_inputs_sha256, self.source_layout_sha256)
+        ):
+            raise ValueError("source inputs apply only to extra model probes")
 
 
 def remaining_seconds(request: Request, now: float) -> float:
@@ -145,6 +159,26 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
     if len(cpus) != 16 or len(set(cpus)) != 16:
         raise ValueError("O65 requires 16 distinct shard CPUs")
     delivery = REMOTE_ROOT / "delivery"
+    if request.mode == "floor-extra":
+        source = RESULTS / str(request.source_name) / "profile"
+        return [
+            "/opt/venv/bin/python",
+            "-m",
+            "scripts.profile_o65_floor",
+            "--checkpoint",
+            str(delivery / "payloads/final.pt"),
+            "--inputs",
+            str(source / "floor-inputs.pt"),
+            "--layout",
+            str(source / "floor-layout.json"),
+            "--output",
+            str(WORK / request.name / "profile"),
+            "--extra-only",
+            "--expected-inputs-sha256",
+            str(request.source_inputs_sha256),
+            "--expected-layout-sha256",
+            str(request.source_layout_sha256),
+        ]
     argv = [
         "/opt/venv/bin/python",
         "experiments/065_selfplay_ppo.py",
@@ -424,12 +458,13 @@ def download(name: str, local: Path) -> None:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    mode: Literal["smoke", "profile", "floor", "download"] = "profile"
+    mode: Literal["smoke", "profile", "floor", "floor-extra", "download"] = "profile"
     name: str | None = None
     matches: int = 1024
     timeout_seconds: int = 1800
     secret: str = "hal"
     output: Path = Path("runs/modal")
+    source_name: str | None = None
 
 
 def main(args: Args) -> None:
@@ -449,7 +484,26 @@ def main(args: Args) -> None:
     if published.split()[:1] != [sha]:
         raise ValueError(f"push {branch} HEAD before launching")
     name = args.name or f"{args.mode}-{args.matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
-    request = Request(name, sha, args.mode, args.matches, args.timeout_seconds)
+    inputs_digest = layout_digest = None
+    if args.mode == "floor-extra":
+        if args.source_name is None:
+            raise ValueError("extra model probes require --source-name")
+        validate_name(args.source_name)
+        source = ROOT / "runs/modal-floor" / args.source_name / "profile"
+        with (source / "floor-inputs.pt").open("rb") as file:
+            inputs_digest = hashlib.file_digest(file, "sha256").hexdigest()
+        with (source / "floor-layout.json").open("rb") as file:
+            layout_digest = hashlib.file_digest(file, "sha256").hexdigest()
+    request = Request(
+        name,
+        sha,
+        args.mode,
+        args.matches,
+        args.timeout_seconds,
+        source_name=args.source_name,
+        source_inputs_sha256=inputs_digest,
+        source_layout_sha256=layout_digest,
+    )
     args.output.mkdir(parents=True, exist_ok=True)
     budget = ROOT / "runs/modal-floor/budget.jsonl"
     budget.parent.mkdir(parents=True, exist_ok=True)
