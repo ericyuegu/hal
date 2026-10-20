@@ -2103,6 +2103,7 @@ class RolloutEngine:
             for shard in group
         }
         self.device_lanes = {key: torch.from_numpy(lanes).to(policy.device) for key, lanes in self.shard_lanes.items()}
+        self.buffer_device_lanes: dict[int, Tensor] = {}
         buffers: list[tuple[RolloutBuffer, ...]] = []
         for shards in groups:
             split = (len(shards) + 1) // 2
@@ -2113,7 +2114,9 @@ class RolloutEngine:
                 lanes = np.concatenate([self.shard_lanes[id(shard)] for shard in half])
                 lanes.flags.writeable = False
                 stream = torch.cuda.Stream(device=policy.device) if policy.device.type == "cuda" else None
-                prepared.append(RolloutBuffer(index, half, lanes, stream))
+                buffer = RolloutBuffer(index, half, lanes, stream)
+                prepared.append(buffer)
+                self.buffer_device_lanes[id(buffer)] = torch.from_numpy(lanes.copy()).to(policy.device)
             buffers.append(tuple(prepared))
         self.buffers = tuple(buffers)
         self.group_slots: list[dict[tuple[int, int | None], Tensor]] = [{} for _ in groups]
@@ -2449,90 +2452,90 @@ class RolloutEngine:
 
     def _accept(
         self,
-        shard: SimulatorShard,
-        rows: tuple[ShardFrames, ...],
-        clock: int,
+        buffer: RolloutBuffer,
+        shards: tuple[SimulatorShard, ...],
+        batches: tuple[ShardFrames, ...],
+        end_clock: int,
         update: int,
         table: DenseRollout,
         pending: Tensor,
     ) -> tuple[int, int]:
+        for shard, frames in zip(shards, batches, strict=True):
+            if len(frames) != len(shard.match_ids):
+                raise ValueError("simulator returned the wrong lane count")
         group = self.cursor
         players = len(self.dense_meta[group])
         ring = self.rings[group]
-        host_lanes = self.shard_lanes[id(shard)]
-        lanes = self.device_lanes[id(shard)]
+        if len(shards) == len(buffer.shards):
+            host_lanes, lanes = buffer.lanes, self.buffer_device_lanes[id(buffer)]
+        else:
+            host_lanes = np.concatenate([self.shard_lanes[id(shard)] for shard in shards])
+            lanes = torch.cat([self.device_lanes[id(shard)] for shard in shards])
+        frames = concatenate_shard_frames(batches)
         slots = (2 * lanes[:, None] + torch.arange(2, device=self.policy.device)[None]).flatten()
-        frames_stepped = timeouts = 0
-        for offset, frames in enumerate(rows, start=1):
-            if len(frames) != len(shard.match_ids):
-                raise ValueError("simulator returned the wrong lane count")
-            active_host = self._active(shard)
-            active = self.active[group][lanes]
-            positions = self.stops[group][lanes]
-            rewards = table.store.write(positions, lanes, frames, torch.arange(len(lanes), device=lanes.device))
-            terminals, truncations = frames.terminal, frames.timeout
-            ids = torch.where(pending[slots] >= 0, pending[slots], slots)
-            valid = (pending[slots] >= 0) & active.repeat_interleave(2)
-            duration = table.duration[ids]
-            table.rewards[ids, duration.clamp_max(3)] = torch.where(
-                valid, rewards.flatten(), table.rewards[ids, duration.clamp_max(3)]
+        timeouts = 0
+        active_host = self.live_host[group][host_lanes]
+        active = self.active[group][lanes]
+        positions = self.stops[group][lanes]
+        rewards = table.store.write(positions, lanes, frames, torch.arange(len(lanes), device=lanes.device))
+        terminals, truncations = frames.terminal, frames.timeout
+        ids = torch.where(pending[slots] >= 0, pending[slots], slots)
+        valid = (pending[slots] >= 0) & active.repeat_interleave(2)
+        duration = table.duration[ids]
+        table.rewards[ids, duration.clamp_max(3)] = torch.where(
+            valid, rewards.flatten(), table.rewards[ids, duration.clamp_max(3)]
+        )
+        table.duration[ids] += valid.long()
+        self.episode_returns[group][lanes] += torch.where(active[:, None], rewards, 0)
+        self.stops[group][lanes] += active.long()
+        self.observed_clocks[group][lanes] += active.long()
+        ring.head[lanes] = (ring.head[lanes] + active[:, None].long()) % ring.capacity
+        ring.length_device[lanes] -= active[:, None].long()
+        frames_stepped = int(active_host.sum())
+        ends = active_host & (terminals | truncations)
+        for source in np.flatnonzero(ends):
+            lane = int(host_lanes[source])
+            match = self.group_matches[group][lane]
+            state = self.matches[match]
+            returns = (
+                float(self.episode_returns[group][lane, 0]),
+                float(self.episode_returns[group][lane, 1]),
             )
-            table.duration[ids] += valid.long()
-            self.episode_returns[group][lanes] += torch.where(active[:, None], rewards, 0)
-            self.stops[group][lanes] += active.long()
-            self.observed_clocks[group][lanes] += active.long()
-            ring.head[lanes] = (ring.head[lanes] + active[:, None].long()) % ring.capacity
-            ring.length_device[lanes] -= active[:, None].long()
-            frames_stepped += int(active_host.sum())
-            ends = active_host & (terminals | truncations)
-            for source in np.flatnonzero(ends):
-                match = shard.match_ids[source]
-                lane = int(host_lanes[source])
-                state = self.matches[match]
-                end_clock = clock + offset
-                if offset != len(rows):
-                    raise ValueError("simulator stepped beyond an episode boundary")
-                returns = (
-                    float(self.episode_returns[group][lane, 0]),
-                    float(self.episode_returns[group][lane, 1]),
+            stocks = tuple(
+                int(frames.columns[source, NATIVE_COLUMN_LAYOUT[f"p{side}_stock"][0]].view(np.int32))
+                for side in (1, 2)
+            )
+            self.results.append(
+                EpisodeResult(
+                    match,
+                    state.episode,
+                    end_clock - state.episode_start,
+                    returns,
+                    bool(truncations[source]),
+                    cast(tuple[int, int] | None, stocks),
                 )
-                stocks = tuple(
-                    int(frames.columns[source, NATIVE_COLUMN_LAYOUT[f"p{side}_stock"][0]].view(np.int32))
-                    for side in (1, 2)
-                )
-                self.results.append(
-                    EpisodeResult(
-                        match,
-                        state.episode,
-                        end_clock - state.episode_start,
-                        returns,
-                        bool(truncations[source]),
-                        cast(tuple[int, int] | None, stocks),
-                    )
-                )
-                match_slots = torch.arange(2 * lane, 2 * lane + 2, device=self.policy.device)
-                pending_ids = pending[match_slots]
-                valid_pending = pending_ids >= 0
-                target = pending_ids[valid_pending]
-                table.boundary[target] = True
-                table.terminal[target] = bool(terminals[source])
-                episode_rows = (table.integers[:, MATCH] == match) & (
-                    table.integers[:, EPISODE] == state.episode.number
-                )
-                episode_rows &= table.valid
-                ended_rows = torch.nonzero(episode_rows).flatten()
-                table.remaining[ended_rows] = end_clock - table.integers[ended_rows, CLOCK]
-                if truncations[source]:
-                    boot = (
-                        self.sampler.schedule.rollout_frames // 2 + (end_clock - self.clocks[group] - 1) // 128
-                    ) * players + match_slots
-                    self._write_bootstrap(table, boot, match_slots, end_clock, update)
-                    table.following[target] = boot[valid_pending]
-                pending[match_slots] = -1
-                state.end_clock = end_clock
-                self.active[group][lane] = False
-                self.live_host[group][lane] = False
-                timeouts += int(truncations[source])
+            )
+            match_slots = torch.arange(2 * lane, 2 * lane + 2, device=self.policy.device)
+            pending_ids = pending[match_slots]
+            valid_pending = pending_ids >= 0
+            target = pending_ids[valid_pending]
+            table.boundary[target] = True
+            table.terminal[target] = bool(terminals[source])
+            episode_rows = (table.integers[:, MATCH] == match) & (table.integers[:, EPISODE] == state.episode.number)
+            episode_rows &= table.valid
+            ended_rows = torch.nonzero(episode_rows).flatten()
+            table.remaining[ended_rows] = end_clock - table.integers[ended_rows, CLOCK]
+            if truncations[source]:
+                boot = (
+                    self.sampler.schedule.rollout_frames // 2 + (end_clock - self.clocks[group] - 1) // 128
+                ) * players + match_slots
+                self._write_bootstrap(table, boot, match_slots, end_clock, update)
+                table.following[target] = boot[valid_pending]
+            pending[match_slots] = -1
+            state.end_clock = end_clock
+            self.active[group][lane] = False
+            self.live_host[group][lane] = False
+            timeouts += int(truncations[source])
         return frames_stepped, timeouts
 
     def _write_bootstrap(self, table: DenseRollout, ids: Tensor, slots: Tensor, clock: int, update: int) -> None:
@@ -2655,21 +2658,41 @@ class RolloutEngine:
                                 else contextlib.nullcontext()
                             ):
                                 futures.extend(self._submit_buffer(workers, buffer))
-                    for buffer, shard, future in futures:
-                        rows = future.result()
-                        if not 1 <= len(rows) <= 2:
-                            raise ValueError("simulator must return between one and two frames")
+                    for buffer in buffers:
+                        completed = [(shard, future.result()) for owner, shard, future in futures if owner is buffer]
+                        for shard, rows in completed:
+                            if not 1 <= len(rows) <= 2:
+                                raise ValueError("simulator must return between one and two frames")
+                            if len(rows) == 2 and bool(
+                                ((rows[0].terminal | rows[0].timeout) & self._active(shard)).any()
+                            ):
+                                raise ValueError("simulator stepped beyond an episode boundary")
                         with (
                             torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext()
                         ):
-                            stepped, ended_timeouts = self._accept(shard, rows, clock, update, table, pending)
-                            frames_stepped += stepped
-                            timeouts += ended_timeouts
-                            if len(rows) == 1 and self._active(shard).any():
-                                rest = _step_shard(shard, self._inputs(shard, 1), self._active(shard), buffer.stream)
-                                if len(rest) != 1:
-                                    raise ValueError("one-frame step returned the wrong duration")
-                                stepped, ended_timeouts = self._accept(shard, rest, clock + 1, update, table, pending)
+                            for offset in range(2):
+                                accepted: list[tuple[SimulatorShard, ShardFrames]] = []
+                                for shard, rows in completed:
+                                    if offset < len(rows):
+                                        accepted.append((shard, rows[offset]))
+                                    elif self._active(shard).any():
+                                        rest = _step_shard(
+                                            shard, self._inputs(shard, 1), self._active(shard), buffer.stream
+                                        )
+                                        if len(rest) != 1:
+                                            raise ValueError("one-frame step returned the wrong duration")
+                                        accepted.append((shard, rest[0]))
+                                if not accepted:
+                                    continue
+                                stepped, ended_timeouts = self._accept(
+                                    buffer,
+                                    tuple(shard for shard, _ in accepted),
+                                    tuple(frames for _, frames in accepted),
+                                    clock + offset + 1,
+                                    update,
+                                    table,
+                                    pending,
+                                )
                                 frames_stepped += stepped
                                 timeouts += ended_timeouts
                     if default_stream is not None:
@@ -2703,6 +2726,24 @@ class RolloutEngine:
             tuple(self.results),
             count * len(matches) - frames_stepped,
         )
+
+
+def concatenate_shard_frames(frames: Sequence[ShardFrames]) -> ShardFrames:
+    if not frames:
+        raise ValueError("frame concatenation needs a nonempty shard batch")
+    if len(frames) == 1:
+        return frames[0]
+    columns = np.concatenate([frame.columns for frame in frames])
+    columns.flags.writeable = False
+    return ShardFrames(
+        torch.cat([frame.records for frame in frames]),
+        torch.cat([frame.actions for frame in frames]),
+        columns,
+        np.concatenate([frame.rewards for frame in frames]),
+        np.concatenate([frame.terminal for frame in frames]),
+        np.concatenate([frame.timeout for frame in frames]),
+        np.concatenate([frame.host_actions for frame in frames]),
+    )
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

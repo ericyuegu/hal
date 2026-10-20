@@ -446,3 +446,112 @@ def test_kl_rejects_invalid_executed_probabilities(value: float, reference: bool
     probabilities[0][row, frame, 0] = value
     with pytest.raises(ValueError, match="executed KL probabilities"):
         exp.factor_kl(policy, target, batch.decisions.executed_factors_JF)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_buffer_acceptance_matches_serial_shards_with_staggered_ends(device: str) -> None:
+    from test_065_loop import FakeShard
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    class StaggeredShard(FakeShard):
+        def step(self, inputs: torch.Tensor, active: NDArray[np.bool_]) -> tuple[Any, ...]:
+            rows = []
+            for actions in inputs.detach().cpu().numpy():
+                self.trace.append(actions.copy())
+                self.ticks += active
+                rewards = actions[..., 6].copy()
+                self.returns += np.where(active[:, None], rewards, 0)
+                end = self.ticks >= np.array([13, 16])
+                rows.append(self._frames(actions, rewards, np.zeros_like(end), end))
+                if bool((end & active).any()):
+                    break
+            return tuple(rows)
+
+    class SerialEngine(exp.RolloutEngine):
+        def _accept(
+            self, buffer: Any, shards: Any, batches: Any, end_clock: int, update: int, table: Any, pending: Any
+        ) -> tuple[int, int]:
+            count = timeouts = 0
+            for shard, frames in zip(shards, batches, strict=True):
+                stepped, ended = super()._accept(buffer, (shard,), (frames,), end_clock, update, table, pending)
+                count += stepped
+                timeouts += ended
+            return count, timeouts
+
+    def make(engine_type: type[Any]) -> Any:
+        base = trainer(device, groups=1, development=True)
+        shards = (
+            FakeShard((3, 0), length=67, timeout=True, device=device),
+            FakeShard((7, 5), length=22, timeout=False, device=device),
+            StaggeredShard((8, 9), device=device),
+            FakeShard((11, 2), length=1000000, device=device),
+        )
+        engine = engine_type(
+            (shards,), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()}, fixed_anchor_lanes=True
+        )
+        engine.initialize()
+        return exp.Trainer(engine, base.config)
+
+    def episode_key(result: Any) -> tuple[int, int]:
+        return result.match, result.episode.number
+
+    batched, serial = make(exp.RolloutEngine), make(SerialEngine)
+    for update in range(2):
+        actual = batched.prepare(batched.engine.collect(update))
+        expected = serial.prepare(serial.engine.collect(update))
+        for field in (
+            "integers",
+            "conditions",
+            "coefficients",
+            "prefix",
+            "opponent",
+            "actions",
+            "behavior",
+            "rewards",
+            "duration",
+            "remaining",
+            "terminal",
+            "boundary",
+            "following",
+            "values",
+            "active",
+            "valid",
+            "bootstrap",
+        ):
+            torch.testing.assert_close(
+                getattr(actual.rollout.table, field), getattr(expected.rollout.table, field), rtol=0, atol=0, msg=field
+            )
+        for field in ("records", "actions", "rewards", "flags", "lengths"):
+            torch.testing.assert_close(
+                getattr(actual.rollout.table.store, field),
+                getattr(expected.rollout.table.store, field),
+                rtol=0,
+                atol=0,
+                msg=field,
+            )
+        torch.testing.assert_close(actual.advantages, expected.advantages, rtol=0, atol=0)
+        torch.testing.assert_close(actual.targets, expected.targets, rtol=0, atol=0)
+        assert sorted(actual.rollout.results, key=episode_key) == sorted(expected.rollout.results, key=episode_key)
+        assert actual.rollout.frames == expected.rollout.frames
+        assert actual.rollout.timeouts == expected.rollout.timeouts
+        assert actual.rollout.resets == expected.rollout.resets
+
+
+def test_buffer_acceptance_rejects_a_step_past_a_terminal_frame() -> None:
+    from test_065_loop import FakeShard
+
+    class PastEndShard(FakeShard):
+        def step(self, inputs: torch.Tensor, active: NDArray[np.bool_]) -> tuple[Any, ...]:
+            first = super().step(inputs, active)[0]
+            return first, first
+
+    base = trainer(groups=1, anchor_rate=0)
+    shard = PastEndShard((3, 0), length=1)
+    engine = exp.RolloutEngine(((shard,),), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()})
+    engine.initialize()
+    with pytest.raises(ValueError, match="beyond an episode boundary"):
+        engine.collect(0)
+    with pytest.raises(ValueError, match="nonempty"):
+        exp.concatenate_shard_frames(())
