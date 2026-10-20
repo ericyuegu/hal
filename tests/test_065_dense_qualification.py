@@ -12,16 +12,16 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from o65_precision import ProxyBatch
+from o65_precision import error
+from o65_precision import exp as control
+from o65_precision import flattened_gradients
+from o65_precision import old_forward
+from o65_precision import quantities
+from o65_precision import targets
+from o65_precision import values
 from test_065_loop import ROOT
 from test_065_loop import exp
-from test_window_replay_proxy import ProxyBatch
-from test_window_replay_proxy import error
-from test_window_replay_proxy import exp as control
-from test_window_replay_proxy import flattened_gradients
-from test_window_replay_proxy import old_forward
-from test_window_replay_proxy import quantities
-from test_window_replay_proxy import targets
-from test_window_replay_proxy import values
 
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.models.replay_actor import actor_loss
@@ -172,7 +172,7 @@ def qualify(output: Path) -> dict[str, Any]:
         default_policy.tick_decoder.replay_variants = default_policy.tick_decoder.variants.copy()
         default_ref = control.TransformerPolicy(reference.model, schedule, checkpoint.statistics, compiled=True)
         print("dense precision: control actor", flush=True)
-        default = quantities(default_policy, default_ref, batch, behavior, window=False, fp32=False)
+        default = quantities(default_policy, default_ref, batch, behavior, fp32=False)
         print("dense precision: production actor", flush=True)
         full_reference = reference.evaluate_reference(
             prepared.windows, prepared.placement.positions, prepared.placement.windows
@@ -252,7 +252,7 @@ def qualify(output: Path) -> dict[str, Any]:
             high.requires_grad_(True)
             high.percentile_head.requires_grad_(False)
             high_models.append(control.TransformerPolicy(high, schedule, checkpoint.statistics))
-        high = quantities(high_models[0], high_models[1], batch, behavior, window=False, fp32=True)
+        high = quantities(high_models[0], high_models[1], batch, behavior, fp32=True)
         high_output = old_forward(high_models[0], batch, grad=False, fp32=True)
         high_ref = old_forward(high_models[1], batch, grad=False, fp32=True)
         baseline_ref = old_forward(default_ref, batch, grad=False)
@@ -379,7 +379,7 @@ def qualify(output: Path) -> dict[str, Any]:
                 "hal/models/replay_actor.py",
                 "hal/inference/graphed_actor.py",
                 "tests/o65_reference.py",
-                "tests/test_window_replay_proxy.py",
+                "tests/o65_precision.py",
             )
         }
         report["configuration"]["reference"] = (
