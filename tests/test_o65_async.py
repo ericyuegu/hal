@@ -149,6 +149,8 @@ def test_transfer_parity_resets_and_staggered_ends(
             assert expected.resets == actual.resets > 0
             assert expected.timeouts == actual.timeouts > 0
             assert torch.equal(expected.ids, actual.ids)
+            assert len(engines[1].transfer_timings) <= 256
+            assert all(len(shard.timings) <= 128 for shard in engines[1].groups[0])
             for name, reference in vars(expected.table).items():
                 if isinstance(reference, torch.Tensor):
                     assert torch.equal(reference, getattr(actual.table, name)), name

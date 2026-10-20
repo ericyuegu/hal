@@ -22,6 +22,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from collections.abc import Sequence
 from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 from typing import Protocol
@@ -2518,16 +2519,20 @@ class RolloutEngine:
                 if staging is not None and not staging.ready.is_set():
                     staging.release_inputs()
 
-    def _submit_buffer(self, buffer: RolloutBuffer) -> list[PendingStep]:
+    def _submit_buffer(self, workers: ThreadPoolExecutor, buffer: RolloutBuffer) -> list[PendingStep]:
         pending: list[PendingStep] = []
         staging = self.staging.get(id(buffer))
         if staging is None:
-            # Test seams may create device tensors. Keep them on the calling thread.
+            # CUDA test seams run on the caller; CPU seams retain simulator overlap.
             for shard in buffer.shards:
                 active = self._active(shard)
                 if active.any():
-                    future: Future[tuple[ShardFrames, ...]] = Future()
-                    future.set_result(shard.step(self._inputs(shard, 2), active))
+                    inputs = self._inputs(shard, 2)
+                    if self.policy.device.type == "cpu":
+                        future = workers.submit(_step_shard, shard, inputs, active)
+                    else:
+                        future: Future[tuple[ShardFrames, ...]] = Future()
+                        future.set_result(shard.step(inputs, active))
                     pending.append((buffer, shard, future))
             return pending
         staging.started = time.perf_counter()
@@ -2772,6 +2777,10 @@ class RolloutEngine:
         self.results = []
         group_id = self.cursor
         shards = self.groups[group_id]
+        self.transfer_timings.clear()
+        for shard in shards:
+            if isinstance(shard, NativeSimulatorShard):
+                shard.timings.clear()
         start = self.clocks[group_id]
         count = self.sampler.schedule.rollout_frames
         if count % 128:
@@ -2813,91 +2822,98 @@ class RolloutEngine:
         resets = timeouts = frames_stepped = 0
         buffers = self.buffers[group_id]
         default_stream = torch.cuda.current_stream(self.policy.device) if self.policy.device.type == "cuda" else None
-        for clock in range(start, start + count, 2):
-            boundary = clock % 128 == 0
-            with (
-                self._host_transfers(buffers),
-                sample(
-                    self.profile,
-                    "boundary_tick" if boundary else "tick",
-                    work=float(len(matches)),
-                    limit=2 if boundary else 4,
-                    skip=0 if boundary else 16,
-                ),
-            ):
-                if default_stream is not None:
+        with ThreadPoolExecutor(max_workers=len(shards)) as workers:
+            for clock in range(start, start + count, 2):
+                boundary = clock % 128 == 0
+                with (
+                    self._host_transfers(buffers),
+                    sample(
+                        self.profile,
+                        "boundary_tick" if boundary else "tick",
+                        work=float(len(matches)),
+                        limit=2 if boundary else 4,
+                        skip=0 if boundary else 16,
+                    ),
+                ):
+                    if default_stream is not None:
+                        for buffer in buffers:
+                            default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
+                    resets += self._reset_waiting(shards, clock)
+                    with sample(self.profile, "tick_state", work=float(len(matches)), limit=0):
+                        ids = self._stage_tick(clock, update, table, pending)
+                    ready = all(self._tick_ready(buffer, clock) for buffer in buffers)
+                    futures: list[PendingStep] = []
                     for buffer in buffers:
-                        default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
-                resets += self._reset_waiting(shards, clock)
-                with sample(self.profile, "tick_state", work=float(len(matches)), limit=0):
-                    ids = self._stage_tick(clock, update, table, pending)
-                ready = all(self._tick_ready(buffer, clock) for buffer in buffers)
-                futures: list[PendingStep] = []
-                for buffer in buffers:
-                    inference_stream = buffer.stream if ready else default_stream
-                    if ready and buffer.stream is not None:
-                        buffer.stream.wait_stream(cast(torch.cuda.Stream, default_stream))
-                    with (
-                        torch.cuda.stream(inference_stream)
-                        if inference_stream is not None
-                        else contextlib.nullcontext()
-                    ):
-                        with sample(self.profile, "gpu_tick", work=float(len(buffer.lanes)), limit=0):
-                            self._sample_buffer(buffer, clock, table, ids)
-                        if ready:
-                            futures.extend(self._submit_buffer(buffer))
-                if not ready:
-                    # Cold captures restore the shared ring; serialize them before staging controller inputs.
-                    for buffer in buffers:
-                        if buffer.stream is not None:
+                        inference_stream = buffer.stream if ready else default_stream
+                        if ready and buffer.stream is not None:
                             buffer.stream.wait_stream(cast(torch.cuda.Stream, default_stream))
+                        with (
+                            torch.cuda.stream(inference_stream)
+                            if inference_stream is not None
+                            else contextlib.nullcontext()
+                        ):
+                            with sample(self.profile, "gpu_tick", work=float(len(buffer.lanes)), limit=0):
+                                self._sample_buffer(buffer, clock, table, ids)
+                            if ready:
+                                futures.extend(self._submit_buffer(workers, buffer))
+                    if not ready:
+                        # Cold captures restore the shared ring; serialize them before staging controller inputs.
+                        for buffer in buffers:
+                            if buffer.stream is not None:
+                                buffer.stream.wait_stream(cast(torch.cuda.Stream, default_stream))
+                            with (
+                                torch.cuda.stream(buffer.stream)
+                                if buffer.stream is not None
+                                else contextlib.nullcontext()
+                            ):
+                                futures.extend(self._submit_buffer(workers, buffer))
+                    for buffer in buffers:
+                        staging = self.staging.get(id(buffer))
+                        if staging is not None:
+                            staging.release_inputs()
+                    for buffer in buffers:
                         with (
                             torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext()
                         ):
-                            futures.extend(self._submit_buffer(buffer))
-                for buffer in buffers:
-                    staging = self.staging.get(id(buffer))
-                    if staging is not None:
-                        staging.release_inputs()
-                for buffer in buffers:
-                    with torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext():
-                        completed = self._complete_buffer(buffer, futures)
-                    for shard, rows in completed:
-                        if not 1 <= len(rows) <= 2:
-                            raise ValueError("simulator must return between one and two frames")
-                        if (
-                            not isinstance(shard, NativeSimulatorShard)
-                            and len(rows) == 2
-                            and bool(((rows[0].terminal | rows[0].timeout) & self._active(shard)).any())
+                            completed = self._complete_buffer(buffer, futures)
+                        for shard, rows in completed:
+                            if not 1 <= len(rows) <= 2:
+                                raise ValueError("simulator must return between one and two frames")
+                            if (
+                                not isinstance(shard, NativeSimulatorShard)
+                                and len(rows) == 2
+                                and bool(((rows[0].terminal | rows[0].timeout) & self._active(shard)).any())
+                            ):
+                                raise ValueError("simulator stepped beyond an episode boundary")
+                        with (
+                            torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext()
                         ):
-                            raise ValueError("simulator stepped beyond an episode boundary")
-                    with torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext():
-                        for offset in range(2):
-                            accepted: list[tuple[SimulatorShard, ShardFrames]] = []
-                            for shard, rows in completed:
-                                if offset < len(rows):
-                                    accepted.append((shard, rows[offset]))
-                                elif self._active(shard).any():
-                                    rest = _step_shard(shard, self._inputs(shard, 1), self._active(shard))
-                                    if len(rest) != 1:
-                                        raise ValueError("one-frame step returned the wrong duration")
-                                    accepted.append((shard, rest[0]))
-                            if not accepted:
-                                continue
-                            stepped, ended_timeouts = self._accept(
-                                buffer,
-                                tuple(shard for shard, _ in accepted),
-                                tuple(frames for _, frames in accepted),
-                                clock + offset + 1,
-                                update,
-                                table,
-                                pending,
-                            )
-                            frames_stepped += stepped
-                            timeouts += ended_timeouts
-                if default_stream is not None:
-                    for buffer in buffers:
-                        default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
+                            for offset in range(2):
+                                accepted: list[tuple[SimulatorShard, ShardFrames]] = []
+                                for shard, rows in completed:
+                                    if offset < len(rows):
+                                        accepted.append((shard, rows[offset]))
+                                    elif self._active(shard).any():
+                                        rest = _step_shard(shard, self._inputs(shard, 1), self._active(shard))
+                                        if len(rest) != 1:
+                                            raise ValueError("one-frame step returned the wrong duration")
+                                        accepted.append((shard, rest[0]))
+                                if not accepted:
+                                    continue
+                                stepped, ended_timeouts = self._accept(
+                                    buffer,
+                                    tuple(shard for shard, _ in accepted),
+                                    tuple(frames for _, frames in accepted),
+                                    clock + offset + 1,
+                                    update,
+                                    table,
+                                    pending,
+                                )
+                                frames_stepped += stepped
+                                timeouts += ended_timeouts
+                    if default_stream is not None:
+                        for buffer in buffers:
+                            default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
         end = start + count
         live_slots = torch.nonzero(pending >= 0).flatten()
         pending_ids = pending[live_slots]
@@ -3666,9 +3682,6 @@ class Trainer:
         native_shards = [
             shard for shard in self.engine.groups[self.engine.cursor] if isinstance(shard, NativeSimulatorShard)
         ]
-        self.engine.transfer_timings.clear()
-        for shard in native_shards:
-            shard.timings.clear()
         before = [
             (shard.step_seconds, shard.reset_seconds, shard.stepped_frames, shard.copied_bytes)
             for shard in native_shards
