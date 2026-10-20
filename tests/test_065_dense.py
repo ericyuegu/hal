@@ -402,6 +402,12 @@ def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> N
         torch.testing.assert_close(first, second, rtol=3e-5, atol=5e-6)
         assert not first.requires_grad
     assert all(not p.requires_grad and p.grad is None for p in run.reference.model.parameters())
+    scoring = run.reference.reference_forward_model
+    assert scoring is not None
+    assert all(p.grad is None for p in scoring.parameters())
+    for original, copied in zip(run.reference.model.parameters(), scoring.parameters(), strict=True):
+        assert original.data_ptr() != copied.data_ptr()
+        torch.testing.assert_close(original, copied, rtol=0, atol=0)
     with pytest.raises(ValueError, match="distinct slots"):
         run.reference.evaluate_reference(windows, torch.zeros(len(rows), 2, dtype=torch.long), order)
     with pytest.raises(ValueError, match="actor shape"):

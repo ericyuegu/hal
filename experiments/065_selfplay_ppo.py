@@ -1384,6 +1384,7 @@ class TransformerPolicy:
         self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
         self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
+        self.reference_forward_model: SelfPlayTransformer | None = None
         self.value_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[Tensor]] = {}
         self.queue_replay = (
             torch.compile(
@@ -1451,6 +1452,7 @@ class TransformerPolicy:
         self.current_layouts.clear()
         self.value_graphs.clear()
         self.reference_graphs.clear()
+        self.reference_forward_model = None
         self.actor_graph = None
 
     def frozen_copy(self) -> LoopPolicy:
@@ -1700,24 +1702,20 @@ class TransformerPolicy:
         return self.window_replay(self.model, hidden, observed, ReplaySlots(*inputs[5:]), grad=grad)
 
     def reference_forward(self, inputs: tuple[Tensor, ...], windows_per_step: int, count: int) -> ReplayOutput:
+        model = self.reference_forward_model
+        if model is None:
+            raise ValueError("reference forward model is not prepared")
         batches = []
         for start in range(0, len(inputs[0]), windows_per_step):
             end = start + windows_per_step
             with (
-                torch.no_grad(),
+                torch.enable_grad(),
                 torch.autocast(
                     self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda", cache_enabled=False
                 ),
             ):
                 context, observed = self._packed_context(tuple(value[start:end] for value in inputs[:5]))
-                hidden = self.model(
-                    context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed
-                )
-            # Torch 2.11.0 BF16 no-grad replay failed the proxy KL precision gate.
-            # A temporary hidden leaf selects the actor's forward arithmetic;
-            # all reference parameters stay frozen and every result is detached.
-            # Remove this boundary when ordinary no-grad replay passes that gate.
-            hidden = hidden.detach().requires_grad_(True)
+                hidden = model(context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed)
             parts = []
             for slot in range(0, inputs[5].shape[1], count):
                 fields = tuple(
@@ -1727,7 +1725,7 @@ class TransformerPolicy:
                     for name, value in zip(REPLAY_SLOT_NAMES, inputs[5:], strict=True)
                 )
                 with torch.enable_grad():
-                    output = self.window_replay(self.model, hidden, observed, ReplaySlots(*fields), grad=True)
+                    output = self.window_replay(model, hidden, observed, ReplaySlots(*fields), grad=True)
                 parts.append(
                     ReplayOutput(
                         output.log_probs_WKF.detach(),
@@ -1792,6 +1790,14 @@ class TransformerPolicy:
             ),
         )
         inputs = packed.inputs()
+        if self.reference_forward_model is None:
+            # Torch 2.11.0 BF16 forwards with frozen parameter metadata fail
+            # the proxy KL gate. A read-only copy matches the actor's autograd
+            # arithmetic. It has no optimizer or backward; the stored reference
+            # stays frozen and every score is detached. Remove this boundary
+            # when frozen forwards pass the complete gate.
+            self.reference_forward_model = copy.deepcopy(self.model).requires_grad_(True)
+            self.reference_forward_model.percentile_head.requires_grad_(False)
         if self.device.type == "cpu":
             output = self.reference_forward(inputs, windows_per_step, count)
         else:
@@ -3510,7 +3516,7 @@ def _configuration_digest(trainer: Trainer) -> str:
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["decision_kernels"] = "dense_tick_window_graph_v5"
-        identity["reference_kernels"] = "actor_order_hidden_leaf_v2"
+        identity["reference_kernels"] = "actor_order_readonly_forward_v3"
         identity["decoder_precision"] = trainer.policy.model.decoder_precision
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)

@@ -341,7 +341,7 @@ def qualify(output: Path) -> dict[str, Any]:
             )
         }
         report["configuration"]["reference"] = (
-            "one CUDA graph; actor window order, padding and decision slots; detached hidden leaf"
+            "one CUDA graph; actor window order, padding and decision slots; read-only autograd scoring copy"
         )
         (output / "precision.json").write_text(json.dumps(report, indent=2))
         if not all(row["passed"] for row in precision.values()):
