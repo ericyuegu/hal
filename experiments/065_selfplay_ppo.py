@@ -3278,6 +3278,7 @@ class Trainer:
                     selected,
                     value_scale=cfg.value_scale,
                 )
+                _check_finite("critic loss", loss)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True

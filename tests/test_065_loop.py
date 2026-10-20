@@ -1155,3 +1155,18 @@ def test_resume_comparison_rejects_overflow_in_error_statistics() -> None:
     second = {"weight": torch.tensor(-1e200, dtype=torch.float64)}
     with pytest.raises(ValueError, match="errors must be finite"):
         exp._compare_resume_updates(first, second, second)
+
+
+def test_trainer_rejects_critic_loss_sum_overflow_before_optimizer_step() -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    with torch.no_grad():
+        run.policy.model.value_head.weight.fill_(2e21)
+    batch = run.prepare(run.engine.collect(0))
+    loss = exp.critic_loss(run.policy.values(batch.old.features), batch.targets, torch.ones_like(batch.selected))
+    assert bool(torch.isinf(loss))
+    before = tuple(p.detach().clone() for p in run.policy.critic_parameters())
+    with pytest.raises(ValueError, match="critic loss must be finite"):
+        run.fit(batch)
+    assert not run.critic_optimizer.state and not run.actor_optimizer.state
+    for actual, expected in zip(run.policy.critic_parameters(), before, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
