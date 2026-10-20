@@ -257,3 +257,111 @@ projections remain about 3.87 s for rollout and 3.79 s for actor at 1,024.
 The full-preparation trace's host projection remains 0.050 s; GPU work still
 needs the final PRO 6000 measurement. Focused checks pass four tests with one
 CUDA-only diagnostic skip. Both canonical follow-up profiles complete.
+
+
+## Step 5: one dense path and numerical qualification
+
+The trainer now uses only dense tick/player tensors, packed shard frames and
+fixed actor steps. The old decision objects, sequence adapters, grouped sampler,
+per-decision evaluator, CPU wire conversion, chunk options and BLAKE2b action
+sampler are removed. Training checkpoint v5 owns pool snapshot v3 and validates
+the device counter key. The deterministic verifier uses the training graphs
+and compares the next batch, optimizer, scheduler, parameters and all RNGs.
+
+Review found stale reward padding in reused rollout storage. GAE masked those
+cells, but summary metrics could read the prior rollout's values. Clearing the
+reward buffer fixes the metrics; a focused two-rollout test covers it.
+
+The complete precision gate initially rejected actor KL: control RMSE was
+3.92e-6 and dense RMSE was 1.17e-4. Shape probes found both batch-shape effects
+and a Torch 2.11.0 BF16 difference between gradient and no-gradient decoder
+execution. Matching only the shapes reduced the error but still failed the
+maximum-error gate: 1.00e-4 against an 8.39e-5 limit. Neither failure was
+accepted, and the error floors were kept fixed.
+
+The reference follows the actor's window order, padding and decision slots.
+It scores the remaining slots in the same fixed shapes and encodes each window
+once. One CUDA graph owns the complete reference pass. An initial attempt to
+match decoder gradient metadata through a detached hidden tensor passed once,
+but failed on a repeated complete run. That result was not accepted.
+
+A separate read-only scoring copy now uses the actor's full autograd metadata.
+The stored reference remains frozen. The scoring copy has no optimizer and no
+backward runs. All outputs are detached. This Torch 2.11.0 boundary can be
+removed when ordinary frozen forwards pass the complete precision gate.
+
+The final gate uses commit `2912b618` and trainer SHA-256
+`50269b65282245702246105f51b7baf8ecd45e4f6d6fd7abec6eeb6a4e975483`.
+All seven quantities pass RMSE, maximum-error and relative-L2 checks against
+1.5 times the control error plus fixed floors: 1e-6 for gradient elements,
+1e-5 otherwise, and 1e-5 for relative L2. Three actor graph replays pass. The
+FP32 reference uses FP32 for every model operation, TF32 off, and explicit
+dense attention because FlashAttention requires reduced precision. Actor and
+critic targets stay fixed across comparisons.
+
+The probe uses 16 native matches and actual `[32,16]` actor steps on the RTX
+3060. It adds linspace(-0.1,0.1) to action readout biases and initializes the
+critic residual output with std 0.005, so KL and the residual critic are
+nonzero. The control loads `aacdfee0` directly from Git. Rollout control scores
+common actions through its recorded cached sampler, using its actual student
+layout (30 slots) and active decision rows. Actor control uses the recorded
+per-decision evaluator. Neither control implementation remains in the trainer.
+
+| Quantity | Control RMSE | Dense RMSE | Control max | Dense max |
+| --- | ---: | ---: | ---: | ---: |
+| log_probs | 0.0056946 | 0.00462679 | 0.0963125 | 0.0879264 |
+| kl | 3.92345e-06 | 3.20668e-06 | 4.9293e-05 | 4.11458e-05 |
+| actor_gradients | 2.25278e-05 | 1.7069e-05 | 0.00561593 | 0.00351067 |
+| rollout_log_probs | 0.00487061 | 0.00420264 | 0.110955 | 0.0759485 |
+| rollout_kl | 0.000111086 | 0.000109499 | 0.00179926 | 0.00180453 |
+| rollout_values | 0.494738 | 0.296849 | 2.72261 | 1.11101 |
+| rollout_critic_gradients | 1.33887e-06 | 9.05466e-07 | 0.000104262 | 6.31101e-05 |
+
+The table shows the first actor replay. All three replay errors and the five
+complete attempts are in [dense-precision.json](dense-precision.json), together
+with shape probes, source identities and raw input hashes. Raw inputs and logs
+are under `runs/dense/precision-{first,canonical,ordered,student-layout,readonly-copy}`.
+The earlier ordered-layout pass used all 32 control slots and was superseded
+by the stricter recorded-layout gate.
+
+Focused CPU checks pass 89 tests. The CUDA reset, queue ownership and resume
+checks pass five tests before this reference correction. The required Dolphin
+round-trip and session-cleanup integration run passes 8 tests, with 6 deselected
+and no skips. The full unit handoff was interrupted after 119 passes to resolve
+the precision failure; its final run is recorded below.
+
+### Final local profiles
+
+Source-verified profiles use `2912b618`, trainer SHA-256
+`50269b65282245702246105f51b7baf8ecd45e4f6d6fd7abec6eeb6a4e975483`.
+They include the qualified read-only reference copy. Raw outputs are
+`runs/dense/step5q-final16` and `step5q-final64`. Earlier step-5 profiles remain
+in the JSON as `step5`; they precede the final reference fix.
+
+| Matches | Phase | Wall s | Main-thread CPU s | Eager launches, estimated | Graph launches, estimated | Kernel executions, estimated |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | rollout | 2.329 | 1.060 | 85,638 | 384 | 608,634 |
+| 16 | reference | 0.283 | 0.282 | 148 | 1 | 9,995 |
+| 16 | preparation | 0.064 | 0.064 | 74 | 1 | 1,230 |
+| 16 | critic | 0.018 | 0.013 | 601 | 0 | 613 |
+| 16 | actor | 0.470 | 0.470 | 3,672 | 4 | 18,956 |
+| 64 | rollout | 3.342 | 1.085 | 85,638 | 384 | 616,408 |
+| 64 | reference | 0.506 | 0.506 | 148 | 1 | 17,863 |
+| 64 | preparation | 0.138 | 0.138 | 74 | 1 | 1,230 |
+| 64 | critic | 0.045 | 0.040 | 593 | 0 | 609 |
+| 64 | actor | 0.940 | 0.940 | 7,344 | 8 | 37,912 |
+
+The update takes 3.166 s at 16 matches and 4.971 s at 64 matches. Policy and
+tick-state CPU time is 2.831 and 3.046 ms per tick; complete rollout main-thread
+CPU time is 8.284 and 8.474 ms per tick. Counts stay flat except for work that
+grows with windows and actor steps. The earlier columnar path took 5.433 s at
+64 matches before the bootstrap follow-up, with 28 ms of rollout CPU per tick.
+
+Using the measured PRO 6000 host costs, the **1,024-match projection** is
+3.85 s rollout, about 1.28 s reference, about 3.80 s actor and below 0.5 s other
+preparation. The projected complete update is about 9 s. Rollout uses the
+64-match count; actor uses 119 fixed steps; reference scales nine observed
+fixed batches to 129. Eager launches cost 14 us and remaining graph kernels
+cost 5 us. The whole-preparation diagnostic projects about 0.05 s of host
+cost. These are host-count projections, not measurements of GPU work or
+measured 1,024-match times. The final Modal profile must test them.
