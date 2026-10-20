@@ -82,7 +82,8 @@ def test_transfer_parity_resets_and_staggered_ends(
             kwargs = {} if kwargs is None else kwargs
             if any(isinstance(t, torch.Tensor) and t.is_cuda for t in tree_leaves((args, kwargs))):
                 raise AssertionError("worker accessed a CUDA tensor")
-            if torch.device(kwargs.get("device", "cpu")).type == "cuda":
+            requested = kwargs.get("device")
+            if requested is not None and torch.device(requested).type == "cuda":
                 raise AssertionError("worker allocated a CUDA tensor")
             result = func(*args, **kwargs)
             assert not any(isinstance(t, torch.Tensor) and t.is_cuda for t in tree_leaves(result))
@@ -120,7 +121,7 @@ def test_transfer_parity_resets_and_staggered_ends(
             torch.manual_seed(19)
             policy = ToyPolicy(device)
             shards = []
-            for index, cpu in enumerate(sorted(os.sched_getaffinity(0))[:2]):
+            for index, cpu in enumerate(sorted(os.sched_getaffinity(0))[:4]):
                 shard = exp.NativeSimulatorShard(
                     source / "data", (2 * index, 2 * index + 1), cpu=cpu, device=torch.device(device), max_frame=1
                 )
@@ -173,3 +174,20 @@ def test_failed_tick_releases_host_waiters() -> None:
     with pytest.raises(RuntimeError, match="failed inference"), engine._host_transfers((buffer,)):
         raise RuntimeError("failed inference")
     assert staging.ready.is_set()
+
+
+@pytest.mark.integration
+def test_staging_keeps_fp32_controller_bits() -> None:
+    import numpy as np
+    import torch
+    from test_065_loop import exp
+
+    assert torch.cuda.is_available(), "required CUDA fixture missing"
+    source = np.random.default_rng(65).uniform(-1, 1, (2, 8, 2, 14)).astype(np.float32)
+    source[0, 0, 0, 0] = -0.0
+    staging = exp.BufferStaging(8, torch.device("cuda"))
+    staging.ready.clear()
+    staging.inputs.copy_(torch.from_numpy(source).cuda(), non_blocking=True)
+    staging.input_copied.record()
+    staging.release_inputs()
+    np.testing.assert_array_equal(staging.host_inputs.view(np.uint32), source.view(np.uint32))

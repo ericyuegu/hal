@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -28,13 +29,7 @@ class CacheIdentity:
         return hashlib.sha256(self.encoded()).hexdigest()
 
 
-def source_hash(root: Path) -> str:
-    paths = [
-        *root.joinpath("hal").rglob("*.py"),
-        root / "experiments/065_selfplay_ppo.py",
-        root / "pyproject.toml",
-        root / "uv.lock",
-    ]
+def source_hash(root: Path, paths: Sequence[Path]) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths):
         digest.update(str(path.relative_to(root)).encode() + b"\0")
@@ -42,18 +37,18 @@ def source_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
-def current_identity(root: Path, device: torch.device) -> CacheIdentity:
+def current_identity(source_sha256: str, device: torch.device) -> CacheIdentity:
     if str(torch.__version__).split("+")[0] != "2.11.0":
         raise RuntimeError("compiler cache is qualified only for Torch 2.11.0")
     if device.type != "cuda":
-        raise ValueError("O65 compiler cache requires CUDA")
+        raise ValueError("compiler cache requires CUDA")
     return CacheIdentity(
         str(torch.__version__),
         importlib.metadata.version("triton"),
         str(torch.version.cuda),
         torch.cuda.get_device_name(device),
         torch.cuda.get_device_capability(device),
-        source_hash(root),
+        source_sha256,
     )
 
 

@@ -4262,10 +4262,19 @@ def train_native(config: NativeCli) -> None:
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(config.training.deterministic)
     cache_started = time.perf_counter()
+    source_root = Path(__file__).resolve().parents[1]
+    cache_sources = (
+        *source_root.joinpath("hal").rglob("*.py"),
+        Path(__file__).resolve(),
+        source_root / "pyproject.toml",
+        source_root / "uv.lock",
+    )
     cache = (
         compile_cache.CompileCache(
             config.compile_cache,
-            compile_cache.current_identity(Path(__file__).resolve().parents[1], torch.device(config.device)),
+            compile_cache.current_identity(
+                compile_cache.source_hash(source_root, cache_sources), torch.device(config.device)
+            ),
         )
         if config.compile_cache is not None
         else None

@@ -100,6 +100,29 @@ def test_source_hash_changes_with_model_code(tmp_path: Path) -> None:
     (tmp_path / "experiments").mkdir()
     for name in ("experiments/065_selfplay_ppo.py", "pyproject.toml", "uv.lock", "hal/models/policy.py"):
         (tmp_path / name).write_text(name)
-    before = compile_cache.source_hash(tmp_path)
+    before = compile_cache.source_hash(tmp_path, tuple(tmp_path.rglob("*.*")))
     (tmp_path / "hal/models/policy.py").write_text("changed")
-    assert compile_cache.source_hash(tmp_path) != before
+    assert compile_cache.source_hash(tmp_path, tuple(tmp_path.rglob("*.*"))) != before
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"identity": "b" * 64},
+        {"sha256": "../bad"},
+        {"counts": {"inductor": True}},
+        {"unknown": 1},
+    ],
+)
+def test_cache_rejects_malformed_manifest_before_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changes: dict
+) -> None:
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"graphs", SimpleNamespace(artifacts={})))
+    cache = compile_cache.CompileCache(tmp_path, identity())
+    cache.save()
+    path = cache.directory / "artifacts.json"
+    manifest = json.loads(path.read_text())
+    manifest.update(changes)
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="manifest mismatch"):
+        compile_cache.CompileCache(tmp_path, identity())
