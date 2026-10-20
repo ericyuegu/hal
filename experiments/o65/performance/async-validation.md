@@ -118,3 +118,10 @@ batch.
 Final artifact verification: **70 recorded SHA-256 hashes match**. The current
 runtime compilation identity matches both persisted-cache measurement processes.
 All evidence floats are finite.
+
+The final `git diff o65-selfplay-ppo-plan...HEAD --check` exits 2 on inherited
+CRLF lines in `floor-tick-kernels.csv`. The stream-only comparison
+`git diff 376eb42b...HEAD --check` passes. The frozen floor CSV was not changed.
+Report-only commits skip pre-commit Python hooks because they contain no Python
+files; the full handoff commands above were run separately and pass apart from
+the six required fixture skips.

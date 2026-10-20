@@ -24,6 +24,7 @@ Branch `o65-async`, from `o65-floor` at `376eb42b`:
 - `0577890f` — Cover warmup events in CUDA capture tests.
 - `974a9ca0` — Cancel pending simulator work when input copies fail.
 - `278af7e3` — Cover interruption of pending controller transfers.
+- `c4a06db0` — Record async rollout and compile-cache evidence.
 
 Runtime measurements use `974a9ca0`; subsequent changes add tests and evidence.
 
