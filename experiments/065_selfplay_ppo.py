@@ -2791,11 +2791,7 @@ class TrainConfig:
     gradient_clip: float = 1.0
     value_scale: float = 150.0
     warmup_steps: int = 32
-    critic_warmup_updates: int = 172
-    warmup_match_frames: int = 11008
-    plateau_window: int = 32
-    plateau_tolerance: float = 0.01
-    critic_warmup_max_updates: int = 384
+    critic_warmup_updates: int = 32
     lambda_spread_multiplier: float = 3.0
     snapshot_interval: int = 256
     snapshot_capacity: int = 3
@@ -2807,8 +2803,6 @@ class TrainConfig:
             "critic_epochs",
             "windows_per_step",
             "decisions_per_window",
-            "plateau_window",
-            "critic_warmup_max_updates",
             "snapshot_interval",
             "snapshot_capacity",
             "checkpoint_interval",
@@ -2817,11 +2811,9 @@ class TrainConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if not 1 <= self.decisions_per_window <= 16:
             raise ValueError("at most 16 decisions can train per window")
-        for value in (self.warmup_steps, self.critic_warmup_updates, self.warmup_match_frames):
+        for value in (self.warmup_steps, self.critic_warmup_updates):
             if value < 0:
                 raise ValueError("warmup lengths must be nonnegative integers")
-        if self.critic_warmup_max_updates < self.critic_warmup_updates:
-            raise ValueError("maximum critic warmup must include the minimum warmup")
         for name in (
             "actor_lr",
             "critic_lr",
@@ -2832,8 +2824,8 @@ class TrainConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if not 0 < self.clip_epsilon < 1 or not math.isfinite(self.plateau_tolerance) or self.plateau_tolerance < 0:
-            raise ValueError("invalid clip or plateau tolerance")
+        if not 0 < self.clip_epsilon < 1:
+            raise ValueError("invalid clip epsilon")
         if self.actor_optimizer not in ("muon", "adam"):
             raise ValueError("unsupported actor optimizer")
 
@@ -3356,7 +3348,6 @@ class Trainer:
         self.actor_steps = 0
         self.warming = config.critic_warmup_updates > 0
         self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
-        self.fresh_variances: list[float] = []
         self.next_anchor = max(engine.anchors) + 1
         self.evaluation_cursor = 0
         self.updating = False
@@ -3862,25 +3853,8 @@ class Trainer:
                 previous[1] + float(values.sum()),
                 previous[2] + float(values.square().sum()),
             )
-        self.fresh_variances.append(batch.metrics["critic/explained_variance"])
-        window = self.config.plateau_window
-        metrics: dict[str, float] = {}
-        plateau = False
-        if len(self.fresh_variances) >= 2 * window:
-            previous = self.fresh_variances[-2 * window : -window]
-            recent = self.fresh_variances[-window:]
-            if all(math.isfinite(x) for x in (*previous, *recent)):
-                gain = (math.fsum(recent) - math.fsum(previous)) / window
-                metrics["critic/warmup_variance_gain"] = gain
-                plateau = gain < self.config.plateau_tolerance
-        limited = self.update + 1 >= self.config.critic_warmup_max_updates
-        ready = (
-            self.update + 1 >= self.config.critic_warmup_updates
-            and min(self.engine.clocks) >= self.config.warmup_match_frames
-            and plateau
-        )
-        if not limited and not ready:
-            return metrics
+        if self.update + 1 < self.config.critic_warmup_updates:
+            return {}
         spreads = []
         for count, total, squares in self.warmup_moments.values():
             if count < 2:
@@ -3892,8 +3866,7 @@ class Trainer:
             raise ValueError("calibrated lambda_max is outside the declared conditioner range")
         sampler.lambda_max = maximum
         self.warming = False
-        metrics[f"train/warmup_ended_{'limit' if limited else 'plateau'}"] = 1.0
-        return metrics
+        return {"train/warmup_ended": 1.0}
 
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
         if self.updating:
@@ -4104,7 +4077,6 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "episode_metrics": trainer.episode_metrics,
         "anchor_win_history": trainer.anchor_win_history,
         "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
-        "fresh_variances": trainer.fresh_variances,
         "next_anchor": trainer.next_anchor,
         "evaluation_cursor": trainer.evaluation_cursor,
         "python_rng": random.getstate(),
@@ -4275,7 +4247,6 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.episode_metrics = saved["episode_metrics"]
     trainer.anchor_win_history = saved["anchor_win_history"]
     trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
-    trainer.fresh_variances = saved["fresh_variances"]
     trainer.next_anchor = saved["next_anchor"]
     trainer.evaluation_cursor = saved["evaluation_cursor"]
     trainer.policy.clear_caches()
@@ -5263,7 +5234,6 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.actor_steps,
                 trainer.warming,
                 trainer.warmup_moments,
-                trainer.fresh_variances,
                 trainer.next_anchor,
                 trainer.evaluation_cursor,
                 trainer.episode_metrics,

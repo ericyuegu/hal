@@ -29,8 +29,8 @@ from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v7"
-TRAINING_VERSION = 7
+TRAINING_FORMAT = "hal.o65.training.v8"
+TRAINING_VERSION = 8
 
 
 class CheckpointShard(TypedDict):

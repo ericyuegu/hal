@@ -302,7 +302,7 @@ def main(args: Args) -> None:
         groups=2 if args.tiny else 4,
         updates=updates,
         checkpoint_every=checkpoint_every,
-        warmup=0 if args.tiny else 172,
+        warmup=0 if args.tiny else 32,
         compile_cache=args.compile_cache,
     )
     if args.wandb:

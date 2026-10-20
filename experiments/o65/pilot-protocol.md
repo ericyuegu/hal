@@ -75,14 +75,11 @@ final grid. Update sampler hashes in the delivery manifest after regeneration.
 We verify delivery, build MSL and the HAL adapter, then record the source,
 environment and build hashes. Simulator parity tests remain required.
 
-Critic warmup lasts at least 172 updates and advances every group by at least
-11,008 frames. It ends when the mean fresh-feature explained variance of the
-last 32 updates gains less than 0.01 over the preceding 32 updates. It ends at
-update 384 regardless of those conditions. We log the gain and whether the
-plateau or update limit ended warmup. We calibrate lambda_max to three times the
+Critic warmup lasts exactly 32 updates, independent of explained variance and
+group clocks. At the end of update 32, we calibrate lambda_max to three times the
 largest per-cadence advantage spread within the conditioner bounds. We retain
 lambda_min=0.01 and record the calibrated maximum before PPO. Failure to leave
-warmup fails this stage.
+warmup fails this stage. The first PPO update is update 33.
 
 One trainer process runs all updates. It saves complete checkpoints every 32
 updates and at update 2,000. A worker publishes immutable local snapshots to
@@ -90,7 +87,7 @@ the Modal Volume and R2. The queue holds at most two snapshots, including the
 active publication. A worker failure or full queue fails the run. The trainer
 drains publication before final evaluation.
 Training progress comes from existing anchor matches. After a real preemption,
-we resume from the latest complete checkpoint. The first warmup and PPO
+we resume from the latest published complete checkpoint. The first warmup and PPO
 updates record allocated and reserved bytes by phase. We preserve partial
 memory records in phase-memory.json after an OOM. The trainer uses
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. A three-update, 16-match
@@ -123,7 +120,8 @@ metrics retain the same results. Each update records anchor 0 under
 
 We include unfinished matches and countdown frames in exposure, exclude reset
 waits and truncation wins, preserve each episode's anchor id through reset
-processing. Training format v7 retains rolling counts through resume.
+processing. Training format v8 retains rolling counts through resume and removes
+the variance history used by the former warmup rule.
 
 We also record pre-clip gradient norms, cap fractions, conditional KL, entropy,
 reward components, episode-age/u coverage, parameter movement, action counts,

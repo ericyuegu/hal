@@ -202,11 +202,8 @@ compare initial values with completed-episode Monte Carlo returns. Truncations
 are excluded from that comparison.
 
 During warmup, only critic heads train. We skip reference replay and zero KL
-terms while the student still equals pi_ref. Warmup requires at least 172
-updates and 11,008 frames in each group. It ends when the mean fresh explained
-variance of the last 32 updates gains less than 0.01 over the preceding 32
-updates. It ends at update 384 regardless of those conditions. We log whether
-the plateau or update limit ended warmup. We then set lambda_max to three
+terms while the student still equals pi_ref. Warmup lasts exactly 32 updates,
+independent of explained variance and group clocks. We then set lambda_max to three
 times the largest per-cadence advantage spread within the conditioner bounds.
 We record that value before the first PPO update.
 
@@ -239,7 +236,8 @@ replay the reference, calculate KL and GAE, fit the critic, then run one PPO
 epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
-Training format v7 retains pool snapshot v4. A checkpoint records model,
+Training format v8 retains pool snapshot v4 and removes the variance history
+used by the former warmup rule. A checkpoint records model,
 optimizers, scheduler, compressed simulator states, the last 129 frame records,
 committed queues, group clocks, episode conditions and ids, pool position,
 snapshots, metric accumulators and the last 32 anchor win counts. Each rank

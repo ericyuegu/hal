@@ -67,8 +67,8 @@ def write_boundary(directory: Path, update: int) -> Path:
     path.write_text(
         json.dumps(
             {
-                "format": "hal.o65.training.v7",
-                "version": 7,
+                "format": "hal.o65.training.v8",
+                "version": 8,
                 "experiment": "065_selfplay_ppo",
                 "update": update,
                 "configuration_sha256": "c" * 64,
