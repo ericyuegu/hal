@@ -102,6 +102,8 @@ def test_image_delivery_commands_match_the_real_cli() -> None:
         ("name", "../x"),
         ("git_sha", "HEAD"),
         ("timeout_seconds", 0),
+        ("created_unix", float("inf")),
+        ("created_unix", True),
     ],
 )
 def test_modal_request_rejects_invalid_config(field: str, value: object) -> None:
@@ -151,6 +153,14 @@ def test_cpu_selection_uses_distinct_available_ids() -> None:
     assert select_cpus(set(range(1, 37, 2))) == tuple(range(1, 35, 2))
     with pytest.raises(ValueError, match="17 available CPU IDs"):
         select_cpus(set(range(16)))
+
+
+def test_attempts_share_one_absolute_reservation_deadline() -> None:
+    request = Request("test", "a" * 40, timeout_seconds=900, created_unix=100)
+    assert launcher.remaining_seconds(request, 200) == 900
+    assert launcher.remaining_seconds(request, 800) == 560
+    with pytest.raises(ValueError, match="expired"):
+        launcher.remaining_seconds(request, 1300)
 
 
 def test_volume_staging_copies_checkpoint_bytes_and_excludes_caches(tmp_path: Path) -> None:

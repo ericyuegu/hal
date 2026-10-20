@@ -110,6 +110,7 @@ class Request:
     mode: Literal["smoke", "profile", "floor"] = "profile"
     matches: int = 1024
     timeout_seconds: int = 1800
+    created_unix: float = dataclasses.field(default_factory=time.time)
 
     def __post_init__(self) -> None:
         validate_name(self.name)
@@ -124,6 +125,20 @@ class Request:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
         if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= 6600:
             raise ValueError("timeout must be 60 to 6600 seconds")
+        if (
+            type(self.created_unix) not in (int, float)
+            or not math.isfinite(self.created_unix)
+            or self.created_unix <= 0
+        ):
+            raise ValueError("launch time must be a finite positive timestamp")
+
+
+def remaining_seconds(request: Request, now: float) -> float:
+    # A rescheduled container must share the original reservation's deadline.
+    remaining = min(request.timeout_seconds, request.created_unix + request.timeout_seconds + 360 - now)
+    if remaining <= 60:
+        raise ValueError("O65 Modal reservation has expired")
+    return remaining
 
 
 def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
@@ -237,7 +252,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
     )
     Path(env["TMPDIR"]).mkdir()
     identity = {
-        "format": "hal.o65.modal-launch.v1",
+        "format": "hal.o65.modal-launch.v2",
         "request": dataclasses.asdict(request),
         "command": argv,
         "image": IMAGE,
@@ -265,7 +280,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
-            timeout=request.timeout_seconds - 30,
+            timeout=remaining_seconds(request, time.time()) - 30,
         )
     return result.returncode
 
@@ -287,7 +302,7 @@ def nsys_command(argv: list[str], output: Path) -> list[str]:
 
 
 def run_floor(request: Request, output: Path, env: dict[str, str], cpus: tuple[int, ...], log: TextIO) -> int:
-    deadline = time.monotonic() + request.timeout_seconds - 60
+    deadline = time.monotonic() + remaining_seconds(request, time.time()) - 60
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
         log.write(shlex.join(argv) + "\n")
