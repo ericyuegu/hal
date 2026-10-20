@@ -3351,28 +3351,30 @@ class GradientNoise:
         self.total = tuple(torch.zeros_like(p) for p in parameters)
         self.squares = parameters[0].new_zeros(())
         self.windows = 0
+        self.decisions = 0
         self.steps = 0
 
     @torch.no_grad()
-    def add(self, windows: int) -> None:
+    def add(self, windows: int, decisions: int) -> None:
         for parameter, total in zip(self.parameters, self.total, strict=True):
             if parameter.grad is not None:
                 gradient = parameter.grad.detach()
-                total.add_(gradient, alpha=windows)
-                self.squares.add_(gradient.float().square().sum(), alpha=windows)
+                total.add_(gradient, alpha=decisions)
+                self.squares.add_(gradient.float().square().sum(), alpha=decisions)
         self.windows += windows
+        self.decisions += decisions
         self.steps += 1
 
     def metrics(self) -> dict[str, float]:
         result = {"actor/gradient_noise_valid": 0.0, "actor/gradient_noise_steps": float(self.steps)}
         if self.steps < 2:
             return result
-        mean_square = torch.stack([t.float().square().sum() for t in self.total]).sum() / self.windows**2
-        noise = ((self.squares - self.windows * mean_square) / (self.steps - 1)).clamp_min(0)
-        signal = mean_square - noise / self.windows
+        mean_square = torch.stack([t.float().square().sum() for t in self.total]).sum() / self.decisions**2
+        noise = ((self.squares - self.decisions * mean_square) / (self.steps - 1)).clamp_min(0)
+        signal = mean_square - noise / self.decisions
         result.update({"actor/gradient_noise_variance": float(noise), "actor/gradient_signal_squared": float(signal)})
         if float(signal) > 0:
-            estimate = noise / signal
+            estimate = noise / signal * (self.windows / self.decisions)
             _check_finite("gradient noise scale", estimate)
             result.update({"actor/gradient_noise_scale_windows": float(estimate), "actor/gradient_noise_valid": 1.0})
         return result
@@ -3960,7 +3962,7 @@ class Trainer:
                             )
                         ),
                     )
-                    noise.add(int(live.sum()))
+                    noise.add(int(live.sum()), int(selected.sum()))
                     norm = torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )
@@ -4067,7 +4069,8 @@ class Trainer:
             }
         with self.memory.phase("preparation"), phase(self.profile, "preparation"):
             batch = self.prepare(rollout)
-        metrics = self.fit(batch)
+        with self.memory.phase("optimization"):
+            metrics = self.fit(batch)
         metrics.update(self.completed_metrics(rollout, batch.kl))
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True

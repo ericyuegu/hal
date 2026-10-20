@@ -169,10 +169,10 @@ def test_gradient_noise_estimate_uses_preclip_gradients_and_window_counts() -> N
     noise = exp.GradientNoise((parameter,))
     for gradient in (1.0, 3.0):
         parameter.grad = torch.tensor([gradient])
-        noise.add(4)
+        noise.add(4, 64)
         torch.nn.utils.clip_grad_norm_((parameter,), 0.1)
     metrics = noise.metrics()
-    assert metrics["actor/gradient_noise_variance"] == 8
+    assert metrics["actor/gradient_noise_variance"] == 128
     assert metrics["actor/gradient_signal_squared"] == 3
     assert metrics["actor/gradient_noise_scale_windows"] == pytest.approx(8 / 3)
     assert all(math.isfinite(value) for value in metrics.values())
@@ -196,3 +196,14 @@ def test_phase_memory_preserves_oom_phase_and_partial_peaks(tmp_path: Path, monk
     with memory.phase("actor"):
         pass
     assert memory.actor_checked
+
+
+def test_gradient_noise_weights_the_actual_selected_decisions() -> None:
+    parameter = torch.nn.Parameter(torch.zeros(1))
+    noise = exp.GradientNoise((parameter,))
+    for gradient, count in ((1.0, 4), (3.0, 12)):
+        parameter.grad = torch.tensor([gradient])
+        noise.add(4, count)
+    metrics = noise.metrics()
+    assert metrics["actor/gradient_signal_squared"] == 5.5
+    assert metrics["actor/gradient_noise_scale_windows"] == pytest.approx(12 / 5.5 / 2)
