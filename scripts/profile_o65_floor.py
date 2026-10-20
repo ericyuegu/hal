@@ -499,7 +499,7 @@ def critic_benchmark(
 ) -> tuple[dict[str, object], Counter[Gemm]]:
     trunk = torch.randn(count, model.cfg.d_model, device="cuda")
     decoder = torch.randn(count, model.cfg.temporal_d_model, device="cuda")
-    condition = torch.zeros(count, 3, device="cuda")
+    condition = torch.zeros(count, 4, device="cuda")
     queue = torch.zeros(count, model.critic_residual.max_queue, 4, device="cuda", dtype=torch.long)
     lengths = torch.full((count,), 8, device="cuda", dtype=torch.long)
 
@@ -561,8 +561,8 @@ def bootstrap_benchmark(
     starts = slots.history_starts_WL[indices].contiguous()
     prefix = slots.forced_queue_WKD4[indices, :1].contiguous()
     delay = slots.delay_WK[indices, :1].contiguous()
-    condition = slots.condition_WK3[indices, :1].contiguous()
-    opponent_condition = slots.opponent_condition_WK3[indices, 0].contiguous()
+    condition = slots.condition_WK4[indices, :1].contiguous()
+    opponent_condition = slots.opponent_condition_WK4[indices, 0].contiguous()
     queue = slots.opponent_queue_WKQ4[indices, 0].contiguous()
     lengths = slots.opponent_lengths_WK[indices, 0].contiguous()
     compiled_queue = torch.compile(

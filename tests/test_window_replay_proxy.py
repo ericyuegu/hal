@@ -204,8 +204,8 @@ def values(model: SelfPlayTransformer, output: ReplayOutput) -> Tensor:
     return model.self_play_value(
         features.trunk_WKd.flatten(0, 1),
         features.decoder_WKt.flatten(0, 1),
-        features.condition_WK3.flatten(0, 1),
-        features.opponent_condition_WK3.flatten(0, 1),
+        features.condition_WK4.flatten(0, 1),
+        features.opponent_condition_WK4.flatten(0, 1),
         features.opponent_queue_WKQ4.flatten(0, 1),
         features.opponent_lengths_WK.flatten(0, 1),
     ).reshape(output.log_probs_WKF.shape[:2])
@@ -299,7 +299,7 @@ def quantities(
         "trunk_features": output.features.trunk_WKd[selected].detach(),
         "decoder_features": output.features.decoder_WKt[selected].detach(),
         "condition_features": torch.cat(
-            (output.features.condition_WK3[selected], output.features.opponent_condition_WK3[selected]), -1
+            (output.features.condition_WK4[selected], output.features.opponent_condition_WK4[selected]), -1
         ).detach(),
         "opponent_queue": output.features.opponent_queue_WKQ4[selected].float(),
         "opponent_lengths": output.features.opponent_lengths_WK[selected].float(),

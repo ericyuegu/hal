@@ -37,7 +37,7 @@ class QueueResidualHead(nn.Module):
         self.max_queue = max_queue
         self.offset_embedding = nn.Embedding(max_queue, cfg.offset_embed_dim)
         self.queue_encoder = SwiGLU(4 * cfg.action_embed_dim + cfg.offset_embed_dim, hidden_dim, hidden_dim)
-        self.residual = SwiGLU(cfg.temporal_d_model + 6 + hidden_dim, hidden_dim, 1, output_bias=True)
+        self.residual = SwiGLU(cfg.temporal_d_model + 8 + hidden_dim, hidden_dim, 1, output_bias=True)
         nn.init.zeros_(self.residual.down.weight)
         nn.init.zeros_(self.residual.down.bias)
 
@@ -52,8 +52,8 @@ class QueueResidualHead(nn.Module):
         validate: bool = True,
     ) -> Tensor:
         batch = decoder_state.shape[0]
-        if condition.shape != (batch, 3) or opponent_condition.shape != condition.shape:
-            raise ValueError("critic conditions must be [B, 3]")
+        if condition.shape != (batch, 4) or opponent_condition.shape != condition.shape:
+            raise ValueError("critic conditions must be [B, 4]")
         if queue_embeddings.ndim != 3 or queue_embeddings.shape[:2] != (batch, self.max_queue):
             raise ValueError("opponent queue must match the critic capacity")
         if queue_lengths.shape != (batch,) or queue_lengths.dtype not in (torch.int32, torch.int64):

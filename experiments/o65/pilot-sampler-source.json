@@ -1,5 +1,15 @@
 {
-  "source": "data/processed/ranked-anonymized-1/index-v6.jsonl",
-  "sha256": "2fc24f0e46510c66c55c4ebc46cdb371376d98d746bb8d78b422d8d45464afd2",
-  "count_unit": "player appearances in ranked index; Fox/Falco functional pilot only"
+  "format": "hal.o65.sampler-source.v2",
+  "checkpoint_sha256": "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6",
+  "sources": {
+    "ranked-anonymized-1-policy-world-v8": {
+      "manifest": "runs/bigstep/training-sources/ranked-anonymized-1-policy-world-v8/manifest.jsonl",
+      "sha256": "95b432d7d6c93d53dfe82617ea3ca7347da3c253f159895553b1e4d9d5718552",
+      "train_rows": 112188,
+      "checkpoint_train_index_sha256": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8"
+    }
+  },
+  "identity_sidecar_sha256": "54ccf8a2497fe240313117297ca2ea31158e08db2cc53c67e7aa46853a8dac1c",
+  "count_unit": "player appearances per character in the checkpoint training rows; no validation/test rows",
+  "matchup_prior": "hal.eval.matchups.MATCHUP_PRIOR (259 ranked train pairs, minimum 10 replays)"
 }

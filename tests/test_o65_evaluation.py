@@ -724,3 +724,29 @@ def test_decoder_precision_changes_policy_identity_and_rejects_old_artifacts(tmp
     torch.save(raw, paths[0])
     with pytest.raises(ValueError, match="unsupported checkpoint"):
         load_evaluation_checkpoint(paths[0], device=torch.device("cpu"))
+
+
+def test_death_metrics_classify_blast_onsets_and_explicit_zero_damage_proxy() -> None:
+    post = {}
+    for port in (1, 2):
+        post[port] = {
+            "stock": np.array([4, 4, 3, 3, 3, 2, 2]),
+            "percent": np.array([0, 0, 0, 10, 20, 0, 0]),
+            "action": np.array([14, 0, 0, 14, 2, 2, 2]),
+            "position_x": np.zeros(7),
+        }
+    scored = score_match(
+        Trajectory(np.arange(7), post, np.zeros(7, dtype=np.uint32)),
+        simulator="msl",
+        pair="a",
+        seed=1,
+        start=EvaluationStart("fd", 25, (1, 22)),
+        focal_port=1,
+        stop_reason="frame_budget",
+        wall_seconds=1,
+    )
+    assert scored.events["ego_deaths_blast_bottom"] == 1
+    assert scored.events["ego_deaths_blast_right"] == 1
+    assert scored.events["ego_deaths_blast_top"] == 0
+    assert scored.events["ego_zero_damage_self_destruct_rate"] == 0.5
+    assert scored.events["match_minutes"] == 7 / 3600

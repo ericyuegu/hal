@@ -127,8 +127,11 @@ def prepare(msl: Path, root: Path, checkpoint: Path, output: Path, manifest_path
     if commit != MSL_COMMIT:
         raise ValueError("MSL o65-hal-parity no longer names the qualified commit")
     provenance = json.loads((root / SAMPLER_SOURCE_PATH).read_text())
-    if sha256(root / provenance["source"]) != provenance["sha256"]:
-        raise ValueError("sampler count source hash mismatch")
+    if provenance.get("format") != "hal.o65.sampler-source.v2":
+        raise ValueError("unsupported sampler count provenance")
+    for source in provenance["sources"].values():
+        if sha256(root / source["manifest"]) != source["sha256"]:
+            raise ValueError("sampler count source hash mismatch")
     output.mkdir(parents=True, exist_ok=False)
     source = output / "msl-source.tar"
     subprocess.run(

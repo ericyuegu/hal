@@ -22,7 +22,15 @@ class ConditioningRanges:
         if self.delay[0] < 0 or self.replan[0] < 1:
             raise ValueError("delay must be nonnegative and replan must be positive")
 
-    def normalize(self, log_lambda: Tensor, delay: Tensor, replan: Tensor, *, validate: bool = True) -> Tensor:
+    def normalize(
+        self,
+        log_lambda: Tensor,
+        delay: Tensor,
+        replan: Tensor,
+        *,
+        percentile: Tensor | None = None,
+        validate: bool = True,
+    ) -> Tensor:
         if log_lambda.shape != delay.shape or delay.shape != replan.shape:
             raise ValueError("episode conditioning shapes must agree")
         values = (log_lambda, delay, replan)
@@ -40,4 +48,14 @@ class ConditioningRanges:
                 if low == high
                 else 2 * (value.float() - low) / (high - low) - 1
             )
+        u = torch.full_like(log_lambda, 0.95, dtype=torch.float32) if percentile is None else percentile
+        if u.shape != log_lambda.shape:
+            raise ValueError("percentile and episode conditioning shapes must agree")
+        if (
+            validate
+            and not torch.compiler.is_compiling()
+            and bool((~torch.isfinite(u) | (u < 0.1) | (u > 0.999)).any())
+        ):
+            raise ValueError("return percentile must be in [0.1, 0.999]")
+        normalized.append(2 * u.float() - 1)
         return torch.stack(normalized, dim=-1)

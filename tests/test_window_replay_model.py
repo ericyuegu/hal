@@ -41,7 +41,7 @@ def inputs(policy: SelfPlayTransformer, device: str = "cpu") -> tuple[Tensor, Te
         delay,
         replan,
         condition,
-        -condition,
+        torch.cat((-condition[..., :3], condition[..., 3:]), -1),
         policy.codec.quantize(torch.rand(2, 3, 14, ACTION_DIM, device=device)),
         delay + replan,
         policy.codec.quantize(torch.rand(2, 3, 4, ACTION_DIM, device=device)),
@@ -162,8 +162,8 @@ def test_unexecuted_valid_decision_retains_critic_features() -> None:
     value = policy.self_play_value(
         features.trunk_WKd[0, :1],
         features.decoder_WKt[0, :1],
-        features.condition_WK3[0, :1],
-        features.opponent_condition_WK3[0, :1],
+        features.condition_WK4[0, :1],
+        features.opponent_condition_WK4[0, :1],
         features.opponent_queue_WKQ4[0, :1],
         features.opponent_lengths_WK[0, :1],
     )
@@ -180,7 +180,7 @@ def test_unexecuted_valid_decision_retains_critic_features() -> None:
         "replan_WK",
         "executed_WKF",
         "sampled_actions_WK44",
-        "condition_WK3",
+        "condition_WK4",
         "history_starts_WL",
     ],
 )
@@ -190,7 +190,7 @@ def test_invalid_slots_are_rejected(field: str) -> None:
     value = getattr(slots, field).clone()
     if field == "executed_WKF":
         value[0, 0, 1] = False
-    elif field == "condition_WK3":
+    elif field == "condition_WK4":
         value[0, 0, 1] = -0.5
     elif field == "history_starts_WL":
         value[0, 2] = 4
@@ -219,7 +219,7 @@ def test_queue_only_replay_matches_the_pre_action_state() -> None:
         slots.history_starts_WL,
         slots.forced_queue_WKD4,
         slots.delay_WK,
-        slots.condition_WK3,
+        slots.condition_WK4,
     )
     torch.testing.assert_close(
         queue_state[slots.valid_WK], expected.features.decoder_WKt[slots.valid_WK], atol=2e-6, rtol=2e-5
@@ -234,5 +234,5 @@ def test_queue_only_replay_matches_the_pre_action_state() -> None:
             slots.history_starts_WL,
             slots.forced_queue_WKD4,
             lengths,
-            slots.condition_WK3,
+            slots.condition_WK4,
         )

@@ -86,7 +86,10 @@ def test_widened_conditioner_preserves_learned_bc_modulation() -> None:
     with pytest.raises(ValueError, match="outside"):
         RANGES.normalize(torch.tensor([float("nan")]), torch.tensor([8]), torch.tensor([4]))
     fixed = ConditioningRanges((0, 0), (8, 8), (4, 4))
-    assert torch.equal(fixed.normalize(torch.tensor([0.0]), torch.tensor([8]), torch.tensor([4])), torch.zeros(1, 3))
+    assert torch.equal(
+        fixed.normalize(torch.tensor([0.0]), torch.tensor([8]), torch.tensor([4])),
+        torch.tensor([[0.0, 0.0, 0.0, 0.9]]),
+    )
 
 
 @pytest.mark.parametrize("dense_offsets", [False, True])
@@ -101,7 +104,7 @@ def test_bc_load_is_strict_and_critic_starts_at_value_head(dense_offsets: bool) 
     trunk = torch.randn(3, 32, requires_grad=True)
     decoder = torch.randn(3, 32, requires_grad=True)
     queue = policy.codec.quantize(torch.rand(3, 14, ACTION_DIM))
-    condition = torch.randn(3, 3)
+    condition = torch.randn(3, 4)
     value = policy.self_play_value(trunk, decoder, condition, condition, queue, torch.tensor([0, 10, 14]))
     torch.testing.assert_close(value, policy.estimate_value(trunk[:, None]), rtol=0, atol=0)
     # A trained residual must still stop both paths into the actor.
@@ -129,7 +132,7 @@ def test_bc_load_is_strict_and_critic_starts_at_value_head(dense_offsets: bool) 
 def test_queue_padding_is_invisible_even_for_nan_bytes() -> None:
     policy = model()
     nn.init.normal_(policy.critic_residual.residual.down.weight)
-    inputs = (torch.randn(2, 32), torch.randn(2, 3), torch.randn(2, 3))
+    inputs = (torch.randn(2, 32), torch.randn(2, 4), torch.randn(2, 4))
     queue = torch.randn(2, 14, 128)
     lengths = torch.tensor([0, 7])
     expected = policy.critic_residual(*inputs, queue, lengths)
@@ -555,8 +558,8 @@ def test_critic_rejects_a_time_dimension_that_would_broadcast_values(field: str)
         policy.self_play_value(
             torch.zeros(2, 1, 32) if field == "trunk" else torch.zeros(2, 32),
             torch.zeros(2, 1, 32) if field == "decoder" else torch.zeros(2, 32),
-            torch.zeros(2, 3),
-            torch.zeros(2, 3),
+            torch.zeros(2, 4),
+            torch.zeros(2, 4),
             torch.zeros(2, 14, 4, dtype=torch.long),
             torch.tensor([10, 10]),
         )
@@ -569,8 +572,8 @@ def test_critic_rejects_changed_controller_schema(factors: int, dtype: torch.dty
         policy.self_play_value(
             torch.zeros(2, 32),
             torch.zeros(2, 32),
-            torch.zeros(2, 3),
-            torch.zeros(2, 3),
+            torch.zeros(2, 4),
+            torch.zeros(2, 4),
             torch.zeros(2, 14, factors, dtype=dtype),
             torch.tensor([10, 10]),
         )

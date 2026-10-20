@@ -19,10 +19,10 @@ adapter. Dolphin evaluations run alongside training and confirm the finalists.
 | Starting policy | The O64 production checkpoint. A frozen copy serves as $\pi_{\text{ref}}$. |
 | Objective | Maximize $\mathbb{E}[\text{return}] - \lambda\,\mathrm{KL}(\pi \,\Vert\, \pi_{\text{ref}})$. The per-factor KL enters the reward, and a differentiable KL loss supplies its direct gradient. |
 | $\lambda$ | Sampled per player per episode, log-uniform over $[\lambda_{\min}, \lambda_{\max}]$ with $\lambda_{\min} = 0.01$. Critic warmup sets $\lambda_{\max}$, provisionally 10 to 100. |
-| $u^*$ | 0.95 in the student and the reference. The percentile head goes unused. |
+| $u$ | Independently per player and episode: Beta(5.0, 1.3), clipped to [0.1, 0.999]. The student and reference use the same u. Anchors use the same draw rule. Evaluation fixes u=0.95. The percentile head stays frozen. |
 | Policy loss | PPO on the joint ratio of each decision's executed factors, with standard clipping. One epoch ($E = 1$). |
 | Policy conditioning | $\log\lambda$, $D$ and $R$ enter new zero-initialized conditioner columns. |
-| Critic | `value_head` plus a zero-initialized residual head on the detached decoder state after the queue. The residual head also reads $\log\lambda$, $D$, and privileged opponent inputs: $\log\lambda$, $D$ and the committed queue. The critic heads train with their own optimizer. |
+| Critic | `value_head` plus a zero-initialized residual head on the detached decoder state after the queue. The residual head also reads $u$, $\log\lambda$, $D$, and privileged opponent inputs: $u$, $\log\lambda$, $D$ and the committed queue. The critic heads train with their own optimizer. |
 | Delay and replanning | $D \in \{16, \dots, 21\}$ and $R \in \{2, 4\}$, sampled per player per episode subject to $D + R \le 24$. $D = 21$ therefore always uses $R = 2$, which leaves 11 configurations. |
 | Offsets | RL uses offsets 1 to 24. Offsets 27 and 30 go unused. |
 | Context | Block restart: 128-frame blocks with contexts of up to 256 frames. Deployment uses the same scheme. |
@@ -30,7 +30,7 @@ adapter. Dolphin evaluations run alongside training and confirm the finalists.
 | Discount | $\gamma = 0.99855$ per frame. $\lambda_{\text{gae}} = 0.99$ per frame to start. |
 | Episode ends | A match end is terminal. A time-out is a truncation, and the observation carries no timer. |
 | Opponents | About 15% of matches pair the student with a frozen anchor: $\pi_{\text{ref}}$ or a recent snapshot. Only the student side trains. |
-| Identities | (identity, character) pairs drawn with weight $\text{count}^{0.5}$ above a data floor. The masked identity at about 10%. The deployment identity (masked or Master) oversampled to 20 to 25%. |
+| Identities | Match the checkpoint pretraining sources. Count identities per character over training replay rows, using the identity sidecar for professional sources. Weight by count (tempering 1.0), floor 1, mask 10%, deployment rate 0. The proxy uses ranked ids only; O64 includes trained professional ids. |
 | Evaluation | An in-loop matchup matrix against frozen anchors in MSL, periodic Dolphin evaluations throughout training, and held-out seeds and starts for the final report. |
 | Hardware | An 8×B200 node for production. The pilot runs on RTX PRO 6000 Blackwell. |
 
@@ -126,7 +126,7 @@ $$
 $r_f$ is the per-frame reward from `hal/training/returns.py`: damage dealt minus
 damage taken, 120 per stock difference, and 50 more on the deciding stock. The
 context $c_i$ holds the history $h_j$, the forced prefix, the earlier sampled
-factors and $u^*$. Both models apply the same button mask. $\mathrm{KL}_j$ sums
+factors and the same episode $u$ in both policies. Both models apply the same button mask. $\mathrm{KL}_j$ sums
 exact per-factor KLs along the sampled path, which makes it an unbiased estimate
 of the KL of the whole chunk. The rollout stores the student distributions under
 $\pi_{\text{old}}$; the reference pass scores the same actions. $\mathrm{KL}_j$ and the frame rewards both accrue per frame,
@@ -269,10 +269,10 @@ comparison against an outcome-focused reward is an optional later arm.
 - **Conditioner.** The `ReturnConditioner` embedding grows from `Linear(1, E)` to
   `Linear(4, E)`. The new columns read $\log\lambda$, $D$ and $R$, each rescaled
   to $[-1, 1]$ over its range, and start at zero. The embedding then matches
-  O64's exactly at init, and so does every per-layer projection. $u^*$ enters as
-  before.
+  O64's exactly at init, and so does every per-layer projection. Episode $u$ enters
+  through BC's existing percentile input, $2u-1$, replacing fixed 0.95.
 - **Critic.**
-  $V = \text{value\_head}(\text{trunk}) + \text{head}_{\text{res}}(z_{D+1},\ \log\lambda,\ D,\ \log\lambda_{\text{opp}},\ D_{\text{opp}},\ q_{\text{opp}})$.
+  $V = \text{value\_head}(\text{trunk}) + \text{head}_{\text{res}}(z_{D+1},\ u,\ \log\lambda,\ D,\ u_{\text{opp}},\ \log\lambda_{\text{opp}},\ D_{\text{opp}},\ q_{\text{opp}})$.
   - $z_{D+1}$ is the decoder state at the input to offset $D+1$. It has consumed
     the queue and precedes the first sampled factor, so the baseline excludes
     the ego's sampled action.
@@ -414,17 +414,17 @@ episode therefore begins at a block start, as it does in deployment, and its blo
 fall on the same episode frames in training and evaluation. The wait averages 64
 frames, under 1% of a match. A fresh reset samples:
 
-- a matchup from the training prior;
-- a stage from the supported set, with Stadium frozen;
-- each player's (identity, character) pair;
-- $\lambda$, $D$ and $R$ for each player;
-- a stock count shared by both players, and starting percents, to mix match phases;
+- an unordered matchup from the 259-pair training prior, then uniform orientation;
+- a stage uniformly from the six legal stages, with Stadium frozen;
+- each player's identity, conditional on the sampled character;
+- $u$, $\lambda$, $D$ and $R$ independently for each player;
+- a stock count shared by both players and 0% starting damage for both;
 - whether one player is a frozen anchor.
 
 ### Frozen anchors
 
 About 15% of matches pair a student player with a frozen anchor: $\pi_{\text{ref}}$
-at $u^* = 0.95$, or a snapshot from a small pool refreshed every few hundred
+at the sampled episode $u$, or a snapshot from a small pool refreshed every few hundred
 updates. Anchors decode with their own weights in a separate batch. Only the
 student side contributes training windows, about 8% fewer windows per
 match-frame overall.
@@ -565,7 +565,7 @@ above or below the critical batch size.
 
 ## Critic warmup
 
-- **Rollouts.** $\pi_{\text{ref}}$ plays under PPO's sampling: $u^* = 0.95$,
+- **Rollouts.** $\pi_{\text{ref}}$ plays under PPO's sampling: independent clipped Beta episode $u$,
   identities, $D$, $R$, $\lambda$, stock counts and starting percents. At init the
   student equals $\pi_{\text{ref}}$ for every $\lambda$, so these rollouts are
   on-policy for all of them.
@@ -583,8 +583,8 @@ above or below the critical batch size.
   continues until each match has advanced about one match length. A match
   takes about 43 rollouts of 256 frames and rolls out every $G$-th update, so
   that comes to $43 \times G = 172$ updates, or about 5 minutes on the node at
-  rollout-only cost *est.* Stock counts and starting percents mix
-  phases further.
+  rollout-only cost *est.* Starting damage is always zero. Desynchronized episode ends supply phase diversity;
+  log episode-age distributions each update.
 - **Ending.** Warmup ends once the critic's explained variance on fresh rollouts
   plateaus and the phases have mixed.
 
@@ -598,7 +598,7 @@ stays out of the checkpoint. Each rank writes a shard holding:
 2. every pool match's simulator state from the adapter's save path, compressed;
 3. each match's last 129 `HalFrame` records (the current observation and up to
    128 prior frames), both players' committed queues and the group's decision clock;
-4. episode metadata: $\lambda$, $D$, $R$, identities, characters, anchor
+4. episode metadata: $u$, $\lambda$, $D$, $R$, identities, characters, anchor
    assignments, episode counters and stable logical stream ids;
 5. the pool schedule position, the evaluation schedule position and the anchor
    pool.
@@ -611,7 +611,7 @@ checkpoints with a manifest.
 restoring a full batch lane by lane costs quadratic work. The adapter needs a
 batch restore that projects once.
 
-Training format v5 stores dense pool format v3 and the seed-derived device
+Training format v6 stores dense pool format v4 and the seed-derived device
 counter key. Earlier training and pool formats are rejected. Snapshot tensors
 own their storage. Restore clears all execution caches before the next prefill.
 The verifier uses the same tick, reference and actor graph paths and execution
@@ -705,9 +705,9 @@ handoff, and the rate of missed deadlines at each $D$ and $R$.
 ### First run
 
 - **Treatment:** PPO from $\pi_{\text{ref}}$ with the decisions above.
-- **Control:** $\pi_{\text{ref}}$ under the same $u^*$, $(D, R)$ configurations,
+- **Control:** $\pi_{\text{ref}}$ under the same episode $u$ distribution, $(D, R)$ configurations,
   identity sampling, matchup prior, stage set and evaluation protocol.
-- **Invariant inputs:** checkpoint, $u^*$, identity sampling, matchup prior,
+- **Invariant inputs:** checkpoint, episode $u$ distribution, identity sampling, matchup prior,
   stage set, evaluation seeds, simulator build and data manifest.
 - **Selection:** `net_stock_lcb` and head-to-head win rate against the anchors at
   matched $D$, over a $\lambda$ grid, confirmed in Dolphin. Offline metrics
@@ -750,6 +750,27 @@ The O64 checkpoint passes the production range under the same check.
 The proxy trained for delay 2 and replan 2, so delay 8 sits somewhat out of its
 distribution. The proxy runs show whether the loop learns. They say nothing
 about production gameplay.
+
+## Bigstep pilot scientific changes
+
+The first real proxy pilot uses 512 windows per actor step (previous pilot 32),
+16 decisions per window, one epoch, actor LR 1e-5 and 32 optimizer warmup steps.
+Critic settings are unchanged. The user chose 2,000 total updates (previous 512),
+including critic warmup, on four groups of 1,024 matches. See
+[pilot-protocol.md](pilot-protocol.md) for control inputs, launch, costs and gates.
+
+Episode identities now follow the checkpoint's own training replay counts,
+without deployment/Master oversampling; the proxy has ranked training only.
+`build_o65_sampler.py` uses `cfg.source_names` and the identity sidecar. No mix
+identity check rejects an intentionally changed valid table. Percentile changes
+from fixed 0.95 to independent clipped Beta(5,1.3) per player, in both student
+and reference; the residual critic receives both players' percentiles. Evaluation
+keeps 0.95. Starts change from mixed 0/30/60/90% to zero. Training stages change
+from FD only to all six legal stages uniformly, and matchups change from Fox/Falco
+to the frozen 259-pair training prior, with uniform orientation. These are
+scientific treatments, not systems refactors. Episode-age and u-bin diagnostics
+check the resulting coverage. Training/evaluation artifact formats are versioned
+for the added episode state and critic inputs.
 
 ## Metrics
 

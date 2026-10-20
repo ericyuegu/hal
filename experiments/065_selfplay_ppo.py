@@ -33,6 +33,7 @@ from typing import cast
 import numpy as np
 import torch
 from numpy.typing import NDArray
+from scipy.special import betaincinv
 from torch import Tensor
 
 from hal.data.feature_stats import FeatureStats
@@ -738,16 +739,19 @@ class SamplerConfig:
     identities: tuple[IdentityCount, ...]
     matchups: tuple[Matchup, ...]
     stages: tuple[int, ...]
-    data_floor: int = 100
-    tempering: float = 0.5
+    data_floor: int = 1
+    tempering: float = 1.0
     masked_rate: float = 0.1
     deployment_identity: int = int(Rank.MASTER)
-    deployment_rate: float = 0.225
+    deployment_rate: float = 0.0
     lambda_min: float = 0.01
     lambda_max: float = 100.0
     stocks: tuple[int, ...] = (1, 2, 3, 4)
-    percents: tuple[float, ...] = (0.0, 30.0, 60.0, 90.0)
+    percents: tuple[float, ...] = (0.0,)
     anchor_rate: float = 0.15
+    percentile_alpha: float = 5.0
+    percentile_beta: float = 1.3
+    fixed_percentile: float | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -770,7 +774,9 @@ class SamplerConfig:
             if not math.isfinite(rate) or not 0 <= rate <= 1:
                 raise ValueError("sampler rates must be in [0, 1]")
         ordinary_rate = 1 - (
-            self.deployment_rate if self.deployment_identity == 0 else self.masked_rate + self.deployment_rate
+            self.deployment_rate
+            if self.deployment_identity == 0 and self.deployment_rate > 0
+            else self.masked_rate + self.deployment_rate
         )
         if type(self.deployment_identity) is not int or self.deployment_identity < 0 or ordinary_rate < 0:
             raise ValueError("invalid deployment identity or identity rates")
@@ -780,10 +786,18 @@ class SamplerConfig:
             raise ValueError("stocks must be in [1, 4]")
         if not self.percents or any(not math.isfinite(x) or x < 0 for x in self.percents):
             raise ValueError("starting percents must be finite and nonnegative")
+        if any(not math.isfinite(x) or x <= 0 for x in (self.percentile_alpha, self.percentile_beta)):
+            raise ValueError("percentile Beta parameters must be finite and positive")
+        if self.fixed_percentile is not None and (
+            not math.isfinite(self.fixed_percentile) or not 0.1 <= self.fixed_percentile <= 0.999
+        ):
+            raise ValueError("fixed percentile must be in [0.1, 0.999]")
         for matchup in self.matchups:
             for character in matchup.characters:
                 rows = [row for row in self.identities if row.character == character and row.count >= self.data_floor]
-                ordinary = [row for row in rows if row.identity not in (0, self.deployment_identity)]
+                ordinary = [
+                    row for row in rows if (self.deployment_rate == 0 or row.identity != self.deployment_identity)
+                ]
                 if not rows or (ordinary_rate > 0 and not ordinary):
                     raise ValueError(f"character {character} has no admitted ordinary identities")
                 if (
@@ -803,6 +817,7 @@ class PlayerEpisode:
     stocks: int
     percent: float
     anchor: int | None
+    percentile: float = 0.95
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -831,10 +846,15 @@ class EpisodeSampler:
         if rng.uniform("anchor_share", match_id, episode, 0) < cfg.anchor_rate:
             anchor_side = rng.choice((1.0, 1.0), "anchor_side", match_id, episode, 0)
         players: list[PlayerEpisode] = []
-        for side, character in enumerate(matchup.characters):
+        characters = matchup.characters
+        if rng.uniform("orientation", match_id, episode, 0) < 0.5:
+            characters = characters[::-1]
+        for side, character in enumerate(characters):
             stream = 2 * match_id + side
             identity_draw = rng.uniform("identity_kind", stream, episode, 0)
-            masked_mass = cfg.deployment_rate if cfg.deployment_identity == 0 else cfg.masked_rate
+            masked_mass = (
+                cfg.deployment_rate if cfg.deployment_identity == 0 and cfg.deployment_rate > 0 else cfg.masked_rate
+            )
             if identity_draw < masked_mass:
                 identity = 0
             elif cfg.deployment_identity != 0 and identity_draw < masked_mass + cfg.deployment_rate:
@@ -845,7 +865,7 @@ class EpisodeSampler:
                     for row in cfg.identities
                     if row.character == character
                     and row.count >= cfg.data_floor
-                    and row.identity not in (0, cfg.deployment_identity)
+                    and (cfg.deployment_rate == 0 or row.identity != cfg.deployment_identity)
                 ]
                 identity = rows[
                     rng.choice([row.count**cfg.tempering for row in rows], "identity", stream, episode, 0)
@@ -862,7 +882,18 @@ class EpisodeSampler:
                 if not anchors:
                     raise ValueError("anchor sampling requires a reference policy")
                 anchor = anchors[rng.choice([1.0] * len(anchors), "anchor", stream, episode, 0)]
-            players.append(PlayerEpisode(identity, character, log_lambda, timing, stocks, percent, anchor))
+            percentile = cfg.fixed_percentile
+            if percentile is None:
+                percentile = float(
+                    np.clip(
+                        betaincinv(
+                            cfg.percentile_alpha, cfg.percentile_beta, rng.uniform("percentile", stream, episode, 0)
+                        ),
+                        0.1,
+                        0.999,
+                    )
+                )
+            players.append(PlayerEpisode(identity, character, log_lambda, timing, stocks, percent, anchor, percentile))
         self.cursor += 1
         seed = int(rng.uniform("simulator_seed", match_id, episode, 0) * 2**32)
         return Episode(episode, stage, (players[0], players[1]), seed)
@@ -1347,8 +1378,9 @@ class DenseRollout:
         self.store = store
         self.device = store.records.device
         self.integers = torch.zeros(capacity, 18, dtype=torch.long, device=self.device)
-        self.conditions = torch.zeros(capacity, 2, device=self.device)
+        self.conditions = torch.zeros(capacity, 4, device=self.device)
         self.coefficients = torch.zeros(capacity, device=self.device)
+        self.age = torch.zeros(capacity, dtype=torch.long, device=self.device)
         self.prefix = torch.zeros(capacity, 24, 4, dtype=torch.long, device=self.device)
         self.opponent = torch.zeros_like(self.prefix)
         self.actions = torch.zeros(capacity, 4, 4, dtype=torch.long, device=self.device)
@@ -1378,8 +1410,8 @@ class DenseRollout:
             CriticFeatures(
                 torch.zeros(capacity, model.cfg.d_model, device=self.device),
                 torch.zeros(capacity, model.cfg.temporal_d_model, device=self.device),
-                torch.zeros(capacity, 3, device=self.device),
-                torch.zeros(capacity, 3, device=self.device),
+                torch.zeros(capacity, 4, device=self.device),
+                torch.zeros(capacity, 4, device=self.device),
                 torch.zeros(capacity, model.critic_residual.max_queue, 4, dtype=torch.long, device=self.device),
                 torch.zeros(capacity, dtype=torch.long, device=self.device),
             ),
@@ -1572,15 +1604,19 @@ class TransformerPolicy:
             replan,
             uniforms[:count],
             sampled_offsets=count,
+            percentile=conditions[:, 2].contiguous(),
             history=history,
             sampled_actions=None if actions is None else actions[:, :count],
             validate=False,
         )
-        condition = self.model.ranges.normalize(log_lambda, delay, replan, validate=False)
+        condition = self.model.ranges.normalize(
+            log_lambda, delay, replan, percentile=conditions[:, 2].contiguous(), validate=False
+        )
         opponent_condition = self.model.ranges.normalize(
             conditions[:, 1].contiguous(),
             integers[:, OPP_DELAY].contiguous(),
             integers[:, OPP_REPLAN].contiguous(),
+            percentile=conditions[:, 3].contiguous(),
             validate=False,
         )
         capacity = self.model.critic_residual.max_queue
@@ -1907,7 +1943,7 @@ class TransformerPolicy:
         valid = slots.valid_WK
         positions = torch.where(valid, slots.positions_WK, 0)
         delay = torch.where(valid, slots.delay_WK, 0)
-        condition = torch.where(valid[..., None], slots.condition_WK3, 0)
+        condition = torch.where(valid[..., None], slots.condition_WK4, 0)
         with torch.autocast(
             self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda", cache_enabled=False
         ):
@@ -1930,7 +1966,7 @@ class TransformerPolicy:
             hidden[rows, positions].flatten(0, 1).detach(),
             state.flatten(0, 1).detach(),
             condition.flatten(0, 1),
-            torch.where(valid[..., None], slots.opponent_condition_WK3, 0).flatten(0, 1),
+            torch.where(valid[..., None], slots.opponent_condition_WK4, 0).flatten(0, 1),
             opponent_queue.flatten(0, 1),
             lengths.flatten(),
         )
@@ -2198,7 +2234,7 @@ class RolloutEngine:
         self.dense_meta = [
             torch.zeros(2 * len(ids), 18, dtype=torch.long, device=policy.device) for ids in self.group_matches
         ]
-        self.dense_logs = [torch.zeros(2 * len(ids), 2, device=policy.device) for ids in self.group_matches]
+        self.dense_logs = [torch.zeros(2 * len(ids), 4, device=policy.device) for ids in self.group_matches]
         self.stops = [torch.zeros(len(ids), dtype=torch.long, device=policy.device) for ids in self.group_matches]
         self.episode_clocks = [torch.zeros_like(value) for value in self.stops]
         self.observed_clocks = [torch.zeros_like(value) for value in self.stops]
@@ -2256,10 +2292,10 @@ class RolloutEngine:
                     matches=metadata,
                 )
             )
-        return PoolSnapshot("hal.o65.rollout_pool.v3", tuple(groups))
+        return PoolSnapshot("hal.o65.rollout_pool.v4", tuple(groups))
 
     def restore_pool(self, snapshot: PoolSnapshot) -> None:
-        if not isinstance(snapshot, PoolSnapshot) or snapshot.format != "hal.o65.rollout_pool.v3":
+        if not isinstance(snapshot, PoolSnapshot) or snapshot.format != "hal.o65.rollout_pool.v4":
             raise ValueError("unsupported rollout pool snapshot identity")
         if len(snapshot.groups) != len(self.groups):
             raise ValueError("rollout pool topology mismatch")
@@ -2366,6 +2402,8 @@ class RolloutEngine:
     ) -> None:
         rows = []
         for side, player in enumerate(episode.players):
+            if not math.isfinite(player.percentile) or not 0.1 <= player.percentile <= 0.999:
+                raise ValueError("episode percentile must be in [0.1, 0.999]")
             opponent = episode.players[1 - side]
             rows.append(
                 [
@@ -2394,7 +2432,8 @@ class RolloutEngine:
         self.dense_meta[group][at] = torch.tensor(rows, device=self.policy.device)
         self.owners[group][at] = torch.from_numpy(self.assignments[group][at].copy()).to(self.policy.device)
         logs = tuple(player.log_lambda for player in episode.players)
-        self.dense_logs[group][at] = torch.tensor((logs, logs[::-1]), device=self.policy.device)
+        u = tuple(player.percentile for player in episode.players)
+        self.dense_logs[group][at] = torch.tensor(((*logs, *u), (*logs[::-1], *u[::-1])), device=self.policy.device)
         self.stops[group][lane] = position + 1
         self.episode_clocks[group][lane] = episode_start
         self.observed_clocks[group][lane] = episode_start
@@ -2433,6 +2472,7 @@ class RolloutEngine:
         at = torch.arange(players, device=self.policy.device) + tick * players
         meta = self._dense_metadata(clock, update)
         table.integers[at] = meta
+        table.age[at] = meta[:, CLOCK] - self.episode_clocks[group].repeat_interleave(2)
         table.remaining[at] = -1
         table.conditions[at] = self.dense_logs[group]
         table.coefficients[at] = self.dense_logs[group][:, 0].exp()
@@ -2975,7 +3015,7 @@ class TrainConfig:
     actor_lr: float = 1e-5
     critic_lr: float = 3e-4
     critic_epochs: int = 4
-    windows_per_step: int = 32
+    windows_per_step: int = 512
     decisions_per_window: int = 16
     clip_epsilon: float = 0.2
     gradient_clip: float = 1.0
@@ -3096,6 +3136,7 @@ class PreparedUpdate:
     old: PolicyEvaluation
     reference: PolicyEvaluation | None
     values: Tensor
+    kl: Tensor
     advantages: Tensor
     targets: Tensor
     selected: Tensor
@@ -3199,9 +3240,15 @@ def replay_batch(policy: LoopPolicy, table: DenseRollout, rows: Tensor, valid: T
         table.prefix[rows, : policy.max_delay],
         meta[..., DELAY],
         meta[..., REPLAN],
-        policy.condition_ranges.normalize(conditions[..., 0], meta[..., DELAY], meta[..., REPLAN], validate=False),
         policy.condition_ranges.normalize(
-            conditions[..., 1], meta[..., OPP_DELAY], meta[..., OPP_REPLAN], validate=False
+            conditions[..., 0], meta[..., DELAY], meta[..., REPLAN], percentile=conditions[..., 2], validate=False
+        ),
+        policy.condition_ranges.normalize(
+            conditions[..., 1],
+            meta[..., OPP_DELAY],
+            meta[..., OPP_REPLAN],
+            percentile=conditions[..., 3],
+            validate=False,
         ),
         table.opponent[rows, : policy.max_opponent_queue],
         meta[..., OPP_LENGTH],
@@ -3216,6 +3263,198 @@ class WindowPlacement:
     selected: Tensor  # [W,K]
     positions: Tensor  # [W,decisions_per_window]
     windows: Tensor  # [steps,windows_per_step], -1 padding
+
+
+class PhaseMemory:
+    """Measure the first update and first actor update, including nested phases."""
+
+    def __init__(self, device: torch.device, windows_per_step: int) -> None:
+        self.device = device
+        self.windows_per_step = windows_per_step
+        self.label = "first_update"
+        self.active = False
+        self.first_checked = False
+        self.actor_checked = False
+        self.peaks: dict[str, tuple[int, int]] = {}
+        self.stack: list[str] = []
+        self.output: Path | None = None
+
+    @contextlib.contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        measure = self.active and self.device.type == "cuda"
+        if measure:
+            torch.cuda.synchronize(self.device)
+            self.record()
+            torch.cuda.reset_peak_memory_stats(self.device)
+            self.stack.append(f"{self.label}_{name}")
+        try:
+            yield
+        except torch.cuda.OutOfMemoryError as error:
+            if measure:
+                self.record()
+                self.publish()
+            raise RuntimeError(
+                f"O65 CUDA OOM in {name}; configured actor step is {self.windows_per_step} windows. "
+                "Stop this run and inspect phase-memory.json. No automatic batch-size change is allowed."
+            ) from error
+        finally:
+            if measure:
+                self.record()
+                self.stack.pop()
+                torch.cuda.reset_peak_memory_stats(self.device)
+                self.publish()
+        if measure and name == "actor":
+            self.actor_checked = True
+
+    def record(self) -> None:
+        allocated = torch.cuda.max_memory_allocated(self.device)
+        reserved = torch.cuda.max_memory_reserved(self.device)
+        for name in self.stack:
+            old = self.peaks.get(name, (0, 0))
+            self.peaks[name] = (max(old[0], allocated), max(old[1], reserved))
+
+    def publish(self) -> None:
+        if self.output is not None:
+            self.output.mkdir(parents=True, exist_ok=True)
+            temporary = self.output / ".phase-memory.partial"
+            temporary.write_text(json.dumps(self.metrics(), indent=2))
+            temporary.replace(self.output / "phase-memory.json")
+
+    def metrics(self) -> dict[str, float]:
+        return {
+            f"memory/{name}_peak_{kind}_bytes": float(value)
+            for name, values in self.peaks.items()
+            for kind, value in zip(("allocated", "reserved"), values, strict=True)
+        }
+
+
+def gradient_metrics(name: str, norms: Sequence[Tensor], cap: float) -> dict[str, float]:
+    if not norms:
+        return {}
+    values = torch.stack(tuple(norms)).float()
+    return {
+        f"{name}/gradient_norm": float(values.mean()),
+        f"{name}/gradient_norm_max": float(values.max()),
+        f"{name}/gradient_cap_fraction": float((values > cap).float().mean()),
+    }
+
+
+class GradientNoise:
+    """Online window-scale estimate from pre-clip gradients across actor steps.
+
+    Consecutive gradients use moving weights. This cheap diagnostic is not a
+    fixed-weight measurement; report signal and validity with the estimate.
+    """
+
+    def __init__(self, parameters: tuple[torch.nn.Parameter, ...]) -> None:
+        self.parameters = parameters
+        self.total = tuple(torch.zeros_like(p) for p in parameters)
+        self.squares = parameters[0].new_zeros(())
+        self.windows = 0
+        self.steps = 0
+
+    @torch.no_grad()
+    def add(self, windows: int) -> None:
+        for parameter, total in zip(self.parameters, self.total, strict=True):
+            if parameter.grad is not None:
+                gradient = parameter.grad.detach()
+                total.add_(gradient, alpha=windows)
+                self.squares.add_(gradient.float().square().sum(), alpha=windows)
+        self.windows += windows
+        self.steps += 1
+
+    def metrics(self) -> dict[str, float]:
+        result = {"actor/gradient_noise_valid": 0.0, "actor/gradient_noise_steps": float(self.steps)}
+        if self.steps < 2:
+            return result
+        mean_square = torch.stack([t.float().square().sum() for t in self.total]).sum() / self.windows**2
+        noise = ((self.squares - self.windows * mean_square) / (self.steps - 1)).clamp_min(0)
+        signal = mean_square - noise / self.windows
+        result.update({"actor/gradient_noise_variance": float(noise), "actor/gradient_signal_squared": float(signal)})
+        if float(signal) > 0:
+            estimate = noise / signal
+            _check_finite("gradient noise scale", estimate)
+            result.update({"actor/gradient_noise_scale_windows": float(estimate), "actor/gradient_noise_valid": 1.0})
+        return result
+
+
+@torch.no_grad()
+def parameter_metrics(
+    name: str, optimizer: torch.optim.Optimizer, before: tuple[Tensor, ...], policy: LoopPolicy, reference: LoopPolicy
+) -> dict[str, float]:
+    parameters = policy.actor_parameters() if name == "actor" else policy.critic_parameters()
+    previous = dict(zip(map(id, parameters), before, strict=True))
+    keys = {id(p): key for key, p in policy.model.named_parameters()}
+    base = dict(reference.model.named_parameters())
+    metrics = {}
+    for index, group in enumerate(optimizer.param_groups):
+        params = cast(list[torch.nn.Parameter], group["params"])
+        weight = torch.stack([previous[id(p)].float().square().sum() for p in params]).sum().sqrt()
+        delta = torch.stack([(p.float() - previous[id(p)]).square().sum() for p in params]).sum().sqrt()
+        distance = torch.stack([(p.float() - base[keys[id(p)]]).square().sum() for p in params]).sum().sqrt()
+        metrics[f"{name}/reference_distance_group{index}"] = float(distance)
+        metrics[f"{name}/update_norm_group{index}"] = float(delta)
+        # A zero group has no defined relative update. Keep its absolute norm.
+        if float(weight) > 0:
+            metrics[f"{name}/update_to_weight_group{index}"] = float(delta / weight)
+    return metrics
+
+
+@torch.no_grad()
+def action_statistics(
+    model: SelfPlayTransformer, old: PolicyEvaluation, reference: PolicyEvaluation, executed: Tensor
+) -> dict[str, float]:
+    metrics = {}
+    for factor, name in enumerate(FACTOR_ORDER):
+        valid = executed[:, factor::4]
+        if not bool(valid.any()):
+            continue
+        size = old.distributions[factor].shape[-1]
+        semantics = model.codec.semantic_values(name, torch.arange(size, device=executed.device)).float()
+        for label, evaluation in (("student", old), ("reference", reference)):
+            mean = evaluation.distributions[factor][valid].mean(0)
+            if name == "buttons":
+                for index, value in enumerate(mean @ semantics):
+                    metrics[f"action/{label}_button{index}_press_rate"] = float(value)
+            elif name == "triggers":
+                for index, value in enumerate(mean @ semantics):
+                    metrics[f"action/{label}_trigger{index}_mean"] = float(value)
+            else:
+                magnitude = semantics.square().sum(-1).sqrt()
+                bins = torch.bucketize(magnitude, magnitude.new_tensor((0.01, 0.25, 0.5, 0.75, 1.01)))
+                histogram = mean.new_zeros(6).scatter_add_(0, bins, mean)
+                for index, value in enumerate(histogram):
+                    metrics[f"action/{label}_{name}_magnitude_bin{index}"] = float(value)
+    return metrics
+
+
+@torch.no_grad()
+def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
+    table = rollout.table
+    meta = table.integers[rollout.ids]
+    positions = meta[:, START] + meta[:, LENGTH] - 1
+    lane, side = meta[:, LANE], meta[:, SIDE]
+    valid = torch.arange(4, device=meta.device)[None] < table.duration[rollout.ids, None]
+    at = (positions[:, None] + torch.arange(5, device=meta.device)).clamp_max(len(table.store.records) - 1)
+    records = table.store.records[at, lane[:, None]]
+    columns = records[:, :, : 4 * len(native.OBSERVATION_FIELDS)].contiguous().view(torch.int32)
+    stock = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_stock"][0]] for s in (1, 2)], -1)
+    percent = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_percent"][0]] for s in (1, 2)], -1).view(
+        torch.float32
+    )
+    losses = (stock[:, 1:] < stock[:, :-1]).float()
+    damage = (percent[:, 1:] - percent[:, :-1]).clamp_min(0)
+    wins = losses * (stock[:, 1:] == 0)
+    result = {}
+    rows = torch.arange(len(meta), device=meta.device)[:, None]
+    for name, value, scale in (("damage", damage, 1.0), ("stock", losses, 120.0), ("win", wins, 50.0)):
+        positive = value[rows, torch.arange(4, device=meta.device), 1 - side[:, None]] * scale
+        negative = -value[rows, torch.arange(4, device=meta.device), side[:, None]] * scale
+        net = (positive + negative) / scale
+        result[f"return/{name}_positive"] = float(torch.where(valid, positive, 0).sum() / len(meta))
+        result[f"return/{name}_negative"] = float(torch.where(valid, negative, 0).sum() / len(meta))
+        result[f"return/{name}_reward"] = float(torch.where(valid, net * scale, 0).sum() / len(meta))
+    return result
 
 
 def place_windows(
@@ -3272,8 +3511,8 @@ def window_evaluation(output: ReplayOutput, actions: Tensor, indices: Tensor) ->
                 for name in (
                     "trunk_WKd",
                     "decoder_WKt",
-                    "condition_WK3",
-                    "opponent_condition_WK3",
+                    "condition_WK4",
+                    "opponent_condition_WK4",
                     "opponent_queue_WKQ4",
                     "opponent_lengths_WK",
                 )
@@ -3309,6 +3548,10 @@ def decision_batch(rollout: Rollout) -> DecisionBatch:
     )
 
 
+def percentile_bin(u: float) -> int:
+    return sum(u > edge for edge in (0.5, 0.75, 0.9, 0.97))
+
+
 class Trainer:
     def __init__(self, engine: RolloutEngine, config: TrainConfig) -> None:
         if torch.are_deterministic_algorithms_enabled() != config.deterministic:
@@ -3316,6 +3559,7 @@ class Trainer:
         if engine.sampler.rng.seed != config.seed:
             raise ValueError("trainer and counter RNG seeds must agree")
         self.profile: UpdateProfile | None = None
+        self.memory = PhaseMemory(engine.policy.device, config.windows_per_step)
         self.engine = engine
         self.policy = engine.policy
         self.reference = engine.anchors[0]
@@ -3337,6 +3581,76 @@ class Trainer:
         self.next_anchor = max(engine.anchors) + 1
         self.evaluation_cursor = 0
         self.updating = False
+        self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+
+    @torch.no_grad()
+    def completed_metrics(self, rollout: Rollout, kl: Tensor) -> dict[str, float]:
+        """Compare the initial value with full-episode discounted task return.
+
+        Exclude truncations. KL cost follows the trained rollout-tail convention
+        in the objective; also report the task return without regularization.
+        """
+        table, ids = rollout.table, rollout.ids
+        meta, age = table.integers[ids], table.age[ids]
+        pairs, inverse = torch.unique(meta[:, [STREAM, EPISODE]], dim=0, return_inverse=True)
+        count = len(pairs)
+        first = torch.full((count,), len(ids), device=ids.device, dtype=torch.long)
+        first.scatter_reduce_(0, inverse, torch.arange(len(ids), device=ids.device), reduce="amin")
+        frames = torch.arange(4, device=ids.device)
+        rewards = torch.where(frames < table.duration[ids, None], table.rewards[ids], 0)
+        discounted = (rewards * GAMMA ** (age[:, None] + frames)).sum(-1)
+        costs = torch.where(decision_batch(rollout).executed_factors_JF, kl, 0).sum(-1) * table.coefficients[ids]
+        totals = torch.zeros(count, 3, device=ids.device)
+        totals.scatter_add_(
+            0, inverse[:, None].expand(-1, 3), torch.stack((discounted, costs, costs * GAMMA**age), -1)
+        )
+        packed = torch.cat((totals, table.values[ids[first], None], age[first, None]), -1).cpu().tolist()
+        for key, row in zip(pairs.cpu().tolist(), packed, strict=True):
+            identity = (int(key[0]), int(key[1]))
+            previous = self.episode_metrics.get(identity)
+            if previous is None and row[4] != 0:
+                raise ValueError("episode metrics lost the episode's initial state")
+            self.episode_metrics[identity] = (
+                row[0] + (previous[0] if previous else 0),
+                row[1] + (previous[1] if previous else 0),
+                previous[2] if previous else row[3],
+                row[2] + (previous[3] if previous else 0),
+            )
+        metrics: dict[str, float] = {}
+        costs_done, values, returns, task_returns = [], [], [], []
+        bins: dict[int, list[tuple[float, float]]] = defaultdict(list)
+        for result in rollout.results:
+            match_cost = 0.0
+            for side, player in enumerate(result.episode.players):
+                if player.anchor is not None:
+                    continue
+                discounted_return, cost, value, discounted_cost = self.episode_metrics.pop(
+                    (2 * result.match + side, result.episode.number)
+                )
+                match_cost += cost
+                if result.timeout:
+                    continue
+                values.append(value)
+                returns.append(discounted_return - discounted_cost)
+                task_returns.append(discounted_return)
+                if result.stocks is not None:
+                    bins[percentile_bin(player.percentile)].append(
+                        (result.returns[side], float(result.stocks[side] > result.stocks[1 - side]))
+                    )
+            costs_done.append(match_cost)
+        metrics["critic/monte_carlo_episode_count"] = float(len(values))
+        if values:
+            v, target = torch.tensor(values, dtype=torch.float64), torch.tensor(returns, dtype=torch.float64)
+            metrics["critic/monte_carlo_initial_value"] = float(v.mean())
+            metrics["critic/monte_carlo_task_return"] = sum(task_returns) / len(task_returns)
+            metrics["critic/monte_carlo_return"] = float(target.mean())
+            metrics["critic/monte_carlo_rmse"] = float((v - target).square().mean().sqrt())
+        if costs_done:
+            metrics["return/completed_match_kl_cost"] = sum(costs_done) / len(costs_done)
+        for index, rows in bins.items():
+            metrics[f"return/completed_episode_u{index}"] = sum(row[0] for row in rows) / len(rows)
+            metrics[f"gameplay/win_rate_u{index}"] = sum(row[1] for row in rows) / len(rows)
+        return metrics
 
     @torch.no_grad()
     def prepare(self, rollout: Rollout) -> PreparedUpdate:
@@ -3361,7 +3675,11 @@ class Trainer:
         compact = window_indices(ids, players)
         assert table.evaluation is not None
         old = _take_evaluation(table.evaluation, ids)
-        with phase(self.profile, "reference"), sample(self.profile, "windows", work=float(rows.numel())):
+        with (
+            self.memory.phase("reference"),
+            phase(self.profile, "reference"),
+            sample(self.profile, "windows", work=float(rows.numel())),
+        ):
             reference = (
                 None
                 if self.warming
@@ -3430,7 +3748,7 @@ class Trainer:
         executed = decisions.executed_factors_JF
         metrics = {
             "critic/explained_variance": explained_variance(values, targets),
-            "policy/kl_per_frame": float(torch.where(executed, kl, 0).sum() / decisions.replan_J.sum()),
+            "policy/kl_per_frame": float(torch.where(executed, kl, 0).sum() / executed[:, ::4].sum().clamp_min(1)),
             "return/interval_reward": float(frame_rewards.sum(-1).mean()),
             "data/anchor_share": sum(
                 player.anchor is not None for state in self.engine.matches.values() for player in state.episode.players
@@ -3457,7 +3775,7 @@ class Trainer:
             if bool(mask.any()):
                 metrics[f"return/interval_reward_lambda{index}"] = float(frame_rewards[mask].sum(-1).mean())
                 metrics[f"policy/kl_per_frame_lambda{index}"] = float(
-                    torch.where(executed[mask], kl[mask], 0).sum() / decisions.replan_J[mask].sum()
+                    torch.where(executed[mask], kl[mask], 0).sum() / executed[mask, ::4].sum().clamp_min(1)
                 )
         for position in range(4):
             mask = (decisions.decision_frame_J % 128) // 32 == position
@@ -3498,6 +3816,7 @@ class Trainer:
             if not bool(mask.any()):
                 continue
             suffix = f"d{timing.delay}_r{timing.replan}"
+            metrics[f"policy/kl_per_frame_{suffix}"] = float(kl[mask].sum() / executed[mask, ::4].sum().clamp_min(1))
             metrics[f"critic/advantage_mean_{suffix}"] = float(advantages[mask].mean())
             metrics[f"critic/advantage_std_{suffix}"] = float(advantages[mask].std(unbiased=False))
             metrics[f"critic/explained_variance_{suffix}"] = explained_variance(values[mask], targets[mask])
@@ -3505,12 +3824,38 @@ class Trainer:
             entropy = -(distribution * torch.where(distribution > 0, distribution, 1).log()).sum(-1)
             valid = torch.arange(4, device=device)[None] < decisions.replan_J[:, None]
             metrics[f"policy/entropy_{factor}"] = float(entropy[valid].mean())
+        for index, factor in enumerate(FACTOR_ORDER):
+            frames = executed[:, index::4]
+            if bool(frames.any()):
+                metrics[f"policy/kl_{factor}_per_frame"] = float(kl[:, index::4][frames].mean())
+        if reference is not None and isinstance(self.policy, TransformerPolicy):
+            metrics.update(action_statistics(self.policy.model, old, reference, executed))
+        metrics.update(reward_component_metrics(rollout))
+
+        ages = table.age[ids]
+        age_bins = torch.bucketize(ages, ages.new_tensor((128, 512, 2048, 8192)))
+        for index, value in enumerate(torch.bincount(age_bins, minlength=5).float() / len(ids)):
+            metrics[f"data/episode_age_bin{index}"] = float(value)
+        metrics["data/episode_age_mean_frames"] = float(ages.float().mean())
+        u_bins = torch.bucketize(table.conditions[ids, 2], table.conditions.new_tensor((0.5, 0.75, 0.9, 0.97)))
+        entropy = torch.stack([-(p * torch.where(p > 0, p, 1).log()).sum(-1) for p in old.distributions]).sum(0)
+        for index in range(5):
+            mask = u_bins == index
+            frames = executed[:, ::4] & mask[:, None]
+            if bool(mask.any()):
+                metrics[f"return/interval_reward_u{index}"] = float(frame_rewards[mask].sum(-1).mean())
+            if bool(frames.any()):
+                metrics[f"policy/kl_per_frame_u{index}"] = float(
+                    torch.where(executed & mask[:, None], kl, 0).sum() / frames.sum()
+                )
+                metrics[f"policy/entropy_u{index}"] = float(entropy[frames].mean())
         return PreparedUpdate(
             rollout,
             decisions,
             old,
             reference,
             values,
+            kl,
             advantages,
             targets,
             selected,
@@ -3525,8 +3870,12 @@ class Trainer:
             raise ValueError("actor update requires a reference evaluation")
         cfg = self.config
         metrics = dict(batch.metrics)
+        actor_before = () if self.warming else tuple(p.detach().clone() for p in self.policy.actor_parameters())
+        critic_before = tuple(p.detach().clone() for p in self.policy.critic_parameters())
+        critic_norms: list[Tensor] = []
         started = time.perf_counter()
         with (
+            self.memory.phase("critic"),
             phase(self.profile, "critic"),
             sample(self.profile, "fit", work=float(len(batch.values))),
         ):
@@ -3543,12 +3892,15 @@ class Trainer:
                 )
                 _check_finite("critic loss", loss)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
+                norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                 )
+                critic_norms.append(norm.detach())
                 self.critic_optimizer.step()
             metrics["critic/loss"] = float(loss.detach())
             metrics["systems/critic_seconds"] = time.perf_counter() - started
+        metrics.update(gradient_metrics("critic", critic_norms, cfg.gradient_clip))
+        metrics.update(parameter_metrics("critic", self.critic_optimizer, critic_before, self.policy, self.reference))
         if self.warming:
             self._warmup(batch)
             return metrics
@@ -3561,6 +3913,8 @@ class Trainer:
         kl_losses: list[Tensor] = []
         ratios: list[Tensor] = []
         old_log_ratios: list[Tensor] = []
+        actor_norms: list[Tensor] = []
+        noise = GradientNoise(self.policy.actor_parameters())
         table = batch.rollout.table
         dense_advantage = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
@@ -3570,7 +3924,7 @@ class Trainer:
         )
         for target, value in zip(reference_dense, batch.reference.distributions, strict=True):
             target[batch.rollout.ids] = value
-        with phase(self.profile, "actor"):
+        with self.memory.phase("actor"), phase(self.profile, "actor"):
             for step, window_ids in enumerate(batch.steps):
                 with sample(
                     self.profile, "step", work=float(cfg.windows_per_step * cfg.decisions_per_window), limit=2
@@ -3606,9 +3960,11 @@ class Trainer:
                             )
                         ),
                     )
-                    torch.nn.utils.clip_grad_norm_(
+                    noise.add(int(live.sum()))
+                    norm = torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )
+                    actor_norms.append(norm.detach())
                     with sample(self.profile, "muon", limit=0):
                         self.actor_optimizer.step()
                     self.scheduler.step()
@@ -3636,6 +3992,9 @@ class Trainer:
                     old_kl = factor_kl(new, previous, mask)
                     metrics[f"policy/old_kl_step{step}"] = float(torch.where(mask, old_kl, 0).sum() / selected.sum())
         ratio = torch.cat(ratios)
+        metrics.update(gradient_metrics("actor", actor_norms, cfg.gradient_clip))
+        metrics.update(noise.metrics())
+        metrics.update(parameter_metrics("actor", self.actor_optimizer, actor_before, self.policy, self.reference))
         metrics.update(
             {
                 "policy/loss": float(torch.stack(policy_losses).mean()),
@@ -3695,16 +4054,23 @@ class Trainer:
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
             torch.cuda.reset_peak_memory_stats(self.policy.device)
-        with phase(self.profile, "rollout"):
+        self.memory.active = self.policy.device.type == "cuda" and (
+            not self.memory.first_checked or not self.memory.actor_checked and not self.warming
+        )
+        self.memory.label = "first_warmup" if self.warming else "first_ppo"
+        with self.memory.phase("rollout"), phase(self.profile, "rollout"):
             rollout = self.engine.collect(self.update)
         if self.profile is not None:
             self.profile.transfer_timings = [dataclasses.asdict(t) for t in self.engine.transfer_timings]
             self.profile.shard_timings = {
                 str(i): [dataclasses.asdict(t) for t in shard.timings] for i, shard in enumerate(native_shards)
             }
-        with phase(self.profile, "preparation"):
+        with self.memory.phase("preparation"), phase(self.profile, "preparation"):
             batch = self.prepare(rollout)
         metrics = self.fit(batch)
+        metrics.update(self.completed_metrics(rollout, batch.kl))
+        metrics.update(self.memory.metrics())
+        self.memory.first_checked = True
         for index, (shard, previous) in enumerate(zip(native_shards, before, strict=True)):
             elapsed = shard.step_seconds - previous[0]
             metrics[f"systems/native_shard{index}_seconds"] = elapsed
@@ -3745,8 +4111,32 @@ class Trainer:
                     del self.engine.anchors[key]
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
-            metrics["systems/peak_allocated_bytes"] = float(torch.cuda.max_memory_allocated(self.policy.device))
-            metrics["systems/peak_reserved_bytes"] = float(torch.cuda.max_memory_reserved(self.policy.device))
+            metrics["systems/peak_allocated_bytes"] = float(
+                max(
+                    torch.cuda.max_memory_allocated(self.policy.device),
+                    max(
+                        (
+                            value[0]
+                            for key, value in self.memory.peaks.items()
+                            if self.memory.active and key.startswith(self.memory.label)
+                        ),
+                        default=0,
+                    ),
+                )
+            )
+            metrics["systems/peak_reserved_bytes"] = float(
+                max(
+                    torch.cuda.max_memory_reserved(self.policy.device),
+                    max(
+                        (
+                            value[1]
+                            for key, value in self.memory.peaks.items()
+                            if self.memory.active and key.startswith(self.memory.label)
+                        ),
+                        default=0,
+                    ),
+                )
+            )
         metrics["systems/update_seconds"] = time.perf_counter() - started
         metrics["systems/match_frames_per_second"] = rollout.frames / metrics["systems/update_seconds"]
         self.updating = False
@@ -3800,7 +4190,7 @@ def _configuration_digest(trainer: Trainer) -> str:
             [s.max_frame if isinstance(s, NativeSimulatorShard) else None for s in group] for group in engine.groups
         ],
         "episode_reset": "shared_stocks_block_wait_v1",
-        "rollout_storage": "dense_windows_v5",
+        "rollout_storage": "dense_windows_v6",
         "selection_rng": "integer_counter_v3",
         "opponent_layout": "fixed_anchor_ranges_v1" if engine.fixed_anchor_lanes else "sampled_anchor_lanes_v1",
     }
@@ -3854,6 +4244,8 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "actor_steps": trainer.actor_steps,
         "warming": trainer.warming,
         "warmup_moments": trainer.warmup_moments,
+        "episode_metrics": trainer.episode_metrics,
+        "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
         "fresh_variances": trainer.fresh_variances,
         "next_anchor": trainer.next_anchor,
         "evaluation_cursor": trainer.evaluation_cursor,
@@ -4024,6 +4416,8 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.actor_steps = saved["actor_steps"]
     trainer.warming = saved["warming"]
     trainer.warmup_moments = saved["warmup_moments"]
+    trainer.episode_metrics = saved["episode_metrics"]
+    trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
     trainer.fresh_variances = saved["fresh_variances"]
     trainer.next_anchor = saved["next_anchor"]
     trainer.evaluation_cursor = saved["evaluation_cursor"]
@@ -4104,6 +4498,7 @@ def run_training(
     if (evaluation_shards is None) != (evaluation_config is None) or evaluation_interval < 1:
         raise ValueError("evaluation needs dedicated shards, a configuration, and a positive interval")
     output.mkdir(parents=True, exist_ok=True)
+    trainer.memory.output = output
     resolved: dict[str, object] = {
         "configuration_sha256": _configuration_digest(trainer),
         "environment": _environment(),
@@ -4111,8 +4506,13 @@ def run_training(
         "train": dataclasses.asdict(trainer.config),
         "sampler": dataclasses.asdict(trainer.engine.sampler.config),
         "schedule": dataclasses.asdict(trainer.engine.sampler.schedule),
-        "treatment": "KL-regularized joint PPO from pi_ref at u95",
-        "control": "frozen pi_ref with matched sampling, starts, u95, and schedules",
+        "treatment": "KL-regularized joint PPO; independent per-player clipped Beta(5,1.3) u",
+        "actor_step_change": {
+            "old_windows_per_step": 32,
+            "windows_per_step": trainer.config.windows_per_step,
+            "actor_epochs": 1,
+        },
+        "control": "frozen pi_ref with matched sampling, starts, episode u, and schedules",
         "invariants": "BC checkpoint, representation, data, simulator, adapter, reward, evaluation seeds",
         "run": run_configuration,
     }
@@ -4206,6 +4606,7 @@ class NativeCli:
     evaluation_simulators: tuple[Literal["msl", "dolphin"], ...] = ("msl", "dolphin")
     evaluation_device: str = "cpu"
     verify_resume: bool = False
+    verify_only: bool = False
     fixed_anchor_lanes: bool = True
     wandb_project: str | None = None
     profiling: ProfileConfig | None = None
@@ -4214,6 +4615,8 @@ class NativeCli:
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.verify_only and (not self.verify_resume or self.resume is None):
+            raise ValueError("verify-only needs a resume checkpoint and verify-resume")
         if self.profiling is not None and (
             self.device != "cuda"
             or self.training.critic_warmup_updates
@@ -4249,8 +4652,20 @@ def read_native_sampler(path: Path) -> SamplerConfig:
     raw = json.loads(path.read_text())
     if (
         not isinstance(raw, dict)
-        or set(raw) != {"format", "identities", "matchups", "stages", "stocks", "percents"}
-        or raw["format"] != "hal.o65.sampler.v1"
+        or set(raw)
+        != {
+            "format",
+            "identities",
+            "matchups",
+            "stages",
+            "stocks",
+            "percents",
+            "data_floor",
+            "tempering",
+            "masked_rate",
+            "deployment_rate",
+        }
+        or raw["format"] != "hal.o65.sampler.v2"
     ):
         raise ValueError("unsupported native sampler schema")
     identities = []
@@ -4265,7 +4680,15 @@ def read_native_sampler(path: Path) -> SamplerConfig:
         matchups.append(Matchup((row["characters"][0], row["characters"][1]), row["weight"]))
     stocks = tuple(raw["stocks"])
     return SamplerConfig(
-        tuple(identities), tuple(matchups), tuple(raw["stages"]), stocks=stocks, percents=tuple(raw["percents"])
+        tuple(identities),
+        tuple(matchups),
+        tuple(raw["stages"]),
+        stocks=stocks,
+        percents=tuple(raw["percents"]),
+        data_floor=raw["data_floor"],
+        tempering=raw["tempering"],
+        masked_rate=raw["masked_rate"],
+        deployment_rate=raw["deployment_rate"],
     )
 
 
@@ -4354,6 +4777,9 @@ def train_native(config: NativeCli) -> None:
             engine.initialize()
         else:
             restore_checkpoint(trainer, config.resume, provenance)
+        if config.verify_only:
+            verify_checkpoint_resume(trainer, config.output, provenance)
+            return
         evaluator = None
         if config.evaluation_every:
             arguments = [
@@ -5157,6 +5583,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.fresh_variances,
                 trainer.next_anchor,
                 trainer.evaluation_cursor,
+                trainer.episode_metrics,
             )
         ),
     }
@@ -5511,7 +5938,11 @@ def evaluate_anchors(
         for timing in trainer.engine.sampler.schedule.configurations:
             for bin_id, coefficient in enumerate(config.lambdas):
                 sampler_config = dataclasses.replace(
-                    trainer.engine.sampler.config, lambda_min=coefficient, lambda_max=coefficient, anchor_rate=1.0
+                    trainer.engine.sampler.config,
+                    lambda_min=coefficient,
+                    lambda_max=coefficient,
+                    anchor_rate=1.0,
+                    fixed_percentile=0.95,
                 )
                 schedule = ScheduleConfig((timing,), trainer.engine.sampler.schedule.supervised_offsets)
                 evaluation_seed = int(CounterRng(config.seed).uniform("evaluation", 0, 0, 0) * 2**63)

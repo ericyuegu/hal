@@ -198,7 +198,7 @@ class ToyPolicy:
         frame = torch.arange(4, device=self.device)[None] < meta[:, exp.REPLAN, None]
         logs = torch.where(frame.repeat_interleave(4, -1), logs, 0)
         trunk = torch.ones(n, 1, device=self.device)
-        zeros = torch.zeros(n, 3, device=self.device)
+        zeros = torch.zeros(n, 4, device=self.device)
         features = exp.CriticFeatures(
             trunk,
             trunk,
@@ -241,8 +241,8 @@ class ToyPolicy:
         features = ReplayCriticFeatures(
             trunk,
             trunk,
-            slots.condition_WK3,
-            slots.opponent_condition_WK3,
+            slots.condition_WK4,
+            slots.opponent_condition_WK4,
             slots.opponent_queue_WKQ4,
             slots.opponent_lengths_WK,
         )
@@ -279,6 +279,8 @@ def sampler(*, delay: int = 0, mixed: bool = True, anchor_rate: float = 0.15) ->
         data_floor=100,
         anchor_rate=anchor_rate,
         deployment_identity=1,
+        deployment_rate=0.225,
+        tempering=0.5,
         lambda_max=0.02,
     )
     timings = (exp.DelayReplan(delay, 2), exp.DelayReplan(delay, 4)) if mixed else (exp.DelayReplan(delay, 2),)
@@ -563,8 +565,8 @@ def test_full_batch_critic_loss_and_gradient_match_shuffled_order(device: str) -
     features = exp.CriticFeatures(
         torch.randn(count, policy.model.cfg.d_model, device=device),
         torch.randn(count, policy.model.cfg.temporal_d_model, device=device),
-        torch.randn(count, 3, device=device),
-        torch.randn(count, 3, device=device),
+        torch.randn(count, 4, device=device),
+        torch.randn(count, 4, device=device),
         torch.zeros(count, 14, 4, dtype=torch.long, device=device),
         torch.arange(count, device=device) % 15,
     )

@@ -20,7 +20,7 @@ class ReplaySlots:
 
     Controller tensors use codec order (buttons, main stick, C-stick, triggers).
     F=16 uses frame-major decode order (C-stick, main stick, triggers, buttons).
-    Conditions are normalized [log lambda, delay, replan]. Invalid slots and
+    Conditions are normalized [log lambda, delay, replan, 2*u-1]. Invalid slots and
     unexecuted factors never enter a loss reduction. All indices are int64,
     masks bool, and conditions float32. Validate once before compiled replay.
     """
@@ -31,8 +31,8 @@ class ReplaySlots:
     forced_queue_WKD4: Tensor
     delay_WK: Tensor
     replan_WK: Tensor
-    condition_WK3: Tensor
-    opponent_condition_WK3: Tensor
+    condition_WK4: Tensor
+    opponent_condition_WK4: Tensor
     opponent_queue_WKQ4: Tensor
     opponent_lengths_WK: Tensor
     sampled_actions_WK44: Tensor
@@ -45,8 +45,8 @@ class ReplayCriticFeatures:
 
     trunk_WKd: Tensor
     decoder_WKt: Tensor
-    condition_WK3: Tensor
-    opponent_condition_WK3: Tensor
+    condition_WK4: Tensor
+    opponent_condition_WK4: Tensor
     opponent_queue_WKQ4: Tensor
     opponent_lengths_WK: Tensor
 
@@ -85,8 +85,8 @@ def _check_shapes(model: SelfPlayTransformer, hidden: Tensor, observed: Tensor, 
         "forced_queue_WKD4": (*shape, max_delay, 4),
         "delay_WK": shape,
         "replan_WK": shape,
-        "condition_WK3": (*shape, 3),
-        "opponent_condition_WK3": (*shape, 3),
+        "condition_WK4": (*shape, 4),
+        "opponent_condition_WK4": (*shape, 4),
         "opponent_queue_WKQ4": (*shape, model.critic_residual.max_queue, 4),
         "opponent_lengths_WK": shape,
         "sampled_actions_WK44": (*shape, 4, 4),
@@ -97,7 +97,7 @@ def _check_shapes(model: SelfPlayTransformer, hidden: Tensor, observed: Tensor, 
     for field in fields(slots):
         tensor: Tensor = getattr(slots, field.name)
         dtype = torch.bool if field.name in ("valid_WK", "executed_WKF") else torch.int64
-        if field.name in ("condition_WK3", "opponent_condition_WK3"):
+        if field.name in ("condition_WK4", "opponent_condition_WK4"):
             dtype = torch.float32
         if tuple(tensor.shape) != expected[field.name] or tensor.dtype != dtype or tensor.device != hidden.device:
             raise ValueError(f"{field.name} has the wrong shape, dtype or device")
@@ -131,15 +131,17 @@ def validate_replay_inputs(
     configurations = tuple(sorted(set(zip(delay.tolist(), replan.tolist(), strict=True))))
     if configurations:
         validate_executed_offsets(model.head_offsets, configurations)
-    condition = slots.condition_WK3[valid]
-    opponent = slots.opponent_condition_WK3[valid]
+    condition = slots.condition_WK4[valid]
+    opponent = slots.opponent_condition_WK4[valid]
     for value in (condition, opponent):
         if bool((~torch.isfinite(value) | (value < -1) | (value > 1)).any()):
             raise ValueError("slot conditions must be normalized to [-1,1]")
+        if bool(((value[:, 3] < -0.8) | (value[:, 3] > 0.998)).any()):
+            raise ValueError("slot percentile must be in [0.1,0.999]")
     expected = model.ranges.normalize(
         torch.full_like(delay, model.ranges.log_lambda[0], dtype=torch.float32), delay, replan
     )
-    if not torch.equal(condition[:, 1:], expected[:, 1:]):
+    if not torch.equal(condition[:, 1:3], expected[:, 1:3]):
         raise ValueError("slot delay and replan disagree with policy conditioning")
     opponent_lengths = slots.opponent_lengths_WK[valid]
     if bool(((opponent_lengths < 0) | (opponent_lengths > model.critic_residual.max_queue)).any()):
@@ -198,8 +200,8 @@ def replay_windows(
     position = torch.where(valid, slots.positions_WK, 0)
     delay = torch.where(valid, slots.delay_WK, 0)
     replan = torch.where(valid, slots.replan_WK, 2)
-    condition = torch.where(valid[..., None], slots.condition_WK3, 0)
-    opponent_condition = torch.where(valid[..., None], slots.opponent_condition_WK3, 0)
+    condition = torch.where(valid[..., None], slots.condition_WK4, 0)
+    opponent_condition = torch.where(valid[..., None], slots.opponent_condition_WK4, 0)
     depth = torch.arange(slots.forced_queue_WKD4.shape[2], device=hidden_WLd.device)
     queue = torch.where((valid[..., None] & (depth < delay[..., None]))[..., None], slots.forced_queue_WKD4, 0)
     actions = torch.where(

@@ -223,6 +223,21 @@ def score_match(
         stock = columns["stock"]
         deaths = float(np.maximum(stock[:-1] - stock[1:], 0).sum())
         events[f"{role}_deaths_per_min"] = deaths / minutes
+        actions = columns["action"]
+        death_starts = onsets((actions >= 0) & (actions <= 10))
+        for zone, low, high in (("bottom", 0, 0), ("left", 1, 1), ("right", 2, 2), ("top", 3, 10)):
+            count = sum(low <= actions[index] <= high for index in death_starts)
+            events[f"{role}_deaths_blast_{zone}"] = float(count)
+        # Native observations have no KO-credit field. This explicit proxy only
+        # counts stocks lost without taking any damage since the prior respawn.
+        lost = np.flatnonzero(stock[1:] < stock[:-1]) + 1
+        start_index = 0
+        self_destructs = 0
+        for index in lost:
+            self_destructs += float(np.max(columns["percent"][start_index : index + 1])) == 0
+            start_index = int(index)
+        events[f"{role}_zero_damage_self_destruct_rate"] = self_destructs / max(1, len(lost))
+        events[f"{role}_zero_damage_self_destructs_per_min"] = self_destructs / minutes
         events[f"{role}_ledge_grabs_per_min"] = (
             len(onsets(columns["action"] == melee.Action.EDGE_CATCHING.value)) / minutes
         )
@@ -825,6 +840,8 @@ def evaluate(
             "intervals": "two-sided 95% normal intervals over paired units; fewer than two units gives null bounds",
             "net_stock_lcb": "one-sided 95% normal lower bound over paired units",
             "offstage": "fraction of active frames past the walkable stage edge",
+            "zero_damage_self_destruct_rate": "proxy: fraction of lost stocks with zero damage since respawn; no KO-credit field is available",
+            "deaths_blast_zone": "onsets of death action states: bottom=0, left=1, right=2, top=3..10; animation-based classification",
             "wall_seconds": "batch wall time divided equally among its matches; summed shares measure throughput",
         },
         "rng_note": "Seeds control policy draws and MSL reset. Dolphin game RNG is recorded, not injected.",

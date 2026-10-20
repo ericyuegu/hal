@@ -316,9 +316,9 @@ class ReturnConditioner(nn.Module):
         safe = torch.where(present, return_value, 0.0)
         inputs = (safe / RETURN_SCALE)[..., None]
         if self.ranges is not None:
-            if policy_condition is None or policy_condition.shape != (*safe.shape, 3):
-                raise ValueError("widened conditioner requires normalized [log_lambda, D, R]")
-            inputs = torch.cat((inputs, policy_condition), dim=-1)
+            if policy_condition is None or policy_condition.shape != (*safe.shape, 4):
+                raise ValueError("widened conditioner requires normalized [log_lambda, D, R, u]")
+            inputs = torch.cat((inputs, policy_condition[..., :3]), dim=-1)
         elif policy_condition is not None:
             raise ValueError("policy conditioning requires a widened conditioner")
         embedded = F.silu(self.embedding(inputs))
@@ -1240,7 +1240,7 @@ class CausalTemporalDecoder(nn.Module):
         raw_trunk = hidden[:, -1]
         bias = self._state_bias(decoder_rmsnorm(raw_trunk))
         skips = self._trunk_skip_logits(raw_trunk)
-        returns = torch.full((batch,), 0.9 * RETURN_SCALE, device=hidden.device)
+        returns = policy_condition[..., 3] * RETURN_SCALE
         present = torch.ones(batch, dtype=torch.bool, device=hidden.device)
         conditioning = self.return_conditioner(returns, present, policy_condition)
         memory = self._live_history(hidden, ctx_pad) if history is None else history
@@ -1346,7 +1346,7 @@ class CausalTemporalDecoder(nn.Module):
         bias = self._state_bias(decoder_rmsnorm(raw_trunk))
         state = decoder_rmsnorm(bias[:, None] + self._step_features(previous, depth + 1))
         conditioning = self.return_conditioner(
-            torch.full((batch,), 0.9 * RETURN_SCALE, device=hidden.device),
+            policy_condition[..., 3] * RETURN_SCALE,
             torch.ones(batch, dtype=torch.bool, device=hidden.device),
             policy_condition,
         )
@@ -1408,7 +1408,7 @@ class CausalTemporalDecoder(nn.Module):
         """
         windows, slots = prefix_positions.shape
         count = forced_queue.shape[2] + 1
-        if forced_queue.shape != (windows, slots, count - 1, 4) or policy_condition.shape != (windows, slots, 3):
+        if forced_queue.shape != (windows, slots, count - 1, 4) or policy_condition.shape != (windows, slots, 4):
             raise ValueError("window queues or conditions have the wrong shape")
         if queue_lengths.shape != (windows, slots) or queue_lengths.dtype not in (torch.int32, torch.int64):
             raise ValueError("committed queue lengths must be integer [W,K]")
@@ -1429,7 +1429,7 @@ class CausalTemporalDecoder(nn.Module):
         state = decoder_rmsnorm(bias[:, :, None] + self._step_features(previous, depth + 1))
         state = state.reshape(windows * slots, count, self.d_model)
         conditioning = self.return_conditioner(
-            torch.full((windows, slots), 0.9 * RETURN_SCALE, device=hidden.device),
+            policy_condition[..., 3] * RETURN_SCALE,
             torch.ones((windows, slots), dtype=torch.bool, device=hidden.device),
             policy_condition,
         )
@@ -1485,7 +1485,7 @@ class CausalTemporalDecoder(nn.Module):
         state = decoder_rmsnorm(bias[:, :, None] + self._step_features(previous, depth + 1))
         state = state.reshape(windows * slots, count, self.d_model)
         conditioning = self.return_conditioner(
-            torch.full((windows, slots), 0.9 * RETURN_SCALE, device=hidden.device),
+            policy_condition[..., 3] * RETURN_SCALE,
             torch.ones((windows, slots), dtype=torch.bool, device=hidden.device),
             policy_condition,
         )

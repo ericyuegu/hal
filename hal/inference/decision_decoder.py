@@ -69,6 +69,7 @@ class DecisionDecoder:
         uniforms: Tensor,
         *,
         sampled_offsets: int,
+        percentile: Tensor | None = None,
         ctx_pad: Tensor | None = None,
         history: KVMemory | None = None,
         sampled_actions: Tensor | None = None,
@@ -116,7 +117,7 @@ class DecisionDecoder:
                 .any()
             ):
                 raise ValueError(f"{name} contains buttons incompatible with its triggers")
-        condition = self.model.ranges.normalize(log_lambda, delay, replan, validate=validate)
+        condition = self.model.ranges.normalize(log_lambda, delay, replan, percentile=percentile, validate=validate)
         bf16 = self.model.decoder_precision == "bf16"
         dtype = torch.bfloat16 if bf16 else torch.float32
         # Own the precision boundary even when evaluation has no outer autocast.
