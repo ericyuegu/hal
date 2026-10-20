@@ -32,9 +32,10 @@ PPO uses stored behavior log-probs. See [dense validation and measurements](perf
 
 Normal training uses default Torch algorithms. `--training.deterministic`
 selects deterministic algorithms and configures cuBLAS before CUDA starts.
-`--verify-resume` runs the same graph path in deterministic mode, compares the
-next batch, both optimizers, scheduler, parameters and RNGs, then restores the
-original boundary and execution mode. Training format v5 and pool snapshot v3
+`--verify-resume` uses the training graphs and execution mode. It checks restored
+model, optimizer, scheduler, sampler, simulator and RNG states exactly, then
+checks the next update within the measured spread of two control repetitions.
+It restores the original boundary after the check. Training format v5 and pool snapshot v3
 reject earlier persisted formats.
 
 The sampler JSON uses `hal.o65.sampler.v1`. It reads identity/character counts,

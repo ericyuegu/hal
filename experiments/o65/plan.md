@@ -1,7 +1,7 @@
 # O65: self-play PPO in melee-sim-light
 
 Status: the single-GPU proxy loop, native replay parity, paired evaluation,
-and exact resume are implemented and tested locally. RTX 3060 measurements
+and complete-state resume are implemented and tested locally. RTX 3060 measurements
 cover complete updates through 512 active matches and the BF16 decoder ablation.
 The RTX PRO 6000 learning pilot, O64 production run, two-GPU NCCL path, and
 deployment latency measurements remain open. See [measured results](performance/report.md)
@@ -614,8 +614,15 @@ batch restore that projects once.
 Training format v5 stores dense pool format v3 and the seed-derived device
 counter key. Earlier training and pool formats are rejected. Snapshot tensors
 own their storage. Restore clears all execution caches before the next prefill.
-The deterministic verifier uses the same tick, reference and actor graph paths
-as training and compares the next batch, optimizer state, parameters and RNGs.
+The verifier uses the same tick, reference and actor graph paths and execution
+mode as training. It checks exact restoration of model, both optimizers,
+scheduler, pool and simulator state, sampler cursor, counter key, progress and
+every RNG state. It repeats the next update twice as controls, rewinding the
+same boundary between them, then compares a third resumed update. Each floating
+tensor may differ by at most 1.5 times the controls' maximum absolute difference
+plus eight dtype rounding units at its control scale (minimum scale 1e-3).
+Integer update state and scheduler progress must match exactly. The report
+records both control errors and the resulting tolerances.
 
 ### Random numbers
 
@@ -630,9 +637,17 @@ rebatching and restore, so the generator has no state to save.
 Resume restores the complete training state. On the same hardware, software
 and world size:
 
-- the next batch's data, window choice and decision subsampling match an
-  uninterrupted run exactly;
-- the next optimizer update matches within a measured tolerance.
+- model, optimizer, scheduler, simulator, sampler cursor and every RNG state
+  restore exactly;
+- the next optimizer update matches within tolerance measured from two control
+  repetitions of that update. Atomic adds and other nondeterministic reductions
+  are permitted in training and verification.
+
+Next-batch hashes are recorded as diagnostics. They need not match: numerical
+noise can flip a sampled category and then change later observations, windows
+and decision subsampling. No NaN or infinity is accepted in an executed
+log-probability, KL, advantage, loss or gradient. Non-finite training values
+raise an error; they are never masked or clamped away.
 
 Bitwise identical execution is out of scope. Numerical differences can flip a
 categorical sample even under an identical random draw.

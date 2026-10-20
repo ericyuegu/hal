@@ -795,7 +795,7 @@ def test_resume_rejects_invalid_execution_metadata_before_model_mutation(tmp_pat
     assert exp._state_hash(run.policy.model.state_dict()) == before
 
 
-def test_native_defaults_reserve_deterministic_algorithms_for_resume_verification(tmp_path: Path) -> None:
+def test_native_defaults_keep_training_algorithms_for_resume_verification(tmp_path: Path) -> None:
     config = exp.NativeCli(
         checkpoint=tmp_path / "proxy.pt",
         sampler=tmp_path / "sampler.json",
@@ -853,48 +853,63 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
     run.run_update()
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     result = json.loads((tmp_path / "resume-check.json").read_text())
-    assert result["next_batch_expected_sha256"] == result["next_batch_actual_sha256"]
-    assert result["optimizer_expected_sha256"] == result["optimizer_actual_sha256"]
+    assert result["format"] == "hal.o65.resume-check.v3"
+    assert len(set(result["next_batch_sha256"])) == 1
+    assert result["restored"] == [result["boundary"]] * 3
     assert result["maximum_parameter_error"] == 0
-    assert result["deterministic"] is True
+    assert result["passed"]
+    assert result["deterministic"] is False
     assert not run.config.deterministic
     assert not torch.are_deterministic_algorithms_enabled()
     assert run.update == 1
     if warmup == 1:
         assert run.warming
-        assert result["uninterrupted_metrics"]["train/warming"] == 0
-        assert result["uninterrupted_metrics"]["train/actor_steps"] == 0
+        assert result["control_metrics"][0]["train/warming"] == 0
+        assert result["control_metrics"][0]["train/actor_steps"] == 0
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_muon_resume_repeats_the_next_fit(tmp_path: Path, device: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Exact equality is guaranteed in the verifier's deterministic mode.
-    initial_mode = torch.are_deterministic_algorithms_enabled()
-    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    torch.use_deterministic_algorithms(True)
-    try:
-        run = transformer_trainer(device, development=True, deterministic=True)
-        run = exp.Trainer(run.engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
-        run.run_update()
-        manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
-        optimizer_before = exp._state_hash(
-            (run.actor_optimizer.state_dict(), run.critic_optimizer.state_dict(), run.scheduler.state_dict())
-        )
-        batch = run.prepare(run.engine.collect(run.update))
-        run.fit(batch)
-        expected = {name: value.detach().cpu().clone() for name, value in run.policy.model.state_dict().items()}
-        exp.restore_checkpoint(run, manifest, PROVENANCE)
-        assert (
-            exp._state_hash(
-                (run.actor_optimizer.state_dict(), run.critic_optimizer.state_dict(), run.scheduler.state_dict())
-            )
-            == optimizer_before
-        )
-        run.fit(batch)
-        for name, value in expected.items():
-            torch.testing.assert_close(run.policy.model.state_dict()[name].cpu(), value, rtol=0, atol=0, msg=name)
-    finally:
-        torch.use_deterministic_algorithms(initial_mode)
+def test_muon_resume_restores_state_and_matches_measured_next_update(tmp_path: Path, device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    run = transformer_trainer(device, development=True)
+    run = exp.Trainer(run.engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
+    run.run_update()
+    boundary = exp._resume_state_hashes(run)
+    exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+    assert exp._resume_state_hashes(run) == boundary
+    result = json.loads((tmp_path / "resume-check.json").read_text())
+    assert result["passed"]
+    assert all(row["passed"] for row in result["comparisons"].values())
+    assert not result["deterministic"]
+
+
+@pytest.mark.parametrize("error,passed", [(0.0015, True), (0.003, False)])
+def test_resume_update_tolerance_uses_measured_control_spread(error: float, passed: bool) -> None:
+    first = {"weight": torch.tensor([1.0, 2.0]), "step": torch.tensor(1)}
+    second = {"weight": torch.tensor([1.001, 2.0]), "step": torch.tensor(1)}
+    resumed = {"weight": torch.tensor([1.0, 2.0 + error]), "step": torch.tensor(1)}
+    report = exp._compare_resume_updates(first, second, resumed)
+    assert report["weight"]["passed"] is passed
+    assert report["step"]["passed"]
+    assert report["weight"]["control_spread"] == pytest.approx(0.001, rel=1e-4)
+    assert report["weight"]["tolerance"] == pytest.approx(0.0015, abs=2e-6)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_resume_comparison_rejects_nonfinite_values(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        exp._compare_resume_updates({"w": torch.tensor(0.0)}, {"w": torch.tensor(0.0)}, {"w": torch.tensor(value)})
+
+
+def test_resume_comparison_rejects_changed_integer_state_and_schema() -> None:
+    assert not exp._compare_resume_updates(
+        {"step": torch.tensor(1)}, {"step": torch.tensor(2)}, {"step": torch.tensor(2)}
+    )["step"]["passed"]
+    with pytest.raises(ValueError, match="schema"):
+        exp._compare_resume_updates({"w": torch.zeros(1)}, {"w": torch.zeros(1)}, {"w": torch.zeros(2)})
+    with pytest.raises(ValueError, match="identities"):
+        exp._compare_resume_updates({"w": torch.zeros(1)}, {}, {"w": torch.zeros(1)})
 
 
 @pytest.mark.parametrize("version", [1, 2])

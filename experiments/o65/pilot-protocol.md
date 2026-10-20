@@ -115,17 +115,21 @@ evaluation and startup separately because update throughput excludes them.
    and W&B run before the next training segment.
 5. At update 256, SIGKILL the trainer process group after atomic checkpoint
    publication while it still has work left. Evaluate that durable snapshot,
-   then resume it to 288. At 288, run the existing exact-resume verifier on the
-   full pool: the next batch and optimizer update run uninterrupted and from
-   restore. Require identical batch hashes, optimizer/scheduler hashes and
-   zero model parameter error. Restore the 288 boundary after the check.
-   Continue through 512 with the same configuration and run id.
-   Checkpoints record deterministic mode and the cuBLAS workspace setting, but
-   these execution settings do not bind resume identity. The verifier restores
-   the boundary before each of its two comparison updates and runs both with
-   deterministic algorithms. It discards graphs captured in the other mode,
-   then restores the boundary and default training mode after the check.
-   Its exact claim concerns those two updates, not the earlier training run.
+   then resume it to 288. At 288, run the resume verifier on the full pool.
+   Require exact restoration of model, both optimizers, scheduler, simulator
+   and pool state, sampler cursor, counter key, progress and every RNG state.
+   Repeat the next update twice as controls from the identical boundary, then
+   once from resume. Compare each floating tensor with 1.5 times the controls'
+   maximum absolute spread plus eight dtype rounding units at the control
+   scale (minimum 1e-3). Integer state and scheduler progress remain exact.
+   Record all errors and tolerances. Batch hashes are diagnostic: reduction
+   noise can change categorical samples. Atomic adds and other nondeterministic
+   reductions are allowed, including in the verifier. Reject NaNs and infinities
+   in executed log-probs, KL, advantages, losses and gradients.
+   Restore the 288 boundary after the check and continue through 512 with the
+   same configuration and run id. The verifier uses training's graph paths and
+   execution mode. Checkpoints record deterministic mode and the cuBLAS workspace
+   setting; these execution settings do not bind resume identity.
 6. Evaluate only the final checkpoint once on the held-out grid in both
    simulators, with a 28,924-frame budget. Keep the held-out claim and every
    partial result, including on failure. No held-out retry or selection is
@@ -143,8 +147,8 @@ and match outcomes.
 
 The systems stage passes only if builds and input checks pass, all scheduled
 matches publish, warmup calibrates and exits, the actor takes PPO steps,
-W&B records both training and evaluations, and the forced kill plus exact
-resume passes on the actual RTX PRO 6000. The hard cap expiring is a failed
+W&B records both training and evaluations, and the forced kill plus state-exact
+resume and noise-qualified next update pass on the actual RTX PRO 6000. The hard cap expiring is a failed
 completion. Preserve its partial evidence.
 
 The learning stage passes only if the final held-out MSL comparison has
@@ -330,8 +334,7 @@ comparisons do not select a policy or establish gameplay improvement.
 
 
 Dense execution uses training checkpoint format v5 and pool snapshot format v3.
-The device RNG key is part of the resume identity. The deterministic verifier
-uses the training graphs and checks the next batch, optimizer, parameters and
-all RNG states. Earlier persisted formats are rejected. Numerical qualification
+The device RNG key is part of the resume identity. The verifier uses the training graphs and execution mode. It checks restored
+state exactly and the next update against the measured two-control spread. Earlier persisted formats are rejected. Numerical qualification
 and statistical comparison with Git commit `aacdfee0` remain required before a
 learning run.

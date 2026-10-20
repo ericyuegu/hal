@@ -3980,7 +3980,7 @@ def read_native_sampler(path: Path) -> SamplerConfig:
 
 def train_native(config: NativeCli) -> None:
     torch.set_num_threads(2)
-    if config.training.deterministic or config.verify_resume:
+    if config.training.deterministic:
         workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
         if workspace not in (None, ":4096:8"):
             raise ValueError("deterministic native runs require CUBLAS_WORKSPACE_CONFIG=:4096:8")
@@ -4575,6 +4575,11 @@ def _state_hash(value: object) -> str:
         elif isinstance(item, np.ndarray):
             digest.update(str((item.dtype, item.shape)).encode())
             digest.update(item.tobytes())
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            visit(type(item).__name__)
+            visit(tuple((field.name, getattr(item, field.name)) for field in dataclasses.fields(item)))
+        elif isinstance(item, bytes):
+            digest.update(item)
         elif isinstance(item, dict):
             for key, child in item.items():
                 visit(key)
@@ -4638,94 +4643,144 @@ def _rng_hash() -> str:
     )
 
 
+def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
+    engine = trainer.engine
+    return {
+        "model": _state_hash(trainer.policy.model.state_dict()),
+        "actor_optimizer": _state_hash(trainer.actor_optimizer.state_dict()),
+        "critic_optimizer": _state_hash(trainer.critic_optimizer.state_dict()),
+        "scheduler": _state_hash(trainer.scheduler.state_dict()),
+        "pool": _state_hash(engine.snapshot()),
+        "simulators": _state_hash(tuple(shard.save() for group in engine.groups for shard in group)),
+        "sampler": _state_hash((engine.sampler.cursor, engine.sampler.lambda_max, engine.sampler.rng)),
+        "rng": _rng_hash(),
+        "anchors": _state_hash({key: policy.model.state_dict() for key, policy in engine.anchors.items()}),
+        "progress": _state_hash(
+            (
+                engine.clocks,
+                engine.cursor,
+                engine.anchor_candidates,
+                trainer.update,
+                trainer.actor_steps,
+                trainer.warming,
+                trainer.warmup_moments,
+                trainer.fresh_variances,
+                trainer.next_anchor,
+                trainer.evaluation_cursor,
+            )
+        ),
+    }
+
+
+def _update_tensors(trainer: Trainer) -> dict[str, Tensor]:
+    tensors: dict[str, Tensor] = {}
+
+    def visit(path: str, value: object) -> None:
+        if isinstance(value, Tensor):
+            _check_finite(path, value)
+            tensors[path] = value.detach().to(device="cpu", copy=True)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                visit(f"{path}/{key}", child)
+        elif isinstance(value, tuple | list):
+            for index, child in enumerate(value):
+                visit(f"{path}/{index}", child)
+
+    visit("model", trainer.policy.model.state_dict())
+    visit("actor_optimizer", trainer.actor_optimizer.state_dict())
+    visit("critic_optimizer", trainer.critic_optimizer.state_dict())
+    return tensors
+
+
+def _compare_resume_updates(
+    first: dict[str, Tensor], second: dict[str, Tensor], resumed: dict[str, Tensor]
+) -> dict[str, dict[str, float | bool]]:
+    """Use 1.5 times each tensor's control spread plus eight rounding units.
+
+    A single maximum per tensor admits reduction noise without requiring it at
+    the same element on every replay. Integer state still compares exactly.
+    """
+    if first.keys() != second.keys() or first.keys() != resumed.keys():
+        raise ValueError("next update tensor identities differ")
+    result: dict[str, dict[str, float | bool]] = {}
+    for name, a in first.items():
+        b, c = second[name], resumed[name]
+        if a.shape != b.shape or a.shape != c.shape or a.dtype != b.dtype or a.dtype != c.dtype:
+            raise ValueError(f"next update tensor schema differs: {name}")
+        for value in (a, b, c):
+            _check_finite(name, value)
+        if not a.numel():
+            continue
+        spread = float((a.double() - b.double()).abs().max())
+        error = max(float((a.double() - c.double()).abs().max()), float((b.double() - c.double()).abs().max()))
+        scale = max(float(a.double().abs().max()), float(b.double().abs().max()), 1e-3)
+        floor = 8 * torch.finfo(a.dtype).eps * scale if a.is_floating_point() else 0.0
+        tolerance = 1.5 * spread + floor if a.is_floating_point() else 0.0
+        result[name] = {"control_spread": spread, "error": error, "tolerance": tolerance, "passed": error <= tolerance}
+    return result
+
+
 def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str]) -> None:
-    """Compare two deterministic next updates, then restore the training boundary."""
-    if trainer.policy.device.type == "cuda" and os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
-        raise ValueError("configure CUBLAS_WORKSPACE_CONFIG=:4096:8 before CUDA resume verification")
+    """Check exact restoration and calibrate next-update error on two controls.
+
+    Each control repeats the uninterrupted next update from the same boundary.
+    Restoring between controls rewinds their inputs. A third update tests resume
+    with the same training graphs and execution mode. Batch hashes are evidence;
+    floating-point noise can change categorical choices, so they need not match.
+    """
     manifest = save_checkpoint(trainer, output / "checkpoints", provenance)
-    config = trainer.config
-    deterministic = torch.are_deterministic_algorithms_enabled()
-    trainer.config = dataclasses.replace(config, deterministic=True)
+    boundary = _resume_state_hashes(trainer)
+    started = time.perf_counter()
+    controls: list[dict[str, Tensor]] = []
+    batches: list[str] = []
+    metrics: list[dict[str, float]] = []
+    restored: list[dict[str, str]] = []
+    schedules: list[str] = []
     try:
-        torch.use_deterministic_algorithms(True)
-        _clear_execution_caches(trainer)
-        restore_checkpoint(trainer, manifest, provenance)
-        _verify_checkpoint_resume(trainer, output, provenance, manifest)
-    finally:
-        try:
-            restore_checkpoint(trainer, manifest, provenance)
-        finally:
-            trainer.config = config
-            torch.use_deterministic_algorithms(deterministic)
+        for _ in range(3):
             _clear_execution_caches(trainer)
+            batch, measured = trainer.run_update()
+            batches.append(_batch_hash(batch))
+            metrics.append(measured)
+            controls.append(_update_tensors(trainer))
+            schedules.append(_state_hash((trainer.scheduler.state_dict(), trainer.update, trainer.actor_steps)))
+            del batch
+            restore_checkpoint(trainer, manifest, provenance)
+            restored.append(_resume_state_hashes(trainer))
+            if restored[-1] != boundary:
+                changed = [name for name in boundary if restored[-1][name] != boundary[name]]
+                raise ValueError(f"checkpoint did not restore exact state: {changed}")
+        comparisons = _compare_resume_updates(*controls)
+        passed = all(row["passed"] for row in comparisons.values()) and len(set(schedules)) == 1
+        report = {
+            "format": "hal.o65.resume-check.v3",
+            "manifest": str(manifest),
+            "deterministic": torch.are_deterministic_algorithms_enabled(),
+            "boundary": boundary,
+            "restored": restored,
+            "next_batch_sha256": batches,
+            "next_scheduler_sha256": schedules,
+            "tolerance": "per tensor: 1.5 * two-control max spread + 8 * dtype epsilon * max(control abs, 1e-3)",
+            "comparisons": comparisons,
+            "maximum_parameter_error": max(
+                row["error"] for name, row in comparisons.items() if name.startswith("model/")
+            ),
+            "control_metrics": metrics[:2],
+            "resumed_metrics": metrics[2],
+            "passed": passed,
+            "elapsed_seconds": time.perf_counter() - started,
+        }
+        (output / "resume-check.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+        if not passed:
+            raise ValueError(f"native resume exceeded measured update noise; see {output / 'resume-check.json'}")
+    finally:
+        restore_checkpoint(trainer, manifest, provenance)
+        _clear_execution_caches(trainer)
 
 
 def _clear_execution_caches(trainer: Trainer) -> None:
     for policy in (trainer.policy, *trainer.engine.anchors.values()):
         policy.clear_caches()
-
-
-def _verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str], manifest: Path) -> None:
-    boundary_optimizer = _state_hash(
-        (trainer.actor_optimizer.state_dict(), trainer.critic_optimizer.state_dict(), trainer.scheduler.state_dict())
-    )
-    boundary_rng = _rng_hash()
-    started = time.perf_counter()
-    expected, expected_metrics = trainer.run_update()
-    expected_rng = _rng_hash()
-    expected_batch = _batch_hash(expected)
-    expected_model = {name: value.detach().cpu().clone() for name, value in trainer.policy.model.state_dict().items()}
-    expected_optimizer = _state_hash(
-        (trainer.actor_optimizer.state_dict(), trainer.critic_optimizer.state_dict(), trainer.scheduler.state_dict())
-    )
-    del expected
-    restore_checkpoint(trainer, manifest, provenance)
-    restored_optimizer = _state_hash(
-        (trainer.actor_optimizer.state_dict(), trainer.critic_optimizer.state_dict(), trainer.scheduler.state_dict())
-    )
-    if restored_optimizer != boundary_optimizer:
-        raise ValueError("checkpoint did not restore the exact optimizer and scheduler state")
-    restored_rng = _rng_hash()
-    if restored_rng != boundary_rng:
-        raise ValueError("checkpoint did not restore every random-number generator")
-    actual, actual_metrics = trainer.run_update()
-    actual_rng = _rng_hash()
-    actual_batch = _batch_hash(actual)
-    actual_optimizer = _state_hash(
-        (trainer.actor_optimizer.state_dict(), trainer.critic_optimizer.state_dict(), trainer.scheduler.state_dict())
-    )
-    maximum = max(
-        float((expected_model[name].float() - value.detach().cpu().float()).abs().max())
-        for name, value in trainer.policy.model.state_dict().items()
-        if value.numel()
-    )
-    report = {
-        "format": "hal.o65.resume-check.v2",
-        "rng_expected_sha256": expected_rng,
-        "rng_actual_sha256": actual_rng,
-        "boundary_rng_sha256": boundary_rng,
-        "restored_rng_sha256": restored_rng,
-        "deterministic": torch.are_deterministic_algorithms_enabled(),
-        "manifest": str(manifest),
-        "next_batch_expected_sha256": expected_batch,
-        "next_batch_actual_sha256": actual_batch,
-        "optimizer_expected_sha256": expected_optimizer,
-        "optimizer_actual_sha256": actual_optimizer,
-        "boundary_optimizer_sha256": boundary_optimizer,
-        "restored_optimizer_sha256": restored_optimizer,
-        "maximum_parameter_error": maximum,
-        "uninterrupted_metrics": expected_metrics,
-        "resumed_metrics": actual_metrics,
-        "elapsed_seconds": time.perf_counter() - started,
-    }
-    (output / "resume-check.json").write_text(json.dumps(report, indent=2, sort_keys=True))
-    if (
-        expected_batch != actual_batch
-        or expected_optimizer != actual_optimizer
-        or expected_rng != actual_rng
-        or maximum != 0
-    ):
-        raise ValueError(f"exact native resume failed; see {output / 'resume-check.json'}")
 
 
 def qualify_development(config: ProxyCli) -> None:
