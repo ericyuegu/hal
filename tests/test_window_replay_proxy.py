@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 import torch
+from o65_reference import CONTROL_COMMIT
 from o65_reference import ROOT
 from o65_reference import load_control
 from torch import Tensor
@@ -372,7 +373,11 @@ def run(output_dir: Path) -> dict[str, Any]:
             head.down.bias.add_(torch.linspace(-0.1, 0.1, head.down.out_features, device="cuda"))
         torch.nn.init.normal_(policy.model.critic_residual.residual.down.weight, std=0.005)
     source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
-    sampling = exp.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json")
+    sampler_path = output_dir / "sampler.json"
+    sampler_path.write_bytes(
+        subprocess.check_output(["git", "show", f"{CONTROL_COMMIT}:experiments/o65/pilot-sampler.json"], cwd=ROOT)
+    )
+    sampling = exp.read_native_sampler(sampler_path)
     with contextlib.ExitStack() as resources:
         shards = []
         for index, cpu in enumerate(sorted(os.sched_getaffinity(0))[:4]):
@@ -435,7 +440,7 @@ def run(output_dir: Path) -> dict[str, Any]:
             "checkpoint_sha256": checkpoint.checkpoint_sha256,
             "environment": exp._environment(),
             "seed": 65,
-            "sampler_sha256": exp.sha256(ROOT / "experiments/o65/pilot-sampler.json"),
+            "sampler_sha256": exp.sha256(sampler_path),
             "simulator_sha256": shards[0].shard.library_sha256,
             "adapter_sha256": exp.native_bridge.library_sha256(),
             "data_manifests": checkpoint.provenance["data_manifests"],
