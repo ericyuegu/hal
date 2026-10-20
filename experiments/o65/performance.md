@@ -5,6 +5,8 @@ using Torch 2.11.0+cu130, seed 65, cadences (8,4) and (10,2), 256 frames per
 active match, four critic epochs. The measurements below use 32 windows per
 actor step. The pilot uses 512 windows per step and the sampling inputs in
 [pilot-protocol.md](pilot-protocol.md). Its complete update time is unmeasured.
+The measured episodes use Fox/Falco on Final Destination, u=0.95 and starting
+damage drawn from 0, 30, 60 or 90 percent.
 
 ## Complete updates
 
