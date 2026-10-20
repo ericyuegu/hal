@@ -234,7 +234,9 @@ def score_match(
         start_index = 0
         self_destructs = 0
         for index in lost:
-            self_destructs += float(np.max(columns["percent"][start_index : index + 1])) == 0
+            percent = columns["percent"][start_index : index + 1]
+            alive = actions[start_index : index + 1] > 10
+            self_destructs += bool(alive.any()) and bool((percent[alive] == 0).all())
             start_index = int(index)
         events[f"{role}_zero_damage_self_destruct_rate"] = self_destructs / max(1, len(lost))
         events[f"{role}_zero_damage_self_destructs_per_min"] = self_destructs / minutes

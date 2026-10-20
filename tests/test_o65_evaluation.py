@@ -750,3 +750,25 @@ def test_death_metrics_classify_blast_onsets_and_explicit_zero_damage_proxy() ->
     assert scored.events["ego_deaths_blast_top"] == 0
     assert scored.events["ego_zero_damage_self_destruct_rate"] == 0.5
     assert scored.events["match_minutes"] == 7 / 3600
+
+
+def test_zero_damage_proxy_excludes_previous_stocks_death_animation() -> None:
+    post = {}
+    for port in (1, 2):
+        post[port] = {
+            "stock": np.array([4, 4, 3, 3, 3, 3, 3, 2]),
+            "percent": np.array([0, 40, 40, 40, 0, 0, 0, 0]),
+            "action": np.array([14, 14, 0, 0, 12, 14, 2, 2]),
+            "position_x": np.zeros(8),
+        }
+    scored = score_match(
+        Trajectory(np.arange(8), post, np.zeros(8, dtype=np.uint32)),
+        simulator="msl",
+        pair="a",
+        seed=1,
+        start=EvaluationStart("fd", 25, (1, 22)),
+        focal_port=1,
+        stop_reason="frame_budget",
+        wall_seconds=1,
+    )
+    assert scored.events["ego_zero_damage_self_destruct_rate"] == 0.5
