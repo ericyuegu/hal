@@ -1017,3 +1017,47 @@ def test_disabled_deployment_identity_does_not_require_its_data_row() -> None:
     cfg = dataclasses.replace(sampling.config, identities=rows, deployment_rate=0)
     sampling = exp.EpisodeSampler(cfg, sampling.schedule, sampling.rng)
     assert all(player.identity != 1 for episode in range(50) for player in sampling.sample(0, episode, (0,)).players)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("field", ["loss", "policy_loss", "kl_loss", "joint_ratio_WK", "factor_kl_WKF", "gradient"])
+def test_trainer_rejects_nonfinite_actor_result_before_optimizer_step(value: float, field: str) -> None:
+    class FaultPolicy(ToyPolicy):
+        def actor_step(self, batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
+            result, output = super().actor_step(batch, targets, clip_epsilon=clip_epsilon)
+            if field == "gradient":
+                assert self.model.logits.grad is not None
+                self.model.logits.grad.fill_(value)
+            else:
+                bad = torch.full_like(getattr(result, field), value)
+                result = dataclasses.replace(result, **{field: bad})
+            return result, output
+
+    base = trainer(groups=1, anchor_rate=0)
+    policy = FaultPolicy("cpu")
+    engine = exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})
+    engine.initialize()
+    run = exp.Trainer(engine, base.config)
+    initial = policy.model.logits.detach().clone()
+    error = RuntimeError if field == "gradient" else ValueError
+    with pytest.raises(error, match="non-finite|finite"):
+        run.run_update()
+    torch.testing.assert_close(policy.model.logits, initial, rtol=0, atol=0)
+    assert not run.actor_optimizer.state
+    assert run.updating
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_trainer_rejects_nonfinite_critic_gradient_before_optimizer_step(value: float) -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    parameter = run.policy.critic_parameters()[0]
+    before = parameter.detach().clone()
+    handle = parameter.register_hook(lambda gradient: torch.full_like(gradient, value))
+    try:
+        with pytest.raises(RuntimeError, match="non-finite"):
+            run.run_update()
+    finally:
+        handle.remove()
+    torch.testing.assert_close(parameter, before, rtol=0, atol=0)
+    assert not run.critic_optimizer.state and not run.actor_optimizer.state
+    assert run.updating

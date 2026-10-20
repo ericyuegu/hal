@@ -468,6 +468,9 @@ def dense_advantages(
     decided_TP: Tensor,
 ) -> AdvantageTargets:
     """Empty ticks preserve the next decision's trace without adding a discount."""
+    _check_finite("decision rewards", rewards_TP[decided_TP])
+    _check_finite("decision values", values_TP[decided_TP])
+    _check_finite("decision bootstrap values", next_values_TP[decided_TP & bootstrap_TP])
     values = torch.where(decided_TP, values_TP, 0)
     next_values = torch.where(decided_TP & bootstrap_TP, next_values_TP, 0)
     rewards = torch.where(decided_TP, rewards_TP, 0)
@@ -480,7 +483,9 @@ def dense_advantages(
         candidate = delta[tick] + discount[tick] * torch.where(trace_TP[tick], tail, 0)
         tail = torch.where(decided_TP[tick], candidate, tail)
         advantages[tick] = torch.where(decided_TP[tick], tail, 0)
-    return AdvantageTargets(advantages, advantages + values)
+    targets = advantages + values
+    _check_finite("decision advantages and targets", torch.stack((advantages, targets)))
+    return AdvantageTargets(advantages, targets)
 
 
 @torch.no_grad()
@@ -2802,6 +2807,11 @@ def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF
     rows = []
     for group, (p, q) in enumerate(zip(policy.distributions, reference.distributions, strict=True)):
         valid = executed_JF[:, group::4, None]
+        for probabilities in (p, q):
+            active = probabilities[valid.expand_as(probabilities)]
+            _check_finite("executed KL probabilities", active)
+            if bool((active < 0).any()):
+                raise ValueError("executed KL probabilities must be nonnegative")
         neutral = torch.nn.functional.one_hot(torch.zeros_like(p[..., 0], dtype=torch.long), p.shape[-1]).to(p.dtype)
         p = torch.where(valid, p, neutral)
         q = torch.where(valid, q, neutral)
@@ -3322,6 +3332,16 @@ class Trainer:
                         selected.sum().float(),
                     )
                     result, current = self.policy.actor_step(windows, targets, clip_epsilon=cfg.clip_epsilon)
+                    _check_finite(
+                        "actor loss, KL and joint ratio",
+                        torch.cat(
+                            (
+                                torch.stack((result.loss, result.policy_loss, result.kl_loss)),
+                                result.factor_kl_WKF.flatten(),
+                                result.joint_ratio_WK[selected],
+                            )
+                        ),
+                    )
                     torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )

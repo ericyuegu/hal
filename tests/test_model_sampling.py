@@ -49,3 +49,23 @@ def test_upper_uniform_cannot_select_masked_tail_after_cdf_rounding(dtype: torch
     assert actual.eq(127).all()
     actual = sample_with_temperature(logits, uniforms, torch.ones(1000, 1, device=device))
     assert actual.eq(127).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_compiled_sampler_cannot_round_normalized_cdf_below_the_upper_draw(dtype: torch.dtype) -> None:
+    generator = torch.Generator().manual_seed(42)
+    logits = torch.randn(1024, 256, generator=generator).to(device="cuda", dtype=dtype)
+    last_legal = torch.randint(1, 255, (1024,), generator=generator, device="cpu").cuda()
+    logits.masked_fill_(torch.arange(256, device="cuda")[None] > last_legal[:, None], -torch.inf)
+    draws = torch.full((1024,), 1 - 2.0**-24, dtype=torch.float64, device="cuda")
+    compiled = torch.compile(sample_categorical, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
+    compiled_temperature = torch.compile(
+        sample_with_temperature, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False}
+    )
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        actual = compiled(logits, argmax=False, uniform=draws)
+        tempered = compiled_temperature(logits, draws, torch.ones(1024, 1, device="cuda"))
+    torch.testing.assert_close(actual, last_legal, rtol=0, atol=0)
+    torch.testing.assert_close(tempered, last_legal, rtol=0, atol=0)
+    assert torch.isfinite(logits.float().log_softmax(-1).gather(-1, actual[:, None])).all()

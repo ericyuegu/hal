@@ -20,11 +20,18 @@ def validate_sampling_temperature(temperature: float) -> float:
 
 def _sample_uniform(probabilities: Tensor, uniform: Tensor) -> Tensor:
     cumulative = probabilities.cumsum(-1)
-    # Rounding must not leave the CDF below a valid draw at a masked tail.
     cumulative = cumulative / cumulative[..., -1:]
     upper = 1.0 - torch.finfo(probabilities.dtype).eps / 2
     uniform = uniform.to(device=probabilities.device, dtype=probabilities.dtype).clamp_max(upper)
-    return (cumulative <= uniform[..., None]).sum(-1).clamp_max(probabilities.shape[-1] - 1)
+    indices = torch.arange(probabilities.shape[-1], device=probabilities.device)
+    positive = probabilities > 0
+    last = torch.where(positive, indices, -1).amax(-1, keepdim=True)
+    # Torch 2.11's parallel scan can round differently across a zero-mass
+    # plateau. Counting CDF entries then selects masked classes near a boundary.
+    # Take the first positive-mass crossing and give the last such class the
+    # exact endpoint. Remove this constraint only when scan tests prove it safe.
+    crossed = (cumulative > uniform[..., None]) | (indices == last)
+    return torch.where(positive & crossed, indices, probabilities.shape[-1]).amin(-1)
 
 
 def sample_categorical(

@@ -414,3 +414,35 @@ def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> N
         run.reference.evaluate_reference(windows, positions, torch.zeros(2, 3, dtype=torch.bool))
     with pytest.raises(ValueError, match="distinct windows"):
         run.reference.evaluate_reference(windows, positions, torch.zeros(2, 3, dtype=torch.long))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("field", ["reward", "value", "bootstrap", "overflow"])
+def test_dense_gae_rejects_nonfinite_training_values(value: float, field: str) -> None:
+    rewards = torch.ones(2, 2)
+    values = torch.zeros_like(rewards)
+    following = torch.zeros_like(rewards)
+    duration = torch.full((2, 2), 2, dtype=torch.long)
+    valid = torch.ones(2, 2, dtype=torch.bool)
+    trace = valid.clone()
+    trace[-1] = False
+    if field == "overflow":
+        rewards.fill_(torch.finfo(torch.float32).max)
+    else:
+        {"reward": rewards, "value": values, "bootstrap": following}[field][0, 0] = value
+    with pytest.raises(ValueError, match="finite"):
+        exp.dense_advantages(rewards, values, following, duration, valid, trace, valid)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), -0.1])
+@pytest.mark.parametrize("reference", [False, True])
+def test_kl_rejects_invalid_executed_probabilities(value: float, reference: bool) -> None:
+    run = trainer(groups=1, anchor_rate=0)
+    batch = run.prepare(run.engine.collect(0))
+    policy = batch.old
+    target = batch.reference
+    probabilities = target.distributions if reference else policy.distributions
+    row, frame = torch.nonzero(batch.decisions.executed_factors_JF[:, ::4])[0]
+    probabilities[0][row, frame, 0] = value
+    with pytest.raises(ValueError, match="executed KL probabilities"):
+        exp.factor_kl(policy, target, batch.decisions.executed_factors_JF)
