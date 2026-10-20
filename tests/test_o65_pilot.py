@@ -320,3 +320,12 @@ def test_published_held_out_consumption_blocks_a_retry(tmp_path: Path) -> None:
     assert (volume / ".o65-held-out-claim.json").read_text() == "claim"
     with pytest.raises(RuntimeError, match="already consumed"):
         _MODULE.consume_held_out(volume, 2000, tmp_path / "protocol.json")
+
+
+def test_completed_pilot_cannot_resume_under_different_source(tmp_path: Path) -> None:
+    _MODULE.bind_pilot_identity(tmp_path, "a" * 40, tiny=False)
+    write_boundary(tmp_path / "train/checkpoints", 2000)
+    _MODULE.bind_pilot_identity(tmp_path, "a" * 40, tiny=False)
+    with pytest.raises(ValueError, match="source or inputs differ"):
+        _MODULE.bind_pilot_identity(tmp_path, "b" * 40, tiny=False)
+    assert _MODULE.latest_checkpoint(tmp_path / "train/checkpoints").name == "update-00002000.json"

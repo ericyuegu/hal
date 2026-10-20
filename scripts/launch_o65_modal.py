@@ -304,7 +304,13 @@ def stage_results(source: Path, destination: Path) -> None:
         and not path.name.endswith(".partial")
         and not set(path.relative_to(source).parts).intersection(("tmp", "inductor", "triton"))
     ]
-    files.sort(key=lambda path: (path.name.startswith("update-") and path.suffix == ".json", str(path)))
+    files.sort(
+        key=lambda path: (
+            path.name != "pilot-identity.json",
+            path.name.startswith("update-") and path.suffix == ".json",
+            str(path),
+        )
+    )
     for path in files:
         target = destination / path.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)

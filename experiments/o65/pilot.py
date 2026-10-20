@@ -342,11 +342,35 @@ def consume_held_out(output: Path, update: int, protocol: Path) -> Path:
     return consumed
 
 
+def bind_pilot_identity(output: Path, git_sha: str, *, tiny: bool) -> None:
+    record = {
+        "format": "hal.o65.pilot-identity.v1",
+        "git_sha": git_sha,
+        "tiny": tiny,
+        "inputs": {
+            name: hashlib.sha256((ROOT / "experiments/o65" / name).read_bytes()).hexdigest()
+            for name in ("pilot-inputs.json", "pilot-sampler.json", "pilot-evaluation.json")
+        },
+    }
+    path = output / "pilot-identity.json"
+    if path.is_file():
+        if json.loads(path.read_text()) != record:
+            raise ValueError("pilot source or inputs differ from the persisted run; use its recorded source")
+        return
+    temporary = output / ".pilot-identity.partial"
+    if any(value != temporary for value in output.iterdir()):
+        raise ValueError("existing pilot state has no source/input identity")
+    temporary.write_text(json.dumps(record, indent=2, sort_keys=True))
+    temporary.replace(path)
+
+
 def main(args: Args) -> None:
     signal.signal(signal.SIGTERM, terminate)
     os.chdir(ROOT)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=args.resume)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    bind_pilot_identity(output, sha, tiny=args.tiny)
     available = tuple(sorted(os.sched_getaffinity(0)))
     cpus = args.cpus or available[: 2 if args.tiny else 16]
     if len(cpus) != (2 if args.tiny else 16) or len(set(cpus)) != len(cpus) or set(cpus) - set(available):
@@ -447,7 +471,6 @@ def main(args: Args) -> None:
         compile_cache=args.compile_cache,
     )
     if args.wandb:
-        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))

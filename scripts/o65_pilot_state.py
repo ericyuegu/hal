@@ -44,7 +44,13 @@ def stage_state(source: Path, destination: Path) -> dict[str, str]:
         )
     ]
     # State manifests become visible only after every referenced shard is copied.
-    files.sort(key=lambda path: (path.name.startswith("update-") and path.suffix == ".json", str(path)))
+    files.sort(
+        key=lambda path: (
+            path.name != "pilot-identity.json",
+            path.name.startswith("update-") and path.suffix == ".json",
+            str(path),
+        )
+    )
     for path in files:
         relative = str(path.relative_to(source))
         target = destination / relative

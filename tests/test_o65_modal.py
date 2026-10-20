@@ -233,6 +233,7 @@ def test_interrupted_staging_keeps_the_previous_checkpoint_readable(
 ) -> None:
     source, destination = tmp_path / "source", tmp_path / "volume"
     source.mkdir()
+    (source / "pilot-identity.json").write_text("source identity")
     (source / "old.pt").write_bytes(b"old state")
     (source / "update-00000032.json").write_text("old.pt")
     launcher.stage_results(source, destination)
@@ -250,6 +251,7 @@ def test_interrupted_staging_keeps_the_previous_checkpoint_readable(
     monkeypatch.setattr(launcher, "copy_result", interrupt)
     with pytest.raises(InterruptedError):
         launcher.stage_results(source, destination)
+    assert copied[0] == "pilot-identity.json"
     assert copied.index("new.pt") < copied.index("update-00000064.json")
     assert (destination / "old.pt").read_bytes() == b"old state"
     assert not (destination / "update-00000064.json").exists()

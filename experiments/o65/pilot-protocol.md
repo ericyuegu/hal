@@ -195,6 +195,8 @@ A held-out consumption marker is committed before starting held-out play.
 The evaluator's hidden claim is also preserved. Either marker prevents a retry
 after interruption. A failed resume-verification report also blocks continuation.
 
+A pilot identity record binds the source SHA and input hashes before any other
+state is published, including when resuming an already completed run.
 The driver preserves W&B identity across segments and preemption. Metrics
 past the durable checkpoint are retained separately, then trimmed from the
 active disk log. The two-control resume verifier includes simulator state,
