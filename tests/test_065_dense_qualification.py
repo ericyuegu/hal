@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import dataclasses
 import json
+import math
 import os
 import random
 import subprocess
@@ -384,6 +385,22 @@ def qualify(output: Path) -> dict[str, Any]:
         return report
 
 
+def planned_entropy(distributions: tuple[torch.Tensor, ...], replan: torch.Tensor) -> torch.Tensor:
+    valid = torch.arange(4, device=replan.device)[None] < replan[:, None]
+    result = torch.zeros_like(replan, dtype=torch.float32)
+    for probabilities in distributions:
+        entropy = -(probabilities * torch.where(probabilities > 0, probabilities, 1).log()).sum(-1)
+        result += torch.where(valid, entropy, 0).sum(-1)
+    return result
+
+
+def test_statistical_entropy_excludes_unplanned_decoder_padding() -> None:
+    probabilities = torch.full((2, 4, 2), 0.5)
+    probabilities[0, 2:] = torch.nan
+    result = planned_entropy((probabilities,) * 4, torch.tensor([2, 4]))
+    torch.testing.assert_close(result, torch.tensor([8.0, 16.0]) * math.log(2))
+
+
 def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_resume: bool) -> dict[str, Any]:
     if mode not in ("dense", "control"):
         raise ValueError("statistics mode must be dense or control")
@@ -444,9 +461,7 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
                 sides = torch.tensor([row.state.side for row in batch.rollout.records], device=policy.device)
                 frame_reward = torch.tensor([sum(row.rewards) for row in batch.rollout.records], device=policy.device)
             kl = exp.factor_kl(batch.old, batch.reference, batch.decisions.executed_factors_JF)
-            entropy = torch.zeros_like(batch.values)
-            for p in batch.old.distributions:
-                entropy += torch.where(p > 0, -p * torch.where(p > 0, p, 1).log(), 0).sum(-1).sum(-1)
+            entropy = planned_entropy(batch.old.distributions, batch.decisions.replan_J)
             rows = []
             for match in range(64):
                 at = matches == match

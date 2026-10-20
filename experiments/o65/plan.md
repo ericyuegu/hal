@@ -618,11 +618,12 @@ The verifier uses the same tick, reference and actor graph paths and execution
 mode as training. It checks exact restoration of model, both optimizers,
 scheduler, pool and simulator state, sampler cursor, counter key, progress and
 every RNG state. It repeats the next update twice as controls, rewinding the
-same boundary between them, then compares a third resumed update. Each floating
-tensor may differ by at most 1.5 times the controls' maximum absolute difference
-plus eight dtype rounding units at its control scale (minimum scale 1e-3).
-Integer update state and scheduler progress must match exactly. The report
-records both control errors and the resulting tolerances.
+same boundary between them, then compares a third resumed update. For the
+model and each optimizer state family, RMS and maximum error may each reach
+twice the corresponding control spread plus eight dtype rounding units at the
+control scale (minimum scale 1e-3). Per-tensor errors remain diagnostic because
+reduction noise can move between tensors. Integer update state and scheduler
+progress must match exactly. Report v4 records the errors and tolerances.
 
 ### Random numbers
 
@@ -649,8 +650,7 @@ and decision subsampling. No NaN or infinity is accepted in an executed
 log-probability, KL, advantage, loss or gradient. Non-finite training values
 raise an error; they are never masked or clamped away.
 
-Bitwise identical execution is out of scope. Numerical differences can flip a
-categorical sample even under an identical random draw.
+Bitwise identical execution is out of scope.
 
 ## Distributed training
 

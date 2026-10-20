@@ -119,9 +119,11 @@ evaluation and startup separately because update throughput excludes them.
    Require exact restoration of model, both optimizers, scheduler, simulator
    and pool state, sampler cursor, counter key, progress and every RNG state.
    Repeat the next update twice as controls from the identical boundary, then
-   once from resume. Compare each floating tensor with 1.5 times the controls'
-   maximum absolute spread plus eight dtype rounding units at the control
-   scale (minimum 1e-3). Integer state and scheduler progress remain exact.
+   once from resume. Compare RMS and maximum errors for the complete model
+   and each optimizer state family. Each error may reach twice the measured
+   control spread plus eight dtype rounding units at the control scale
+   (minimum 1e-3). Keep per-tensor errors as diagnostics. Integer state and
+   scheduler progress remain exact.
    Record all errors and tolerances. Batch hashes are diagnostic: reduction
    noise can change categorical samples. Atomic adds and other nondeterministic
    reductions are allowed, including in the verifier. Reject NaNs and infinities

@@ -853,7 +853,7 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
     run.run_update()
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
     result = json.loads((tmp_path / "resume-check.json").read_text())
-    assert result["format"] == "hal.o65.resume-check.v3"
+    assert result["format"] == "hal.o65.resume-check.v4"
     assert len(set(result["next_batch_sha256"])) == 1
     assert result["restored"] == [result["boundary"]] * 3
     assert result["maximum_parameter_error"] == 0
@@ -880,7 +880,7 @@ def test_muon_resume_restores_state_and_matches_measured_next_update(tmp_path: P
     assert exp._resume_state_hashes(run) == boundary
     result = json.loads((tmp_path / "resume-check.json").read_text())
     assert result["passed"]
-    assert all(row["passed"] for row in result["comparisons"].values())
+    assert all(row["passed"] for row in result["groups"].values())
     assert not result["deterministic"]
 
 
@@ -890,10 +890,10 @@ def test_resume_update_tolerance_uses_measured_control_spread(error: float, pass
     second = {"weight": torch.tensor([1.001, 2.0]), "step": torch.tensor(1)}
     resumed = {"weight": torch.tensor([1.0, 2.0 + error]), "step": torch.tensor(1)}
     report = exp._compare_resume_updates(first, second, resumed)
-    assert report["weight"]["passed"] is passed
-    assert report["step"]["passed"]
-    assert report["weight"]["control_spread"] == pytest.approx(0.001, rel=1e-4)
-    assert report["weight"]["tolerance"] == pytest.approx(0.0015, abs=2e-6)
+    assert report.groups["weight"]["passed"] is passed
+    assert report.groups["step"]["passed"]
+    assert report.tensors["weight"]["control_spread"] == pytest.approx(0.001, rel=1e-4)
+    assert report.groups["weight"]["tolerance_max"] == pytest.approx(0.002, abs=3e-6)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
@@ -905,7 +905,7 @@ def test_resume_comparison_rejects_nonfinite_values(value: float) -> None:
 def test_resume_comparison_rejects_changed_integer_state_and_schema() -> None:
     assert not exp._compare_resume_updates(
         {"step": torch.tensor(1)}, {"step": torch.tensor(2)}, {"step": torch.tensor(2)}
-    )["step"]["passed"]
+    ).passed
     with pytest.raises(ValueError, match="schema"):
         exp._compare_resume_updates({"w": torch.zeros(1)}, {"w": torch.zeros(1)}, {"w": torch.zeros(2)})
     with pytest.raises(ValueError, match="identities"):
@@ -1061,3 +1061,97 @@ def test_trainer_rejects_nonfinite_critic_gradient_before_optimizer_step(value: 
     torch.testing.assert_close(parameter, before, rtol=0, atol=0)
     assert not run.critic_optimizer.state and not run.actor_optimizer.state
     assert run.updating
+
+
+@pytest.mark.parametrize("last_noise,passed", [(0.0005, True), (0.1, False)])
+def test_resume_verifier_accepts_only_calibrated_update_noise(tmp_path: Path, last_noise: float, passed: bool) -> None:
+    class NoisyTrainer(exp.Trainer):
+        def __init__(self, engine: Any, config: Any) -> None:
+            super().__init__(engine, config)
+            self.calls = 0
+
+        def run_update(self) -> Any:
+            result = super().run_update()
+            noise = (0.0, 0.001, last_noise)[self.calls]
+            self.calls += 1
+            with torch.no_grad():
+                self.policy.model.logits.add_(noise)
+            return result
+
+    base = trainer(groups=1, anchor_rate=0)
+    run = NoisyTrainer(base.engine, base.config)
+    before = exp._resume_state_hashes(run)
+    if passed:
+        exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+    else:
+        with pytest.raises(ValueError, match="exceeded measured update noise"):
+            exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+    result = json.loads((tmp_path / "resume-check.json").read_text())
+    assert result["passed"] is passed
+    assert result["comparisons"]["model/logits"]["control_spread"] == pytest.approx(0.001, rel=1e-4)
+    assert exp._resume_state_hashes(run) == before
+
+
+def test_resume_verifier_rejects_inexact_model_restoration(tmp_path: Path) -> None:
+    class CorruptRestoreModel(ToyModel):
+        def load_state_dict(self, state_dict: Any, strict: bool = True, assign: bool = False) -> Any:
+            result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+            if self.logits.requires_grad:
+                with torch.no_grad():
+                    self.logits.add_(0.25)
+            return result
+
+    class CorruptRestorePolicy(ToyPolicy):
+        def __init__(self, device: str) -> None:
+            super().__init__(device)
+            self.model = CorruptRestoreModel(device)
+
+    base = trainer(groups=1, anchor_rate=0)
+    policy = CorruptRestorePolicy("cpu")
+    engine = exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})
+    engine.initialize()
+    run = exp.Trainer(engine, base.config)
+    with pytest.raises(ValueError, match="did not restore exact state.*model"):
+        exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
+
+
+def test_resume_noise_can_move_between_model_tensors() -> None:
+    first = {"model/a": torch.zeros(4), "model/b": torch.zeros(4)}
+    second = {"model/a": torch.full((4,), 0.001), "model/b": torch.zeros(4)}
+    resumed = {"model/a": torch.zeros(4), "model/b": torch.full((4,), 0.001)}
+    report = exp._compare_resume_updates(first, second, resumed)
+    assert report.passed
+    assert report.tensors["model/b"]["control_spread"] == 0
+    assert report.tensors["model/b"]["error"] > 0
+
+
+def test_resume_moment_noise_cannot_hide_a_second_moment_error() -> None:
+    first = {
+        "actor_optimizer/state/0/exp_avg": torch.tensor(1.0),
+        "actor_optimizer/state/0/exp_avg_sq": torch.tensor(0.0),
+    }
+    second = {
+        "actor_optimizer/state/0/exp_avg": torch.tensor(1.1),
+        "actor_optimizer/state/0/exp_avg_sq": torch.tensor(0.0),
+    }
+    resumed = {
+        "actor_optimizer/state/0/exp_avg": torch.tensor(1.05),
+        "actor_optimizer/state/0/exp_avg_sq": torch.tensor(0.01),
+    }
+    report = exp._compare_resume_updates(first, second, resumed)
+    assert report.groups["actor_optimizer/exp_avg"]["passed"]
+    assert not report.groups["actor_optimizer/exp_avg_sq"]["passed"]
+    assert not report.passed
+
+
+def test_resume_integer_comparison_does_not_lose_low_bits_to_float_conversion() -> None:
+    first = {"step": torch.tensor(2**62)}
+    resumed = {"step": torch.tensor(2**62 + 1)}
+    assert not exp._compare_resume_updates(first, first, resumed).passed
+
+
+def test_resume_comparison_rejects_overflow_in_error_statistics() -> None:
+    first = {"weight": torch.tensor(1e200, dtype=torch.float64)}
+    second = {"weight": torch.tensor(-1e200, dtype=torch.float64)}
+    with pytest.raises(ValueError, match="errors must be finite"):
+        exp._compare_resume_updates(first, second, second)

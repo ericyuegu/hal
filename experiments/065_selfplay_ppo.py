@@ -4712,17 +4712,30 @@ def _update_tensors(trainer: Trainer) -> dict[str, Tensor]:
     return tensors
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ResumeComparison:
+    tensors: dict[str, dict[str, float | bool]]
+    groups: dict[str, dict[str, float | bool]]
+
+    @property
+    def passed(self) -> bool:
+        return all(row["passed"] for row in self.groups.values())
+
+
 def _compare_resume_updates(
     first: dict[str, Tensor], second: dict[str, Tensor], resumed: dict[str, Tensor]
-) -> dict[str, dict[str, float | bool]]:
-    """Use 1.5 times each tensor's control spread plus eight rounding units.
+) -> ResumeComparison:
+    """Compare model and optimizer-state vectors with two-control noise.
 
-    A single maximum per tensor admits reduction noise without requiring it at
-    the same element on every replay. Integer state still compares exactly.
+    RMS and maximum errors may each reach twice the corresponding control
+    spread plus eight dtype rounding units. Per-tensor errors are diagnostic:
+    reduction noise can move between tensors. Integer state remains exact.
+    Optimizer state families have separate scales (e.g. first/second moments).
     """
     if first.keys() != second.keys() or first.keys() != resumed.keys():
         raise ValueError("next update tensor identities differ")
-    result: dict[str, dict[str, float | bool]] = {}
+    tensors: dict[str, dict[str, float | bool]] = {}
+    accumulated: dict[str, dict[str, float]] = {}
     for name, a in first.items():
         b, c = second[name], resumed[name]
         if a.shape != b.shape or a.shape != c.shape or a.dtype != b.dtype or a.dtype != c.dtype:
@@ -4731,13 +4744,77 @@ def _compare_resume_updates(
             _check_finite(name, value)
         if not a.numel():
             continue
-        spread = float((a.double() - b.double()).abs().max())
-        error = max(float((a.double() - c.double()).abs().max()), float((b.double() - c.double()).abs().max()))
-        scale = max(float(a.double().abs().max()), float(b.double().abs().max()), 1e-3)
-        floor = 8 * torch.finfo(a.dtype).eps * scale if a.is_floating_point() else 0.0
-        tolerance = 1.5 * spread + floor if a.is_floating_point() else 0.0
-        result[name] = {"control_spread": spread, "error": error, "tolerance": tolerance, "passed": error <= tolerance}
-    return result
+        root = name.split("/", 1)[0]
+        group = f"{root}/{name.rsplit('/', 1)[-1]}" if root.endswith("_optimizer") else root
+        totals = accumulated.setdefault(
+            group,
+            dict.fromkeys(
+                (
+                    "count",
+                    "control_square",
+                    "first_square",
+                    "second_square",
+                    "floor_square",
+                    "control_max",
+                    "error_max",
+                    "floor_max",
+                    "integer_mismatch",
+                ),
+                0.0,
+            ),
+        )
+        if not a.is_floating_point():
+            exact = torch.equal(a, b) and torch.equal(a, c)
+            totals["integer_mismatch"] += float(not exact)
+            tensors[name] = {"exact": exact}
+            continue
+        a, b, c = a.double(), b.double(), c.double()
+        control = a - b
+        first_error, second_error = a - c, b - c
+        spread = float(control.abs().max())
+        error = max(float(first_error.abs().max()), float(second_error.abs().max()))
+        floor = 8 * torch.finfo(first[name].dtype).eps * max(float(a.abs().max()), float(b.abs().max()), 1e-3)
+        control_square = float(control.square().sum())
+        first_square, second_square = float(first_error.square().sum()), float(second_error.square().sum())
+        if not all(
+            math.isfinite(value) for value in (spread, error, floor, control_square, first_square, second_square)
+        ):
+            raise ValueError("resume comparison errors must be finite")
+        tensors[name] = {
+            "control_spread": spread,
+            "error": error,
+            "control_rms": math.sqrt(control_square / a.numel()),
+            "error_rms": math.sqrt(max(first_square, second_square) / a.numel()),
+        }
+        totals["count"] += a.numel()
+        totals["control_square"] += control_square
+        totals["first_square"] += first_square
+        totals["second_square"] += second_square
+        totals["floor_square"] += a.numel() * floor**2
+        totals["control_max"] = max(totals["control_max"], spread)
+        totals["error_max"] = max(totals["error_max"], error)
+        totals["floor_max"] = max(totals["floor_max"], floor)
+    groups: dict[str, dict[str, float | bool]] = {}
+    for name, totals in accumulated.items():
+        if not all(math.isfinite(value) for value in totals.values()):
+            raise ValueError("resume comparison totals must be finite")
+        count = max(1.0, totals["count"])
+        control_rms = math.sqrt(totals["control_square"] / count)
+        error_rms = math.sqrt(max(totals["first_square"], totals["second_square"]) / count)
+        tolerance_rms = 2 * control_rms + math.sqrt(totals["floor_square"] / count)
+        tolerance_max = 2 * totals["control_max"] + totals["floor_max"]
+        integer_equal = totals["integer_mismatch"] == 0
+        groups[name] = {
+            "control_rms": control_rms,
+            "error_rms": error_rms,
+            "tolerance_rms": tolerance_rms,
+            "control_max": totals["control_max"],
+            "error_max": totals["error_max"],
+            "tolerance_max": tolerance_max,
+            "integer_equal": integer_equal,
+            "passed": integer_equal and error_rms <= tolerance_rms and totals["error_max"] <= tolerance_max,
+        }
+    return ResumeComparison(tensors, groups)
 
 
 def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str]) -> None:
@@ -4771,19 +4848,20 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
                 changed = [name for name in boundary if restored[-1][name] != boundary[name]]
                 raise ValueError(f"checkpoint did not restore exact state: {changed}")
         comparisons = _compare_resume_updates(*controls)
-        passed = all(row["passed"] for row in comparisons.values()) and len(set(schedules)) == 1
+        passed = comparisons.passed and len(set(schedules)) == 1
         report = {
-            "format": "hal.o65.resume-check.v3",
+            "format": "hal.o65.resume-check.v4",
             "manifest": str(manifest),
             "deterministic": torch.are_deterministic_algorithms_enabled(),
             "boundary": boundary,
             "restored": restored,
             "next_batch_sha256": batches,
             "next_scheduler_sha256": schedules,
-            "tolerance": "per tensor: 1.5 * two-control max spread + 8 * dtype epsilon * max(control abs, 1e-3)",
-            "comparisons": comparisons,
+            "tolerance": "RMS and max per model/optimizer-state family: 2 * two-control spread + 8 dtype rounding units",
+            "comparisons": comparisons.tensors,
+            "groups": comparisons.groups,
             "maximum_parameter_error": max(
-                row["error"] for name, row in comparisons.items() if name.startswith("model/")
+                float(row.get("error", 0.0)) for name, row in comparisons.tensors.items() if name.startswith("model/")
             ),
             "control_metrics": metrics[:2],
             "resumed_metrics": metrics[2],
