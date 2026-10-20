@@ -226,7 +226,7 @@ class ToyPolicy:
         ring.commit(meta, due, actions, self.device_wire_actions(actions), count=4 if clock % 4 == 0 else 2)
         states.table.record_evaluation(states.ids, output, self.values(output.features))
 
-    def evaluate_windows(self, batch: Any) -> ReplayOutput:
+    def window_output(self, batch: Any) -> ReplayOutput:
         slots = batch.slots
         w, k = slots.valid_WK.shape
         p = self.model.logits.softmax(-1)[None, None, None].expand(w, k, 4, 4, 2)
@@ -250,12 +250,15 @@ class ToyPolicy:
             torch.where(mask, logs, 0), tuple(p[..., g, :] for g in exp.DECODE_GROUP_INDICES), mask, features
         )
 
+    def evaluate_reference(self, batch: Any, positions: Any, *, windows_per_step: int) -> Any:
+        return self.window_output(batch)
+
     def evaluate_values(self, batch: Any) -> torch.Tensor:
         return self.model.value_head(torch.ones(*batch.slots.valid_WK.shape, 1, device=self.device)).squeeze(-1)
 
     def actor_step(self, batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
         self.model.zero_grad(set_to_none=True)
-        output = self.evaluate_windows(batch)
+        output = self.window_output(batch)
         loss = exp.actor_loss(output, targets, clip_epsilon=clip_epsilon)
         loss.loss.backward()
         return loss, dataclasses.replace(
@@ -536,10 +539,10 @@ def test_critic_only_warmup_does_not_step_actor() -> None:
 def test_warmup_skips_reference_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     run = trainer(groups=1, warmup=100, anchor_rate=0)
 
-    def fail_evaluation(states: Any, actions: torch.Tensor) -> Any:
+    def fail_evaluation(batch: Any, positions: Any, *, windows_per_step: int) -> Any:
         raise AssertionError("warmup must not evaluate the reference")
 
-    monkeypatch.setattr(run.reference, "evaluate_windows", fail_evaluation)
+    monkeypatch.setattr(run.reference, "evaluate_reference", fail_evaluation)
     batch, metrics = run.run_update()
     assert batch.reference is None
     assert metrics["policy/kl_per_frame"] == 0

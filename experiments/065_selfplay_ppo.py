@@ -65,6 +65,7 @@ from hal.models.replay_actor import actor_loss
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_decoder_precision
+from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
@@ -1095,7 +1096,7 @@ class LoopPolicy(Protocol):
     def sample_tick(
         self, states: TickInputs, rng: CounterRng, layout: TickLayout, ring: ActionRing, *, clock: int
     ) -> None: ...
-    def evaluate_windows(self, batch: ReplayBatch) -> ReplayOutput: ...
+    def evaluate_reference(self, batch: ReplayBatch, positions: Tensor, *, windows_per_step: int) -> ReplayOutput: ...
     def evaluate_values(self, batch: ReplayBatch) -> Tensor: ...
     def actor_step(
         self, batch: ReplayBatch, targets: ActorTargets, *, clip_epsilon: float
@@ -1382,7 +1383,7 @@ class TransformerPolicy:
         self.tick_caches: dict[tuple[ActionRing, tuple[int, ...]], BlockRestartCache] = {}
         self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
-        self.window_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
+        self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
         self.value_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[Tensor]] = {}
         self.queue_replay = (
             torch.compile(
@@ -1448,8 +1449,8 @@ class TransformerPolicy:
         self.tick_caches.clear()
         self.tick_graphs.clear()
         self.current_layouts.clear()
-        self.window_graphs.clear()
         self.value_graphs.clear()
+        self.reference_graphs.clear()
         self.actor_graph = None
 
     def frozen_copy(self) -> LoopPolicy:
@@ -1698,23 +1699,115 @@ class TransformerPolicy:
         # Capture the eager trunk together with the compiled shared-history decoder.
         return self.window_replay(self.model, hidden, observed, ReplaySlots(*inputs[5:]), grad=grad)
 
+    def reference_forward(self, inputs: tuple[Tensor, ...], windows_per_step: int, count: int) -> ReplayOutput:
+        batches = []
+        for start in range(0, len(inputs[0]), windows_per_step):
+            end = start + windows_per_step
+            with (
+                torch.no_grad(),
+                torch.autocast(
+                    self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda", cache_enabled=False
+                ),
+            ):
+                context, observed = self._packed_context(tuple(value[start:end] for value in inputs[:5]))
+                hidden = self.model(
+                    context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed
+                )
+            # Torch 2.11.0 BF16 no-grad replay failed the proxy KL precision gate.
+            # A temporary hidden leaf selects the actor's forward arithmetic;
+            # all reference parameters stay frozen and every result is detached.
+            # Remove this boundary when ordinary no-grad replay passes that gate.
+            hidden = hidden.detach().requires_grad_(True)
+            parts = []
+            for slot in range(0, inputs[5].shape[1], count):
+                fields = tuple(
+                    value[start:end].contiguous()
+                    if name == "history_starts_WL"
+                    else value[start:end, slot : slot + count].contiguous()
+                    for name, value in zip(REPLAY_SLOT_NAMES, inputs[5:], strict=True)
+                )
+                with torch.enable_grad():
+                    output = self.window_replay(self.model, hidden, observed, ReplaySlots(*fields), grad=True)
+                parts.append(
+                    ReplayOutput(
+                        output.log_probs_WKF.detach(),
+                        tuple(p.detach() for p in output.distributions),
+                        output.factor_mask_WKF,
+                        output.features,
+                    )
+                )
+            batches.append(concatenate_replays(parts, 1))
+        return concatenate_replays(batches, 0)
+
     @torch.no_grad()
-    def evaluate_windows(self, batch: ReplayBatch) -> ReplayOutput:
+    def evaluate_reference(self, batch: ReplayBatch, positions: Tensor, *, windows_per_step: int) -> ReplayOutput:
+        if torch.is_inference_mode_enabled():
+            raise ValueError("reference replay requires autograd metadata outside inference_mode")
+        if any(parameter.requires_grad for parameter in self.model.parameters()):
+            raise ValueError("reference parameters must stay frozen")
+        windows, slots = batch.rows.shape
+        count = positions.shape[1] if positions.ndim == 2 else 0
+        if (
+            type(windows_per_step) is not int
+            or windows_per_step < 1
+            or positions.shape != (windows, count)
+            or not 1 <= count <= slots
+            or positions.dtype != torch.long
+            or positions.device != self.device
+        ):
+            raise ValueError("invalid reference actor shape")
+        ordered_positions = positions.sort(-1).values
+        if bool(((positions < 0) | (positions >= slots)).any()) or bool(
+            (ordered_positions[:, 1:] == ordered_positions[:, :-1]).any()
+        ):
+            raise ValueError("reference positions must be distinct slots inside each window")
+        priority = (torch.arange(slots, device=self.device)[None] + count).expand(windows, -1).clone()
+        priority.scatter_(1, positions, torch.arange(count, device=self.device)[None].expand_as(positions))
+        permutation = priority.argsort(-1)
+        inverse = permutation.argsort(-1)
+        padded_slots = math.ceil(slots / count) * count
+        permutation = torch.nn.functional.pad(permutation, (0, padded_slots - slots))
+        padded_windows = math.ceil(windows / windows_per_step) * windows_per_step
+        indices = torch.arange(padded_windows, device=self.device)
+        packed = batch.take(indices, permutation, indices < windows)
+        packed = dataclasses.replace(
+            packed,
+            slots=dataclasses.replace(
+                packed.slots,
+                valid_WK=packed.slots.valid_WK & (torch.arange(padded_slots, device=self.device) < slots),
+            ),
+        )
+        inputs = packed.inputs()
+        if self.device.type == "cpu":
+            output = self.reference_forward(inputs, windows_per_step, count)
+        else:
+            key = ((windows_per_step, count), *(tuple(value.shape) for value in inputs))
+            captured = self.reference_graphs.get(key)
+            if captured is None:
+                static = tuple(value.clone() for value in inputs)
+                with prepared_shape_compilation(64):
+                    captured = CapturedCall(
+                        lambda: self.reference_forward(static, windows_per_step, count), static, device=self.device
+                    )
+                self.reference_graphs[key] = captured
+            output = captured(inputs)
         if self.profile is not None:
             phase_name = self.profile.phase_name
-            self.profile.work[f"{phase_name}/trunk_tokens"] += batch.records.shape[0] * batch.records.shape[1]
-            self.profile.work[f"{phase_name}/decoder_tokens"] += batch.rows.numel() * (self.max_delay + 4)
-        inputs = batch.inputs()
-        if self.device.type == "cpu":
-            return self.window_forward(inputs, grad=False)
-        key = tuple(tuple(value.shape) for value in inputs)
-        captured = self.window_graphs.get(key)
-        if captured is None:
-            static = tuple(value.clone() for value in inputs)
-            with prepared_shape_compilation(64):
-                captured = CapturedCall(lambda: self.window_forward(static, grad=False), static, device=self.device)
-            self.window_graphs[key] = captured
-        return captured(inputs)
+            self.profile.work[f"{phase_name}/trunk_tokens"] += padded_windows * 256
+            self.profile.work[f"{phase_name}/decoder_tokens"] += padded_windows * padded_slots * (self.max_delay + 4)
+
+        def reorder(value: Tensor) -> Tensor:
+            index = inverse.reshape(windows, slots, *([1] * (value.ndim - 2)))
+            return value[:windows].gather(1, index.expand(windows, slots, *value.shape[2:]))
+
+        return ReplayOutput(
+            reorder(output.log_probs_WKF),
+            tuple(reorder(p) for p in output.distributions),
+            reorder(output.factor_mask_WKF),
+            ReplayCriticFeatures(
+                *(reorder(getattr(output.features, field.name)) for field in dataclasses.fields(output.features))
+            ),
+        )
 
     def value_forward(self, inputs: tuple[Tensor, ...]) -> Tensor:
         slots = ReplaySlots(*inputs[5:])
@@ -2767,6 +2860,20 @@ class ReplayBatch:
         )
 
 
+def concatenate_replays(outputs: Sequence[ReplayOutput], dimension: int) -> ReplayOutput:
+    return ReplayOutput(
+        torch.cat([output.log_probs_WKF for output in outputs], dimension),
+        tuple(torch.cat([output.distributions[group] for output in outputs], dimension) for group in range(4)),
+        torch.cat([output.factor_mask_WKF for output in outputs], dimension),
+        ReplayCriticFeatures(
+            *(
+                torch.cat([getattr(output.features, field.name) for output in outputs], dimension)
+                for field in dataclasses.fields(outputs[0].features)
+            )
+        ),
+    )
+
+
 REPLAY_SLOT_NAMES = tuple(field.name for field in dataclasses.fields(ReplaySlots))
 
 
@@ -2951,6 +3058,13 @@ class Trainer:
         size = ticks * players
         rows = torch.arange(size, device=device).reshape(-1, 64, players).transpose(1, 2).reshape(-1, 64)
         windows = replay_batch(self.policy, table, rows, table.valid[rows])
+        placement = place_windows(
+            windows,
+            self.engine.sampler.rng,
+            rollout.update,
+            self.config.decisions_per_window,
+            self.config.windows_per_step,
+        )
         compact = window_indices(ids, players)
         assert table.evaluation is not None
         old = _take_evaluation(table.evaluation, ids)
@@ -2958,7 +3072,13 @@ class Trainer:
             reference = (
                 None
                 if self.warming
-                else window_evaluation(self.reference.evaluate_windows(windows), old.actions, compact)
+                else window_evaluation(
+                    self.reference.evaluate_reference(
+                        windows, placement.positions, windows_per_step=self.config.windows_per_step
+                    ),
+                    old.actions,
+                    compact,
+                )
             )
         kl = (
             torch.zeros_like(old.log_probs)
@@ -3014,13 +3134,6 @@ class Trainer:
         )
         advantages = result.advantages.flatten()[ids]
         targets = result.value_targets.flatten()[ids]
-        placement = place_windows(
-            windows,
-            self.engine.sampler.rng,
-            rollout.update,
-            self.config.decisions_per_window,
-            self.config.windows_per_step,
-        )
         selected = placement.selected.flatten()[compact]
         steps = tuple(placement.windows.unbind(0))
         executed = decisions.executed_factors_JF
@@ -3385,6 +3498,7 @@ def _configuration_digest(trainer: Trainer) -> str:
     }
     if isinstance(trainer.policy, TransformerPolicy):
         identity["decision_kernels"] = "dense_tick_window_graph_v5"
+        identity["reference_kernels"] = "actor_shape_hidden_leaf_v1"
         identity["decoder_precision"] = trainer.policy.model.decoder_precision
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
@@ -4647,6 +4761,9 @@ def episode_diagnostics(
     reference: LoopPolicy,
     rollout: Rollout,
     wanted: Tensor,
+    *,
+    windows_per_step: int,
+    decisions_per_window: int,
 ) -> EpisodeDiagnostics:
     table, ids = rollout.table, rollout.ids
     if table.evaluation is None:
@@ -4657,7 +4774,12 @@ def episode_diagnostics(
     full = (torch.arange(4, device=policy.device) < windows.slots.replan_WK[..., None]).repeat_interleave(4, -1)
     windows = dataclasses.replace(windows, slots=dataclasses.replace(windows.slots, executed_WKF=full))
     old = _take_evaluation(table.evaluation, ids)
-    control = window_evaluation(reference.evaluate_windows(windows), old.actions, window_indices(ids, players))
+    positions = torch.arange(decisions_per_window, device=policy.device)[None].expand(len(rows), -1)
+    control = window_evaluation(
+        reference.evaluate_reference(windows, positions, windows_per_step=windows_per_step),
+        old.actions,
+        window_indices(ids, players),
+    )
     meta = table.integers[ids]
     mask = (torch.arange(4, device=policy.device) < meta[:, REPLAN, None]).repeat_interleave(4, -1)
     kl = factor_kl(old, control, mask)
@@ -4754,7 +4876,16 @@ def evaluate_anchors(
                 wanted_ids = torch.tensor(sorted(wanted), device=policy.device)
                 for update in range(config.max_rollouts):
                     rollout = engine.collect(update)
-                    chunks.append(episode_diagnostics(policy, trainer.reference, rollout, wanted_ids))
+                    chunks.append(
+                        episode_diagnostics(
+                            policy,
+                            trainer.reference,
+                            rollout,
+                            wanted_ids,
+                            windows_per_step=trainer.config.windows_per_step,
+                            decisions_per_window=trainer.config.decisions_per_window,
+                        )
+                    )
                     for result in rollout.results:
                         if result.match in wanted and result.episode.number == 0:
                             results[result.match] = result

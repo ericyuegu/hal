@@ -75,7 +75,7 @@ def test_prepare_uses_behavior_outputs_without_student_scoring() -> None:
         raise AssertionError("preparation must use the stored behavior evaluation")
 
     run.policy.evaluate_values = bootstrap_only
-    run.policy.evaluate_windows = reject_student_scoring
+    run.policy.evaluate_reference = reject_student_scoring
     batch = run.prepare(rollout)
     assert calls and all(slots == 1 for slots in calls)
     torch.testing.assert_close(batch.old.log_probs, batch.decisions.behavior_log_probs_JF, rtol=0, atol=0)
@@ -378,3 +378,27 @@ def test_reused_rollout_clears_reward_padding_before_metrics() -> None:
     prepared = run.prepare(following)
     expected = torch.where(live, table.rewards[ids], 0).sum(-1).mean()
     assert prepared.metrics["return/interval_reward"] == pytest.approx(float(expected))
+
+
+@pytest.mark.parametrize("count", [3, 16])
+def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> None:
+    from test_065_loop import transformer_trainer
+
+    run = transformer_trainer("cpu", development=True, decoder_precision="fp32")
+    rollout = run.engine.collect(0)
+    table = rollout.table
+    rows = torch.arange(table.ticks * table.players).reshape(-1, 64, table.players).transpose(1, 2).reshape(-1, 64)
+    windows = exp.replay_batch(run.policy, table, rows, table.valid[rows])
+    positions = torch.stack([torch.randperm(64)[:count] for _ in range(len(rows))])
+    expected = run.reference.window_forward(windows.inputs(), grad=False)
+    actual = run.reference.evaluate_reference(windows, positions, windows_per_step=3)
+    torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=3e-5, atol=5e-6)
+    torch.testing.assert_close(actual.factor_mask_WKF, expected.factor_mask_WKF, rtol=0, atol=0)
+    for first, second in zip(actual.distributions, expected.distributions, strict=True):
+        torch.testing.assert_close(first, second, rtol=3e-5, atol=5e-6)
+        assert not first.requires_grad
+    assert all(not p.requires_grad and p.grad is None for p in run.reference.model.parameters())
+    with pytest.raises(ValueError, match="distinct slots"):
+        run.reference.evaluate_reference(windows, torch.zeros(len(rows), 2, dtype=torch.long), windows_per_step=3)
+    with pytest.raises(ValueError, match="actor shape"):
+        run.reference.evaluate_reference(windows, positions, windows_per_step=True)
