@@ -160,7 +160,6 @@ def qualify(output: Path) -> dict[str, Any]:
             windows.slots,
             states,
             table.actions[chosen],
-            chosen,
             dense_advantage[windows.rows],
             dense_targets[windows.rows],
             dense_selected[windows.rows] & valid,

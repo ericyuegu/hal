@@ -26,7 +26,6 @@ class ProxyBatch:
     slots: ReplaySlots
     states: Any
     actions: Tensor
-    source_indices: Tensor
     advantages_WK: Tensor
     value_targets_WK: Tensor
     selected_WK: Tensor
@@ -150,22 +149,8 @@ def quantities(policy: Any, reference: Any, batch: ProxyBatch, behavior: Tensor,
     actor_gradient = flattened_gradients(loss.loss, policy.model.actor_parameters())
     diagnostic_kl = actor_loss(output, dataclasses.replace(target, selected_WK=output.factor_mask_WKF.any(-1)))
     mask = output.factor_mask_WKF
-    selected = batch.slots.valid_WK
-    critic_values = values(policy.model, output)
-    critic_loss = (
-        torch.where(selected, ((critic_values - batch.value_targets_WK) / 150).square(), 0).sum() / selected.sum()
-    )
     return {
         "log_probs": output.log_probs_WKF[mask].detach(),
         "kl": diagnostic_kl.factor_kl_WKF[mask].detach(),
-        "values": critic_values[selected].detach(),
-        "trunk_features": output.features.trunk_WKd[selected].detach(),
-        "decoder_features": output.features.decoder_WKt[selected].detach(),
-        "condition_features": torch.cat(
-            (output.features.condition_WK4[selected], output.features.opponent_condition_WK4[selected]), -1
-        ).detach(),
-        "opponent_queue": output.features.opponent_queue_WKQ4[selected].float(),
-        "opponent_lengths": output.features.opponent_lengths_WK[selected].float(),
         "actor_gradients": actor_gradient,
-        "critic_gradients": flattened_gradients(critic_loss, policy.model.critic_parameters()),
     }
