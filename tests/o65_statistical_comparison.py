@@ -12,14 +12,21 @@ from numpy.typing import NDArray
 def summaries(run: dict[str, Any]) -> dict[str, NDArray[np.float64]]:
     result = {}
     rows = {match: [u["matches"][match] for u in run["updates"]] for match in range(64)}
-    for field in ("reward", "kl", "entropy", "resets"):
+    for field in ("kl", "entropy", "resets"):
         result[field] = np.array(
             [sum(r[field] for r in values) / (3 if field in ("kl", "entropy") else 1) for values in rows.values()]
         )
-    for field in ("advantages", "targets"):
-        values = [np.concatenate([np.array(r[field], dtype=np.float64) for r in items]) for items in rows.values()]
+    trajectories = {
+        field: [np.concatenate([np.array(r[field], dtype=np.float64) for r in items]) for items in rows.values()]
+        for field in ("advantages", "targets")
+    }
+    trajectories["reward"] = [
+        np.array([sum(r["player_rewards"][side] for r in items) for side in items[0]["player_rewards"]])
+        for items in rows.values()
+    ]
+    for field, values in trajectories.items():
         for statistic in ("mean", "std", "q05", "q50", "q95"):
-            result[f"{field}/{statistic}"] = np.array(
+            result["reward" if field == "reward" and statistic == "mean" else f"{field}/{statistic}"] = np.array(
                 [
                     float(v.mean())
                     if statistic == "mean"
@@ -42,7 +49,7 @@ def summaries(run: dict[str, Any]) -> dict[str, NDArray[np.float64]]:
 
 def compare(control: dict[str, Any], dense: dict[str, Any]) -> dict[str, Any]:
     if (
-        control["format"] != "hal.o65.dense-statistical-raw.v1"
+        control["format"] != "hal.o65.dense-statistical-raw.v2"
         or dense["format"] != control["format"]
         or (control["mode"], dense["mode"]) != ("control", "dense")
     ):
@@ -70,6 +77,19 @@ def compare(control: dict[str, Any], dense: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError("comparison requires three complete 64-match updates")
 
+    for match in range(64):
+        sides = set(control["updates"][0]["matches"][match]["player_rewards"])
+        if (
+            not sides
+            or sides - {"0", "1"}
+            or any(
+                set(update["matches"][match]["player_rewards"]) != sides
+                for run in (control, dense)
+                for update in run["updates"]
+            )
+        ):
+            raise ValueError("comparison student sides changed")
+
     old, new = summaries(control), summaries(dense)
     rng = np.random.default_rng(65)
     indices = rng.integers(0, 64, size=(10000, 64))
@@ -88,7 +108,7 @@ def compare(control: dict[str, Any], dense: dict[str, Any]) -> dict[str, Any]:
             "dense_match_quantiles": np.quantile(b, [0.05, 0.5, 0.95]).tolist(),
         }
     result = {
-        "format": "hal.o65.dense-statistical-comparison.v1",
+        "format": "hal.o65.dense-statistical-comparison.v2",
         "configuration": {
             "matches": 64,
             "updates": 3,
@@ -98,7 +118,7 @@ def compare(control: dict[str, Any], dense: dict[str, Any]) -> dict[str, Any]:
             "confidence": 0.95,
             "resampling_unit": "paired logical match, retaining all three updates",
             "trajectory_statistics": "per-match pooled decisions; means of match-level mean/std/quantiles",
-            "reward": "three-update undiscounted interval sum per match",
+            "reward": "per-match student returns across three updates; mean/std/quantiles before match clustering",
             "kl": "mean per planned frame across the three updates",
             "entropy": "mean per planned action frame across the three updates",
             "resets": "completed episodes across three updates",

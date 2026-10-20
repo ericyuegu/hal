@@ -437,9 +437,11 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
             batch, metrics = run.run_update()
             if mode == "dense":
                 matches = batch.rollout.table.integers[batch.rollout.ids, module.MATCH]
+                sides = batch.rollout.table.integers[batch.rollout.ids, module.SIDE]
                 frame_reward = batch.rollout.table.rewards[batch.rollout.ids].sum(-1)
             else:
                 matches = torch.tensor([row.state.match for row in batch.rollout.records], device=policy.device)
+                sides = torch.tensor([row.state.side for row in batch.rollout.records], device=policy.device)
                 frame_reward = torch.tensor([sum(row.rewards) for row in batch.rollout.records], device=policy.device)
             kl = exp.factor_kl(batch.old, batch.reference, batch.decisions.executed_factors_JF)
             entropy = torch.zeros_like(batch.values)
@@ -453,6 +455,11 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
                     {
                         "match": match,
                         "reward": float(frame_reward[at].sum()),
+                        "player_rewards": {
+                            str(side): float(frame_reward[at & (sides == side)].sum())
+                            for side in (0, 1)
+                            if bool((at & (sides == side)).any())
+                        },
                         "kl": float(kl[at].sum() / batch.decisions.replan_J[at].sum()),
                         "entropy": float(entropy[at].sum() / batch.decisions.replan_J[at].sum()),
                         "advantages": batch.advantages[at].cpu().tolist(),
@@ -464,7 +471,7 @@ def trace_statistics(output: Path, mode: Literal["dense", "control"], *, verify_
             updates.append({"update": update, "matches": rows, "metrics": metrics})
             print(mode, update, metrics["systems/update_seconds"], flush=True)
         result = {
-            "format": "hal.o65.dense-statistical-raw.v1",
+            "format": "hal.o65.dense-statistical-raw.v2",
             "mode": mode,
             "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
             "trainer_sha256": exp.sha256(ROOT / "experiments/065_selfplay_ppo.py")
