@@ -130,9 +130,16 @@ The supplementary job succeeds in 48.478 GPU-container seconds. It checks both
 source artifact hashes before CUDA work. It reuses the pinned Nsight image
 layer and does not warm a trainer. No smoke job ran.
 
-The final 2,048-match arm is separately bounded by the remaining ledger. Its
-result and final accounting will be appended after completion. No further
-cloud job is planned.
+The final 2,048-match arm succeeds, `exit_code=0`, in 1,400.351 s, including
+1,330.648 s of warm-up. Its clean update takes **18.142752 s, 28,898 frames/s,
+20,026 decisions/s**. Peak allocated/reserved memory is 45.574/84.197 GiB.
+All 21 downloaded artifact hashes verify. There is no OOM. The 4,096 arm is not
+attempted: the remaining reservation cannot cover another cold warm-up.
+
+All three containers are confirmed stopped. Function elapsed time totals
+5,590.017 s (1.553 hours). Including the retained 360 s per call, the ledger
+charges 6,670.017 s (1.853 hours), below 7,200 s. The cost allowance is USD 11.05
+including the USD 3 build reserve, below USD 20. No fourth job was launched.
 
 Monitoring initially encountered an unavailable public `modal.Container` API,
 missing output from non-PTY CLI reads, and one redirected PTY read that returned
@@ -167,6 +174,9 @@ Findings and fixes:
 - Correct an analysis-only double multiplication of the critic epoch count
   before publication. The probe's recorded GEMM counts already include four
   epochs; the evidence and floor table use that count once.
+- Keep rate lookups separate for the two measured physical GPUs. Each probe
+  uses its own card's matching GEMM rates; supplementary rates no longer
+  overwrite same-shaped baseline rates. Combined component sums are projections.
 - State benchmark limits: repeated reference slots, fixed actor cotangents,
   frozen-step optimizer graph, omitted non-GEMM floor terms, buffer overlap and
   profiler overhead. No negative trainer overhead or full floor is claimed.

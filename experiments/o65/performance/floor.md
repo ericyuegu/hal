@@ -56,6 +56,11 @@ call identities are in [floor-measurements.json](floor-measurements.json).
 [floor-artifacts.json](floor-artifacts.json) hashes the downloaded evidence.
 Raw reports remain in Modal Volume `hal-o65-profile` under
 `floor-baseline-5d122bbb-20261020` and `floor-extra-ae4eed4f-20261020`.
+The completed larger sweep arm is `floor-sweep2048-aa807cce-20261020`.
+The baseline hardware and model probes share card `GPU-7b85dc51…`.
+Supplementary prefill/bootstrap probes use another card of the same model,
+`GPU-07614033…`. Their GEMM costs use that card's own rate measurements.
+Combined phase sums across the jobs are projections, not paired card measurements.
 
 ### Hardware rates
 
@@ -137,13 +142,31 @@ of model time from trainer time for those phases.
 | ---: | ---: | ---: | ---: | ---: |
 | 256 | 4.620547 | 14,184 | 10,070 | 6.599 / 16.840 |
 | 1,024 | 11.426755 | 22,941 | 15,873 | 23.264 / 46.307 |
-| 2,048 | Warm-up timed out | — | — | Not measured |
-| 4,096 | Not attempted after deadline | — | — | Not measured |
+| 2,048 | 18.142752 | 28,898 | 20,026 | 45.574 / 84.197 |
+| 4,096 | Not attempted within remaining budget | — | — | Not measured |
 
-The first job reached its absolute time limit during 2,048-match warm-up. It
-did not record an OOM. No memory ceiling is claimed. The 1,024-match cold warm-up
-took 1,468 s, including 1,318 s in rollout compilation/capture. Cold costs are
-excluded from throughput, but included in the GPU budget.
+The first job reached its absolute time limit during 2,048-match warm-up. A
+separate 1,900-second reservation completed that arm: warm-up took 1,330.648 s,
+and the complete job took 1,400.351 s. No OOM was recorded. No memory ceiling
+is claimed. This arm used a third card of the same GPU model; CPU topology is
+not exposed by Modal. Observed frame throughput is 26.0% above the 1,024-match
+rate. The cross-job comparison does not isolate batch size from card or host
+variation. It is a systems measurement, not a selected learning configuration.
+
+The 1,024-match cold warm-up took 1,468 s, including 1,318 s in rollout
+compilation/capture. Cold costs are excluded from throughput, but included in
+the GPU budget. At 2,048 the clean phases are rollout 8.846824 s, reference
+1.994630 s, other preparation 0.694722 s, critic 0.245387 s and actor including
+optimizer 6.352961 s. The update's measured rate is 28,898 frames/s and 20,026
+decisions/s. The residual between phase ranges is 8.228 ms.
+
+Three calls used 5,590.017 function-seconds (1.553 GPU-container hours).
+The ledger retains another 360 seconds per call for startup and teardown:
+6,670.017 seconds (1.853 hours), with a USD 11.05 cost allowance including the
+USD 3 build reserve. Rates were checked against [Modal pricing](https://modal.com/pricing)
+on 2026-10-19. All three containers are stopped. The remaining 529.983 reserved
+seconds permit at most a 169-second child reservation after the launch margin;
+that cannot cover another measured cold warm-up. No fourth job was launched.
 
 ### Floor arithmetic and its limits
 
@@ -176,11 +199,11 @@ uses traced host time, marked T; a separate clean Muon time was not saved.
 
 | Phase, whole update | GEMM TFLOPs | GEMM operand GB | GEMM kernels in decomposition | Partial floor | Bare | Trainer | Limit / missing work |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Rollout tick, plus prefills | 55.191 | 336.899 | 127,782 | 0.686270 (381,984; 264,292) | 3.380142 (77,554; 53,659) | 6.703817 (39,104; 27,056) | Attention bandwidth, sampling, host waits; buffers overlap |
-| Reference | 60.045 | 369.435 | 41,280 | 0.406875 (644,287; 445,779) | 1.143505 (229,246; 158,614) | 1.038549 (252,414; 174,644) | Attention/elementwise latency; bare padding differs |
+| Rollout tick, plus prefills | 55.191 | 336.899 | 127,782 | 0.685741 (382,278; 264,496) | 3.380142 (77,554; 53,659) | 6.703817 (39,104; 27,056) | Attention bandwidth, sampling, host waits; buffers overlap |
+| Reference | 60.045 | 369.435 | 41,280 | 0.405774 (646,035; 446,988) | 1.143505 (229,246; 158,614) | 1.038549 (252,414; 174,644) | Attention/elementwise latency; bare padding differs |
 | Preparation excluding reference | 10.580 | 57.766 | 218 | 0.044988 (5,826,970; 4,031,648) | 0.233756 (1,121,441; 775,919) | 0.344829 (760,214; 525,988) | Bootstrap compute, GAE/data traffic |
 | Critic | 0.867 | 22.332 | 84 | 0.022943 (11,425,760; 7,905,421) | 0.119196 (2,199,270; 1,521,663) | 0.123855 (2,116,542; 1,464,424) | FP32 compute and bandwidth |
-| Actor, excluding optimizer in bare/floor | 83.694 | 487.814 | 42,007 | 0.515157 (508,862; 352,079) | 2.041313 (128,419; 88,853) | 3.211275 incl. optimizer (81,632; 56,481) | Backward, attention and host dispatch |
+| Actor, excluding optimizer in bare/floor | 83.694 | 487.814 | 42,007 | 0.513909 (510,099; 352,934) | 2.041313 (128,419; 88,853) | 3.211275 incl. optimizer (81,632; 56,481) | Backward, attention and host dispatch |
 | Muon plus auxiliary Adam | 11.582 | 118.795 | 10,710 | 0.082408 (3,181,070; 2,200,965) | 0.630601 (415,705; 287,624) | 0.753907 T (347,714; 240,581) | Small matrix/elementwise kernels and eager dispatch |
 
 For KV size, the trainer already stores BF16. Three policy batches total 2,048
@@ -240,6 +263,9 @@ scoring into rollout changes memory and scheduling substantially. Dropping
 overlap is not justified: rollout kernel sums exceed their interval union.
 No trainer optimization is implemented: the complete floor and exact reference
 benchmark remain prerequisites.
+The exported input artifact contains only the selected actor slots, so the
+exact full-reference payload cannot be recovered from it. Regenerating that
+payload requires another trainer run beyond this stream's remaining reservation.
 
 Numerical thresholds are unchanged. In `dense-precision.json`'s accepted
 `valid_support_sampler` result, the actor KL maximum error is
