@@ -86,7 +86,8 @@ def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: flo
     """Calculate joint PPO and direct KL from stored behavior and reference probabilities.
 
     Validate targets before capture. Detach all targets so gradients flow only
-    through the current policy."""
+    through the current policy.
+    """
     if not 0 < clip_epsilon < 1:
         raise ValueError("clip epsilon must be finite and between zero and one")
     selected = targets.selected_WK & output.factor_mask_WKF.any(-1)

@@ -18,7 +18,8 @@ class ColumnContextBuilder:
     """Resolve feature routes and normalization before frame loops.
 
     Use the applied action from the observed post-frame, as in BC. At an episode
-    start, substitute a neutral controller. Read per-frame ids across resets."""
+    start, substitute a neutral controller. Read per-frame ids across resets.
+    """
 
     def __init__(self, stats: dict[str, FeatureStats], controlled_port: int) -> None:
         if controlled_port not in (1, 2):
@@ -102,7 +103,8 @@ class PackedColumnContextBuilder:
     """Build features from packed adapter columns on the device.
 
     Read each integer or float column from a little-endian 32-bit word. Validate
-    sides, identities and history lengths before calling; pad after valid frames."""
+    sides, identities and history lengths before calling; pad after valid frames.
+    """
 
     def __init__(self, stats: dict[str, FeatureStats], fields: tuple[str, ...], device: torch.device) -> None:
         routes = [ColumnContextBuilder(stats, port).routes for port in (1, 2)]

@@ -260,7 +260,8 @@ class DecisionBatch:
 def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
     """Sum forward KL on shared support, detaching the reference.
 
-    Illegal categories use -inf log-probabilities and contribute zero gradients."""
+    Illegal categories use -inf log-probabilities and contribute zero gradients.
+    """
     _check_tensor("reference", reference_log_probs, tuple(log_probs.shape), "float", log_probs.device)
     if not log_probs.is_floating_point() or log_probs.ndim < 1 or log_probs.shape[-1] < 1:
         raise ValueError("log-probs must have a category dimension")
@@ -3106,7 +3107,8 @@ def gradient_metrics(name: str, norms: Sequence[Tensor], cap: float) -> dict[str
 class GradientNoise:
     """Estimate gradient noise from pre-clip gradients and trained counts.
 
-    Weights change between samples, so this is a training diagnostic."""
+    Weights change between samples, so this is a training diagnostic.
+    """
 
     def __init__(self, parameters: tuple[torch.nn.Parameter, ...]) -> None:
         self.parameters = parameters
@@ -4047,7 +4049,8 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
     """Publish a manifest after every referenced file is durable.
 
     Use content-hash filenames to preserve published checkpoints during interruption.
-    Resume rebuilds caches from restored weights."""
+    Resume rebuilds caches from restored weights.
+    """
     import io
 
     if torch.are_deterministic_algorithms_enabled() != trainer.config.deterministic:
@@ -4640,7 +4643,8 @@ class UpdateProfile:
     """Time an update, then trace bounded samples in a separate update.
 
     Use unions of trace intervals for device busy time. CUDA event spans include
-    idle gaps; scaled samples estimate only their recorded sites."""
+    idle gaps; scaled samples estimate only their recorded sites.
+    """
 
     def __init__(self, output: Path, device: torch.device, *, traces: bool) -> None:
         self.output = output

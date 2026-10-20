@@ -38,11 +38,22 @@ def frozen_rows(table: Any) -> Any:
         setattr(store, name, getattr(table.store, name))
     old = control.DecisionTable(len(table.values), store)
     old.count = len(table.values)
-    for name in ("integers", "conditions", "coefficients", "prefix", "opponent", "actions", "behavior", "rewards"):
+    for name in ("integers", "coefficients", "prefix", "opponent", "actions", "behavior", "rewards"):
         getattr(old, name).copy_(getattr(table, name))
+    old.conditions.copy_(table.conditions[:, :2])
     old.meta[:] = table.integers.cpu().numpy()
-    old.log_lambda[:] = table.conditions.cpu().numpy()
+    old.log_lambda[:] = table.conditions[:, :2].cpu().numpy()
     return old
+
+
+class QualificationSampler(exp.EpisodeSampler):
+    def sample(self, match_id: int, episode: int, anchors: tuple[int, ...]) -> Any:
+        sampled = super().sample(match_id, episode, anchors)
+        left, right = sampled.players
+        return dataclasses.replace(
+            sampled,
+            players=(dataclasses.replace(left, percentile=0.95), dataclasses.replace(right, percentile=0.95)),
+        )
 
 
 class ForcedControl(control.TransformerPolicy):
@@ -118,12 +129,12 @@ def qualify(output: Path) -> dict[str, Any]:
             )
             resources.callback(shard.close)
             shards.append(shard)
-        sampling = exp.EpisodeSampler(
+        sampling = QualificationSampler(
             exp.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json"), schedule, exp.CounterRng(65)
         )
         engine = exp.RolloutEngine((tuple(shards),), policy, sampling, {0: reference}, fixed_anchor_lanes=True)
         engine.initialize()
-        run = exp.Trainer(engine, exp.TrainConfig(critic_warmup_updates=0))
+        run = exp.Trainer(engine, exp.TrainConfig(critic_warmup_updates=0, windows_per_step=32))
         print("dense precision: rollout", flush=True)
         rollout = engine.collect(0)
         print("dense precision: prepare", flush=True)

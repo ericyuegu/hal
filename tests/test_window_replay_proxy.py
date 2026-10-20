@@ -1,25 +1,17 @@
-"""Real 16-match common-input qualification and local window replay measurements.
+"""Compare window replay against the recorded per-decision evaluator on the O63 proxy."""
 
-Run this module under the shared GPU lock; artifacts go to the given work dir.
-The experiment owns the live trainer. This harness only reads its public and
-private paths to compare the model boundary against the frozen old evaluator.
-"""
-
-import argparse
 import contextlib
 import dataclasses
 import hashlib
 import json
 import os
 import subprocess
-import time
 from collections import defaultdict
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pytest
 import torch
 from o65_reference import ROOT
@@ -27,7 +19,6 @@ from o65_reference import load_control
 from torch import Tensor
 
 from hal.inference.cuda_graph import CapturedCall
-from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.attention import KVMemory
 from hal.models.replay_actor import ActorTargets
@@ -313,43 +304,6 @@ def quantities(
     return result
 
 
-def measure(operation: Callable[[], object], repeats: int) -> dict[str, float]:
-    for _ in range(2):
-        operation()
-    torch.cuda.synchronize()
-    begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    durations, wall = [], []
-    for _ in range(repeats):
-        start = time.perf_counter()
-        begin.record()
-        operation()
-        end.record()
-        end.synchronize()
-        durations.append(begin.elapsed_time(end))
-        wall.append((time.perf_counter() - start) * 1000)
-    # One bounded sample counts actual CUDA kernel activities, including graph nodes.
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
-    ) as profile:
-        operation()
-        torch.cuda.synchronize()
-    events = profile.events()
-    activities = [event for event in events if event.device_type == torch.autograd.DeviceType.CUDA]
-    kernels = sum("Memcpy" not in event.name and "Memset" not in event.name for event in activities)
-    launches = sum(
-        "cudaLaunchKernel" in event.name or "cudaGraphLaunch" in event.name or "cuLaunchKernel" in event.name
-        for event in events
-    )
-    return {
-        "gpu_ms_median": float(np.median(durations)),
-        "wall_ms_median": float(np.median(wall)),
-        "cuda_activities": len(activities),
-        "kernels": kernels,
-        "host_launches": launches,
-        "peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
-    }
-
-
 def forward_inputs(
     model: SelfPlayTransformer,
     names: tuple[str, ...],
@@ -368,12 +322,6 @@ def forward_inputs(
             observed,
         )
     return replay(model, hidden, observed, slots, grad=grad)
-
-
-def backward(policy: Any, batch: ProxyBatch, target: ActorTargets, *, window: bool) -> None:
-    policy.model.zero_grad(set_to_none=True)
-    output = window_forward(policy.model, batch, grad=True) if window else old_forward(policy, batch, grad=True)
-    actor_loss(output, target).loss.backward()
 
 
 def graph_score(captured: CapturedCall[ReplayOutput], inputs: tuple[Tensor, ...]) -> ReplayOutput:
@@ -403,7 +351,7 @@ def capture_score(
     return CapturedCall(partial(forward, static), static, device=inputs[0].device)
 
 
-def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
+def run(output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(2)
     torch.manual_seed(65)
@@ -568,58 +516,6 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
         (output_dir / "measurements.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"precision": precision}), flush=True)
         assert all(row["passed"] for row in precision.values()), precision
-        if performance:
-            del default, candidate, high, high_policy, high_reference, high_model, high_ref_model
-            policy.clear_caches()
-            reference.clear_caches()
-            torch.cuda.empty_cache()
-            measurements = []
-            # Warm compiled decoder once per fixed shape; trunk remains the
-            # same full-window path in both timing arms.
-            with prepared_shape_compilation(12):
-                for k in (32, 64):
-                    eligible = [key for key, row in groups.items() if int(states.meta[row, exp.REPLAN]) == 128 // k]
-                    for w in (1, 2, 4):
-                        measured = pack(policy, states, prepared, eligible[:w], k)
-                        with torch.no_grad():
-                            ref = window_forward(reference.model, measured, grad=False)
-                            base = window_forward(policy.model, measured, grad=False)
-                        old_behavior = torch.zeros(w, k, 16, device="cuda")
-                        old_behavior[measured.slots.valid_WK] = decisions.behavior_log_probs_JF[
-                            measured.source_indices
-                        ]
-                        target = targets(base, ref, old_behavior, measured)
-                        model = policy.model
-                        tensors = replay_inputs(measured)
-                        compiled_replay = torch.compile(
-                            replay_windows,
-                            fullgraph=True,
-                            dynamic=False,
-                            options={"triton.cudagraphs": False, "emulate_precision_casts": True},
-                        )
-                        compiled = partial(forward_inputs, model, tuple(measured.features), replay=compiled_replay)
-                        compiled_no_grad = partial(
-                            forward_inputs, model, tuple(measured.features), grad=False, replay=compiled_replay
-                        )
-                        row: dict[str, Any] = {"W": w, "K": k}
-                        for name, operation in (
-                            ("old_no_grad", partial(old_forward, policy, measured, grad=False)),
-                            ("window_no_grad", partial(window_forward, model, measured, grad=False)),
-                            ("compiled_window_no_grad", partial(compiled_no_grad, tensors)),
-                            ("old_backward", partial(backward, policy, measured, target, window=False)),
-                            ("window_backward", partial(backward, policy, measured, target, window=True)),
-                        ):
-                            torch.cuda.reset_peak_memory_stats()
-                            row[name] = measure(operation, 5)
-                        score = capture_score(compiled_no_grad, tensors)
-                        row["graphed_no_grad"] = measure(partial(graph_score, score, tensors), 10)
-                        graph = GraphedActorStep(compiled, tensors, target, model.actor_parameters())
-                        row["graphed_backward"] = measure(partial(graph.backward, tensors, target), 10)
-                        measurements.append(row)
-                        report["performance"] = measurements
-                        (output_dir / "measurements.json").write_text(json.dumps(report, indent=2))
-                        print(json.dumps(row), flush=True)
-                        del graph, score, compiled, compiled_no_grad, compiled_replay
         return report
 
 
@@ -627,12 +523,4 @@ def run(output_dir: Path, *, performance: bool) -> dict[str, Any]:
 def test_proxy_window_replay_precision(tmp_path: Path) -> None:
     if not torch.cuda.is_available():
         pytest.fail("proxy window replay qualification requires CUDA")
-    run(tmp_path, performance=False)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--performance", action="store_true")
-    arguments = parser.parse_args()
-    run(arguments.output, performance=arguments.performance)
+    run(tmp_path)

@@ -19,7 +19,8 @@ class ReplaySlots:
     """Store controller indices in codec order and masks in frame-major decode order.
 
     Normalize conditions as [log lambda, delay, replan, 2*u-1]. Validate before
-    compiled replay, then mask invalid slots and unexecuted factors during reduction."""
+    compiled replay, then mask invalid slots and unexecuted factors during reduction.
+    """
 
     positions_WK: Tensor
     valid_WK: Tensor
@@ -50,7 +51,8 @@ class ReplayOutput:
     """Return FP32 logs and probabilities in decode order.
 
     Mask reductions with factor_mask_WKF, because distributions include unexecuted
-    sampled frames."""
+    sampled frames.
+    """
 
     log_probs_WKF: Tensor
     distributions: tuple[Tensor, ...]
@@ -175,7 +177,8 @@ def replay_windows(
 
     Preserve trunk autograd history when grad=True and detach critic features.
     For Torch 2.11 CUDA capture, compile with triton.cudagraphs=False and
-    emulate_precision_casts=True to meet the proxy FP32-reference limits."""
+    emulate_precision_casts=True to meet the proxy FP32-reference limits.
+    """
     if grad and not torch.compiler.is_compiling() and torch.is_inference_mode_enabled():
         raise ValueError("gradient replay requires autograd outside inference_mode")
     _check_shapes(model, hidden_WLd, observed_WL4, slots)

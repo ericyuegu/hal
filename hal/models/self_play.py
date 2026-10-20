@@ -102,7 +102,8 @@ class SelfPlayTransformer(ActionSequenceTransformer):
     def load_bc_state_dict(self, state: Mapping[str, Tensor]) -> None:
         """Add zero conditioner columns while loading BC weights.
 
-        Validate BC keys and tensor sizes before applying the converted state."""
+        Validate BC keys and tensor sizes before applying the converted state.
+        """
         expected = {name for name in self.state_dict() if not name.startswith("critic_residual.")}
         if state.keys() != expected:
             raise ValueError(
