@@ -343,7 +343,7 @@ def test_prepare_rejects_invalid_next_state(field: str) -> None:
         run.prepare(rollout)
 
 
-@pytest.mark.parametrize("field", ["counter_rng", "clocks", "cursor", "sampler_cursor"])
+@pytest.mark.parametrize("field", ["counter_rng", "counter_rng_type", "clocks", "cursor", "sampler_cursor"])
 def test_restore_rejects_invalid_progress_before_model_mutation(field: str, tmp_path: Path) -> None:
     import io
     import json
@@ -356,7 +356,10 @@ def test_restore_rejects_invalid_progress_before_model_mutation(field: str, tmp_
     raw = json.loads(manifest.read_text())
     shard = next(shard for shard in raw["shards"] if shard["role"] == "training")
     saved = torch.load(tmp_path / shard["name"], weights_only=False)
-    saved[field] = {"seed": 65, "key": 0} if field == "counter_rng" else ([0] if field == "clocks" else True)
+    if field == "counter_rng_type":
+        saved["counter_rng"]["seed"] = 65.0
+    else:
+        saved[field] = {"seed": 65, "key": 0} if field == "counter_rng" else ([0] if field == "clocks" else True)
     payload = io.BytesIO()
     torch.save(saved, payload)
     shard["name"], shard["sha256"] = exp._durable_file(tmp_path, payload.getvalue(), "rank0.pt")

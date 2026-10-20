@@ -3662,7 +3662,13 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     for field in ("actor_steps", "sampler_cursor", "evaluation_cursor", "next_anchor"):
         if type(saved[field]) is not int or saved[field] < 0:
             raise ValueError("checkpoint progress counters must be nonnegative integers")
-    if saved.get("counter_rng") != {"seed": trainer.engine.sampler.rng.seed, "key": trainer.engine.sampler.rng.key}:
+    counter = saved.get("counter_rng")
+    if (
+        not isinstance(counter, dict)
+        or set(counter) != {"seed", "key"}
+        or any(type(counter[name]) is not int for name in ("seed", "key"))
+        or counter != {"seed": trainer.engine.sampler.rng.seed, "key": trainer.engine.sampler.rng.key}
+    ):
         raise ValueError("checkpoint counter RNG key mismatch")
     execution = saved.get("execution")
     if (
