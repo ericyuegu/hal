@@ -170,7 +170,8 @@ def test_transfer_parity_resets_and_staggered_ends(
         assert not cuda_calls
 
 
-def test_failed_tick_releases_host_waiters() -> None:
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_failed_tick_releases_host_waiters(failure: type[BaseException]) -> None:
     from test_065_loop import exp
     from test_065_loop import trainer
 
@@ -179,10 +180,10 @@ def test_failed_tick_releases_host_waiters() -> None:
     staging.ready = Future()
     buffer = engine.buffers[0][0]
     engine.staging[id(buffer)] = staging
-    with pytest.raises(RuntimeError, match="failed inference"), engine._host_transfers((buffer,)):
-        raise RuntimeError("failed inference")
+    with pytest.raises(failure, match="failed inference"), engine._host_transfers((buffer,)):
+        raise failure("failed inference")
     assert staging.ready.done()
-    with pytest.raises(RuntimeError, match="failed inference"):
+    with pytest.raises(failure, match="failed inference"):
         staging.ready.result()
 
 
