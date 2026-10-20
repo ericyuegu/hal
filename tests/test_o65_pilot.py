@@ -1,47 +1,16 @@
 import hashlib
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
 import pytest
-import tyro
 
 _SPEC = importlib.util.spec_from_file_location("o65_pilot", Path(__file__).parents[1] / "experiments/o65/pilot.py")
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
-
-
-def test_kill_waits_for_published_boundary(tmp_path: Path) -> None:
-    manifest = tmp_path / "checkpoint.json"
-    child = tmp_path / "child.py"
-    child.write_text(
-        "import json,os,signal,sys\n"
-        "from pathlib import Path\n"
-        "path=Path(sys.argv[1])\n"
-        "temp=path.with_suffix('.partial')\n"
-        "temp.write_text(json.dumps({'pid':os.getpid()}))\n"
-        "temp.replace(path)\n"
-        "signal.pause()\n"
-    )
-    _MODULE.kill_at_checkpoint(
-        [sys.executable, str(child), str(manifest)], manifest, tmp_path / "child.log", dict(os.environ)
-    )
-    with pytest.raises(ProcessLookupError):
-        os.kill(json.loads(manifest.read_text())["pid"], 0)
-
-
-def test_exit_before_checkpoint_fails(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="before the kill boundary"):
-        _MODULE.kill_at_checkpoint(
-            [sys.executable, "-c", "raise SystemExit(3)"],
-            tmp_path / "absent.json",
-            tmp_path / "child.log",
-            dict(os.environ),
-        )
 
 
 def test_qualification_rejects_bad_scaling_and_memory() -> None:
@@ -65,34 +34,6 @@ def test_qualification_rejects_bad_scaling_and_memory() -> None:
         )
     with pytest.raises(ValueError, match="nonempty candidates"):
         _MODULE.qualify_pool([row(3000), [], row(5000)])
-
-
-@pytest.mark.parametrize("verify,deterministic", [(False, False), (False, True), (True, False)])
-def test_pilot_reserves_determinism_for_resume_segments(tmp_path: Path, verify: bool, deterministic: bool) -> None:
-    command = _MODULE.training_command(
-        tmp_path,
-        tmp_path / "run",
-        (0, 1),
-        matches=1,
-        groups=2,
-        updates=4,
-        checkpoint_every=1,
-        warmup=0,
-        verify=verify,
-        deterministic=deterministic,
-    )
-    assert command[command.index("--evaluation-every") + 1] == "0"
-    assert ("--training.deterministic" in command) == deterministic
-    assert ("--verify-resume" in command) == verify
-    from test_065_loop import exp
-
-    parsed = tyro.cli(exp.NativeCli, args=command[3:])
-    assert parsed.verify_resume == verify and parsed.training.deterministic == deterministic
-    evaluation = _MODULE.evaluation_command(
-        tmp_path, tmp_path / "model", tmp_path / "protocol", tmp_path / "eval", held_out=False, simulators=("msl",)
-    )
-    assert evaluation[evaluation.index("--simulators") + 1 :] == ["msl"]
-    assert evaluation[evaluation.index("--anchors") + 1] == str(tmp_path / "payloads/final.pt")
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -173,11 +114,12 @@ def write_boundary(directory: Path, update: int) -> Path:
     return path
 
 
-def test_compact_checkpoints_keeps_resume_checks_actors_and_shared_shards(tmp_path: Path) -> None:
+def test_compact_checkpoints_keeps_latest_actors_and_shared_shards(tmp_path: Path) -> None:
     directory = tmp_path / "checkpoints"
     old = write_boundary(directory, 32)
     original = old.read_bytes()
-    keep = [write_boundary(directory, update) for update in (256, 288, 320)]
+    boundaries = [write_boundary(directory, update) for update in (256, 288, 320)]
+    keep = boundaries[-1:]
     _MODULE.compact_checkpoints(directory, 320)
     assert sorted(directory.glob("update-*.json")) == keep
     assert (tmp_path / "retired-checkpoints" / old.name).read_bytes() == original
@@ -192,7 +134,7 @@ def test_compact_checkpoints_keeps_resume_checks_actors_and_shared_shards(tmp_pa
     write_boundary(directory, 352)
     _MODULE.compact_checkpoints(directory, 352)
     assert not keep[-1].exists()
-    assert len(list(directory.glob("*.rank0.pt"))) == 3
+    assert len(list(directory.glob("*.rank0.pt"))) == 1
     assert len(list(directory.glob("*.actor.pt"))) == 5
 
 
@@ -291,16 +233,6 @@ def test_publication_rejects_missing_and_overlapping_source_trees(tmp_path: Path
     with pytest.raises(ValueError, match="source directory is missing"):
         module.stage_state(tmp_path / "absent", source)
     assert checkpoint.read_bytes() == b"preserve"
-
-
-def test_failed_resume_report_cannot_be_bypassed_after_preemption(tmp_path: Path) -> None:
-    path = tmp_path / "resume-check.json"
-    assert not _MODULE.resume_verified(path)
-    path.write_text(json.dumps({"format": "hal.o65.resume-check.v5", "passed": False}))
-    with pytest.raises(RuntimeError, match="verification failed"):
-        _MODULE.resume_verified(path)
-    path.write_text(json.dumps({"format": "hal.o65.resume-check.v5", "passed": True}))
-    assert _MODULE.resume_verified(path)
 
 
 def test_published_held_out_consumption_blocks_a_retry(tmp_path: Path) -> None:

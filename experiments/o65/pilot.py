@@ -1,8 +1,7 @@
 """Run the bounded O63 debug pilot with fixed inputs.
 
-Build MSL, measure candidate pool sizes, kill training after checkpoint
-publication, then resume the same configuration. Use --tiny for a local check.
-The training CLI performs PPO and critic updates.
+Train without evaluation interruptions, publish checkpoints, and evaluate the
+final policy once in MSL. Resume the same configuration after preemption.
 """
 
 import dataclasses
@@ -43,11 +42,11 @@ class Args:
 
 
 def compact_checkpoints(directory: Path, latest: int) -> None:
-    """Keep resume state for the latest update and the kill/resume checks.
+    """Keep complete resume state for the latest update.
 
     Retain every actor and move retired manifests into a separate history
     directory before removing their unreferenced training and simulator files.
-    Call only while the trainer and evaluation are stopped.
+    Call only while the trainer is stopped.
     """
     retained: set[str] = set()
     retired = directory.parent / "retired-checkpoints"
@@ -60,7 +59,7 @@ def compact_checkpoints(directory: Path, latest: int) -> None:
         if (retired / path.name).exists():
             raise FileExistsError(retired / path.name)
     for path, manifest in parsed:
-        if manifest["update"] in (latest, 256, 288):
+        if manifest["update"] == latest:
             retained.update(shard["name"] for shard in manifest["shards"])
         else:
             retired.mkdir(exist_ok=True)
@@ -78,29 +77,6 @@ def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
         subprocess.run(command, stdout=target, stderr=subprocess.STDOUT, env=environment, check=True, cwd=ROOT)
 
 
-def kill_at_checkpoint(command: list[str], manifest: Path, log: Path, environment: dict[str, str]) -> None:
-    """Kill the process group only after atomic checkpoint publication."""
-    if manifest.exists():
-        raise FileExistsError(manifest)
-    with log.open("ab") as target:
-        process = subprocess.Popen(
-            command, stdout=target, stderr=subprocess.STDOUT, env=environment, cwd=ROOT, start_new_session=True
-        )
-        try:
-            while not manifest.is_file():
-                if process.poll() is not None:
-                    raise RuntimeError(f"training exited {process.returncode} before the kill boundary; see {log}")
-                time.sleep(0.25)
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            if process.returncode != -signal.SIGKILL:
-                raise RuntimeError("pilot process did not reach the forced-kill check")
-        finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-
-
 def training_command(
     delivery: Path,
     output: Path,
@@ -111,8 +87,6 @@ def training_command(
     updates: int,
     checkpoint_every: int,
     warmup: int,
-    verify: bool,
-    deterministic: bool = False,
     compile_cache: Path | None = None,
 ) -> list[str]:
     command = [
@@ -148,10 +122,6 @@ def training_command(
     ]
     if compile_cache is not None:
         command.extend(("--compile-cache", str(compile_cache)))
-    if deterministic:
-        command.append("--training.deterministic")
-    if verify:
-        command.append("--verify-resume")
     return command
 
 
@@ -180,10 +150,6 @@ def evaluation_command(
     checkpoint: Path,
     protocol: Path,
     output: Path,
-    *,
-    held_out: bool,
-    simulators: tuple[Literal["msl", "dolphin"], ...],
-    anchors: tuple[Path, ...] = (),
 ) -> list[str]:
     return [
         sys.executable,
@@ -191,7 +157,7 @@ def evaluation_command(
         "--checkpoint",
         str(checkpoint),
         "--anchors",
-        *(str(path) for path in (delivery / "payloads/final.pt", *anchors)),
+        str(delivery / "payloads/final.pt"),
         "--data-dir",
         str(delivery / "inputs/msl/data"),
         "--protocol",
@@ -199,7 +165,7 @@ def evaluation_command(
         "--output",
         str(output),
         "--split",
-        "held_out" if held_out else "selection",
+        "held_out",
         "--cadence-grid",
         "8/4",
         "10/2",
@@ -208,7 +174,7 @@ def evaluation_command(
         "--device",
         "cuda",
         "--simulators",
-        *simulators,
+        "msl",
     ]
 
 
@@ -258,22 +224,6 @@ def latest_checkpoint(directory: Path) -> Path | None:
     return latest
 
 
-def snapshot_anchors(directory: Path, update: int) -> tuple[Path, ...]:
-    # Evaluation uses the same recent snapshot cadence as the training pool.
-    updates = [value for value in range(256, update + 1, 256)][-3:]
-    snapshots: list[Path] = []
-    for value in updates:
-        path = directory / f"update-{value:08d}.json"
-        if not path.is_file():
-            path = directory.parent / "retired-checkpoints" / path.name
-        manifest = read_training_manifest(path)
-        actors = [shard for shard in manifest["shards"] if shard["role"] == "actor"]
-        if len(actors) != 1:
-            raise ValueError("snapshot anchor requires one published actor")
-        snapshots.append(directory / actors[0]["name"])
-    return tuple(snapshots)
-
-
 def publish(args: Args, output: Path) -> None:
     values = (args.publish_directory, args.publish_volume, args.r2_prefix)
     if all(value is None for value in values):
@@ -320,15 +270,6 @@ def trim_interrupted_metrics(path: Path, update: int) -> None:
 
 def terminate(_signal: int, _frame: object) -> None:
     raise SystemExit("pilot interrupted; resume from the latest published checkpoint")
-
-
-def resume_verified(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    report = json.loads(path.read_text())
-    if report.get("format") != "hal.o65.resume-check.v5" or report.get("passed") is not True:
-        raise RuntimeError("resume verification failed or has an unsupported report; do not continue training")
-    return True
 
 
 def consume_held_out(output: Path, update: int, protocol: Path) -> Path:
@@ -400,20 +341,7 @@ def main(args: Args) -> None:
     environment["MSL_CORE_LIBRARY"] = str(delivery / "msl/build/melee_core/python/libmelee_core.so")
     environment["HAL_NATIVE_LIBRARY"] = str(delivery / "libhal_native.so")
     execute(["bash", str(ROOT / "docker/o65-build-msl.sh"), str(delivery)], output / "build.log", environment)
-    if not args.tiny:
-        for fixture in ("ssbm.ciso", "dolphin-exiai"):
-            execute(
-                [sys.executable, "-m", "hal.scripts.fetch", "--name", fixture],
-                output / f"fetch-{fixture}.log",
-                environment,
-            )
-    tiny_protocol = output / "tiny-evaluation.json"
-    if args.tiny:
-        raw = json.loads((ROOT / "experiments/o65/pilot-evaluation.json").read_text())
-        raw["selection"]["seeds"] = [17]
-        raw["max_frames"] = 132
-        tiny_protocol.write_text(json.dumps(raw))
-    protocol = tiny_protocol if args.tiny else ROOT / "experiments/o65/pilot-evaluation.json"
+    protocol = ROOT / "experiments/o65/pilot-evaluation.json"
     sizes = ((1, 2, 4) if args.tiny else (16, 32, 64)) if args.qualify_pool_sizes else ()
     qualification = []
     for size in sizes:
@@ -428,7 +356,6 @@ def main(args: Args) -> None:
                 updates=3,
                 checkpoint_every=3,
                 warmup=0,
-                verify=False,
             ),
             output / f"qualify-{size * len(cpus)}.log",
             environment,
@@ -438,25 +365,9 @@ def main(args: Args) -> None:
     (output / "throughput.json").write_text(json.dumps(qualification, indent=2))
     if qualification and not args.tiny:
         qualify_pool([row["steady_updates"] for row in qualification])
-    if not args.tiny and not (output / "control/results.json").is_file():
-        control = output / "control"
-        if control.exists():
-            control.rename(control.with_name(f"control-interrupted-{time.time_ns()}"))
-        execute(
-            evaluation_command(
-                delivery,
-                delivery / "payloads/final.pt",
-                protocol,
-                output / "control",
-                held_out=False,
-                simulators=("msl", "dolphin"),
-            ),
-            output / "control.log",
-            environment,
-        )
     # No automatic pool or optimizer sweep: each changes the experiment.
     run = output / "train"
-    kill_update, updates = (2, 4) if args.tiny else (256, 2000)
+    updates = 4 if args.tiny else 2000
     checkpoint_every = 1 if args.tiny else 32
     command = training_command(
         delivery,
@@ -464,18 +375,16 @@ def main(args: Args) -> None:
         cpus,
         matches=1 if args.tiny else 64,
         groups=2 if args.tiny else 4,
-        updates=kill_update + checkpoint_every,
+        updates=updates,
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 172,
-        verify=False,
         compile_cache=args.compile_cache,
     )
     if args.wandb:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))
-    manifest = run / f"checkpoints/update-{kill_update:08d}.json"
-    # Stop at each evaluation boundary, so one GPU never trains and evaluates concurrently.
+    # Stop only to publish complete state on the existing checkpoint interval.
     boundaries = list(range(1, updates + 1)) if args.tiny else [*range(32, updates + 1, 32), updates]
     boundaries = sorted(set(boundaries))
     previous = latest_checkpoint(run / "checkpoints") if args.resume else None
@@ -484,66 +393,17 @@ def main(args: Args) -> None:
         run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
     if previous is not None:
         trim_interrupted_metrics(run / "metrics.jsonl", restored_update)
-    if restored_update >= kill_update and not (output / "kill.json").is_file():
-        raise RuntimeError(
-            "preemption interrupted the forced-kill qualification; inspect its preserved boundary before continuing"
-        )
-    verify_boundary = kill_update + checkpoint_every
-    if restored_update >= verify_boundary and not resume_verified(run / "resume-check.json"):
-        check = command.copy()
-        check[check.index("--updates") + 1] = str(verify_boundary + 1)
-        check.extend(
-            (
-                "--resume",
-                str(run / f"checkpoints/update-{verify_boundary:08d}.json"),
-                "--verify-resume",
-                "--verify-only",
-            )
-        )
-        execute(check, output / "resume-verification.log", environment)
     publish(args, output)
     for boundary in boundaries:
+        if boundary <= restored_update:
+            continue
         checkpoint = run / f"checkpoints/update-{boundary:08d}.json"
-        result = output / "selection" / f"update-{boundary:08d}"
-        if boundary < restored_update:
-            continue
-        if boundary == restored_update and (result / "results.json").is_file():
-            continue
         current = command.copy()
         current[current.index("--updates") + 1] = str(boundary)
         if previous is not None:
             current.extend(("--resume", str(previous)))
-        if boundary == restored_update:
-            pass
-        elif boundary == kill_update:
-            # Give the child another update to do after publication, so the kill cannot race normal exit.
-            current[current.index("--updates") + 1] = str(boundary + checkpoint_every)
-            kill_at_checkpoint(current, manifest, output / "before-kill.log", environment)
-            (output / "kill.json").write_text(
-                json.dumps({"signal": "SIGKILL", "manifest": str(manifest), "update": kill_update})
-            )
-        else:
-            if boundary == kill_update + checkpoint_every:
-                current.append("--verify-resume")
-            execute(current, output / f"train-{boundary:08d}.log", environment)
+        execute(current, output / f"train-{boundary:08d}.log", environment)
         previous = checkpoint
-        publish(args, output)
-        simulators: tuple[Literal["msl", "dolphin"], ...] = (
-            ("msl", "dolphin") if not args.tiny and boundary % 128 == 0 else ("msl",)
-        )
-        if (result / "results.json").is_file():
-            continue
-        if result.exists():
-            result.rename(result.with_name(f"{result.name}-interrupted-{time.time_ns()}"))
-        anchors = snapshot_anchors(run / "checkpoints", boundary)
-        execute(
-            evaluation_command(
-                delivery, previous, protocol, result, held_out=False, simulators=simulators, anchors=anchors
-            ),
-            output / f"evaluation-{boundary:08d}.log",
-            environment,
-        )
-        log_evaluation(result, boundary, environment, online=args.wandb)
         if args.checkpoint_retention == "compact":
             compact_checkpoints(run / "checkpoints", boundary)
         publish(args, output)
@@ -554,18 +414,12 @@ def main(args: Args) -> None:
     if not args.tiny and not (output / "held-out/results.json").is_file():
         consume_held_out(output, updates, protocol)
         publish(args, output)
-        final_protocol = output / "final-evaluation.json"
-        raw = json.loads(protocol.read_text())
-        raw["max_frames"] = 28924
-        final_protocol.write_text(json.dumps(raw))
         execute(
             evaluation_command(
                 delivery,
                 run / f"checkpoints/update-{updates:08d}.json",
-                final_protocol,
+                protocol,
                 output / "held-out",
-                held_out=True,
-                simulators=("msl", "dolphin"),
             ),
             output / "held-out.log",
             environment,

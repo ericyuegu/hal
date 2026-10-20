@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 from hal.data.player_identity import PlayerIdentitySidecar
@@ -58,6 +59,7 @@ def test_counts_use_train_rows_characters_and_the_professional_sidecar(tmp_path:
     ranked = count_identities(path, sidecar, professional=False)
     professional = count_identities(path, sidecar, professional=True)
     assert ranked.train_rows == professional.train_rows == 2
+    assert ranked.matchups == Counter({(1, 22): 2})
     assert ranked.identities == (
         {"identity": 2, "character": 1, "count": 2},
         {"identity": 3, "character": 22, "count": 2},
@@ -66,3 +68,12 @@ def test_counts_use_train_rows_characters_and_the_professional_sidecar(tmp_path:
         {"identity": 5, "character": 1, "count": 2},
         {"identity": 6, "character": 22, "count": 2},
     )
+
+
+def test_matchup_weights_use_sqrt_count_and_keep_single_replays() -> None:
+    rows = _MODULE.matchup_weights(Counter({(1, 1): 1, (1, 22): 4, (22, 22): 9}))
+    assert rows == [
+        {"characters": [1, 1], "weight": 1.0},
+        {"characters": [1, 22], "weight": 2.0},
+        {"characters": [22, 22], "weight": 3.0},
+    ]

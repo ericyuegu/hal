@@ -1,12 +1,1547 @@
 {
-  "format": "hal.o65.protocol.v1",
-  "selection": {
-    "seeds": [17, 29],
-    "starts": [{"name": "fd-fox-falco", "stage": 25, "characters": [1, 22]}]
-  },
+  "format": "hal.o65.protocol.v2",
   "held_out": {
-    "seeds": [10017, 10029, 10041, 10053, 10067, 10079, 10093, 10111],
-    "starts": [{"name": "bf-fox-falco", "stage": 24, "characters": [1, 22]}]
+    "seeds": [
+      10017
+    ],
+    "starts": [
+      {
+        "name": "pair0-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          5
+        ]
+      },
+      {
+        "name": "pair0-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          5
+        ]
+      },
+      {
+        "name": "pair0-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          5
+        ]
+      },
+      {
+        "name": "pair0-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          5
+        ]
+      },
+      {
+        "name": "pair0-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          5
+        ]
+      },
+      {
+        "name": "pair0-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          5
+        ]
+      },
+      {
+        "name": "pair1-stage25",
+        "stage": 25,
+        "characters": [
+          2,
+          7
+        ]
+      },
+      {
+        "name": "pair1-stage24",
+        "stage": 24,
+        "characters": [
+          2,
+          7
+        ]
+      },
+      {
+        "name": "pair1-stage18",
+        "stage": 18,
+        "characters": [
+          2,
+          7
+        ]
+      },
+      {
+        "name": "pair1-stage26",
+        "stage": 26,
+        "characters": [
+          2,
+          7
+        ]
+      },
+      {
+        "name": "pair1-stage8",
+        "stage": 8,
+        "characters": [
+          2,
+          7
+        ]
+      },
+      {
+        "name": "pair1-stage6",
+        "stage": 6,
+        "characters": [
+          2,
+          7
+        ]
+      },
+      {
+        "name": "pair2-stage25",
+        "stage": 25,
+        "characters": [
+          10,
+          16
+        ]
+      },
+      {
+        "name": "pair2-stage24",
+        "stage": 24,
+        "characters": [
+          10,
+          16
+        ]
+      },
+      {
+        "name": "pair2-stage18",
+        "stage": 18,
+        "characters": [
+          10,
+          16
+        ]
+      },
+      {
+        "name": "pair2-stage26",
+        "stage": 26,
+        "characters": [
+          10,
+          16
+        ]
+      },
+      {
+        "name": "pair2-stage8",
+        "stage": 8,
+        "characters": [
+          10,
+          16
+        ]
+      },
+      {
+        "name": "pair2-stage6",
+        "stage": 6,
+        "characters": [
+          10,
+          16
+        ]
+      },
+      {
+        "name": "pair3-stage25",
+        "stage": 25,
+        "characters": [
+          2,
+          14
+        ]
+      },
+      {
+        "name": "pair3-stage24",
+        "stage": 24,
+        "characters": [
+          2,
+          14
+        ]
+      },
+      {
+        "name": "pair3-stage18",
+        "stage": 18,
+        "characters": [
+          2,
+          14
+        ]
+      },
+      {
+        "name": "pair3-stage26",
+        "stage": 26,
+        "characters": [
+          2,
+          14
+        ]
+      },
+      {
+        "name": "pair3-stage8",
+        "stage": 8,
+        "characters": [
+          2,
+          14
+        ]
+      },
+      {
+        "name": "pair3-stage6",
+        "stage": 6,
+        "characters": [
+          2,
+          14
+        ]
+      },
+      {
+        "name": "pair4-stage25",
+        "stage": 25,
+        "characters": [
+          2,
+          9
+        ]
+      },
+      {
+        "name": "pair4-stage24",
+        "stage": 24,
+        "characters": [
+          2,
+          9
+        ]
+      },
+      {
+        "name": "pair4-stage18",
+        "stage": 18,
+        "characters": [
+          2,
+          9
+        ]
+      },
+      {
+        "name": "pair4-stage26",
+        "stage": 26,
+        "characters": [
+          2,
+          9
+        ]
+      },
+      {
+        "name": "pair4-stage8",
+        "stage": 8,
+        "characters": [
+          2,
+          9
+        ]
+      },
+      {
+        "name": "pair4-stage6",
+        "stage": 6,
+        "characters": [
+          2,
+          9
+        ]
+      },
+      {
+        "name": "pair5-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          7
+        ]
+      },
+      {
+        "name": "pair5-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          7
+        ]
+      },
+      {
+        "name": "pair5-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          7
+        ]
+      },
+      {
+        "name": "pair5-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          7
+        ]
+      },
+      {
+        "name": "pair5-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          7
+        ]
+      },
+      {
+        "name": "pair5-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          7
+        ]
+      },
+      {
+        "name": "pair6-stage25",
+        "stage": 25,
+        "characters": [
+          10,
+          15
+        ]
+      },
+      {
+        "name": "pair6-stage24",
+        "stage": 24,
+        "characters": [
+          10,
+          15
+        ]
+      },
+      {
+        "name": "pair6-stage18",
+        "stage": 18,
+        "characters": [
+          10,
+          15
+        ]
+      },
+      {
+        "name": "pair6-stage26",
+        "stage": 26,
+        "characters": [
+          10,
+          15
+        ]
+      },
+      {
+        "name": "pair6-stage8",
+        "stage": 8,
+        "characters": [
+          10,
+          15
+        ]
+      },
+      {
+        "name": "pair6-stage6",
+        "stage": 6,
+        "characters": [
+          10,
+          15
+        ]
+      },
+      {
+        "name": "pair7-stage25",
+        "stage": 25,
+        "characters": [
+          13,
+          21
+        ]
+      },
+      {
+        "name": "pair7-stage24",
+        "stage": 24,
+        "characters": [
+          13,
+          21
+        ]
+      },
+      {
+        "name": "pair7-stage18",
+        "stage": 18,
+        "characters": [
+          13,
+          21
+        ]
+      },
+      {
+        "name": "pair7-stage26",
+        "stage": 26,
+        "characters": [
+          13,
+          21
+        ]
+      },
+      {
+        "name": "pair7-stage8",
+        "stage": 8,
+        "characters": [
+          13,
+          21
+        ]
+      },
+      {
+        "name": "pair7-stage6",
+        "stage": 6,
+        "characters": [
+          13,
+          21
+        ]
+      },
+      {
+        "name": "pair8-stage25",
+        "stage": 25,
+        "characters": [
+          13,
+          22
+        ]
+      },
+      {
+        "name": "pair8-stage24",
+        "stage": 24,
+        "characters": [
+          13,
+          22
+        ]
+      },
+      {
+        "name": "pair8-stage18",
+        "stage": 18,
+        "characters": [
+          13,
+          22
+        ]
+      },
+      {
+        "name": "pair8-stage26",
+        "stage": 26,
+        "characters": [
+          13,
+          22
+        ]
+      },
+      {
+        "name": "pair8-stage8",
+        "stage": 8,
+        "characters": [
+          13,
+          22
+        ]
+      },
+      {
+        "name": "pair8-stage6",
+        "stage": 6,
+        "characters": [
+          13,
+          22
+        ]
+      },
+      {
+        "name": "pair9-stage25",
+        "stage": 25,
+        "characters": [
+          17,
+          18
+        ]
+      },
+      {
+        "name": "pair9-stage24",
+        "stage": 24,
+        "characters": [
+          17,
+          18
+        ]
+      },
+      {
+        "name": "pair9-stage18",
+        "stage": 18,
+        "characters": [
+          17,
+          18
+        ]
+      },
+      {
+        "name": "pair9-stage26",
+        "stage": 26,
+        "characters": [
+          17,
+          18
+        ]
+      },
+      {
+        "name": "pair9-stage8",
+        "stage": 8,
+        "characters": [
+          17,
+          18
+        ]
+      },
+      {
+        "name": "pair9-stage6",
+        "stage": 6,
+        "characters": [
+          17,
+          18
+        ]
+      },
+      {
+        "name": "pair10-stage25",
+        "stage": 25,
+        "characters": [
+          10,
+          14
+        ]
+      },
+      {
+        "name": "pair10-stage24",
+        "stage": 24,
+        "characters": [
+          10,
+          14
+        ]
+      },
+      {
+        "name": "pair10-stage18",
+        "stage": 18,
+        "characters": [
+          10,
+          14
+        ]
+      },
+      {
+        "name": "pair10-stage26",
+        "stage": 26,
+        "characters": [
+          10,
+          14
+        ]
+      },
+      {
+        "name": "pair10-stage8",
+        "stage": 8,
+        "characters": [
+          10,
+          14
+        ]
+      },
+      {
+        "name": "pair10-stage6",
+        "stage": 6,
+        "characters": [
+          10,
+          14
+        ]
+      },
+      {
+        "name": "pair11-stage25",
+        "stage": 25,
+        "characters": [
+          2,
+          15
+        ]
+      },
+      {
+        "name": "pair11-stage24",
+        "stage": 24,
+        "characters": [
+          2,
+          15
+        ]
+      },
+      {
+        "name": "pair11-stage18",
+        "stage": 18,
+        "characters": [
+          2,
+          15
+        ]
+      },
+      {
+        "name": "pair11-stage26",
+        "stage": 26,
+        "characters": [
+          2,
+          15
+        ]
+      },
+      {
+        "name": "pair11-stage8",
+        "stage": 8,
+        "characters": [
+          2,
+          15
+        ]
+      },
+      {
+        "name": "pair11-stage6",
+        "stage": 6,
+        "characters": [
+          2,
+          15
+        ]
+      },
+      {
+        "name": "pair12-stage25",
+        "stage": 25,
+        "characters": [
+          7,
+          22
+        ]
+      },
+      {
+        "name": "pair12-stage24",
+        "stage": 24,
+        "characters": [
+          7,
+          22
+        ]
+      },
+      {
+        "name": "pair12-stage18",
+        "stage": 18,
+        "characters": [
+          7,
+          22
+        ]
+      },
+      {
+        "name": "pair12-stage26",
+        "stage": 26,
+        "characters": [
+          7,
+          22
+        ]
+      },
+      {
+        "name": "pair12-stage8",
+        "stage": 8,
+        "characters": [
+          7,
+          22
+        ]
+      },
+      {
+        "name": "pair12-stage6",
+        "stage": 6,
+        "characters": [
+          7,
+          22
+        ]
+      },
+      {
+        "name": "pair13-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          12
+        ]
+      },
+      {
+        "name": "pair13-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          12
+        ]
+      },
+      {
+        "name": "pair13-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          12
+        ]
+      },
+      {
+        "name": "pair13-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          12
+        ]
+      },
+      {
+        "name": "pair13-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          12
+        ]
+      },
+      {
+        "name": "pair13-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          12
+        ]
+      },
+      {
+        "name": "pair14-stage25",
+        "stage": 25,
+        "characters": [
+          15,
+          16
+        ]
+      },
+      {
+        "name": "pair14-stage24",
+        "stage": 24,
+        "characters": [
+          15,
+          16
+        ]
+      },
+      {
+        "name": "pair14-stage18",
+        "stage": 18,
+        "characters": [
+          15,
+          16
+        ]
+      },
+      {
+        "name": "pair14-stage26",
+        "stage": 26,
+        "characters": [
+          15,
+          16
+        ]
+      },
+      {
+        "name": "pair14-stage8",
+        "stage": 8,
+        "characters": [
+          15,
+          16
+        ]
+      },
+      {
+        "name": "pair14-stage6",
+        "stage": 6,
+        "characters": [
+          15,
+          16
+        ]
+      },
+      {
+        "name": "pair15-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          25
+        ]
+      },
+      {
+        "name": "pair15-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          25
+        ]
+      },
+      {
+        "name": "pair15-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          25
+        ]
+      },
+      {
+        "name": "pair15-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          25
+        ]
+      },
+      {
+        "name": "pair15-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          25
+        ]
+      },
+      {
+        "name": "pair15-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          25
+        ]
+      },
+      {
+        "name": "pair16-stage25",
+        "stage": 25,
+        "characters": [
+          9,
+          18
+        ]
+      },
+      {
+        "name": "pair16-stage24",
+        "stage": 24,
+        "characters": [
+          9,
+          18
+        ]
+      },
+      {
+        "name": "pair16-stage18",
+        "stage": 18,
+        "characters": [
+          9,
+          18
+        ]
+      },
+      {
+        "name": "pair16-stage26",
+        "stage": 26,
+        "characters": [
+          9,
+          18
+        ]
+      },
+      {
+        "name": "pair16-stage8",
+        "stage": 8,
+        "characters": [
+          9,
+          18
+        ]
+      },
+      {
+        "name": "pair16-stage6",
+        "stage": 6,
+        "characters": [
+          9,
+          18
+        ]
+      },
+      {
+        "name": "pair17-stage25",
+        "stage": 25,
+        "characters": [
+          12,
+          14
+        ]
+      },
+      {
+        "name": "pair17-stage24",
+        "stage": 24,
+        "characters": [
+          12,
+          14
+        ]
+      },
+      {
+        "name": "pair17-stage18",
+        "stage": 18,
+        "characters": [
+          12,
+          14
+        ]
+      },
+      {
+        "name": "pair17-stage26",
+        "stage": 26,
+        "characters": [
+          12,
+          14
+        ]
+      },
+      {
+        "name": "pair17-stage8",
+        "stage": 8,
+        "characters": [
+          12,
+          14
+        ]
+      },
+      {
+        "name": "pair17-stage6",
+        "stage": 6,
+        "characters": [
+          12,
+          14
+        ]
+      },
+      {
+        "name": "pair18-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          14
+        ]
+      },
+      {
+        "name": "pair18-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          14
+        ]
+      },
+      {
+        "name": "pair18-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          14
+        ]
+      },
+      {
+        "name": "pair18-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          14
+        ]
+      },
+      {
+        "name": "pair18-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          14
+        ]
+      },
+      {
+        "name": "pair18-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          14
+        ]
+      },
+      {
+        "name": "pair19-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "pair19-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "pair19-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "pair19-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "pair19-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "pair19-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "pair20-stage25",
+        "stage": 25,
+        "characters": [
+          18,
+          19
+        ]
+      },
+      {
+        "name": "pair20-stage24",
+        "stage": 24,
+        "characters": [
+          18,
+          19
+        ]
+      },
+      {
+        "name": "pair20-stage18",
+        "stage": 18,
+        "characters": [
+          18,
+          19
+        ]
+      },
+      {
+        "name": "pair20-stage26",
+        "stage": 26,
+        "characters": [
+          18,
+          19
+        ]
+      },
+      {
+        "name": "pair20-stage8",
+        "stage": 8,
+        "characters": [
+          18,
+          19
+        ]
+      },
+      {
+        "name": "pair20-stage6",
+        "stage": 6,
+        "characters": [
+          18,
+          19
+        ]
+      },
+      {
+        "name": "pair21-stage25",
+        "stage": 25,
+        "characters": [
+          13,
+          15
+        ]
+      },
+      {
+        "name": "pair21-stage24",
+        "stage": 24,
+        "characters": [
+          13,
+          15
+        ]
+      },
+      {
+        "name": "pair21-stage18",
+        "stage": 18,
+        "characters": [
+          13,
+          15
+        ]
+      },
+      {
+        "name": "pair21-stage26",
+        "stage": 26,
+        "characters": [
+          13,
+          15
+        ]
+      },
+      {
+        "name": "pair21-stage8",
+        "stage": 8,
+        "characters": [
+          13,
+          15
+        ]
+      },
+      {
+        "name": "pair21-stage6",
+        "stage": 6,
+        "characters": [
+          13,
+          15
+        ]
+      },
+      {
+        "name": "pair22-stage25",
+        "stage": 25,
+        "characters": [
+          18,
+          20
+        ]
+      },
+      {
+        "name": "pair22-stage24",
+        "stage": 24,
+        "characters": [
+          18,
+          20
+        ]
+      },
+      {
+        "name": "pair22-stage18",
+        "stage": 18,
+        "characters": [
+          18,
+          20
+        ]
+      },
+      {
+        "name": "pair22-stage26",
+        "stage": 26,
+        "characters": [
+          18,
+          20
+        ]
+      },
+      {
+        "name": "pair22-stage8",
+        "stage": 8,
+        "characters": [
+          18,
+          20
+        ]
+      },
+      {
+        "name": "pair22-stage6",
+        "stage": 6,
+        "characters": [
+          18,
+          20
+        ]
+      },
+      {
+        "name": "pair23-stage25",
+        "stage": 25,
+        "characters": [
+          10,
+          26
+        ]
+      },
+      {
+        "name": "pair23-stage24",
+        "stage": 24,
+        "characters": [
+          10,
+          26
+        ]
+      },
+      {
+        "name": "pair23-stage18",
+        "stage": 18,
+        "characters": [
+          10,
+          26
+        ]
+      },
+      {
+        "name": "pair23-stage26",
+        "stage": 26,
+        "characters": [
+          10,
+          26
+        ]
+      },
+      {
+        "name": "pair23-stage8",
+        "stage": 8,
+        "characters": [
+          10,
+          26
+        ]
+      },
+      {
+        "name": "pair23-stage6",
+        "stage": 6,
+        "characters": [
+          10,
+          26
+        ]
+      },
+      {
+        "name": "pair24-stage25",
+        "stage": 25,
+        "characters": [
+          1,
+          26
+        ]
+      },
+      {
+        "name": "pair24-stage24",
+        "stage": 24,
+        "characters": [
+          1,
+          26
+        ]
+      },
+      {
+        "name": "pair24-stage18",
+        "stage": 18,
+        "characters": [
+          1,
+          26
+        ]
+      },
+      {
+        "name": "pair24-stage26",
+        "stage": 26,
+        "characters": [
+          1,
+          26
+        ]
+      },
+      {
+        "name": "pair24-stage8",
+        "stage": 8,
+        "characters": [
+          1,
+          26
+        ]
+      },
+      {
+        "name": "pair24-stage6",
+        "stage": 6,
+        "characters": [
+          1,
+          26
+        ]
+      },
+      {
+        "name": "pair25-stage25",
+        "stage": 25,
+        "characters": [
+          7,
+          15
+        ]
+      },
+      {
+        "name": "pair25-stage24",
+        "stage": 24,
+        "characters": [
+          7,
+          15
+        ]
+      },
+      {
+        "name": "pair25-stage18",
+        "stage": 18,
+        "characters": [
+          7,
+          15
+        ]
+      },
+      {
+        "name": "pair25-stage26",
+        "stage": 26,
+        "characters": [
+          7,
+          15
+        ]
+      },
+      {
+        "name": "pair25-stage8",
+        "stage": 8,
+        "characters": [
+          7,
+          15
+        ]
+      },
+      {
+        "name": "pair25-stage6",
+        "stage": 6,
+        "characters": [
+          7,
+          15
+        ]
+      },
+      {
+        "name": "pair26-stage25",
+        "stage": 25,
+        "characters": [
+          22,
+          22
+        ]
+      },
+      {
+        "name": "pair26-stage24",
+        "stage": 24,
+        "characters": [
+          22,
+          22
+        ]
+      },
+      {
+        "name": "pair26-stage18",
+        "stage": 18,
+        "characters": [
+          22,
+          22
+        ]
+      },
+      {
+        "name": "pair26-stage26",
+        "stage": 26,
+        "characters": [
+          22,
+          22
+        ]
+      },
+      {
+        "name": "pair26-stage8",
+        "stage": 8,
+        "characters": [
+          22,
+          22
+        ]
+      },
+      {
+        "name": "pair26-stage6",
+        "stage": 6,
+        "characters": [
+          22,
+          22
+        ]
+      },
+      {
+        "name": "pair27-stage25",
+        "stage": 25,
+        "characters": [
+          12,
+          12
+        ]
+      },
+      {
+        "name": "pair27-stage24",
+        "stage": 24,
+        "characters": [
+          12,
+          12
+        ]
+      },
+      {
+        "name": "pair27-stage18",
+        "stage": 18,
+        "characters": [
+          12,
+          12
+        ]
+      },
+      {
+        "name": "pair27-stage26",
+        "stage": 26,
+        "characters": [
+          12,
+          12
+        ]
+      },
+      {
+        "name": "pair27-stage8",
+        "stage": 8,
+        "characters": [
+          12,
+          12
+        ]
+      },
+      {
+        "name": "pair27-stage6",
+        "stage": 6,
+        "characters": [
+          12,
+          12
+        ]
+      },
+      {
+        "name": "pair28-stage25",
+        "stage": 25,
+        "characters": [
+          13,
+          18
+        ]
+      },
+      {
+        "name": "pair28-stage24",
+        "stage": 24,
+        "characters": [
+          13,
+          18
+        ]
+      },
+      {
+        "name": "pair28-stage18",
+        "stage": 18,
+        "characters": [
+          13,
+          18
+        ]
+      },
+      {
+        "name": "pair28-stage26",
+        "stage": 26,
+        "characters": [
+          13,
+          18
+        ]
+      },
+      {
+        "name": "pair28-stage8",
+        "stage": 8,
+        "characters": [
+          13,
+          18
+        ]
+      },
+      {
+        "name": "pair28-stage6",
+        "stage": 6,
+        "characters": [
+          13,
+          18
+        ]
+      },
+      {
+        "name": "pair29-stage25",
+        "stage": 25,
+        "characters": [
+          4,
+          12
+        ]
+      },
+      {
+        "name": "pair29-stage24",
+        "stage": 24,
+        "characters": [
+          4,
+          12
+        ]
+      },
+      {
+        "name": "pair29-stage18",
+        "stage": 18,
+        "characters": [
+          4,
+          12
+        ]
+      },
+      {
+        "name": "pair29-stage26",
+        "stage": 26,
+        "characters": [
+          4,
+          12
+        ]
+      },
+      {
+        "name": "pair29-stage8",
+        "stage": 8,
+        "characters": [
+          4,
+          12
+        ]
+      },
+      {
+        "name": "pair29-stage6",
+        "stage": 6,
+        "characters": [
+          4,
+          12
+        ]
+      },
+      {
+        "name": "pair30-stage25",
+        "stage": 25,
+        "characters": [
+          8,
+          12
+        ]
+      },
+      {
+        "name": "pair30-stage24",
+        "stage": 24,
+        "characters": [
+          8,
+          12
+        ]
+      },
+      {
+        "name": "pair30-stage18",
+        "stage": 18,
+        "characters": [
+          8,
+          12
+        ]
+      },
+      {
+        "name": "pair30-stage26",
+        "stage": 26,
+        "characters": [
+          8,
+          12
+        ]
+      },
+      {
+        "name": "pair30-stage8",
+        "stage": 8,
+        "characters": [
+          8,
+          12
+        ]
+      },
+      {
+        "name": "pair30-stage6",
+        "stage": 6,
+        "characters": [
+          8,
+          12
+        ]
+      },
+      {
+        "name": "pair31-stage25",
+        "stage": 25,
+        "characters": [
+          18,
+          22
+        ]
+      },
+      {
+        "name": "pair31-stage24",
+        "stage": 24,
+        "characters": [
+          18,
+          22
+        ]
+      },
+      {
+        "name": "pair31-stage18",
+        "stage": 18,
+        "characters": [
+          18,
+          22
+        ]
+      },
+      {
+        "name": "pair31-stage26",
+        "stage": 26,
+        "characters": [
+          18,
+          22
+        ]
+      },
+      {
+        "name": "pair31-stage8",
+        "stage": 8,
+        "characters": [
+          18,
+          22
+        ]
+      },
+      {
+        "name": "pair31-stage6",
+        "stage": 6,
+        "characters": [
+          18,
+          22
+        ]
+      }
+    ]
   },
-  "max_frames": 1924
+  "max_frames": 28924
 }

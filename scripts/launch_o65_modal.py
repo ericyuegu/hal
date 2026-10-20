@@ -31,13 +31,15 @@ IMAGE = "ghcr.io/ericyuegu/hal@sha256:c9160a7bb2dc0aa3eb6dc583b1c4753ff98d9a40f8
 AWS_KEYS = ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET")
 CPU_CORES = 17
 MEMORY_MIB = 65536
-# Published Modal rates checked 2026-10-19; reserve more for startup and CPU builds.
+# Published Modal rates checked 2026-10-20; reserve more for startup and CPU builds.
 GPU_USD_SECOND = 0.000842
 CPU_USD_SECOND = 0.0000131
 MEMORY_USD_GIB_SECOND = 0.00000222
 MAX_GPU_SECONDS = 7200
 MAX_USD = 20.0
 BUILD_RESERVE_USD = 3.0
+PILOT_TIMEOUT_SECONDS = 36000
+PILOT_MAX_USD = 50.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
@@ -129,9 +131,9 @@ class Request:
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
         if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= (
-            85500 if self.mode == "pilot" else 6600
+            PILOT_TIMEOUT_SECONDS if self.mode == "pilot" else 6600
         ):
-            raise ValueError("timeout must be 60..6600 seconds (pilot: at most 85500)")
+            raise ValueError(f"timeout must be 60..6600 seconds (pilot: at most {PILOT_TIMEOUT_SECONDS})")
         if (
             type(self.created_unix) not in (int, float)
             or not math.isfinite(self.created_unix)
@@ -408,14 +410,14 @@ def pilot_estimate() -> dict[str, object]:
         "projected_seconds_per_update": seconds,
         "training_gpu_hours": [2000 * value / 3600 for value in seconds],
         "training_compute_usd": [2000 * value * rate for value in seconds],
-        "full_protocol_gpu_hours_estimate": [8, 12],
+        "full_protocol_gpu_hours_estimate": [6, 8],
         "full_protocol_compute_usd_estimate": [
+            6 * 3600 * rate + BUILD_RESERVE_USD,
             8 * 3600 * rate + BUILD_RESERVE_USD,
-            12 * 3600 * rate + BUILD_RESERVE_USD,
         ],
-        "assumptions": "async projection from performance/async.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, 32-update restarts, evaluation and publication",
-        "hard_timeout_seconds": 85500,
-        "maximum_compute_usd": (85500 + 360) * rate + BUILD_RESERVE_USD,
+        "assumptions": "async projection from performance/async.md; 0.6..1.2 s saved in step overhead, unchanged FLOPs; full protocol allows compilation, 32-update publication/restarts and one final 768-match MSL evaluation; no training evaluations or forced resume checks",
+        "hard_timeout_seconds": PILOT_TIMEOUT_SECONDS,
+        "maximum_compute_usd": (PILOT_TIMEOUT_SECONDS + 360) * rate + BUILD_RESERVE_USD,
         "excludes": "storage/egress beyond included allowances; build variation",
     }
 
@@ -605,7 +607,9 @@ def main(args: Args) -> None:
         sha,
         args.mode,
         args.matches,
-        args.timeout_seconds if args.timeout_seconds is not None else (85500 if args.mode == "pilot" else 1800),
+        args.timeout_seconds
+        if args.timeout_seconds is not None
+        else (PILOT_TIMEOUT_SECONDS if args.mode == "pilot" else 1800),
         source_name=args.source_name,
         source_inputs_sha256=inputs_digest,
         source_layout_sha256=layout_digest,
@@ -617,7 +621,9 @@ def main(args: Args) -> None:
     allowance = request.timeout_seconds + 360
     reserved = reserved_seconds(budget) + allowance
     rate = GPU_USD_SECOND + CPU_CORES * CPU_USD_SECOND + (MEMORY_MIB / 1024) * MEMORY_USD_GIB_SECOND
-    max_seconds, max_usd = (85860, 110.0) if args.mode == "pilot" else (MAX_GPU_SECONDS, MAX_USD)
+    max_seconds, max_usd = (
+        (PILOT_TIMEOUT_SECONDS + 360, PILOT_MAX_USD) if args.mode == "pilot" else (MAX_GPU_SECONDS, MAX_USD)
+    )
     if reserved > max_seconds or reserved * rate + BUILD_RESERVE_USD > max_usd:
         raise ValueError("O65 Modal time or cost budget exhausted")
     keys = [*AWS_KEYS, *(["WANDB_API_KEY"] if args.mode == "pilot" else [])]

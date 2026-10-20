@@ -102,13 +102,15 @@ class EvaluationSet:
 
 @dataclass(frozen=True, slots=True)
 class EvaluationProtocol:
-    selection: EvaluationSet
+    selection: EvaluationSet | None
     held_out: EvaluationSet
     max_frames: int = 28924
 
     def __post_init__(self) -> None:
         if type(self.max_frames) is not int or self.max_frames < 125:
             raise ValueError("evaluation must include active frames")
+        if self.selection is None:
+            return
         if set(self.selection.seeds) & set(self.held_out.seeds):
             raise ValueError("selection and held-out seeds overlap")
 
@@ -129,11 +131,12 @@ def pilot_protocol(*, max_frames: int = 28924) -> EvaluationProtocol:
 
 def read_protocol(path: Path) -> EvaluationProtocol:
     raw = json.loads(path.read_text())
-    if (
-        not isinstance(raw, dict)
-        or set(raw) != {"format", "selection", "held_out", "max_frames"}
-        or raw["format"] != "hal.o65.protocol.v1"
-    ):
+    if not isinstance(raw, dict):
+        raise ValueError("evaluation protocol schema changed")
+    expected = {"format", "held_out", "max_frames"}
+    if raw.get("format") == "hal.o65.protocol.v1":
+        expected.add("selection")
+    if raw.get("format") not in ("hal.o65.protocol.v1", "hal.o65.protocol.v2") or set(raw) != expected:
         raise ValueError("evaluation protocol schema changed")
 
     def dataset(name: str) -> EvaluationSet:
@@ -147,7 +150,11 @@ def read_protocol(path: Path) -> EvaluationProtocol:
             starts.append(EvaluationStart(start["name"], start["stage"], tuple(start["characters"])))
         return EvaluationSet(tuple(value["seeds"]), tuple(starts))
 
-    return EvaluationProtocol(dataset("selection"), dataset("held_out"), raw["max_frames"])
+    return EvaluationProtocol(
+        dataset("selection") if raw["format"] == "hal.o65.protocol.v1" else None,
+        dataset("held_out"),
+        raw["max_frames"],
+    )
 
 
 def claim_held_out(output: Path, dataset: EvaluationSet, checkpoint_sha256: str) -> Path:
@@ -767,6 +774,9 @@ def evaluate(
         raise ValueError("Dolphin worker count must be a positive integer")
     if history_mode not in ("block", "sliding") or (execution == "batched" and history_mode != "block"):
         raise ValueError("batched evaluation requires block history; use serial execution for sliding history")
+    selected = protocol.selection if split == "selection" else protocol.held_out
+    if selected is None:
+        raise ValueError("this protocol has no selection set")
     output.mkdir(parents=True, exist_ok=False)
     focal = load_evaluation_checkpoint(checkpoint, device=torch.device(device), decoder_precision=decoder_precision)
     frozen = [
@@ -795,7 +805,6 @@ def evaluate(
                     )
             build_policy((focal, anchor), cell_conditions, seed=0, focal_port=1, history_mode=history_mode)
             cells.append((cell_index, anchor_index, cell_conditions, anchor))
-    selected = protocol.selection if split == "selection" else protocol.held_out
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     record: dict[str, object] = {
         "format": "hal.o65.evaluation-results.v2",

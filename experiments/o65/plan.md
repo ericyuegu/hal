@@ -10,7 +10,8 @@ the worked production example uses a B200 with $D = 16$ and $R = 4$.
 
 O65 fine-tunes the O64 production percentile checkpoint with KL-regularized
 self-play PPO. Rollouts run in melee-sim-light (MSL) through HAL's native
-adapter. Dolphin evaluations run alongside training and confirm the finalists.
+adapter. The proxy pilot monitors training anchor matches and evaluates only
+the final checkpoint in MSL; it has no Dolphin evaluation.
 
 ## Decisions
 
@@ -31,7 +32,7 @@ adapter. Dolphin evaluations run alongside training and confirm the finalists.
 | Episode ends | A match end is terminal. A time-out is a truncation, and the observation carries no timer. |
 | Opponents | About 15% of matches pair the student with a frozen anchor: $\pi_{\text{ref}}$ or a recent snapshot. Only the student side trains. |
 | Identities | Match the checkpoint pretraining sources. Count identities per character over training replay rows, using the identity sidecar for professional sources. Weight by count (tempering 1.0), floor 1, mask 10%, deployment rate 0. The proxy uses ranked ids only; O64 includes trained professional ids. |
-| Evaluation | An in-loop matchup matrix against frozen anchors in MSL, periodic Dolphin evaluations throughout training, and held-out seeds and starts for the final report. |
+| Evaluation | No evaluation during the proxy pilot. Monitor existing training anchor matches each update; evaluate only the final checkpoint in MSL against pi_ref at u=0.95 on a frozen grid drawn from training matchup weights across six stages and both cadences. No selection grid or Dolphin evaluation. |
 | Hardware | An 8×B200 node for production. The pilot runs on RTX PRO 6000 Blackwell. |
 
 ## Objective and update rules
@@ -231,8 +232,8 @@ epochs through the shared optimizer would move the actor.
 
 Cached features go stale once the actor updates. We report the critic's
 explained variance on the next rollout's fresh features, before any fitting on
-them. We also compare its values against Monte Carlo returns from full episodes
-in the evaluation group.
+them. The proxy pilot compares initial values against full discounted training
+episode returns, excluding truncations.
 
 ### Optimizer
 
@@ -414,7 +415,7 @@ episode therefore begins at a block start, as it does in deployment, and its blo
 fall on the same episode frames in training and evaluation. The wait averages 64
 frames, under 1% of a match. A fresh reset samples:
 
-- an unordered matchup from the 259-pair training prior, then uniform orientation;
+- an unordered matchup weighted by sqrt(training replay count), including all 332 observed ranked-anonymized-1 pairs (minimum one replay), then uniform orientation;
 - a stage uniformly from the six legal stages, with Stadium frozen;
 - each player's identity, conditional on the sampled character;
 - $u$, $\lambda$, $D$ and $R$ independently for each player;
@@ -429,12 +430,15 @@ updates. Anchors decode with their own weights in a separate batch. Only the
 student side contributes training windows, about 8% fewer windows per
 match-frame overall.
 
-### In-loop evaluation group
+### Pilot learning monitor
 
-Every $N$ updates, a fixed evaluation group plays the current weights, frozen at
-the start of the evaluation, against each anchor. It covers a grid of $\lambda$
-and $(D, R)$ configurations with fixed seeds, runs inference only and contributes no training
-data.
+Every update measures the anchor matches already in its rollout: student stocks
+taken minus lost per active minute, damage dealt minus taken per active minute,
+and completed stockout win rate and count, separately by anchor id with pi_ref
+as its own key. A pooled win rate and count cover the last 32 updates. Exclude
+truncations from wins and reset waits from exposure. Preserve opponent identity
+across resets and the rolling counts across preemption. There is no dedicated
+evaluation group during training.
 
 ## One update
 
@@ -600,8 +604,8 @@ stays out of the checkpoint. Each rank writes a shard holding:
    128 prior frames), both players' committed queues and the group's decision clock;
 4. episode metadata: $u$, $\lambda$, $D$, $R$, identities, characters, anchor
    assignments, episode counters and stable logical stream ids;
-5. the pool schedule position, the evaluation schedule position and the anchor
-   pool.
+5. the pool schedule position, anchor pool, episode metric accumulators and the
+   last 32 updates of per-anchor wins and completed-match counts.
 
 After a barrier confirms every shard is durable, rank 0 writes a manifest with
 the shard hashes and publishes it by atomic rename. A resume reads only
@@ -611,8 +615,8 @@ checkpoints with a manifest.
 restoring a full batch lane by lane costs quadratic work. The adapter needs a
 batch restore that projects once.
 
-Training format v6 stores dense pool format v4 and the seed-derived device
-counter key. Earlier training and pool formats are rejected. Snapshot tensors
+Training format v7 stores dense pool format v4, the seed-derived device
+counter key and rolling per-anchor win counts. Earlier training and pool formats are rejected. Snapshot tensors
 own their storage. Restore clears all execution caches before the next prefill.
 The verifier uses the same tick, reference and actor graph paths and execution
 mode as training. It checks exact restoration of model, both optimizers,
@@ -691,16 +695,17 @@ handoff, and the rate of missed deadlines at each $D$ and $R$.
 
 ### During training
 
-- **In MSL:** the matchup matrix against the anchors, every $N$ updates.
-- **In Dolphin:** periodic evaluations against $\pi_{\text{ref}}$ on the
-  existing evaluation VMs, so simulator-specific gains show up early.
-- **Selection set:** fixed seeds and starts for choosing checkpoints and
-  $\lambda$.
-- **Held-out set:** separate seeds and starts, used once for the final report.
-- **Statistics:** confidence intervals treat each match or paired seed as a
-  sample.
-- **Progress signals:** results against anchors and specific failure rates.
-  Win rate in current-versus-current self-play stays near 50% by construction.
+- The proxy pilot runs no evaluations or selection grid. It publishes complete
+  checkpoints every 32 updates and at the final update. There is no forced kill
+  at 256 or scheduled resume verification at 288; real preemptions still resume.
+- Progress signals come from existing training anchor matches, by anchor id.
+  Current-versus-current win rate stays near 50% by construction.
+- Evaluate only the final checkpoint once in MSL against pi_ref at u=0.95,
+  lambda 1, both cadences, and masked identity. Freeze 32 distinct weighted
+  matchup draws (seed 65095), cross all six stages and both orientations, and
+  use held-out seed 10017: 768 matches. No Dolphin evaluation is in this pilot.
+- Confidence intervals treat each paired seed/start as a sample. Training
+  anchor results are diagnostic and do not select a checkpoint or lambda.
 
 ### First run
 
@@ -709,9 +714,9 @@ handoff, and the rate of missed deadlines at each $D$ and $R$.
   identity sampling, matchup prior, stage set and evaluation protocol.
 - **Invariant inputs:** checkpoint, episode $u$ distribution, identity sampling, matchup prior,
   stage set, evaluation seeds, simulator build and data manifest.
-- **Selection:** `net_stock_lcb` and head-to-head win rate against the anchors at
-  matched $D$, over a $\lambda$ grid, confirmed in Dolphin. Offline metrics
-  serve only for diagnosis.
+- **Final report:** `net_stock_lcb` and head-to-head win rate against pi_ref in
+  MSL at each cadence, at fixed lambda 1. The pilot selects neither a checkpoint
+  nor lambda. Offline metrics serve only for diagnosis.
 - **Records:** Git SHA, resolved configuration, seed, environment, simulator and
   adapter hashes, data manifests and checkpoint hashes.
 
@@ -725,7 +730,7 @@ Each stage needs its evidence before the next begins.
 | State and inference | No attention across episodes, cached against full-window log-probs, queue and reset parity |
 | Debug loop | The O63 proxy under the development configuration, end to end on one RTX PRO 6000: loop, logging, checkpoint and resume, and a learning signal against $\pi_{\text{ref}}$ |
 | Minimal learning | The 248M checkpoint on one matchup and stage, fixed $D$, $R$ and $\lambda$, joint PPO, separate critic optimizer |
-| Gameplay | Improvement against frozen anchors in MSL and in Dolphin |
+| Gameplay | Proxy pilot: final MSL improvement against pi_ref; production gameplay validation remains open |
 | Scaling | All 11 $(D, R)$ configurations mixed in each group, real two-GPU NCCL training, full-pool checkpoint and restore, complete-path throughput |
 | Expanded run | $\lambda$ range, identities and anchors, each added with its own comparison |
 
@@ -767,7 +772,7 @@ from fixed 0.95 to independent clipped Beta(5,1.3) per player, in both student
 and reference; the residual critic receives both players' percentiles. Evaluation
 keeps 0.95. Starts change from mixed 0/30/60/90% to zero. Training stages change
 from FD only to all six legal stages uniformly, and matchups change from Fox/Falco
-to the frozen 259-pair training prior, with uniform orientation. These are
+to all 332 observed ranked train pairs weighted by sqrt(count), with uniform orientation. These are
 scientific treatments, not systems refactors. Episode-age and u-bin diagnostics
 check the resulting coverage. Training/evaluation artifact formats are versioned
 for the added episode state and critic inputs.
@@ -780,7 +785,7 @@ for the added episode state and critic inputs.
 | Return and KL | return against KL by $\lambda$ bin, cumulative KL cost per match |
 | Critic | explained variance on fresh features before fitting, by $R$ and by position in the block; value against Monte Carlo returns; value loss; advantage mean and standard deviation by $D$ and $R$; end-of-rollout bootstrap gap |
 | Numerics | joint log-ratio against stored behavior across actor steps; common-input errors against the all-FP32 reference |
-| Gameplay | net stocks, damage, win rate and match length against each anchor, by $\lambda$ bin, $D$ and $R$, in MSL and Dolphin |
+| Gameplay | Each update: net stocks/minute and net damage/minute over active training exposure, completed-match win rate/count and pooled last-32-update win rate/count per anchor id (pi_ref separate). Final checkpoint: MSL paired net stocks, win rate and match length against pi_ref at u=0.95, lambda 1 and both cadences; no training or Dolphin evaluation. |
 | Systems | time per phase, decode and training utilization, decode batch sizes, simulator frames/s per shard, reset wait time, host-to-device bytes, peak HBM per phase, per-rank rollout time |
 | Data | identity, character, stage and matchup counts, anchor share, time-outs, resets per update |
 
@@ -790,11 +795,12 @@ one level deep.
 ## Risks
 
 - **Simulator exploits.** MSL validation covers admitted human replays. RL
-  policies will visit states outside that set, which is why Dolphin evaluations
-  run throughout training.
+  policies will visit states outside that set. The throughput-first proxy pilot
+  omits Dolphin evaluation, so it cannot establish simulator transfer.
 - **Non-transitive cycling.** Shared weights move together across $\lambda$,
   $D$ and identities, so that diversity alone cannot preserve an old
-  counterstrategy. Frozen anchors and the matchup matrix detect cycling.
+  counterstrategy. Per-anchor training metrics can expose cycling, but their
+  changing sampling conditions limit that evidence.
 - **KL growth at small $\lambda$ and large $D$.** $\pi_{\text{ref}}$ is weakest
   at large $D$, so RL moves furthest there. The advantage scale may differ by
   $D$, so warmup measures it per $D$.
@@ -891,8 +897,8 @@ one level deep.
 
 ### Evaluation
 
-- [x] Periodic Dolphin evaluations against $\pi_{\text{ref}}$ during training.
-- [x] Selection and held-out seed and start sets.
+- [x] Periodic evaluator implemented; disabled for the lean proxy pilot.
+- [x] Final-only held-out pilot grid drawn from the training weights; no selection set.
 - [ ] MSL against Dolphin event statistics for distinct policy pairs.
 
 ### Experiment

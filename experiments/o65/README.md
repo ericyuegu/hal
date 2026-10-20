@@ -35,12 +35,13 @@ selects deterministic algorithms and configures cuBLAS before CUDA starts.
 `--verify-resume` uses the training graphs and execution mode. It checks restored
 model, optimizer, scheduler, sampler, simulator and RNG states exactly, then
 checks the next update within the measured spread of two control repetitions.
-It restores the original boundary after the check. Training format v5 and pool snapshot v3
+It restores the original boundary after the check. Training format v7 and pool snapshot v4
 reject earlier persisted formats.
 
-The sampler JSON uses `hal.o65.sampler.v1`. It reads identity/character counts,
+The sampler JSON uses `hal.o65.sampler.v2`. It reads identity/character counts,
 weighted character pairs, HAL stage ids, a shared starting stock count, and
-integer starting percents. [The committed sampler](pilot-sampler.json) records
+starting percents. The pilot draws all 332 observed ranked train matchups with
+sqrt(count) weights and uniform orientation. [The committed sampler](pilot-sampler.json) records
 its count source in [pilot-sampler-source.json](pilot-sampler-source.json).
 Native reset rejects unequal starting stocks.
 
@@ -61,11 +62,12 @@ starts a local child process. Enable it with `--evaluation-every` and
 held-out schedules, and outcome statistics.
 
 The [bounded pilot driver](pilot.py) installs the hash-checked inputs, builds
-MSL, compares pool sizes, kills training after checkpoint publication, then
-resumes. `--tiny --no-wandb` selects a local functional check. The full pilot
+MSL, trains with per-anchor rollout metrics and publishes every 32 updates.
+It resumes after preemption and evaluates only the final checkpoint in MSL.
+`--tiny --no-wandb` selects a local functional check. The full pilot
 requires an RTX PRO 6000 and its declared CPU allocation. The
 [input manifest](pilot-inputs.json) identifies the fixed source and data.
-The [hardware protocol](pilot-protocol.md) defines the treatment, frequent MSL
-checks, periodic Dolphin checks, learning criteria, launch, monitoring and
-teardown. Run `bash scripts/launch_o65.sh --dry-run` from the final clean SHA
-to inspect the one-VM request. Publish its required inputs before a real launch.
+The [hardware protocol](pilot-protocol.md) defines the treatment, one final
+768-match MSL grid, learning criteria, launch and monitoring. Run
+`uv run python -m scripts.launch_o65_modal --mode pilot --dry-run` to inspect
+the Modal request. Publish its required inputs before a real launch.

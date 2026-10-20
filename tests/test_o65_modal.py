@@ -217,7 +217,7 @@ def test_volume_staging_copies_checkpoint_bytes_and_excludes_caches(tmp_path: Pa
 
 
 def test_pilot_command_uses_durable_resume_cache_and_full_driver() -> None:
-    request = Request("pilot", "a" * 40, mode="pilot", timeout_seconds=85500)
+    request = Request("pilot", "a" * 40, mode="pilot", timeout_seconds=36000)
     argv = command(request, tuple(range(16)))
     assert argv[1] == "experiments/o65/pilot.py"
     assert "--resume" in argv
@@ -225,7 +225,7 @@ def test_pilot_command_uses_durable_resume_cache_and_full_driver() -> None:
     assert argv[argv.index("--publish-directory") + 1] == "/o65-results/pilot/pilot"
     assert argv[argv.index("--r2-prefix") + 1] == "o65/pilot-results/pilot"
     with pytest.raises(ValueError, match="reservation has expired"):
-        launcher.remaining_seconds(request, request.created_unix + 85500 + 360)
+        launcher.remaining_seconds(request, request.created_unix + 36000 + 360)
 
 
 def test_interrupted_staging_keeps_the_previous_checkpoint_readable(
