@@ -287,6 +287,34 @@ def hardware_memory() -> dict[str, object]:
     }
 
 
+def hardware_memory_tiers() -> list[dict[str, object]]:
+    results = []
+    for total_bytes in (4 * 1024**2, 32 * 1024**2, 128 * 1024**2, 512 * 1024**2):
+        size = total_bytes // 8
+        source = torch.randn(size, device="cuda")
+        target = torch.empty_like(source)
+        copy = partial(
+            copy_kernel[(triton.cdiv(size, 1024),)],
+            source,
+            target,
+            cast(tl.constexpr, size),
+            BLOCK=cast(tl.constexpr, 1024),
+        )
+        latency = measure(graph_call(partial(repeat, copy, 32)), repeats=21)
+        seconds = latency.cuda_seconds / 32
+        results.append(
+            {
+                "working_set_bytes": total_bytes,
+                "bytes_per_copy": total_bytes,
+                "seconds_per_copy": seconds,
+                "bytes_per_second": total_bytes / seconds,
+                "graph_nodes": 32,
+                "latency": dataclasses.asdict(latency),
+            }
+        )
+    return results
+
+
 def hardware_gemms(shapes: set[Gemm]) -> list[dict[str, object]]:
     results = []
     for shape in sorted(shapes):
@@ -653,6 +681,7 @@ def main(args: Args) -> None:
     (args.output / "rates.json").write_text(json.dumps(result, indent=2))
     shapes: set[Gemm] = set()
     if args.extra_only:
+        result["memory_tiers"] = hardware_memory_tiers()
         prefills = []
         for batch in sorted({row["batch"] for row in layout["tick_layouts"]}):
             row, observed_shapes = prefill_benchmark(model, batch, args.output)
