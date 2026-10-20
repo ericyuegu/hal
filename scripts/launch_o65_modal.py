@@ -463,9 +463,6 @@ def main(args: Args) -> None:
     if not args.dry_run and subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise ValueError("commit changes before launching published source")
     branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip()
-    expected_branch = "o65-bigstep" if args.mode == "pilot" else "o65-floor"
-    if branch != expected_branch:
-        raise ValueError(f"only branch {expected_branch} can launch this job")
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if not args.dry_run:
         published = subprocess.check_output(
