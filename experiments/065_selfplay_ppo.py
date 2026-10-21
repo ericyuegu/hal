@@ -1092,12 +1092,16 @@ class FrameStore:
 class TickInputs:
     table: DenseRollout
     ids: Tensor
+    enabled: Tensor | None = None
 
     def __len__(self) -> int:
         return self.ids.numel()
 
     def tensor(self, value: Tensor) -> Tensor:
-        return value.index_select(0, self.ids)
+        selected = value.index_select(0, self.ids)
+        if value is self.table.active and self.enabled is not None:
+            return selected & self.enabled
+        return selected
 
     def packed(self, length: int, tail: int | None = None) -> tuple[Tensor, ...]:
         meta = self.tensor(self.table.integers)
@@ -1972,6 +1976,8 @@ class RolloutEngine:
         self.tick_layouts: dict[tuple[int, int | None], TickLayout] = {}
         self.group_layouts: list[dict[tuple[int, int | None], TickLayout]] = [{} for _ in groups]
         self.anchor_candidates = tuple(sorted(anchors))
+        self.prepared_anchors: tuple[LoopPolicy, ...] = ()
+        self.layout_anchors: list[tuple[int, ...]] = [() for _ in groups]
         self.clocks = [0] * len(groups)
         self.cursor = 0
         self.matches: dict[int, MatchState] = {}
@@ -2021,6 +2027,7 @@ class RolloutEngine:
             buffers.append(tuple(prepared))
         self.buffers = tuple(buffers)
         self.group_slots: list[dict[tuple[int, int | None], Tensor]] = [{} for _ in groups]
+        self.occupied_layouts: list[set[tuple[int, int | None]]] = [set() for _ in groups]
         self.stores: list[FrameStore | None] = [None] * len(groups)
         self.dense_meta = [
             torch.zeros(2 * len(ids), 18, dtype=torch.long, device=policy.device) for ids in self.group_matches
@@ -2128,7 +2135,7 @@ class RolloutEngine:
             self.stores[group_id] = store
         self.matches = restored
         self.tables = [None] * len(self.groups)
-        for policy in (self.policy, *self.anchors.values()):
+        for policy in (self.policy, *self.anchors.values(), *self.prepared_anchors):
             policy.clear_caches()
 
     def initialize(self) -> None:
@@ -2351,19 +2358,34 @@ class RolloutEngine:
         continuing = due & student & (pending >= 0)
         table.following[previous] = torch.where(continuing, at, table.following[previous])
         pending.copy_(torch.where(due & student, at, pending))
-        if clock % 128 == 0 and not np.array_equal(assignments, self.layout_assignments[group]):
+        anchor_ids = tuple(self.anchors)
+        if clock % 128 == 0 and (
+            not np.array_equal(assignments, self.layout_assignments[group]) or self.layout_anchors[group] != anchor_ids
+        ):
+            self.layout_anchors[group] = anchor_ids
             self.tick_layouts.clear()
             self.group_slots[group].clear()
+            self.occupied_layouts[group].clear()
             self.layout_assignments[group][:] = assignments
             logical = np.asarray(self.group_matches[group], dtype=np.int64).repeat(2) * 2 + np.tile(
                 (0, 1), len(self.group_matches[group])
             )
             for buffer in self.buffers[group]:
                 in_buffer = np.isin(np.arange(players) // 2, buffer.lanes)
-                for owner in np.unique(assignments[in_buffer]):
-                    selected = np.flatnonzero(in_buffer & (assignments == owner))
+                owners = (-1, *anchor_ids) if self.fixed_anchor_lanes else np.unique(assignments[in_buffer])
+                for owner in owners:
+                    # All anchor policies use the same physical lanes. Ownership
+                    # masks queue writes; resets cannot change compiled shapes.
+                    owned = assignments == owner
+                    if self.fixed_anchor_lanes and owner >= 0:
+                        owned = assignments >= 0
+                    selected = np.flatnonzero(in_buffer & owned)
+                    if not len(selected):
+                        continue
                     anchor = None if owner < 0 else int(owner)
                     key = buffer.index, anchor
+                    if np.any(in_buffer & (assignments == owner)):
+                        self.occupied_layouts[group].add(key)
                     self.group_slots[group][key] = torch.from_numpy(selected).to(self.policy.device)
                     self.tick_layouts[key] = TickLayout(
                         tuple(logical[selected].tolist()),
@@ -2377,6 +2399,10 @@ class RolloutEngine:
             for owner, policy in ((None, self.policy), *self.anchors.items()):
                 layouts = tuple(layout for (_, anchor), layout in self.tick_layouts.items() if anchor == owner)
                 policy.retain_tick_layouts(ring, layouts)
+            if self.fixed_anchor_lanes:
+                layouts = tuple(layout for (_, anchor), layout in self.tick_layouts.items() if anchor == 0)
+                for policy in self.prepared_anchors:
+                    policy.retain_tick_layouts(ring, layouts)
         return at
 
     def _sample_buffer(
@@ -2392,7 +2418,20 @@ class RolloutEngine:
             if buffer_index != buffer.index:
                 continue
             policy = self.policy if anchor is None else self.anchors[anchor]
-            rows = TickInputs(table, ids[self.group_slots[self.cursor][key]])
+            selected = ids[self.group_slots[self.cursor][key]]
+            enabled = None
+            if self.fixed_anchor_lanes and anchor is not None:
+                enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == anchor
+                if anchor == 0:
+                    # Prepare each slot's three tick graphs before it can become
+                    # a candidate. Disabled draws leave every committed queue intact.
+                    disabled = TickInputs(table, selected, torch.zeros_like(enabled))
+                    for standby in self.prepared_anchors:
+                        if not standby.tick_ready(layout, ring, clock=clock):
+                            standby.sample_tick(disabled, self.sampler.rng, layout, ring, clock=clock)
+                if key not in self.occupied_layouts[self.cursor]:
+                    continue
+            rows = TickInputs(table, selected, enabled)
             policy.sample_tick(rows, self.sampler.rng, layout, ring, clock=clock)
 
     def _tick_ready(self, buffer: RolloutBuffer, clock: int) -> bool:
@@ -3470,6 +3509,28 @@ class Trainer:
         self.warming = config.critic_warmup_updates > 0
         self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
         self.next_anchor = max(engine.anchors) + 1
+        # Retired anchors keep their weights through the last assigned episode.
+        # Reserve those slots too, using the native timeout to bound their age.
+        assigned_limit = (
+            sum(engine.anchor_counts) if engine.fixed_anchor_lanes else sum(map(len, engine.group_matches))
+        )
+        timeouts = [
+            shard.max_frame for group in engine.groups for shard in group if isinstance(shard, NativeSimulatorShard)
+        ]
+        retired_limit = assigned_limit
+        if len(timeouts) == sum(map(len, engine.groups)) and min(timeouts) >= 0:
+            retired_limit = min(
+                retired_limit,
+                math.ceil(
+                    (max(timeouts) + 128)
+                    * len(engine.groups)
+                    / (engine.sampler.schedule.rollout_frames * config.snapshot_interval)
+                ),
+            )
+        existing = [policy for key, policy in engine.anchors.items() if key]
+        slots = config.snapshot_capacity + retired_limit
+        self.snapshot_slots = tuple(existing + [self.policy.frozen_copy() for _ in range(slots - len(existing))])
+        engine.prepared_anchors = self.snapshot_slots
         self.evaluation_cursor = 0
         self.updating = False
         self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
@@ -4111,28 +4172,33 @@ class Trainer:
             },
         )
         if not self.warming and self.update % self.config.snapshot_interval == 0:
+            snapshot_started = time.perf_counter()
             assigned = {p.anchor for m in self.engine.matches.values() for p in m.episode.players}
             snapshots = sorted(key for key in self.engine.anchors if key)
             retired = snapshots[: max(0, len(snapshots) - self.config.snapshot_capacity + 1)]
-            available = [key for key in retired if key not in assigned]
-            if available:
-                anchor = self.engine.anchors.pop(available[0])
-                anchor.model.load_state_dict(self.policy.model.state_dict(), strict=True)
-                anchor.clear_caches()
-            else:
-                anchor = self.policy.frozen_copy()
+            for key in retired:
+                if key not in assigned:
+                    del self.engine.anchors[key]
+            used = {id(policy) for policy in self.engine.anchors.values()}
+            available = [policy for policy in self.snapshot_slots if id(policy) not in used]
+            if not available:
+                raise RuntimeError("preallocated snapshot slots exhausted by assigned episodes")
+            anchor = available[0]
+            anchor.model.load_state_dict(self.policy.model.state_dict(), strict=True)
             self.engine.anchors[self.next_anchor] = anchor
+            promoted = self.next_anchor
             self.next_anchor += 1
             self.engine.anchor_candidates = (
                 0,
                 *sorted(key for key in self.engine.anchors if key)[-self.config.snapshot_capacity :],
             )
-            # Keep an assigned snapshot until its last episode finishes.
-            assigned = {p.anchor for m in self.engine.matches.values() for p in m.episode.players}
-            snapshots = sorted(key for key in self.engine.anchors if key)
-            for key in snapshots[: -self.config.snapshot_capacity]:
-                if key not in assigned:
-                    del self.engine.anchors[key]
+            if self.policy.device.type == "cuda":
+                torch.cuda.synchronize(self.policy.device)
+            metrics["systems/snapshot_seconds"] = time.perf_counter() - snapshot_started
+            print(
+                f"snapshot update={self.update} anchor={promoted} seconds={metrics['systems/snapshot_seconds']:.3f}",
+                flush=True,
+            )
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
             metrics["systems/peak_allocated_bytes"] = float(
@@ -4562,11 +4628,16 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.critic_optimizer.load_state_dict(saved["critic_optimizer"])
     trainer.scheduler.load_state_dict(saved["scheduler"])
     engine = trainer.engine
+    if len(saved["anchors"]) - 1 > len(trainer.snapshot_slots):
+        raise ValueError("checkpoint exceeds the preallocated snapshot slots")
+    reference = trainer.reference
     engine.anchors.clear()
+    slots = iter(trainer.snapshot_slots)
     for key, tensors in saved["anchors"].items():
-        policy = trainer.policy.frozen_copy()
+        policy = reference if key == 0 else next(slots)
         policy.model.load_state_dict(tensors, strict=True)
         engine.anchors[key] = policy
+    engine.layout_anchors = [() for _ in engine.groups]
     trainer.reference = engine.anchors[0]
     for name, value in saved["reference"].items():
         if not torch.equal(trainer.reference.model.state_dict()[name].cpu(), value):
@@ -5814,7 +5885,7 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
 
 
 def _clear_execution_caches(trainer: Trainer) -> None:
-    for policy in (trainer.policy, *trainer.engine.anchors.values()):
+    for policy in (trainer.policy, *trainer.engine.anchors.values(), *trainer.snapshot_slots):
         policy.clear_caches()
 
 

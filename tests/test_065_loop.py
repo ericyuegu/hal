@@ -1259,6 +1259,92 @@ def test_checkpoint_worker_failure_stops_before_next_update(tmp_path: Path, monk
     assert not list((tmp_path / "checkpoints").glob("update-*.json"))
 
 
+def test_snapshot_promotion_reuses_slots_and_keeps_assigned_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = trainer(groups=1, anchor_rate=1, length=1000000)
+    run.config = dataclasses.replace(run.config, snapshot_interval=1, snapshot_capacity=1)
+    identities = {id(policy) for policy in run.snapshot_slots}
+
+    def reject_copy() -> Any:
+        raise AssertionError("snapshot allocated a new policy")
+
+    def reject_clear() -> None:
+        raise AssertionError("snapshot cleared prepared graphs")
+
+    monkeypatch.setattr(run.policy, "frozen_copy", reject_copy)
+    for slot in run.snapshot_slots:
+        monkeypatch.setattr(slot, "clear_caches", reject_clear)
+    run.run_update()
+    assigned = run.engine.anchors[1]
+    saved = copy.deepcopy(assigned.model.state_dict())
+    match = next(iter(run.engine.matches))
+    state = run.engine.matches[match]
+    players = (dataclasses.replace(state.episode.players[0], anchor=1), state.episode.players[1])
+    state.episode = dataclasses.replace(state.episode, players=players)
+    for _ in range(4):
+        run.run_update()
+        assert run.engine.anchors[1] is assigned
+        for name, value in saved.items():
+            torch.testing.assert_close(assigned.model.state_dict()[name], value, atol=0, rtol=0)
+        assert all(id(policy) in identities for key, policy in run.engine.anchors.items() if key)
+    state.episode = dataclasses.replace(state.episode, players=(dataclasses.replace(players[0], anchor=0), players[1]))
+    run.run_update()
+    assert 1 not in run.engine.anchors
+
+
+def test_training_stdout_reports_updates_checkpoints_and_warmup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = trainer(groups=1, anchor_rate=0, warmup=1)
+    run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
+    exp.run_training(run, 2, tmp_path, PROVENANCE)
+    lines = capsys.readouterr().out.splitlines()
+    assert sum(line.startswith("update=") for line in lines) == 2
+    assert any(line.startswith("critic_warmup_ended update=1") for line in lines)
+    assert any(line.startswith("snapshot update=2") for line in lines)
+    checkpoint = next(line for line in lines if line.startswith("checkpoint update=2"))
+    assert all(field in checkpoint for field in ("training_seconds=", "worker_seconds=", "wait_seconds="))
+    progress = next(line for line in lines if line.startswith("update=1"))
+    assert "warming=1" in progress and "pi_ref_win32=n/a games=0" in progress
+    assert all(field in progress for field in ("rollout=", "preparation=", "actor=", "critic=", "kl/frame=", "ev="))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_prepared_snapshot_reuses_graphs_after_weight_copy(device: str) -> None:
+    from hal.inference.cuda_graph import count_compilation_starts
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    base = transformer_trainer(device, development=True, decoder_precision="bf16" if device == "cuda" else "fp32")
+    sampling = base.engine.sampler
+    sampling.config = dataclasses.replace(sampling.config, anchor_rate=0.5)
+    shard = FakeShard((0, 1), length=23, timeout=True, device=device)
+    engine = exp.RolloutEngine(
+        ((shard,),), base.policy, sampling, {0: base.policy.frozen_copy()}, fixed_anchor_lanes=True
+    )
+    engine.initialize()
+    run = exp.Trainer(engine, dataclasses.replace(base.config, snapshot_interval=2, snapshot_capacity=1))
+    run.run_update()
+    slot = run.snapshot_slots[0]
+    pointers = [value.data_ptr() for value in slot.model.parameters()]
+    graphs = {key: id(graph) for key, graph in slot.tick_graphs.items()}
+    with torch.no_grad():
+        for head in run.policy.model.temporal.outputs.values():
+            head.down.bias.add_(0.1)
+    run.run_update()
+    assert engine.anchors[1] is slot
+    assert pointers == [value.data_ptr() for value in slot.model.parameters()]
+    for name, value in slot.model.state_dict().items():
+        torch.testing.assert_close(value, run.policy.model.state_dict()[name], rtol=0, atol=0)
+    engine.anchor_candidates = (1,)
+    with count_compilation_starts() as counter:
+        batch, _ = run.run_update()
+        assert counter.snapshot() == 0
+    assert {key: id(graph) for key, graph in slot.tick_graphs.items()} == graphs
+    assert bool((batch.rollout.table.opponent_anchor[batch.rollout.ids] == 1).any())
+    if device == "cuda":
+        assert len(graphs) == 3
+
+
 def test_failed_checkpoint_write_keeps_latest_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run = trainer(groups=1)
     run.run_update()
@@ -1280,6 +1366,69 @@ def test_failed_checkpoint_write_keeps_latest_manifest(tmp_path: Path, monkeypat
     assert not (tmp_path / "update-00000002.json").exists()
     exp.restore_checkpoint(run, first, PROVENANCE)
     assert run.update == 1
+
+
+def test_padded_anchor_batches_preserve_compact_rollout() -> None:
+    class CompactEngine(exp.RolloutEngine):
+        def _stage_tick(self, clock: int, update: int, table: Any, pending: torch.Tensor) -> torch.Tensor:
+            ids = super()._stage_tick(clock, update, table, pending)
+            if clock % 128:
+                return ids
+            group, ring = self.cursor, self.rings[self.cursor]
+            for key, layout in list(self.tick_layouts.items()):
+                anchor = key[1]
+                if anchor is None:
+                    continue
+                slots = self.group_slots[group][key]
+                owned = self.owners[group][slots] == anchor
+                keep = owned.cpu().tolist()
+                if not any(keep):
+                    del self.tick_layouts[key]
+                    continue
+                self.group_slots[group][key] = slots[owned]
+                self.tick_layouts[key] = exp.TickLayout(
+                    tuple(stream for stream, valid in zip(layout.streams, keep, strict=True) if valid),
+                    tuple(lane for lane, valid in zip(layout.lanes, keep, strict=True) if valid),
+                    layout.buffer,
+                )
+            for anchor, policy in self.anchors.items():
+                policy.retain_tick_layouts(
+                    ring, tuple(layout for (_, owner), layout in self.tick_layouts.items() if owner == anchor)
+                )
+            return ids
+
+    def make(engine_type: Any) -> Any:
+        base = transformer_trainer(development=True, decoder_precision="fp32")
+        sampling = base.engine.sampler
+        sampling.config = dataclasses.replace(sampling.config, anchor_rate=0.5)
+        anchors = {key: base.policy.frozen_copy() for key in range(3)}
+        with torch.no_grad():
+            for key, policy in anchors.items():
+                for head in policy.model.temporal.outputs.values():
+                    head.down.bias.add_(key * torch.linspace(-0.2, 0.2, head.down.out_features))
+        engine = engine_type(
+            ((FakeShard(tuple(range(8)), length=67, timeout=True),),),
+            base.policy,
+            sampling,
+            anchors,
+            fixed_anchor_lanes=True,
+        )
+        engine.initialize()
+        return engine
+
+    padded, compact = make(exp.RolloutEngine), make(CompactEngine)
+    actual, expected = padded.collect(0), compact.collect(0)
+    torch.testing.assert_close(padded.rings[0].values, compact.rings[0].values, rtol=0, atol=0)
+    torch.testing.assert_close(actual.table.store.records, expected.table.store.records, rtol=0, atol=0)
+    torch.testing.assert_close(actual.ids, expected.ids, rtol=0, atol=0)
+    for name in ("actions", "behavior", "values"):
+        torch.testing.assert_close(
+            getattr(actual.table, name)[actual.ids],
+            getattr(expected.table, name)[expected.ids],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    assert actual.results == expected.results
 
 
 @pytest.mark.integration

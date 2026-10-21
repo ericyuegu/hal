@@ -29,7 +29,11 @@ a warmed update and trace a separate update; `--nsys` permits an external
 Nsight capture. [performance.md](performance.md) records measured server times
 and the pilot projections.
 
-Each update appends metrics to `metrics.jsonl`. The trainer records resolved
+Each update prints a compact, flushed progress line and appends metrics to
+`metrics.jsonl`. Checkpoint lines report capture, worker and wait seconds;
+snapshot lines report promotion time. The fixed-lane pilot warms preallocated
+snapshot policies before use and copies weights into them at promotion.
+The trainer records resolved
 settings, environment and input hashes in `resolved.json`. It publishes
 checkpoint manifests after writing their referenced files. `--resume` restores
 complete training state; `--updates` sets the total update count. The optional

@@ -256,9 +256,20 @@ writes durable files before publishing an atomic manifest with hashes.
 We reject earlier formats and mismatched resume settings.
 
 One trainer process runs the whole pilot. It saves every 32 updates and at the
-final update. A background worker copies immutable snapshots to the Modal
-Volume and R2. At most two snapshots can be active or queued. A failed worker
-or full queue fails the run. Resume uses the latest published checkpoint.
+final update. At each checkpoint boundary, we capture independent CPU tensors, raw simulator
+states, RNG states and publication metadata. One background worker serializes,
+compresses, hashes, writes and publishes the checkpoint to the Modal Volume and
+R2. Only one checkpoint can be in progress. If it is still running at the next
+checkpoint boundary, we wait and log the wait. A worker failure fails training
+before the next update. Resume uses the latest published checkpoint.
+
+The fixed-lane pilot preallocates snapshot policies and warms their rollout
+graphs on the first visit to each group. Each policy uses the full set of anchor
+lanes, with ownership masks on queue writes. Promotion copies weights in place;
+the next block prefill rebuilds its history. We reserve snapshot_capacity slots
+plus enough retired slots to cover the native timeout. With four groups, a
+28,800-frame timeout and a 256-update snapshot interval, this is five slots.
+Retired weights remain unchanged while an episode uses them.
 
 We derive independent counter draws from run seed, domain, logical stream id,
 episode, frame, offset and factor. We separate action draws, reset choices,
