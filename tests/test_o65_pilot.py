@@ -376,8 +376,11 @@ def test_verify_only_rejects_unused_publication(tmp_path: Path) -> None:
         )
 
 
-def test_background_publication_uses_boundary_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    source, destination = tmp_path / "pilot", tmp_path / "volume"
+@pytest.mark.parametrize("parent", ["runs", "checkpoints", "retired-checkpoints"])
+def test_background_publication_uses_boundary_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parent: str
+) -> None:
+    source, destination = tmp_path / parent / "pilot", tmp_path / "volume"
     checkpoint = write_boundary(source / "train/checkpoints", 1)
     (source / "train/resolved.json").write_text('{"update": 1}')
     (source / "train/metrics.jsonl").write_text('{"global_step": 1}\n')

@@ -139,8 +139,8 @@ class CheckpointPublisher:
             for path in state_files(self.args.source)
             if path.suffix != ".pt"
             and not path.name.endswith(".sim.zlib")
-            and "checkpoints" not in path.parts
-            and "retired-checkpoints" not in path.parts
+            and "checkpoints" not in path.relative_to(self.args.source).parts
+            and "retired-checkpoints" not in path.relative_to(self.args.source).parts
         }
 
     def submit(self, checkpoint: Path, *, metadata: dict[Path, bytes] | None = None) -> None:
@@ -163,7 +163,11 @@ class CheckpointPublisher:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if source.suffix == ".pt" or source.name.endswith(".sim.zlib"):
                     os.link(source, target)
-                elif metadata is None or "checkpoints" in source.parts or "retired-checkpoints" in source.parts:
+                elif (
+                    metadata is None
+                    or "checkpoints" in source.relative_to(self.args.source).parts
+                    or "retired-checkpoints" in source.relative_to(self.args.source).parts
+                ):
                     shutil.copyfile(source, target)
                 elif source.relative_to(self.args.source) in metadata:
                     target.write_bytes(metadata[source.relative_to(self.args.source)])
