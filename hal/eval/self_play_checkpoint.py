@@ -183,7 +183,7 @@ def save_evaluation_checkpoint(
     At an update boundary, record the reference hash, Git SHA, update, and data
     manifest hashes before scheduling evaluation.
     """
-    _validate_provenance(provenance)
+    metadata = evaluation_checkpoint_metadata(model, statistics, provenance=provenance)
     if path.exists():
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,21 +192,34 @@ def save_evaluation_checkpoint(
         with temporary.open("xb") as target:
             torch.save(
                 {
-                    "format": EVALUATION_FORMAT,
-                    "architecture": asdict(model.cfg),
-                    "ranges": asdict(model.ranges),
-                    "decoder_precision": model.decoder_precision,
-                    "max_opponent_queue": model.critic_residual.max_queue,
-                    "critic_hidden_dim": model.critic_residual.residual.up.out_features // 2,
+                    **metadata,
                     "model": {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()},
-                    "statistics": {name: asdict(value) for name, value in statistics.items()},
-                    "provenance": provenance,
                 },
                 target,
             )
         os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def evaluation_checkpoint_metadata(
+    model: SelfPlayTransformer,
+    statistics: dict[str, FeatureStats],
+    *,
+    provenance: dict[str, object],
+) -> dict[str, object]:
+    """Describe the evaluation envelope without copying the model tensors."""
+    _validate_provenance(provenance)
+    return {
+        "format": EVALUATION_FORMAT,
+        "architecture": asdict(model.cfg),
+        "ranges": asdict(model.ranges),
+        "decoder_precision": model.decoder_precision,
+        "max_opponent_queue": model.critic_residual.max_queue,
+        "critic_hidden_dim": model.critic_residual.residual.up.out_features // 2,
+        "statistics": {name: asdict(value) for name, value in statistics.items()},
+        "provenance": provenance,
+    }
 
 
 def _validate_provenance(value: dict[str, object]) -> None:

@@ -38,9 +38,9 @@ from hal.eval.self_play_checkpoint import EVALUATION_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_VERSION
 from hal.eval.self_play_checkpoint import evaluation_actor_path
+from hal.eval.self_play_checkpoint import evaluation_checkpoint_metadata
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import read_training_manifest
-from hal.eval.self_play_checkpoint import save_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import sha256
 from hal.inference import compile_cache
 from hal.inference.column_context import PackedColumnContextBuilder
@@ -703,6 +703,23 @@ class ShardTiming:
     other: float
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class NativePoolSnapshot:
+    match_ids: tuple[int, ...]
+    max_frame: int
+    states: tuple[native.NativeSnapshot, ...]
+
+
+def encode_native_pool(snapshot: NativePoolSnapshot) -> bytes:
+    header = json.dumps(
+        {"format": "hal.o65.native_pool.v2", "matches": snapshot.match_ids, "max_frame": snapshot.max_frame}
+    ).encode()
+    states = tuple(native.encode_snapshot(state) for state in snapshot.states)
+    return (
+        struct.pack("<I", len(header)) + header + b"".join(struct.pack("<I", len(state)) + state for state in states)
+    )
+
+
 class NativeSimulatorShard:
     """Step native matches using pinned buffers for device transfers."""
 
@@ -830,16 +847,11 @@ class NativeSimulatorShard:
         self.reset_seconds += time.perf_counter() - started
         return result
 
+    def capture(self) -> Future[tuple[native.NativeSnapshot, ...]]:
+        return self.shard.capture_many(tuple(range(len(self.match_ids))))
+
     def save(self) -> bytes:
-        states = self.shard.save_many(tuple(range(len(self.match_ids)))).result()
-        header = json.dumps(
-            {"format": "hal.o65.native_pool.v2", "matches": self.match_ids, "max_frame": self.max_frame}
-        ).encode()
-        return (
-            struct.pack("<I", len(header))
-            + header
-            + b"".join(struct.pack("<I", len(state)) + state for state in states)
-        )
+        return encode_native_pool(NativePoolSnapshot(self.match_ids, self.max_frame, self.capture().result()))
 
     def restore(self, state: bytes) -> None:
         if len(state) < 4:
@@ -4216,14 +4228,31 @@ def _configuration_digest(trainer: Trainer) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str]) -> Path:
-    """Publish a manifest after every referenced file is durable.
+@dataclasses.dataclass(frozen=True, slots=True)
+class CheckpointSnapshot:
+    update: int
+    state: dict[str, object]
+    simulators: tuple[tuple[str, bytes | NativePoolSnapshot], ...]
+    actor: dict[str, object] | None
+    manifest: dict[str, object]
 
-    Use content-hash filenames to preserve published checkpoints during interruption.
-    Resume rebuilds caches from restored weights.
-    """
-    import io
 
+def _checkpoint_tensors(value: object) -> Iterator[Tensor]:
+    if isinstance(value, Tensor):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _checkpoint_tensors(child)
+    elif isinstance(value, (tuple, list)):
+        for child in value:
+            yield from _checkpoint_tensors(child)
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            yield from _checkpoint_tensors(getattr(value, field.name))
+
+
+def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> CheckpointSnapshot:
+    """Own every mutable byte before the next update can change it."""
     if torch.are_deterministic_algorithms_enabled() != trainer.config.deterministic:
         raise ValueError("checkpoint execution mode differs from the trainer configuration")
     if (
@@ -4236,9 +4265,9 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
     required = {"git_sha", "checkpoint_sha256", "data_manifest_sha256", "simulator_sha256", "adapter_sha256"}
     if set(provenance) != required or any(not value for value in provenance.values()):
         raise ValueError("checkpoint provenance must identify source, BC checkpoint, data, simulator, and adapter")
-    directory.mkdir(parents=True, exist_ok=True)
     engine = trainer.engine
-    state = {
+    anchors = {key: value.model.state_dict() for key, value in engine.anchors.items()}
+    state: dict[str, object] = {
         "version": CHECKPOINT_VERSION,
         "execution": {
             "deterministic": trainer.config.deterministic,
@@ -4248,8 +4277,8 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "actor_optimizer": trainer.actor_optimizer.state_dict(),
         "critic_optimizer": trainer.critic_optimizer.state_dict(),
         "scheduler": trainer.scheduler.state_dict(),
-        "reference": trainer.reference.model.state_dict(),
-        "anchors": {key: value.model.state_dict() for key, value in engine.anchors.items()},
+        "reference": anchors[0],
+        "anchors": anchors,
         "anchor_candidates": engine.anchor_candidates,
         "pool": engine.snapshot(),
         "clocks": engine.clocks,
@@ -4272,19 +4301,33 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
         "counter_rng": {"seed": engine.sampler.rng.seed, "key": engine.sampler.rng.key},
     }
-    buffer = io.BytesIO()
-    torch.save(state, buffer)
-    name, digest = _durable_file(directory, buffer.getvalue(), "rank0.pt")
-    shards = [{"name": name, "sha256": digest, "role": "training"}]
+    # Prepopulate deepcopy's memo so it preserves shared tensor references while
+    # batching device-to-pinned-host copies on the current training stream.
+    memo: dict[int, object] = {}
+    for tensor in _checkpoint_tensors(state):
+        if id(tensor) in memo:
+            continue
+        host = torch.empty_like(tensor, device="cpu", pin_memory=tensor.device.type == "cuda")
+        host.copy_(tensor.detach(), non_blocking=tensor.device.type == "cuda")
+        memo[id(tensor)] = host
+    if trainer.policy.device.type == "cuda":
+        torch.cuda.synchronize(trainer.policy.device)
+    state = copy.deepcopy(state, memo)
+    simulators: list[tuple[str, bytes | NativePoolSnapshot]] = []
+    pending: list[tuple[str, NativeSimulatorShard, Future[tuple[native.NativeSnapshot, ...]]]] = []
     for group_id, group in enumerate(engine.groups):
         for shard_id, shard in enumerate(group):
-            name, digest = _durable_file(directory, zlib.compress(shard.save()), "sim.zlib")
-            shards.append({"name": name, "sha256": digest, "role": f"simulator_{group_id}_{shard_id}"})
+            role = f"simulator_{group_id}_{shard_id}"
+            if isinstance(shard, NativeSimulatorShard):
+                pending.append((role, shard, shard.capture()))
+            else:
+                simulators.append((role, shard.save()))
+    for role, shard, future in pending:
+        simulators.append((role, NativePoolSnapshot(shard.match_ids, shard.max_frame, future.result())))
+    actor: dict[str, object] | None = None
     if isinstance(trainer.policy, TransformerPolicy):
-        actor = directory / f".actor-{os.getpid()}-{time.time_ns()}.pt"
-        try:
-            save_evaluation_checkpoint(
-                actor,
+        actor = {
+            **evaluation_checkpoint_metadata(
                 trainer.policy.model,
                 trainer.policy.statistics,
                 provenance={
@@ -4293,34 +4336,128 @@ def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str
                     "update": trainer.update,
                     "data_manifests": {"training": provenance["data_manifest_sha256"]},
                 },
-            )
-            name, digest = _durable_file(directory, actor.read_bytes(), "actor.pt")
-            shards.append({"name": name, "sha256": digest, "role": "actor"})
-        finally:
-            actor.unlink(missing_ok=True)
-    manifest = {
+            ),
+            "model": state["model"],
+        }
+    manifest: dict[str, object] = {
         "format": TRAINING_FORMAT,
         "version": CHECKPOINT_VERSION,
         "experiment": "065_selfplay_ppo",
         "update": trainer.update,
         "configuration_sha256": _configuration_digest(trainer),
         "environment": _environment(),
-        "provenance": provenance,
-        "shards": shards,
+        "provenance": dict(provenance),
     }
-    temporary = directory / f".manifest-{trainer.update}-{os.getpid()}.partial"
-    target = directory / f"update-{trainer.update:08d}.json"
+    return CheckpointSnapshot(trainer.update, state, tuple(simulators), actor, manifest)
+
+
+def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
+    """Publish the manifest only after all immutable files are durable."""
+    import io
+
+    directory.mkdir(parents=True, exist_ok=True)
+    buffer = io.BytesIO()
+    torch.save(snapshot.state, buffer)
+    name, digest = _durable_file(directory, buffer.getvalue(), "rank0.pt")
+    shards = [{"name": name, "sha256": digest, "role": "training"}]
+    for role, state in snapshot.simulators:
+        payload = encode_native_pool(state) if isinstance(state, NativePoolSnapshot) else state
+        name, digest = _durable_file(directory, zlib.compress(payload), "sim.zlib")
+        shards.append({"name": name, "sha256": digest, "role": role})
+    if snapshot.actor is not None:
+        buffer = io.BytesIO()
+        torch.save(snapshot.actor, buffer)
+        name, digest = _durable_file(directory, buffer.getvalue(), "actor.pt")
+        shards.append({"name": name, "sha256": digest, "role": "actor"})
+    manifest = {**snapshot.manifest, "shards": shards}
+    temporary = directory / f".manifest-{snapshot.update}-{os.getpid()}.partial"
+    target = directory / f"update-{snapshot.update:08d}.json"
     with temporary.open("w") as output:
         json.dump(manifest, output, sort_keys=True)
         output.flush()
         os.fsync(output.fileno())
-    os.replace(temporary, target)
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
+        # Persist shard names before the manifest can refer to them.
+        os.fsync(descriptor)
+        os.replace(temporary, target)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
     return target
+
+
+def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str]) -> Path:
+    return write_checkpoint(capture_checkpoint(trainer, provenance), directory)
+
+
+def _write_and_publish_checkpoint(
+    snapshot: CheckpointSnapshot,
+    directory: Path,
+    publisher: self_play_publication.CheckpointPublisher | None,
+    metadata: dict[Path, bytes] | None,
+) -> float:
+    started = time.perf_counter()
+    checkpoint = write_checkpoint(snapshot, directory)
+    if publisher is not None:
+        publisher.submit(checkpoint, metadata=metadata)
+        publisher.wait()
+    return time.perf_counter() - started
+
+
+class CheckpointWorker:
+    """Keep one independent snapshot until its write and publication finish."""
+
+    def __init__(
+        self,
+        directory: Path,
+        provenance: dict[str, str],
+        publisher: self_play_publication.CheckpointPublisher | None = None,
+    ) -> None:
+        self.directory = directory
+        self.provenance = dict(provenance)
+        self.publisher = publisher
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkpoint-write")
+        self.pending: Future[float] | None = None
+        self.update = 0
+        self.capture_seconds = 0.0
+
+    def wait(self) -> None:
+        if self.pending is None:
+            return
+        waiting = not self.pending.done()
+        started = time.perf_counter()
+        if waiting:
+            print(f"checkpoint_wait update={self.update}", flush=True)
+        worker_seconds = self.pending.result()
+        wait_seconds = time.perf_counter() - started if waiting else 0.0
+        print(
+            f"checkpoint update={self.update} training_seconds={self.capture_seconds:.3f} "
+            f"worker_seconds={worker_seconds:.3f} wait_seconds={wait_seconds:.3f}",
+            flush=True,
+        )
+        self.pending = None
+
+    def check(self) -> None:
+        if self.pending is not None and self.pending.done():
+            self.wait()
+
+    def submit(self, trainer: Trainer) -> None:
+        self.wait()
+        started = time.perf_counter()
+        snapshot = capture_checkpoint(trainer, self.provenance)
+        metadata = self.publisher.capture_metadata() if self.publisher is not None else None
+        self.capture_seconds = time.perf_counter() - started
+        self.update = snapshot.update
+        self.pending = self.executor.submit(
+            _write_and_publish_checkpoint, snapshot, self.directory, self.publisher, metadata
+        )
+
+    def close(self) -> None:
+        try:
+            self.wait()
+        finally:
+            self.executor.shutdown(wait=True)
 
 
 def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
@@ -4464,6 +4601,27 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         torch.cuda.set_rng_state_all(saved["cuda_rng"])
 
 
+def print_progress(metrics: dict[str, float], *, warming: bool) -> None:
+    games = int(metrics.get("gameplay/pi_ref_count_32_updates", 0))
+    win_rate = f"{metrics['gameplay/pi_ref_win_rate_32_updates']:.3f}" if games else "n/a"
+    gib = 1024**3
+    print(
+        f"update={int(metrics['global_step'])} warming={int(warming)} "
+        f"seconds={metrics['systems/update_seconds']:.3f} "
+        f"rollout={metrics['systems/rollout_seconds']:.3f} "
+        f"preparation={metrics['systems/preparation_seconds']:.3f} "
+        f"actor={metrics.get('systems/actor_seconds', 0):.3f} "
+        f"critic={metrics['systems/critic_seconds']:.3f} "
+        f"match_frames/s={metrics['systems/match_frames_per_second']:.1f} "
+        f"kl/frame={metrics['policy/kl_per_frame']:.6g} "
+        f"ev={metrics['critic/explained_variance']:.4f} "
+        f"pi_ref_win32={win_rate} games={games} "
+        f"peak_allocated_gib={metrics.get('systems/peak_allocated_bytes', 0) / gib:.3f} "
+        f"peak_reserved_gib={metrics.get('systems/peak_reserved_bytes', 0) / gib:.3f}",
+        flush=True,
+    )
+
+
 def run_training(
     trainer: Trainer,
     updates: int,
@@ -4505,22 +4663,30 @@ def run_training(
                 json.dumps({**dataclasses.asdict(head_start), "metrics": metrics}, indent=2)
             )
             wandb.log({"global_step": 0, **metrics})
-            print(json.dumps(metrics, sort_keys=True), flush=True)
-        with (output / "metrics.jsonl").open("a") as log:
+            print(f"head_start_ended seconds={head_start.seconds:.3f}", flush=True)
+        with (
+            contextlib.closing(CheckpointWorker(output / "checkpoints", provenance, publisher)) as checkpoints,
+            (output / "metrics.jsonl").open("a") as log,
+        ):
             while trainer.update < updates:
-                if publisher is not None:
-                    publisher.check()
+                checkpoints.check()
+                warming = trainer.warming
                 batch, metrics = trainer.run_update()
                 del batch
+                print_progress(metrics, warming=warming)
+                if metrics.get("train/warmup_ended"):
+                    print(
+                        f"critic_warmup_ended update={trainer.update} "
+                        f"lambda_max={trainer.engine.sampler.lambda_max:.6g}",
+                        flush=True,
+                    )
                 resolved["calibrated_lambda_max"] = trainer.engine.sampler.lambda_max
                 (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
                 wandb.log(metrics)
                 log.write(json.dumps(metrics, sort_keys=True) + "\n")
                 log.flush()
                 if trainer.update % trainer.config.checkpoint_interval == 0 or trainer.update == updates:
-                    checkpoint = save_checkpoint(trainer, output / "checkpoints", provenance)
-                    if publisher is not None:
-                        publisher.submit(checkpoint)
+                    checkpoints.submit(trainer)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

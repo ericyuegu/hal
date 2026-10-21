@@ -175,6 +175,15 @@ class NativeShard:
             raise ValueError("save needs distinct lanes")
         return tuple(self._batch.save(lane) for lane in lanes)
 
+    def capture_many(self, lanes: Sequence[int]) -> Future[tuple[native.NativeSnapshot, ...]]:
+        self._check_open()
+        return self._executor.submit(self._capture_many, tuple(lanes))
+
+    def _capture_many(self, lanes: tuple[int, ...]) -> tuple[native.NativeSnapshot, ...]:
+        if len(set(lanes)) != len(lanes):
+            raise ValueError("capture needs distinct lanes")
+        return tuple(self._batch.capture(lane) for lane in lanes)
+
     def restore_many(
         self,
         lanes: Sequence[int],

@@ -266,7 +266,14 @@ def test_publication_leaves_training_free_and_reports_worker_failure(
     run = trainer(groups=1, anchor_rate=0)
     run.config = dataclasses.replace(run.config, checkpoint_interval=1)
     try:
-        exp.run_training(run, 2, source / "train", PROVENANCE, publisher=publisher)
+        training = source / "train"
+        training.mkdir()
+        for _ in range(2):
+            _, metrics = run.run_update()
+            with (training / "metrics.jsonl").open("a") as log:
+                log.write(json.dumps(metrics) + "\n")
+            checkpoint = exp.save_checkpoint(run, training / "checkpoints", PROVENANCE)
+            publisher.submit(checkpoint)
         assert started.wait(timeout=5)
         assert run.update == 2 and not release.is_set()
         # The first snapshot's shards survive local compaction at update two.
@@ -367,3 +374,83 @@ def test_verify_only_rejects_unused_publication(tmp_path: Path) -> None:
                 tmp_path / "pilot", tmp_path / "volume", "test", "o65/pilot-results/test"
             ),
         )
+
+
+def test_background_publication_uses_boundary_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, destination = tmp_path / "pilot", tmp_path / "volume"
+    checkpoint = write_boundary(source / "train/checkpoints", 1)
+    (source / "train/resolved.json").write_text('{"update": 1}')
+    (source / "train/metrics.jsonl").write_text('{"global_step": 1}\n')
+    publisher = self_play_publication.CheckpointPublisher(
+        self_play_publication.Args(source, destination, "test", "o65/pilot-results/test")
+    )
+
+    def publish(args: self_play_publication.Args) -> None:
+        self_play_publication.stage_state(args.source, args.destination)
+
+    monkeypatch.setattr(self_play_publication, "publish", publish)
+    try:
+        metadata = publisher.capture_metadata()
+        (source / "train/resolved.json").write_text('{"update": 2}')
+        (source / "train/metrics.jsonl").write_text('{"global_step": 1}\n{"global_step": 2}\n')
+        publisher.submit(checkpoint, metadata=metadata)
+        publisher.wait()
+    finally:
+        publisher.close()
+    assert json.loads((destination / "train/resolved.json").read_text()) == {"update": 1}
+    rows = (destination / "train/metrics.jsonl").read_text().splitlines()
+    assert list(map(json.loads, rows)) == [{"global_step": 1}]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_checkpoint_worker_serializes_publication_before_next_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    source, destination = tmp_path / "pilot", tmp_path / "volume"
+    run = trainer(groups=1, anchor_rate=0)
+    run.run_update()
+    started, release = threading.Event(), threading.Event()
+    publisher = self_play_publication.CheckpointPublisher(
+        self_play_publication.Args(source, destination, "test", "o65/pilot-results/test")
+    )
+
+    def publish(args: self_play_publication.Args) -> None:
+        started.set()
+        assert release.wait(timeout=60)
+        if fail:
+            raise OSError("publication failed")
+        self_play_publication.stage_state(args.source, args.destination)
+
+    monkeypatch.setattr(self_play_publication, "publish", publish)
+    worker = exp.CheckpointWorker(source / "train/checkpoints", PROVENANCE, publisher)
+    try:
+        worker.submit(run)
+        assert started.wait(timeout=60)
+        assert worker.pending is not None and not worker.pending.done()
+        # Training can advance while the only checkpoint is publishing.
+        run.run_update()
+        worker.check()
+        assert run.update == 2
+        release.set()
+        if fail:
+            with pytest.raises(OSError, match="publication failed"):
+                worker.wait()
+        else:
+            worker.wait()
+            worker.submit(run)
+    finally:
+        release.set()
+        if fail:
+            with pytest.raises(OSError, match="publication failed"):
+                worker.close()
+            with pytest.raises(OSError, match="publication failed"):
+                publisher.close()
+        else:
+            worker.close()
+            publisher.close()
+    if not fail:
+        assert _MODULE.latest_checkpoint(destination / "train/checkpoints").name == "update-00000002.json"

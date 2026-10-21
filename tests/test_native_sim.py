@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import math
+import os
 import struct
 import subprocess
 from dataclasses import replace
@@ -574,3 +575,38 @@ def test_shard_wait_callback_failure_preserves_state(fake_sim: Path) -> None:
     shard.close()
     with pytest.raises(RuntimeError, match="closed"):
         shard.save(0)
+
+
+def test_raw_capture_owns_state_and_keeps_the_saved_format(fake_sim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with native.NativeRolloutBatch(fake_sim, 1) as batch:
+        batch.reset(_matches(1), np.array([True]))
+        saved = batch.save(0)
+
+        def reject_compression(payload: bytes) -> bytes:
+            raise AssertionError("raw capture compressed simulator state")
+
+        with monkeypatch.context() as capture_patch:
+            capture_patch.setattr(native.zlib, "compress", reject_compression)
+            captured = batch.capture(0)
+        action = np.zeros((1, 2, ACTION_DIM), dtype=np.float32)
+        action[0, 0, 6] = 1
+        batch.step(action, np.array([True]))
+        assert native.encode_snapshot(captured) == saved
+        batch.restore(0, native.encode_snapshot(captured))
+        assert batch.frame.frame_id[0] == captured.frame_id
+        np.testing.assert_array_equal(batch.frame.applied_action[0], captured.applied_action)
+        np.testing.assert_array_equal(batch.frame.wire_inputs[0], captured.wire_inputs)
+
+
+def test_shard_raw_capture_is_independent_and_validates_lanes(fake_sim: Path) -> None:
+    from hal.sim.native_shard import NativeShard
+
+    with NativeShard(fake_sim, 2, cpu=min(os.sched_getaffinity(0))) as shard:
+        shard.reset(_matches(2), np.ones(2, dtype=np.bool_)).result()
+        captured = shard.capture_many((1, 0)).result()
+        expected = shard.save_many((1, 0)).result()
+        assert tuple(map(native.encode_snapshot, captured)) == expected
+        with pytest.raises(ValueError, match="distinct"):
+            shard.capture_many((0, 0)).result()
+    with pytest.raises(RuntimeError, match="closed"):
+        shard.capture_many((0,))

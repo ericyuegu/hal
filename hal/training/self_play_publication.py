@@ -132,7 +132,18 @@ class CheckpointPublisher:
                 pending.append(future)
         self.pending = pending
 
-    def submit(self, checkpoint: Path) -> None:
+    def capture_metadata(self) -> dict[Path, bytes]:
+        """Freeze mutable logs and settings while the trainer is at a boundary."""
+        return {
+            path.relative_to(self.args.source): path.read_bytes()
+            for path in state_files(self.args.source)
+            if path.suffix != ".pt"
+            and not path.name.endswith(".sim.zlib")
+            and "checkpoints" not in path.parts
+            and "retired-checkpoints" not in path.parts
+        }
+
+    def submit(self, checkpoint: Path, *, metadata: dict[Path, bytes] | None = None) -> None:
         self.check()
         if len(self.pending) >= 2:
             raise RuntimeError("checkpoint publication queue is full")
@@ -152,18 +163,24 @@ class CheckpointPublisher:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if source.suffix == ".pt" or source.name.endswith(".sim.zlib"):
                     os.link(source, target)
-                else:
+                elif metadata is None or "checkpoints" in source.parts or "retired-checkpoints" in source.parts:
                     shutil.copyfile(source, target)
+                elif source.relative_to(self.args.source) in metadata:
+                    target.write_bytes(metadata[source.relative_to(self.args.source)])
             self.pending.append(self.executor.submit(publish_snapshot, self.args, snapshot))
             submitted = True
         finally:
             if not submitted:
                 snapshot.cleanup()
 
+    def wait(self) -> None:
+        for future in self.pending:
+            future.result()
+        self.pending.clear()
+
     def close(self) -> None:
         try:
-            for future in self.pending:
-                future.result()
+            self.wait()
         finally:
             self.executor.shutdown(wait=True)
 

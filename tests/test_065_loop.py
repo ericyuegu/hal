@@ -1175,3 +1175,149 @@ def test_actor_microbatches_match_the_whole_step() -> None:
     run.fit(batch)
     for name, value in run.policy.model.state_dict().items():
         torch.testing.assert_close(value, whole[name], rtol=1e-5, atol=1e-7, msg=name)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_background_checkpoint_owns_state_and_resumes_next_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    import threading
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    run = trainer(device, length=23, timeout=True)
+    for _ in range(3):
+        run.run_update()
+    synchronous = exp.save_checkpoint(run, tmp_path / "sync", PROVENANCE)
+    entered, release = threading.Event(), threading.Event()
+    original = exp.write_checkpoint
+
+    def delayed_write(snapshot: Any, directory: Path) -> Path:
+        entered.set()
+        assert release.wait(timeout=60)
+        return original(snapshot, directory)
+
+    monkeypatch.setattr(exp, "write_checkpoint", delayed_write)
+    worker = exp.CheckpointWorker(tmp_path / "async", PROVENANCE)
+    try:
+        worker.submit(run)
+        assert entered.wait(timeout=60)
+        expected, _ = run.run_update()
+        control = exp._update_tensors(run)
+        assert not list((tmp_path / "async").glob("update-*.json"))
+    finally:
+        release.set()
+        worker.close()
+    asynchronous = tmp_path / "async/update-00000003.json"
+    results = []
+    for manifest in (synchronous, synchronous, asynchronous):
+        exp.restore_checkpoint(run, manifest, PROVENANCE)
+        actual, _ = run.run_update()
+        assert_batch_equal(expected, actual)
+        results.append(exp._update_tensors(run))
+        assert run.scheduler.last_epoch == run.actor_steps
+    assert exp._compare_resume_updates(results[0], results[1], results[2]).passed
+    assert exp._compare_resume_updates(results[0], results[1], control).passed
+
+
+def test_checkpoint_worker_failure_stops_before_next_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    failed = threading.Event()
+    run = trainer(groups=1, anchor_rate=0)
+    run.config = dataclasses.replace(run.config, checkpoint_interval=1)
+    original = run.run_update
+    calls = []
+
+    def fail_write(snapshot: Any, directory: Path) -> Path:
+        failed.set()
+        raise OSError("checkpoint disk failed")
+
+    def update() -> Any:
+        calls.append(run.update)
+        assert len(calls) == 1, "failed checkpoint allowed the next update"
+        return original()
+
+    submit = exp.CheckpointWorker.submit
+
+    def submit_and_observe(worker: Any, current: Any) -> None:
+        submit(worker, current)
+        assert failed.wait(timeout=60)
+        # Observe completion without consuming its exception.
+        assert worker.pending is not None
+        from concurrent.futures import wait
+
+        wait((worker.pending,), timeout=60)
+        assert worker.pending.done()
+
+    monkeypatch.setattr(exp, "write_checkpoint", fail_write)
+    monkeypatch.setattr(exp.CheckpointWorker, "submit", submit_and_observe)
+    monkeypatch.setattr(run, "run_update", update)
+    with pytest.raises(OSError, match="checkpoint disk failed"):
+        exp.run_training(run, 3, tmp_path, PROVENANCE)
+    assert calls == [0]
+    assert not list((tmp_path / "checkpoints").glob("update-*.json"))
+
+
+def test_failed_checkpoint_write_keeps_latest_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run = trainer(groups=1)
+    run.run_update()
+    first = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+    original = first.read_bytes()
+    run.run_update()
+    snapshot = exp.capture_checkpoint(run, PROVENANCE)
+    durable_file = exp._durable_file
+
+    def fail_simulator(directory: Path, payload: bytes, suffix: str) -> tuple[str, str]:
+        if suffix == "sim.zlib":
+            raise OSError("simulator write failed")
+        return durable_file(directory, payload, suffix)
+
+    monkeypatch.setattr(exp, "_durable_file", fail_simulator)
+    with pytest.raises(OSError, match="simulator write failed"):
+        exp.write_checkpoint(snapshot, tmp_path)
+    assert first.read_bytes() == original
+    assert not (tmp_path / "update-00000002.json").exists()
+    exp.restore_checkpoint(run, first, PROVENANCE)
+    assert run.update == 1
+
+
+@pytest.mark.integration
+def test_native_background_checkpoint_matches_synchronous_next_update(
+    tmp_path: Path, native_rollout_data: Path
+) -> None:
+    policy = ToyPolicy()
+    shard = exp.NativeSimulatorShard(
+        native_rollout_data, (0, 1), cpu=min(os.sched_getaffinity(0)), device=policy.device, max_frame=0
+    )
+    try:
+        engine = exp.RolloutEngine(((shard,),), policy, sampler(anchor_rate=0), {0: policy.frozen_copy()})
+        engine.initialize()
+        run = exp.Trainer(
+            engine,
+            exp.TrainConfig(
+                actor_optimizer="adam",
+                critic_warmup_updates=0,
+                windows_per_step=4,
+                critic_epochs=1,
+                snapshot_interval=100,
+            ),
+        )
+        run.run_update()
+        synchronous = exp.save_checkpoint(run, tmp_path / "sync", PROVENANCE)
+        worker = exp.CheckpointWorker(tmp_path / "async", PROVENANCE)
+        try:
+            worker.submit(run)
+            run.run_update()
+        finally:
+            worker.close()
+        batches, updates = [], []
+        for manifest in (synchronous, synchronous, tmp_path / "async/update-00000001.json"):
+            exp.restore_checkpoint(run, manifest, PROVENANCE)
+            batch, _ = run.run_update()
+            batches.append(exp._batch_hash(batch))
+            updates.append(exp._update_tensors(run))
+        assert len(set(batches)) == 1
+        assert exp._compare_resume_updates(*updates).passed
+    finally:
+        shard.close()

@@ -98,6 +98,43 @@ class NativeMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeSnapshot:
+    config: NativeMatch
+    adapter_sha256: str
+    manifest_sha256: str
+    library_sha256: str
+    frame_id: int
+    applied_action: tuple[tuple[float, ...], tuple[float, ...]]
+    wire_inputs: tuple[tuple[int, ...], tuple[int, ...]]
+    terminated: bool
+    truncated: bool
+    payload: bytes
+
+
+def encode_snapshot(snapshot: NativeSnapshot) -> bytes:
+    header = {
+        "snapshot_version": 3,
+        "compression": "zlib",
+        "abi": _ABI_VERSION,
+        "adapter_abi": native_bridge.ABI_VERSION,
+        "adapter_sha256": snapshot.adapter_sha256,
+        "observation_schema": _OBSERVATION_SCHEMA,
+        "action_schema": _ACTION_SCHEMA,
+        "manifest_sha256": snapshot.manifest_sha256,
+        "library_sha256": snapshot.library_sha256,
+        "config": _config_dict(snapshot.config),
+        "frame_id": snapshot.frame_id,
+        "applied_action": snapshot.applied_action,
+        "wire_inputs": snapshot.wire_inputs,
+        "terminated": snapshot.terminated,
+        "truncated": snapshot.truncated,
+        "payload_sha256": hashlib.sha256(snapshot.payload).hexdigest(),
+    }
+    metadata = json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return _SNAPSHOT_MAGIC + struct.pack("<I", len(metadata)) + metadata + zlib.compress(snapshot.payload)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeFrameBatch:
     """Borrowed arrays, overwritten by the next reset, step, or restore."""
 
@@ -462,26 +499,13 @@ class NativeRolloutBatch:
         return self.frame
 
     def save(self, lane: int) -> bytes:
+        return encode_snapshot(self.capture(lane))
+
+    def capture(self, lane: int) -> NativeSnapshot:
+        """Copy simulator and adapter state without hashing or compression."""
         self._check_lane(lane)
         config = self._configs[lane]
         assert config is not None
-        header = {
-            "snapshot_version": 3,
-            "compression": "zlib",
-            "abi": _ABI_VERSION,
-            "adapter_abi": native_bridge.ABI_VERSION,
-            "adapter_sha256": self._adapter_sha,
-            "observation_schema": _OBSERVATION_SCHEMA,
-            "action_schema": _ACTION_SCHEMA,
-            "manifest_sha256": self._manifest_sha,
-            "library_sha256": self._library_sha,
-            "config": _config_dict(config),
-            "frame_id": int(self.frame.frame_id[lane]),
-            "applied_action": self.frame.applied_action[lane].tolist(),
-            "wire_inputs": self.frame.wire_inputs[lane].tolist(),
-            "terminated": bool(self.frame.terminated[lane]),
-            "truncated": bool(self.frame.truncated[lane]),
-        }
         size = ctypes.c_size_t()
         native_bridge.check(self._lib, self._lib.hal_native_save_size(self._handle, lane, ctypes.byref(size)))
         buffer = ctypes.create_string_buffer(size.value)
@@ -490,9 +514,18 @@ class NativeRolloutBatch:
             self._lib, self._lib.hal_native_save(self._handle, lane, buffer, size.value, ctypes.byref(written))
         )
         payload = buffer.raw[: written.value]
-        header["payload_sha256"] = hashlib.sha256(payload).hexdigest()
-        metadata = json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        return _SNAPSHOT_MAGIC + struct.pack("<I", len(metadata)) + metadata + zlib.compress(payload)
+        return NativeSnapshot(
+            config,
+            self._adapter_sha,
+            self._manifest_sha,
+            self._library_sha,
+            int(self.frame.frame_id[lane]),
+            (tuple(self.frame.applied_action[lane, 0].tolist()), tuple(self.frame.applied_action[lane, 1].tolist())),
+            (tuple(self.frame.wire_inputs[lane, 0].tolist()), tuple(self.frame.wire_inputs[lane, 1].tolist())),
+            bool(self.frame.terminated[lane]),
+            bool(self.frame.truncated[lane]),
+            payload,
+        )
 
     def restore(self, lane: int, state: bytes) -> NativeFrameBatch:
         return self.restore_many((lane,), (state,))
