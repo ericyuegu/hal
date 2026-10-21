@@ -84,3 +84,10 @@ and `runs/modal-floor/`, with remote copies in Modal Volume `hal-o65-profile`.
 
 The earlier dense comparison against `aacdfee0`, recorded at `2ff3e77a`, found
 shifts in KL and trajectory medians. It did not establish statistical equivalence.
+
+## Checkpoint and snapshot stalls
+
+The RTX 3060 probes in [stalls.md](stalls.md) reduce checkpoint capture to
+0.052–0.178 s at 16 matches. A forced anchor split takes 206.071 s before the
+change and 3.500 s after it, with compiler starts reduced from three to zero.
+The full-pilot capture and CUDA graph memory figures remain projections.

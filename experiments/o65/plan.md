@@ -256,8 +256,8 @@ writes durable files before publishing an atomic manifest with hashes.
 We reject earlier formats and mismatched resume settings.
 
 One trainer process runs the whole pilot. It saves every 32 updates and at the
-final update. At each checkpoint boundary, we capture independent CPU tensors, raw simulator
-states, RNG states and publication metadata. One background worker serializes,
+final update. At each checkpoint boundary, we capture independent CPU tensors,
+raw simulator states, RNG states and publication metadata. One background worker serializes,
 compresses, hashes, writes and publishes the checkpoint to the Modal Volume and
 R2. Only one checkpoint can be in progress. If it is still running at the next
 checkpoint boundary, we wait and log the wait. A worker failure fails training
