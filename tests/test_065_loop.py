@@ -1470,3 +1470,23 @@ def test_native_background_checkpoint_matches_synchronous_next_update(
         assert exp._compare_resume_updates(*updates).passed
     finally:
         shard.close()
+
+
+@pytest.mark.parametrize("maximum, interval, expected", [(0, 3, 2), (0, 4, 1), (28800, 256, 2)])
+def test_retired_snapshot_slots_cover_native_countdown_and_pool_rotation(
+    maximum: int, interval: int, expected: int
+) -> None:
+    class BoundedShard(FakeShard, exp.NativeSimulatorShard):
+        def __init__(self, ids: tuple[int, ...]) -> None:
+            FakeShard.__init__(self, ids)
+            self.max_frame = maximum
+
+    policy = ToyPolicy()
+    engine = exp.RolloutEngine(
+        tuple((BoundedShard((2 * group, 2 * group + 1)),) for group in range(4)),
+        policy,
+        sampler(),
+        {0: policy.frozen_copy()},
+    )
+    run = exp.Trainer(engine, exp.TrainConfig(snapshot_interval=interval))
+    assert len(run.snapshot_slots) == run.config.snapshot_capacity + expected

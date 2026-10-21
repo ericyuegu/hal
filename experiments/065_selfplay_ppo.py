@@ -71,6 +71,7 @@ from hal.sim.native_shard import NativeShard
 from hal.training import self_play_publication
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.wire import ACTION_DIM
+from hal.wire import GAME_START_FRAME
 
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
 MAX_REPLAN = 4
@@ -3519,14 +3520,12 @@ class Trainer:
         ]
         retired_limit = assigned_limit
         if len(timeouts) == sum(map(len, engine.groups)) and min(timeouts) >= 0:
-            retired_limit = min(
-                retired_limit,
-                math.ceil(
-                    (max(timeouts) + 128)
-                    * len(engine.groups)
-                    / (engine.sampler.schedule.rollout_frames * config.snapshot_interval)
-                ),
-            )
+            # Native frame ids start before zero. A group advances only once
+            # per pool rotation, and promotion can fall between its visits.
+            episode_updates = math.ceil(
+                (max(timeouts) - GAME_START_FRAME) / engine.sampler.schedule.rollout_frames
+            ) * len(engine.groups)
+            retired_limit = min(retired_limit, math.ceil(episode_updates / config.snapshot_interval))
         existing = [policy for key, policy in engine.anchors.items() if key]
         slots = config.snapshot_capacity + retired_limit
         self.snapshot_slots = tuple(existing + [self.policy.frozen_copy() for _ in range(slots - len(existing))])
