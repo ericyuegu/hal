@@ -1330,9 +1330,9 @@ def test_prepared_snapshot_reuses_graphs_after_weight_copy(device: str) -> None:
     parameter_graph = None
     before = None
     if device == "cuda":
-        head = next(iter(slot.model.temporal.outputs.values()))
-        inputs = torch.zeros(1, head.up.in_features, device=device)
-        parameter_graph = exp.CapturedCall(lambda: head(inputs), (inputs,), device=slot.device)
+        captured_head = next(iter(slot.model.temporal.outputs.values()))
+        inputs = torch.zeros(1, captured_head.up.in_features, device=device)
+        parameter_graph = exp.CapturedCall(lambda: captured_head(inputs), (inputs,), device=slot.device)
         before = parameter_graph((inputs,)).clone()
     with torch.no_grad():
         for head in run.policy.model.temporal.outputs.values():
@@ -1345,7 +1345,7 @@ def test_prepared_snapshot_reuses_graphs_after_weight_copy(device: str) -> None:
     if parameter_graph is not None:
         assert before is not None
         actual = parameter_graph((inputs,)).clone()
-        torch.testing.assert_close(actual, head(inputs), rtol=0, atol=0)
+        torch.testing.assert_close(actual, captured_head(inputs), rtol=0, atol=0)
         assert not torch.equal(actual, before)
     engine.anchor_candidates = (1,)
     with count_compilation_starts() as counter:
