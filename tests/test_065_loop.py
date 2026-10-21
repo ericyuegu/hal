@@ -1327,6 +1327,13 @@ def test_prepared_snapshot_reuses_graphs_after_weight_copy(device: str) -> None:
     slot = run.snapshot_slots[0]
     pointers = [value.data_ptr() for value in slot.model.parameters()]
     graphs = {key: id(graph) for key, graph in slot.tick_graphs.items()}
+    parameter_graph = None
+    before = None
+    if device == "cuda":
+        head = next(iter(slot.model.temporal.outputs.values()))
+        inputs = torch.zeros(1, head.up.in_features, device=device)
+        parameter_graph = exp.CapturedCall(lambda: head(inputs), (inputs,), device=slot.device)
+        before = parameter_graph((inputs,)).clone()
     with torch.no_grad():
         for head in run.policy.model.temporal.outputs.values():
             head.down.bias.add_(0.1)
@@ -1335,12 +1342,26 @@ def test_prepared_snapshot_reuses_graphs_after_weight_copy(device: str) -> None:
     assert pointers == [value.data_ptr() for value in slot.model.parameters()]
     for name, value in slot.model.state_dict().items():
         torch.testing.assert_close(value, run.policy.model.state_dict()[name], rtol=0, atol=0)
+    if parameter_graph is not None:
+        assert before is not None
+        actual = parameter_graph((inputs,)).clone()
+        torch.testing.assert_close(actual, head(inputs), rtol=0, atol=0)
+        assert not torch.equal(actual, before)
     engine.anchor_candidates = (1,)
     with count_compilation_starts() as counter:
         batch, _ = run.run_update()
         assert counter.snapshot() == 0
     assert {key: id(graph) for key, graph in slot.tick_graphs.items()} == graphs
     assert bool((batch.rollout.table.opponent_anchor[batch.rollout.ids] == 1).any())
+    with count_compilation_starts() as counter:
+        for _ in range(3):
+            run.run_update()
+        assert engine.anchors[3] is slot
+        engine.anchor_candidates = (3,)
+        run.run_update()
+        assert counter.snapshot() == 0
+    assert pointers == [value.data_ptr() for value in slot.model.parameters()]
+    assert {key: id(graph) for key, graph in slot.tick_graphs.items()} == graphs
     if device == "cuda":
         assert len(graphs) == 3
 
