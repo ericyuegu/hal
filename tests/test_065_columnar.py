@@ -129,7 +129,7 @@ def test_action_ring_wrap_and_cadence(device: str) -> None:
 def test_pool_rejects_old_formats_and_owns_cpu_queue_snapshots() -> None:
     from test_065_loop import trainer
 
-    run = trainer(groups=1, anchor_rate=0, development=True)
+    run = trainer(groups=1, development=True)
     run.run_update()
     saved = run.engine.snapshot()
     with pytest.raises(ValueError, match="snapshot identity"):
@@ -146,7 +146,7 @@ def test_old_training_checkpoint_is_rejected_before_loading(version: int, tmp_pa
     from test_065_loop import exp as loop_exp
     from test_065_loop import trainer
 
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     path = loop_exp.save_checkpoint(run, tmp_path, PROVENANCE)
     manifest = json.loads(path.read_text())

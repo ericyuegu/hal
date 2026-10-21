@@ -196,3 +196,14 @@ def test_failed_pilot_preserves_the_published_resume_tree(tmp_path: Path, monkey
     assert launcher.run_remote(Request("pilot", "a" * 40, mode="pilot")) == 1
     assert (published / "checkpoint").read_text() == "published update 32"
     assert (results / "pilot/last-attempt/pilot/checkpoint").read_text() == "unpublished update 64"
+
+
+def test_learner_migration_uses_read_only_source_volume_and_new_run() -> None:
+    source = "o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json"
+    request = Request("o65-fixed-resume", "a" * 40, mode="pilot", resume_learner=source)
+    argv = command(request, tuple(range(16)))
+    assert argv[argv.index("--resume-learner") + 1] == f"/o65-results/{source}"
+    assert argv[argv.index("--output") + 1] == "/opt/o65-work/o65-fixed-resume/pilot"
+    for path in ("../" + source, "/" + source, source.replace("256", "255"), "o65-fixed-resume/" + source):
+        with pytest.raises(ValueError):
+            dataclasses.replace(request, resume_learner=path)

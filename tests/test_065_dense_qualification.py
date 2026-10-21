@@ -49,8 +49,8 @@ def frozen_rows(table: Any) -> Any:
 class QualificationSampler(exp.EpisodeSampler):
     """Use u=0.95 for comparison with the recorded control."""
 
-    def sample(self, match_id: int, episode: int, anchors: tuple[int, ...]) -> Any:
-        sampled = super().sample(match_id, episode, anchors)
+    def sample(self, match_id: int, episode: int, anchor: int | None) -> Any:
+        sampled = super().sample(match_id, episode, anchor)
         left, right = sampled.players
         return dataclasses.replace(
             sampled,
@@ -134,7 +134,7 @@ def qualify(output: Path) -> dict[str, Any]:
         sampling = QualificationSampler(
             exp.read_native_sampler(ROOT / "experiments/o65/pilot-sampler.json"), schedule, exp.CounterRng(65)
         )
-        engine = exp.RolloutEngine((tuple(shards),), policy, sampling, {0: reference}, fixed_anchor_lanes=True)
+        engine = exp.RolloutEngine((tuple(shards),), policy, sampling, {0: reference})
         engine.initialize()
         run = exp.Trainer(engine, exp.TrainConfig(critic_warmup_updates=0, windows_per_step=32))
         print("dense precision: rollout", flush=True)

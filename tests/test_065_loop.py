@@ -224,7 +224,7 @@ class ToyPolicy:
         output = self._output(meta, actions)
         due = states.tensor(states.table.active) & (clock % meta[:, exp.REPLAN] == 0)
         ring.commit(meta, due, actions, self.device_wire_actions(actions), count=4 if clock % 4 == 0 else 2)
-        states.table.record_evaluation(states.ids, output, self.values(output.features))
+        states.table.record_evaluation(states.ids, output, self.values(output.features), states.enabled)
 
     def window_output(self, batch: Any) -> ReplayOutput:
         slots = batch.slots
@@ -271,13 +271,12 @@ class ToyPolicy:
         return self.model.value_head(features.trunk.detach()).squeeze(-1)
 
 
-def sampler(*, delay: int = 0, mixed: bool = True, anchor_rate: float = 0.15) -> Any:
+def sampler(*, delay: int = 0, mixed: bool = True) -> Any:
     cfg = exp.SamplerConfig(
         (exp.IdentityCount(1, 1, 400), exp.IdentityCount(2, 1, 100), exp.IdentityCount(3, 1, 900)),
         (exp.Matchup((1, 1), 1.0),),
         (25,),
         data_floor=100,
-        anchor_rate=anchor_rate,
         deployment_identity=1,
         deployment_rate=0.225,
         tempering=0.5,
@@ -295,12 +294,11 @@ def trainer(
     timeout: bool = False,
     delay: int = 0,
     warmup: int = 0,
-    anchor_rate: float = 0.15,
     development: bool = False,
 ) -> Any:
     torch.manual_seed(19)
     policy = ToyPolicy(device)
-    sampling = sampler(delay=delay, anchor_rate=anchor_rate)
+    sampling = sampler(delay=delay)
     if development:
         sampling.schedule = exp.development_config((*range(1, 13), 16, 20, 24, 28))
     shards = tuple(
@@ -321,7 +319,6 @@ def trainer(
         warmup_steps=0,
         windows_per_step=2,
         snapshot_interval=2,
-        snapshot_capacity=2,
     )
     return exp.Trainer(engine, config)
 
@@ -370,7 +367,7 @@ def transformer_trainer(
         player_vocab_size=vocabulary.size,
         player_vocab_sha256=vocabulary.sha256,
     )
-    sampling = sampler(anchor_rate=0)
+    sampling = sampler()
     sampling.schedule = (
         exp.development_config(cfg.head_offsets)
         if development
@@ -435,7 +432,7 @@ def test_sampler_prior_floor_identity_rates_and_anchors() -> None:
     anchors = 0
     lambdas = []
     for episode in range(3000):
-        match = sampling.sample(7, episode, (0, 1, 2))
+        match = sampling.sample(7, episode, episode % 3)
         assert sum(p.anchor is not None for p in match.players) <= 1
         anchors += any(p.anchor is not None for p in match.players)
         for player in match.players:
@@ -445,7 +442,7 @@ def test_sampler_prior_floor_identity_rates_and_anchors() -> None:
     assert 0.08 < identities[0] / 6000 < 0.12
     assert 0.20 < identities[1] / 6000 < 0.25
     assert 2.6 < identities[3] / identities[2] < 3.4  # sqrt(900/100)
-    assert 0.12 < anchors / 3000 < 0.18
+    assert anchors == 3000
     assert abs(sum(lambdas) / len(lambdas) - (math.log(0.01) + math.log(0.02)) / 2) < 0.01
     with pytest.raises(ValueError, match="deployment identity"):
         dataclasses.replace(sampling.config, deployment_identity=9)
@@ -458,7 +455,7 @@ def test_stock_count_is_sampled_once_per_match() -> None:
     stocks = set()
     for match in range(10):
         for episode in range(20):
-            players = sampling.sample(match, episode, (0,)).players
+            players = sampling.sample(match, episode, None).players
             assert players[0].stocks == players[1].stocks
             stocks.add(players[0].stocks)
     assert stocks == {1, 2, 3, 4}
@@ -518,7 +515,7 @@ def test_checkpoint_rejects_corruption_and_changed_config(tmp_path: Path) -> Non
 
 
 def test_toy_reward_increases_action_probability() -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     before = float(run.policy.model.logits[0].softmax(-1)[1].detach())
     for _ in range(8):
         run.run_update()
@@ -527,7 +524,7 @@ def test_toy_reward_increases_action_probability() -> None:
 
 
 def test_critic_only_warmup_does_not_step_actor() -> None:
-    run = trainer(groups=1, warmup=100, anchor_rate=0)
+    run = trainer(groups=1, warmup=100)
     before = copy.deepcopy(run.policy.model.state_dict())
     run.run_update()
     assert not run.actor_optimizer.state
@@ -540,7 +537,7 @@ def test_critic_only_warmup_does_not_step_actor() -> None:
 
 
 def test_warmup_skips_reference_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
-    run = trainer(groups=1, warmup=100, anchor_rate=0)
+    run = trainer(groups=1, warmup=100)
 
     def fail_evaluation(batch: Any, positions: Any, window_order: Any) -> Any:
         raise AssertionError("warmup must not evaluate the reference")
@@ -591,13 +588,13 @@ def test_masked_deployment_rate_is_total_masked_rate() -> None:
     config = dataclasses.replace(sampling.config, deployment_identity=0)
     sampling = exp.EpisodeSampler(config, sampling.schedule, sampling.rng)
     masked = sum(
-        player.identity == 0 for episode in range(3000) for player in sampling.sample(0, episode, (0,)).players
+        player.identity == 0 for episode in range(3000) for player in sampling.sample(0, episode, None).players
     )
     assert 0.20 < masked / 6000 < 0.25
 
 
 def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
-    run = trainer(groups=1, warmup=1, anchor_rate=0)
+    run = trainer(groups=1, warmup=1)
     run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
     run.engine.sampler.lambda_max = 100
     before = run.policy.model.logits.detach().clone()
@@ -645,7 +642,7 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
 
 
 def test_warmup_ends_after_32_updates_with_calibrated_lambda() -> None:
-    run = trainer(groups=1, warmup=exp.TrainConfig().critic_warmup_updates, anchor_rate=0)
+    run = trainer(groups=1, warmup=exp.TrainConfig().critic_warmup_updates)
     run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
     run.engine.sampler.lambda_max = 100
     before = run.policy.model.logits.detach().clone()
@@ -670,7 +667,7 @@ def test_warmup_rejects_a_negative_length() -> None:
 
 
 def test_actor_fit_rejects_missing_reference() -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     batch = run.prepare(run.engine.collect(0))
     before = copy.deepcopy(run.policy.model.state_dict())
     with pytest.raises(ValueError, match="actor update requires a reference evaluation"):
@@ -697,7 +694,7 @@ def test_unfinished_update_cannot_be_checkpointed(tmp_path: Path, monkeypatch: p
 
 
 def test_training_dispatch_writes_flat_metrics_and_manifests(tmp_path: Path) -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     exp.run_training(run, 2, tmp_path, PROVENANCE)
     lines = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert [row["global_step"] for row in lines] == [1, 2]
@@ -763,7 +760,7 @@ def test_training_manifest_binds_exported_actor_and_update(tmp_path: Path) -> No
 def test_resume_allows_execution_mode_change_and_records_the_original_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_mode: bool
 ) -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     initial_mode = torch.are_deterministic_algorithms_enabled()
     try:
@@ -798,7 +795,7 @@ def test_resume_allows_execution_mode_change_and_records_the_original_mode(
     ],
 )
 def test_resume_rejects_invalid_execution_metadata_before_model_mutation(tmp_path: Path, execution: object) -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     raw = json.loads(manifest.read_text())
@@ -817,7 +814,7 @@ def test_resume_rejects_invalid_execution_metadata_before_model_mutation(tmp_pat
 
 @pytest.mark.parametrize("partial", [None, [(True, 0)], [(0, -1)], [(99, 0)], [[0, 0]], [(0, 0)], [(0, 0), (0, 0)]])
 def test_resume_rejects_invalid_partial_episodes_before_model_mutation(tmp_path: Path, partial: object) -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     raw = json.loads(manifest.read_text())
@@ -870,7 +867,7 @@ def test_manifest_metadata_is_validated_by_resume_and_evaluation(tmp_path: Path,
 
 @pytest.mark.parametrize("warmup", [0, 100, 1])
 def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path, warmup: int) -> None:
-    run = trainer(groups=1, development=True, anchor_rate=0, warmup=warmup)
+    run = trainer(groups=1, development=True, warmup=warmup)
     if warmup == 1:
         run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
         run.engine.sampler.lambda_max = 100
@@ -947,7 +944,7 @@ def test_transformer_rejects_invalid_feature_statistics() -> None:
 
 
 def test_rollout_with_no_executed_actions_only_fits_critic() -> None:
-    run = trainer(groups=1, length=1, delay=8, anchor_rate=0)
+    run = trainer(groups=1, length=1, delay=8)
     before = run.policy.model.logits.detach().clone()
     batch, metrics = run.run_update()
     assert not batch.selected.any()
@@ -959,7 +956,7 @@ def test_rollout_with_no_executed_actions_only_fits_critic() -> None:
 
 
 def test_mixed_development_delays_resume_when_execution_masks_are_known(tmp_path: Path) -> None:
-    run = trainer(groups=2, length=128, anchor_rate=0.15, development=True)
+    run = trainer(groups=2, length=128, development=True)
     for _ in range(2):
         batch, _ = run.run_update()
         meta = batch.rollout.table.integers[batch.rollout.ids]
@@ -967,7 +964,7 @@ def test_mixed_development_delays_resume_when_execution_masks_are_known(tmp_path
     manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     expected, _ = run.run_update()
     weights = copy.deepcopy(run.policy.model.state_dict())
-    resumed = trainer(groups=2, length=128, anchor_rate=0.15, development=True)
+    resumed = trainer(groups=2, length=128, development=True)
     exp.restore_checkpoint(resumed, manifest, PROVENANCE)
     actual, _ = resumed.run_update()
     assert_batch_equal(expected, actual)
@@ -982,8 +979,8 @@ def test_rollout_rejects_mutable_or_shared_anchors() -> None:
         with pytest.raises(ValueError, match="frozen and have independent parameters"):
             exp.RolloutEngine(shards, policy, sampler(), {0: anchor})
     engine = exp.RolloutEngine(shards, policy, sampler(), {0: policy.frozen_copy(), 4: policy.frozen_copy()})
-    run = exp.Trainer(engine, exp.TrainConfig(actor_optimizer="adam"))
-    assert run.next_anchor == 5
+    with pytest.raises(ValueError, match="only pi_ref"):
+        exp.Trainer(engine, exp.TrainConfig(actor_optimizer="adam"))
 
 
 def test_disabled_deployment_identity_does_not_require_its_data_row() -> None:
@@ -991,7 +988,7 @@ def test_disabled_deployment_identity_does_not_require_its_data_row() -> None:
     rows = tuple(row for row in sampling.config.identities if row.identity != 1)
     cfg = dataclasses.replace(sampling.config, identities=rows, deployment_rate=0)
     sampling = exp.EpisodeSampler(cfg, sampling.schedule, sampling.rng)
-    assert all(player.identity != 1 for episode in range(50) for player in sampling.sample(0, episode, (0,)).players)
+    assert all(player.identity != 1 for episode in range(50) for player in sampling.sample(0, episode, None).players)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
@@ -1008,7 +1005,7 @@ def test_trainer_rejects_nonfinite_actor_result_before_optimizer_step(value: flo
                 result = dataclasses.replace(result, **{field: bad})
             return result, output
 
-    base = trainer(groups=1, anchor_rate=0)
+    base = trainer(groups=1)
     policy = FaultPolicy("cpu")
     engine = exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})
     engine.initialize()
@@ -1024,7 +1021,7 @@ def test_trainer_rejects_nonfinite_actor_result_before_optimizer_step(value: flo
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_trainer_rejects_nonfinite_critic_gradient_before_optimizer_step(value: float) -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     parameter = run.policy.critic_parameters()[0]
     before = parameter.detach().clone()
     handle = parameter.register_hook(lambda gradient: torch.full_like(gradient, value))
@@ -1053,7 +1050,7 @@ def test_resume_verifier_accepts_only_calibrated_update_noise(tmp_path: Path, la
                 self.policy.model.logits.add_(noise)
             return result
 
-    base = trainer(groups=1, anchor_rate=0)
+    base = trainer(groups=1)
     run = NoisyTrainer(base.engine, base.config)
     before = exp._resume_state_hashes(run)
     if passed:
@@ -1081,7 +1078,7 @@ def test_resume_verifier_rejects_inexact_model_restoration(tmp_path: Path) -> No
             super().__init__(device)
             self.model = CorruptRestoreModel(device)
 
-    base = trainer(groups=1, anchor_rate=0)
+    base = trainer(groups=1)
     policy = CorruptRestorePolicy("cpu")
     engine = exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})
     engine.initialize()
@@ -1133,7 +1130,7 @@ def test_resume_comparison_rejects_overflow_in_error_statistics() -> None:
 
 
 def test_trainer_rejects_critic_loss_sum_overflow_before_optimizer_step() -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     with torch.no_grad():
         run.policy.model.value_head.weight.fill_(2e21)
     batch = run.prepare(run.engine.collect(0))
@@ -1224,7 +1221,7 @@ def test_checkpoint_worker_failure_stops_before_next_update(tmp_path: Path, monk
     import threading
 
     failed = threading.Event()
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.config = dataclasses.replace(run.config, checkpoint_interval=1)
     original = run.run_update
     calls = []
@@ -1259,42 +1256,10 @@ def test_checkpoint_worker_failure_stops_before_next_update(tmp_path: Path, monk
     assert not list((tmp_path / "checkpoints").glob("update-*.json"))
 
 
-def test_snapshot_promotion_reuses_slots_and_keeps_assigned_weights(monkeypatch: pytest.MonkeyPatch) -> None:
-    run = trainer(groups=1, anchor_rate=1, length=1000000)
-    run.config = dataclasses.replace(run.config, snapshot_interval=1, snapshot_capacity=1)
-    identities = {id(policy) for policy in run.snapshot_slots}
-
-    def reject_copy() -> Any:
-        raise AssertionError("snapshot allocated a new policy")
-
-    def reject_clear() -> None:
-        raise AssertionError("snapshot cleared prepared graphs")
-
-    monkeypatch.setattr(run.policy, "frozen_copy", reject_copy)
-    for slot in run.snapshot_slots:
-        monkeypatch.setattr(slot, "clear_caches", reject_clear)
-    run.run_update()
-    assigned = run.engine.anchors[1]
-    saved = copy.deepcopy(assigned.model.state_dict())
-    match = next(iter(run.engine.matches))
-    state = run.engine.matches[match]
-    players = (dataclasses.replace(state.episode.players[0], anchor=1), state.episode.players[1])
-    state.episode = dataclasses.replace(state.episode, players=players)
-    for _ in range(4):
-        run.run_update()
-        assert run.engine.anchors[1] is assigned
-        for name, value in saved.items():
-            torch.testing.assert_close(assigned.model.state_dict()[name], value, atol=0, rtol=0)
-        assert all(id(policy) in identities for key, policy in run.engine.anchors.items() if key)
-    state.episode = dataclasses.replace(state.episode, players=(dataclasses.replace(players[0], anchor=0), players[1]))
-    run.run_update()
-    assert 1 not in run.engine.anchors
-
-
 def test_training_stdout_reports_updates_checkpoints_and_warmup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run = trainer(groups=1, anchor_rate=0, warmup=1)
+    run = trainer(groups=1, warmup=1)
     run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
     exp.run_training(run, 2, tmp_path, PROVENANCE)
     lines = capsys.readouterr().out.splitlines()
@@ -1306,64 +1271,6 @@ def test_training_stdout_reports_updates_checkpoints_and_warmup(
     progress = next(line for line in lines if line.startswith("update=1"))
     assert "warming=1" in progress and "pi_ref_win32=n/a games=0" in progress
     assert all(field in progress for field in ("rollout=", "preparation=", "actor=", "critic=", "kl/frame=", "ev="))
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_prepared_snapshot_reuses_graphs_after_weight_copy(device: str) -> None:
-    from hal.inference.cuda_graph import count_compilation_starts
-
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA unavailable")
-    base = transformer_trainer(device, development=True, decoder_precision="bf16" if device == "cuda" else "fp32")
-    sampling = base.engine.sampler
-    sampling.config = dataclasses.replace(sampling.config, anchor_rate=0.5)
-    shard = FakeShard((0, 1), length=23, timeout=True, device=device)
-    engine = exp.RolloutEngine(
-        ((shard,),), base.policy, sampling, {0: base.policy.frozen_copy()}, fixed_anchor_lanes=True
-    )
-    engine.initialize()
-    run = exp.Trainer(engine, dataclasses.replace(base.config, snapshot_interval=2, snapshot_capacity=1))
-    run.run_update()
-    slot = run.snapshot_slots[0]
-    pointers = [value.data_ptr() for value in slot.model.parameters()]
-    graphs = {key: id(graph) for key, graph in slot.tick_graphs.items()}
-    parameter_graph = None
-    before = None
-    if device == "cuda":
-        captured_head = next(iter(slot.model.temporal.outputs.values()))
-        inputs = torch.zeros(1, captured_head.up.in_features, device=device)
-        parameter_graph = exp.CapturedCall(lambda: captured_head(inputs), (inputs,), device=slot.device)
-        before = parameter_graph((inputs,)).clone()
-    with torch.no_grad():
-        for head in run.policy.model.temporal.outputs.values():
-            head.down.bias.add_(0.1)
-    run.run_update()
-    assert engine.anchors[1] is slot
-    assert pointers == [value.data_ptr() for value in slot.model.parameters()]
-    for name, value in slot.model.state_dict().items():
-        torch.testing.assert_close(value, run.policy.model.state_dict()[name], rtol=0, atol=0)
-    if parameter_graph is not None:
-        assert before is not None
-        actual = parameter_graph((inputs,)).clone()
-        torch.testing.assert_close(actual, captured_head(inputs), rtol=0, atol=0)
-        assert not torch.equal(actual, before)
-    engine.anchor_candidates = (1,)
-    with count_compilation_starts() as counter:
-        batch, _ = run.run_update()
-        assert counter.snapshot() == 0
-    assert {key: id(graph) for key, graph in slot.tick_graphs.items()} == graphs
-    assert bool((batch.rollout.table.opponent_anchor[batch.rollout.ids] == 1).any())
-    with count_compilation_starts() as counter:
-        for _ in range(3):
-            run.run_update()
-        assert engine.anchors[3] is slot
-        engine.anchor_candidates = (3,)
-        run.run_update()
-        assert counter.snapshot() == 0
-    assert pointers == [value.data_ptr() for value in slot.model.parameters()]
-    assert {key: id(graph) for key, graph in slot.tick_graphs.items()} == graphs
-    if device == "cuda":
-        assert len(graphs) == 3
 
 
 def test_failed_checkpoint_write_keeps_latest_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1389,69 +1296,6 @@ def test_failed_checkpoint_write_keeps_latest_manifest(tmp_path: Path, monkeypat
     assert run.update == 1
 
 
-def test_padded_anchor_batches_preserve_compact_rollout() -> None:
-    class CompactEngine(exp.RolloutEngine):
-        def _stage_tick(self, clock: int, update: int, table: Any, pending: torch.Tensor) -> torch.Tensor:
-            ids = super()._stage_tick(clock, update, table, pending)
-            if clock % 128:
-                return ids
-            group, ring = self.cursor, self.rings[self.cursor]
-            for key, layout in list(self.tick_layouts.items()):
-                anchor = key[1]
-                if anchor is None:
-                    continue
-                slots = self.group_slots[group][key]
-                owned = self.owners[group][slots] == anchor
-                keep = owned.cpu().tolist()
-                if not any(keep):
-                    del self.tick_layouts[key]
-                    continue
-                self.group_slots[group][key] = slots[owned]
-                self.tick_layouts[key] = exp.TickLayout(
-                    tuple(stream for stream, valid in zip(layout.streams, keep, strict=True) if valid),
-                    tuple(lane for lane, valid in zip(layout.lanes, keep, strict=True) if valid),
-                    layout.buffer,
-                )
-            for anchor, policy in self.anchors.items():
-                policy.retain_tick_layouts(
-                    ring, tuple(layout for (_, owner), layout in self.tick_layouts.items() if owner == anchor)
-                )
-            return ids
-
-    def make(engine_type: Any) -> Any:
-        base = transformer_trainer(development=True, decoder_precision="fp32")
-        sampling = base.engine.sampler
-        sampling.config = dataclasses.replace(sampling.config, anchor_rate=0.5)
-        anchors = {key: base.policy.frozen_copy() for key in range(3)}
-        with torch.no_grad():
-            for key, policy in anchors.items():
-                for head in policy.model.temporal.outputs.values():
-                    head.down.bias.add_(key * torch.linspace(-0.2, 0.2, head.down.out_features))
-        engine = engine_type(
-            ((FakeShard(tuple(range(8)), length=67, timeout=True),),),
-            base.policy,
-            sampling,
-            anchors,
-            fixed_anchor_lanes=True,
-        )
-        engine.initialize()
-        return engine
-
-    padded, compact = make(exp.RolloutEngine), make(CompactEngine)
-    actual, expected = padded.collect(0), compact.collect(0)
-    torch.testing.assert_close(padded.rings[0].values, compact.rings[0].values, rtol=0, atol=0)
-    torch.testing.assert_close(actual.table.store.records, expected.table.store.records, rtol=0, atol=0)
-    torch.testing.assert_close(actual.ids, expected.ids, rtol=0, atol=0)
-    for name in ("actions", "behavior", "values"):
-        torch.testing.assert_close(
-            getattr(actual.table, name)[actual.ids],
-            getattr(expected.table, name)[expected.ids],
-            rtol=1e-5,
-            atol=1e-6,
-        )
-    assert actual.results == expected.results
-
-
 @pytest.mark.integration
 def test_native_background_checkpoint_matches_synchronous_next_update(
     tmp_path: Path, native_rollout_data: Path
@@ -1461,7 +1305,7 @@ def test_native_background_checkpoint_matches_synchronous_next_update(
         native_rollout_data, (0, 1), cpu=min(os.sched_getaffinity(0)), device=policy.device, max_frame=0
     )
     try:
-        engine = exp.RolloutEngine(((shard,),), policy, sampler(anchor_rate=0), {0: policy.frozen_copy()})
+        engine = exp.RolloutEngine(((shard,),), policy, sampler(), {0: policy.frozen_copy()})
         engine.initialize()
         run = exp.Trainer(
             engine,
@@ -1491,23 +1335,3 @@ def test_native_background_checkpoint_matches_synchronous_next_update(
         assert exp._compare_resume_updates(*updates).passed
     finally:
         shard.close()
-
-
-@pytest.mark.parametrize("maximum, interval, expected", [(0, 3, 2), (0, 4, 1), (28800, 256, 2)])
-def test_retired_snapshot_slots_cover_native_countdown_and_pool_rotation(
-    maximum: int, interval: int, expected: int
-) -> None:
-    class BoundedShard(FakeShard, exp.NativeSimulatorShard):
-        def __init__(self, ids: tuple[int, ...]) -> None:
-            FakeShard.__init__(self, ids)
-            self.max_frame = maximum
-
-    policy = ToyPolicy()
-    engine = exp.RolloutEngine(
-        tuple((BoundedShard((2 * group, 2 * group + 1)),) for group in range(4)),
-        policy,
-        sampler(),
-        {0: policy.frozen_copy()},
-    )
-    run = exp.Trainer(engine, exp.TrainConfig(snapshot_interval=interval))
-    assert len(run.snapshot_slots) == run.config.snapshot_capacity + expected

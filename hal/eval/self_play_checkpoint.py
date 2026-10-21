@@ -29,8 +29,8 @@ from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v8"
-TRAINING_VERSION = 8
+TRAINING_FORMAT = "hal.o65.training.v9"
+TRAINING_VERSION = 9
 
 
 class CheckpointShard(TypedDict):
@@ -65,10 +65,9 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
     }
     if not isinstance(manifest, dict) or set(manifest) != fields:
         raise ValueError("checkpoint manifest schema changed")
-    if (manifest["format"], manifest["version"], manifest["experiment"]) != (
-        TRAINING_FORMAT,
-        TRAINING_VERSION,
-        "065_selfplay_ppo",
+    if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
+        (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v8", 8),
     ):
         raise ValueError("unsupported checkpoint identity")
     if type(manifest["version"]) is not int or type(manifest["update"]) is not int or manifest["update"] < 0:

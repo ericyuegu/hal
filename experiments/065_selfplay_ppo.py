@@ -45,6 +45,8 @@ from hal.eval.self_play_checkpoint import sha256
 from hal.inference import compile_cache
 from hal.inference.column_context import PackedColumnContextBuilder
 from hal.inference.cuda_graph import CapturedCall
+from hal.inference.cuda_graph import CompilationStartCounter
+from hal.inference.cuda_graph import count_compilation_starts
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.decision_decoder import DecisionDecoder
 from hal.inference.graphed_actor import GraphedActorStep
@@ -71,7 +73,6 @@ from hal.sim.native_shard import NativeShard
 from hal.training import self_play_publication
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.wire import ACTION_DIM
-from hal.wire import GAME_START_FRAME
 
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
 MAX_REPLAN = 4
@@ -525,7 +526,6 @@ class SamplerConfig:
     lambda_max: float = 100.0
     stocks: tuple[int, ...] = (1, 2, 3, 4)
     percents: tuple[float, ...] = (0.0,)
-    anchor_rate: float = 0.15
     percentile_alpha: float = 5.0
     percentile_beta: float = 1.3
 
@@ -546,7 +546,7 @@ class SamplerConfig:
             or not 0 <= self.tempering <= 1
         ):
             raise ValueError("invalid identity floor or tempering")
-        for rate in (self.masked_rate, self.deployment_rate, self.anchor_rate):
+        for rate in (self.masked_rate, self.deployment_rate):
             if not math.isfinite(rate) or not 0 <= rate <= 1:
                 raise ValueError("sampler rates must be in [0, 1]")
         ordinary_rate = 1 - (
@@ -608,14 +608,16 @@ class EpisodeSampler:
         self.lambda_max = config.lambda_max
         self.cursor = 0
 
-    def sample(self, match_id: int, episode: int, anchors: tuple[int, ...]) -> Episode:
+    def sample(self, match_id: int, episode: int, anchor: int | None) -> Episode:
+        if anchor is not None and (type(anchor) is not int or anchor not in (0, 1, 2, 3)):
+            raise ValueError("opponent slot must be pi_ref or snapshot 1..3")
         cfg = self.config
         rng = self.rng
         matchup = cfg.matchups[rng.choice([m.weight for m in cfg.matchups], "matchup", match_id, episode, 0)]
         stage = cfg.stages[rng.choice([1.0] * len(cfg.stages), "stage", match_id, episode, 0)]
         stocks = cfg.stocks[rng.choice([1.0] * len(cfg.stocks), "stocks", match_id, episode, 0)]
         anchor_side = None
-        if rng.uniform("anchor_share", match_id, episode, 0) < cfg.anchor_rate:
+        if anchor is not None:
             anchor_side = rng.choice((1.0, 1.0), "anchor_side", match_id, episode, 0)
         players: list[PlayerEpisode] = []
         characters = matchup.characters
@@ -649,11 +651,6 @@ class EpisodeSampler:
                 rng.choice([1.0] * len(self.schedule.configurations), "timing", stream, episode, 0)
             ]
             percent = cfg.percents[rng.choice([1.0] * len(cfg.percents), "percent", stream, episode, 0)]
-            anchor = None
-            if side == anchor_side:
-                if not anchors:
-                    raise ValueError("anchor sampling requires a reference policy")
-                anchor = anchors[rng.choice([1.0] * len(anchors), "anchor", stream, episode, 0)]
             percentile = float(
                 np.clip(
                     betaincinv(
@@ -663,7 +660,18 @@ class EpisodeSampler:
                     0.999,
                 )
             )
-            players.append(PlayerEpisode(identity, character, log_lambda, timing, stocks, percent, anchor, percentile))
+            players.append(
+                PlayerEpisode(
+                    identity,
+                    character,
+                    log_lambda,
+                    timing,
+                    stocks,
+                    percent,
+                    anchor if side == anchor_side else None,
+                    percentile,
+                )
+            )
         self.cursor += 1
         seed = int(rng.uniform("simulator_seed", match_id, episode, 0) * 2**32)
         return Episode(episode, stage, (players[0], players[1]), seed)
@@ -1212,7 +1220,9 @@ class DenseRollout:
         self.following.fill_(-1)
         self.queue_error.zero_()
 
-    def record_evaluation(self, ids: Tensor, output: PolicyEvaluation, values: Tensor) -> None:
+    def record_evaluation(
+        self, ids: Tensor, output: PolicyEvaluation, values: Tensor, enabled: Tensor | None = None
+    ) -> None:
         if self.evaluation is None:
 
             def storage(value: Tensor) -> Tensor:
@@ -1224,14 +1234,20 @@ class DenseRollout:
                 tuple(storage(p) for p in output.distributions),
                 CriticFeatures(*(storage(getattr(output.features, name)) for name in CRITIC_FEATURE_NAMES)),
             )
-        self.actions[ids] = output.actions
-        self.behavior[ids] = output.log_probs
-        self.values[ids] = values
+
+        def write(target: Tensor, source: Tensor) -> None:
+            mask = None if enabled is None else enabled.reshape(-1, *([1] * (source.ndim - 1)))
+            target[ids] = (
+                source.to(target.dtype) if mask is None else torch.where(mask, source.to(target.dtype), target[ids])
+            )
+
+        write(self.actions, output.actions)
+        write(self.behavior, output.log_probs)
+        write(self.values, values)
         for target, source in zip(self.evaluation.distributions, output.distributions, strict=True):
-            target[ids] = source
+            write(target, source)
         for name in CRITIC_FEATURE_NAMES:
-            target = getattr(self.evaluation.features, name)
-            target[ids] = getattr(output.features, name).to(target.dtype)
+            write(getattr(self.evaluation.features, name), getattr(output.features, name))
 
 
 class TransformerPolicy:
@@ -1244,6 +1260,9 @@ class TransformerPolicy:
         statistics: dict[str, FeatureStats],
     ) -> None:
         self.profile: UpdateProfile | None = None
+        self.startup_finished = False
+        self.post_startup_captures = 0
+        self.capture_count = 0
         self.model = model.eval()
         self.schedule = schedule
         self.statistics = statistics
@@ -1293,6 +1312,12 @@ class TransformerPolicy:
         self.device_wire_tables: tuple[Tensor, ...] = ()
         self._prepare_wire_tables()
 
+    def admit_capture(self, key: object) -> None:
+        if self.startup_finished:
+            self.post_startup_captures += 1
+            raise RuntimeError(f"CUDA graph capture after startup: {key}")
+        self.capture_count += 1
+
     @torch.no_grad()
     def _prepare_wire_tables(self) -> None:
         tables = tuple(
@@ -1328,6 +1353,7 @@ class TransformerPolicy:
         return self.model.critic_parameters()
 
     def clear_caches(self) -> None:
+        self.startup_finished = False
         self.tick_caches.clear()
         self.tick_graphs.clear()
         self.current_layouts.clear()
@@ -1545,9 +1571,10 @@ class TransformerPolicy:
                             count=count,
                         )
                         values = self.values(result.features, validate=False)
-                        states.table.record_evaluation(static[10], result, values)
+                        states.table.record_evaluation(static[10], result, values, static[9])
 
                 if enabled:
+                    self.admit_capture(("tick", graph_key))
                     operation = torch.compile(
                         tick, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False}
                     )
@@ -1705,16 +1732,24 @@ class TransformerPolicy:
         if self.device.type == "cpu":
             output = self.reference_forward(inputs, windows_per_step, count)
         else:
-            key = ((windows_per_step, count), *(tuple(value.shape) for value in inputs))
-            captured = self.reference_graphs.get(key)
-            if captured is None:
-                static = tuple(value.clone() for value in inputs)
-                with prepared_shape_compilation(64):
-                    captured = CapturedCall(
-                        lambda: self.reference_forward(static, windows_per_step, count), static, device=self.device
-                    )
-                self.reference_graphs[key] = captured
-            output = captured(inputs)
+            chunks = []
+            for start in range(0, padded_windows, windows_per_step):
+                part = tuple(value[start : start + windows_per_step] for value in inputs)
+                key = ((windows_per_step, count), *(tuple(value.shape) for value in part))
+                captured = self.reference_graphs.get(key)
+                if captured is None:
+                    self.admit_capture(("reference", key))
+                    static = tuple(value.clone() for value in part)
+                    with prepared_shape_compilation(64):
+                        captured = CapturedCall(
+                            lambda static=static: self.reference_forward(static, windows_per_step, count),
+                            static,
+                            device=self.device,
+                        )
+                    self.reference_graphs[key] = captured
+                # Each replay reuses output storage; retain this chunk before the next.
+                chunks.append(concatenate_replays((captured(part),), 0))
+            output = concatenate_replays(chunks, 0)
         if self.profile is not None:
             phase_name = self.profile.phase_name
             self.profile.work[f"{phase_name}/trunk_tokens"] += padded_windows * 256
@@ -1779,6 +1814,7 @@ class TransformerPolicy:
         key = tuple(tuple(value.shape) for value in inputs)
         captured = self.value_graphs.get(key)
         if captured is None:
+            self.admit_capture(("value", key))
             static = tuple(value.clone() for value in inputs)
             with prepared_shape_compilation(64):
                 captured = CapturedCall(lambda: self.value_forward(static), static, device=self.device)
@@ -1808,6 +1844,7 @@ class TransformerPolicy:
         if self.actor_graph is not None and self.actor_clip_epsilon != clip_epsilon:
             raise ValueError("actor clip epsilon differs from the captured objective")
         if self.actor_graph is None:
+            self.admit_capture(("actor", tuple(tuple(value.shape) for value in inputs)))
             with prepared_shape_compilation(64):
                 self.actor_graph = GraphedActorStep(
                     lambda values: self.window_forward(values, grad=True),
@@ -1942,6 +1979,20 @@ class PoolSnapshot:
     groups: tuple[PoolGroupSnapshot, ...]
 
 
+def opponent_slots(lanes: int) -> tuple[int | None, ...]:
+    """Spread 4:2:2:2 anchors over 64 lanes; sub-four test shards use self-play."""
+    if type(lanes) is not int or lanes < 1:
+        raise ValueError("shard lanes must be positive")
+    counts = (max(1, round(lanes / 16)), *(max(1, round(lanes / 32)) for _ in range(3)))
+    if lanes < 4:
+        return (None,) * lanes
+    roles: list[int | None] = [None] * lanes
+    anchors = [slot for slot, count in enumerate(counts) for _ in range(count)]
+    for index, slot in enumerate(anchors):
+        roles[(2 * index + 1) * lanes // (2 * len(anchors))] = slot
+    return tuple(roles)
+
+
 class RolloutEngine:
     def __init__(
         self,
@@ -1949,13 +2000,9 @@ class RolloutEngine:
         policy: LoopPolicy,
         sampler: EpisodeSampler,
         anchors: dict[int, LoopPolicy],
-        *,
-        fixed_anchor_lanes: bool = False,
     ) -> None:
         if not groups or any(not group or any(not shard.match_ids for shard in group) for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
-        if type(fixed_anchor_lanes) is not bool:
-            raise ValueError("fixed_anchor_lanes must be a boolean")
         ids = [match for group in groups for shard in group for match in shard.match_ids]
         if not ids or len(set(ids)) != len(ids) or min(ids) < 0:
             raise ValueError("logical match ids must be nonempty, nonnegative, and globally unique")
@@ -1973,11 +2020,8 @@ class RolloutEngine:
         self.sampler = sampler
         self.configurations = sampler.schedule.configurations
         self.anchors = anchors
-        self.fixed_anchor_lanes = fixed_anchor_lanes
         self.tick_layouts: dict[tuple[int, int | None], TickLayout] = {}
         self.group_layouts: list[dict[tuple[int, int | None], TickLayout]] = [{} for _ in groups]
-        self.anchor_candidates = tuple(sorted(anchors))
-        self.prepared_anchors: tuple[LoopPolicy, ...] = ()
         self.layout_anchors: list[tuple[int, ...]] = [() for _ in groups]
         self.clocks = [0] * len(groups)
         self.cursor = 0
@@ -1991,9 +2035,12 @@ class RolloutEngine:
         self.rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
         for ring in self.rings:
             ring.controllers.copy_(policy.device_wire_actions(ring.values))
-        self.anchor_counts = tuple(
-            math.floor(len(matches) * sampler.config.anchor_rate + 0.5) for matches in self.group_matches
-        )
+        self.lane_roles = {
+            match: role
+            for group in groups
+            for shard in group
+            for match, role in zip(shard.match_ids, opponent_slots(len(shard.match_ids)), strict=True)
+        }
         self.locations = {
             match: (group, lane)
             for group, matches in enumerate(self.group_matches)
@@ -2028,7 +2075,6 @@ class RolloutEngine:
             buffers.append(tuple(prepared))
         self.buffers = tuple(buffers)
         self.group_slots: list[dict[tuple[int, int | None], Tensor]] = [{} for _ in groups]
-        self.occupied_layouts: list[set[tuple[int, int | None]]] = [set() for _ in groups]
         self.stores: list[FrameStore | None] = [None] * len(groups)
         self.dense_meta = [
             torch.zeros(2 * len(ids), 18, dtype=torch.long, device=policy.device) for ids in self.group_matches
@@ -2125,6 +2171,10 @@ class RolloutEngine:
             for lane, match in enumerate(saved.matches):
                 if not 1 <= match.history_length <= 129 or match.history_start < match.episode_start:
                     raise ValueError("invalid rollout pool history span")
+                if sorted(p.anchor for p in match.episode.players if p.anchor is not None) != (
+                    [] if self.lane_roles[match.match] is None else [self.lane_roles[match.match]]
+                ):
+                    raise ValueError("checkpoint episode disagrees with its fixed opponent slot")
                 restored[match.match] = MatchState(match.episode, match.episode_start, match.end_clock)
                 self._publish_episode(group_id, lane, match.match, 0, match.episode, match.episode_start)
                 self.stops[group_id][lane] = match.history_length
@@ -2136,7 +2186,7 @@ class RolloutEngine:
             self.stores[group_id] = store
         self.matches = restored
         self.tables = [None] * len(self.groups)
-        for policy in (self.policy, *self.anchors.values(), *self.prepared_anchors):
+        for policy in (self.policy, *self.anchors.values()):
             policy.clear_caches()
 
     def initialize(self) -> None:
@@ -2211,19 +2261,7 @@ class RolloutEngine:
     def _reset(self, shard: SimulatorShard, lane: int, match: int, clock: int, number: int) -> None:
         if clock % 128:
             raise ValueError("episodes must start on a block boundary")
-        episode = self.sampler.sample(match, number, self.anchor_candidates)
-        if self.fixed_anchor_lanes:
-            group, lane_index = self.locations[match]
-            side = lane_index % 2 if lane_index < self.anchor_counts[group] else None
-            players = []
-            for player_side, player in enumerate(episode.players):
-                anchor = None
-                if player_side == side:
-                    stream = 2 * match + player_side
-                    choice = self.sampler.rng.choice([1.0] * len(self.anchor_candidates), "anchor", stream, number, 0)
-                    anchor = self.anchor_candidates[choice]
-                players.append(dataclasses.replace(player, anchor=anchor))
-            episode = dataclasses.replace(episode, players=(players[0], players[1]))
+        episode = self.sampler.sample(match, number, self.lane_roles[match])
         for player in episode.players:
             if not 0 <= player.identity < self.policy.player_vocab_size:
                 raise ValueError("episode identity is outside the checkpoint vocabulary")
@@ -2366,27 +2404,22 @@ class RolloutEngine:
             self.layout_anchors[group] = anchor_ids
             self.tick_layouts.clear()
             self.group_slots[group].clear()
-            self.occupied_layouts[group].clear()
             self.layout_assignments[group][:] = assignments
             logical = np.asarray(self.group_matches[group], dtype=np.int64).repeat(2) * 2 + np.tile(
                 (0, 1), len(self.group_matches[group])
             )
             for buffer in self.buffers[group]:
                 in_buffer = np.isin(np.arange(players) // 2, buffer.lanes)
-                owners = (-1, *anchor_ids) if self.fixed_anchor_lanes else np.unique(assignments[in_buffer])
-                for owner in owners:
-                    # All anchor policies use the same physical lanes. Ownership
-                    # masks queue writes; resets cannot change compiled shapes.
-                    owned = assignments == owner
-                    if self.fixed_anchor_lanes and owner >= 0:
-                        owned = assignments >= 0
+                for owner in (-1, *anchor_ids):
+                    # Both ports occupy slots; only the episode's owner writes queues.
+                    owned = np.array(
+                        [owner == -1 or self.lane_roles[match] == owner for match in self.group_matches[group]]
+                    ).repeat(2)
                     selected = np.flatnonzero(in_buffer & owned)
                     if not len(selected):
                         continue
                     anchor = None if owner < 0 else int(owner)
                     key = buffer.index, anchor
-                    if np.any(in_buffer & (assignments == owner)):
-                        self.occupied_layouts[group].add(key)
                     self.group_slots[group][key] = torch.from_numpy(selected).to(self.policy.device)
                     self.tick_layouts[key] = TickLayout(
                         tuple(logical[selected].tolist()),
@@ -2400,10 +2433,6 @@ class RolloutEngine:
             for owner, policy in ((None, self.policy), *self.anchors.items()):
                 layouts = tuple(layout for (_, anchor), layout in self.tick_layouts.items() if anchor == owner)
                 policy.retain_tick_layouts(ring, layouts)
-            if self.fixed_anchor_lanes:
-                layouts = tuple(layout for (_, anchor), layout in self.tick_layouts.items() if anchor == 0)
-                for policy in self.prepared_anchors:
-                    policy.retain_tick_layouts(ring, layouts)
         return at
 
     def _sample_buffer(
@@ -2420,18 +2449,8 @@ class RolloutEngine:
                 continue
             policy = self.policy if anchor is None else self.anchors[anchor]
             selected = ids[self.group_slots[self.cursor][key]]
-            enabled = None
-            if self.fixed_anchor_lanes and anchor is not None:
-                enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == anchor
-                if anchor == 0:
-                    # Prepare each slot's three tick graphs before it can become
-                    # a candidate. Disabled draws leave every committed queue intact.
-                    disabled = TickInputs(table, selected, torch.zeros_like(enabled))
-                    for standby in self.prepared_anchors:
-                        if not standby.tick_ready(layout, ring, clock=clock):
-                            standby.sample_tick(disabled, self.sampler.rng, layout, ring, clock=clock)
-                if key not in self.occupied_layouts[self.cursor]:
-                    continue
+            owner = -1 if anchor is None else anchor
+            enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == owner
             rows = TickInputs(table, selected, enabled)
             policy.sample_tick(rows, self.sampler.rng, layout, ring, clock=clock)
 
@@ -2696,6 +2715,24 @@ class RolloutEngine:
         table.prefix[ids] = torch.where((offsets < meta[:, DELAY, None])[..., None], queue, 0)
         table.opponent[ids] = torch.where((offsets < meta[:, OPP_LENGTH, None])[..., None], opponent, 0)
 
+    def truncate_slot(self, slot: int) -> tuple[tuple[int, int], ...]:
+        """End old-weight episodes at their saved boundary values before promotion."""
+        truncated = []
+        for match, role in self.lane_roles.items():
+            if role != slot:
+                continue
+            state = self.matches[match]
+            if state.end_clock is not None:
+                continue
+            group, lane = self.locations[match]
+            # The preceding rollout ended with a nonterminal bootstrap and a trace
+            # boundary. Reset on the next visit uses that same truncation contract.
+            state.end_clock = self.clocks[group]
+            self.active[group][lane] = False
+            self.live_host[group][lane] = False
+            truncated.append((match, state.episode.number))
+        return tuple(truncated)
+
     def _reset_waiting(self, shards: Sequence[SimulatorShard], clock: int) -> int:
         if clock % 128 and not self.staggering:
             return 0
@@ -2765,6 +2802,7 @@ class RolloutEngine:
             self.tables[group_id] = table
             if isinstance(self.policy, TransformerPolicy):
                 table.allocate_evaluation(self.policy.model)
+        table.store = store
         table.reset()
         pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
         resets = timeouts = frames_stepped = 0
@@ -2935,6 +2973,8 @@ class TrainConfig:
     deterministic: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.snapshot_capacity) is not int or self.snapshot_capacity != 3:
+            raise ValueError("fixed opponent layout requires exactly three snapshot slots")
         for name in (
             "critic_epochs",
             "windows_per_step",
@@ -3507,34 +3547,107 @@ class Trainer:
         )
         self.update = 0
         self.actor_steps = 0
+        self.pool_start_update = 0
         self.warming = config.critic_warmup_updates > 0
         self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
-        self.next_anchor = max(engine.anchors) + 1
-        # Retired anchors keep their weights through the last assigned episode.
-        # Reserve those slots too, using the native timeout to bound their age.
-        assigned_limit = (
-            sum(engine.anchor_counts) if engine.fixed_anchor_lanes else sum(map(len, engine.group_matches))
-        )
-        timeouts = [
-            shard.max_frame for group in engine.groups for shard in group if isinstance(shard, NativeSimulatorShard)
-        ]
-        retired_limit = assigned_limit
-        if len(timeouts) == sum(map(len, engine.groups)) and min(timeouts) >= 0:
-            # Native frame ids start before zero. A group advances only once
-            # per pool rotation, and promotion can fall between its visits.
-            episode_updates = math.ceil(
-                (max(timeouts) - GAME_START_FRAME) / engine.sampler.schedule.rollout_frames
-            ) * len(engine.groups)
-            retired_limit = min(retired_limit, math.ceil(episode_updates / config.snapshot_interval))
-        existing = [policy for key, policy in engine.anchors.items() if key]
-        slots = config.snapshot_capacity + retired_limit
-        self.snapshot_slots = tuple(existing + [self.policy.frozen_copy() for _ in range(slots - len(existing))])
-        engine.prepared_anchors = self.snapshot_slots
+        if set(engine.anchors) != {0}:
+            raise ValueError("fresh trainer requires only pi_ref")
+        self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
+        engine.anchors.update(enumerate(self.snapshot_slots, start=1))
+        self.slot_updates = {1: 0, 2: 0, 3: 0}
+        self.compilation_counter: CompilationStartCounter | None = None
+        self.startup_seconds = 0.0
         self.evaluation_cursor = 0
         self.updating = False
         self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self.partial_episodes: set[tuple[int, int]] = set()
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
+
+    @torch.no_grad()
+    def capture_startup(self) -> None:
+        if not isinstance(self.policy, TransformerPolicy) or self.policy.device.type != "cuda":
+            return
+        policies = (self.policy, *self.engine.anchors.values())
+        if any(not isinstance(policy, TransformerPolicy) or policy.startup_finished for policy in policies):
+            raise ValueError("startup capture requires unsealed transformer policies")
+        started = time.perf_counter()
+        engine = self.engine
+        cursor = engine.cursor
+        frames = engine.sampler.schedule.rollout_frames
+        print(
+            f"startup_capture_started groups={len(engine.groups)} matches_per_group={[len(ids) for ids in engine.group_matches]}",
+            flush=True,
+        )
+        for group, matches in enumerate(engine.group_matches):
+            engine.cursor = group
+            previous = engine.stores[group]
+            if previous is None:
+                raise ValueError("startup capture requires an initialized pool")
+            store = FrameStore(129 + frames + frames // 128 + 1, len(matches), self.policy.device)
+            for target, source in (
+                (store.records, previous.records),
+                (store.actions, previous.actions),
+                (store.rewards, previous.rewards),
+                (store.flags, previous.flags),
+            ):
+                target[: len(source)].copy_(source)
+            engine.stores[group] = store
+            table = DenseRollout(frames // 2, store)
+            table.allocate_evaluation(self.policy.model)
+            engine.tables[group] = table
+            engine.tick_layouts = engine.group_layouts[group]
+            pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
+            for offset in (0, 2, 4):
+                clock = engine.clocks[group] + offset
+                ids = engine._stage_tick(clock, self.update, table, pending)
+                table.active[ids] = False
+                for buffer in engine.buffers[group]:
+                    engine._sample_buffer(buffer, clock, table, ids)
+            # Bootstrap and context-gap graphs have fixed player/diagnostic row counts.
+            for count in {2 * len(matches), min(32, 2 * len(matches))}:
+                rows = torch.zeros(count, 1, dtype=torch.long, device=self.policy.device)
+                batch = replay_batch(self.policy, table, rows, torch.zeros_like(rows, dtype=torch.bool))
+                self.policy.evaluate_values(batch)
+            chunk = self.config.windows_per_step // self.config.actor_microbatches
+            rows = torch.zeros(chunk, 64, dtype=torch.long, device=self.policy.device)
+            batch = replay_batch(self.policy, table, rows, torch.zeros_like(rows, dtype=torch.bool))
+            positions = torch.arange(self.config.decisions_per_window, device=self.policy.device)[None].expand(
+                chunk, -1
+            )
+            order = torch.arange(chunk, device=self.policy.device)[None]
+            self.reference.evaluate_reference(batch, positions, order)
+            part = batch.take(
+                order.flatten(), positions, torch.ones(chunk, dtype=torch.bool, device=self.policy.device)
+            )
+            assert isinstance(self.reference, TransformerPolicy)
+            output = self.reference.window_forward(part.inputs(), grad=False)
+            shape = part.slots.valid_WK.shape
+            zero = torch.zeros(shape, device=self.policy.device)
+            targets = ActorTargets(
+                output.log_probs_WKF.float(),
+                zero,
+                torch.zeros_like(zero, dtype=torch.bool),
+                zero,
+                output.distributions,
+                zero.new_zeros(()),
+                zero.new_ones(()),
+                zero.new_ones(()),
+            )
+            self.policy.actor_step(part, targets, clip_epsilon=self.config.clip_epsilon)
+            table.reset()
+        engine.cursor = cursor
+        engine.tick_layouts = engine.group_layouts[cursor]
+        torch.cuda.synchronize(self.policy.device)
+        for policy in policies:
+            assert isinstance(policy, TransformerPolicy)
+            policy.startup_finished = True
+        self.startup_seconds = time.perf_counter() - started
+        if self.compilation_counter is not None:
+            self.compilation_counter.starts = 0
+        print(
+            f"startup_capture seconds={self.startup_seconds:.3f} graphs={sum(p.capture_count for p in policies if isinstance(p, TransformerPolicy))}",
+            flush=True,
+        )
 
     @torch.no_grad()
     def head_start(self) -> HeadStart:
@@ -3619,7 +3732,9 @@ class Trainer:
             .cpu()
             .tolist()
         )
-        metrics: dict[str, float] = {}
+        metrics: dict[str, float] = {
+            f"gameplay/anchor{slot}_weights_update": float(update) for slot, update in self.slot_updates.items()
+        }
         for anchor, (stocks, damage_total, duration) in zip(anchors, exposure, strict=True):
             prefix = "gameplay/pi_ref" if anchor == 0 else f"gameplay/anchor{anchor}"
             if duration:
@@ -4172,25 +4287,17 @@ class Trainer:
         )
         if not self.warming and self.update % self.config.snapshot_interval == 0:
             snapshot_started = time.perf_counter()
-            assigned = {p.anchor for m in self.engine.matches.values() for p in m.episode.players}
-            snapshots = sorted(key for key in self.engine.anchors if key)
-            retired = snapshots[: max(0, len(snapshots) - self.config.snapshot_capacity + 1)]
-            for key in retired:
-                if key not in assigned:
-                    del self.engine.anchors[key]
-            used = {id(policy) for policy in self.engine.anchors.values()}
-            available = [policy for policy in self.snapshot_slots if id(policy) not in used]
-            if not available:
-                raise RuntimeError("preallocated snapshot slots exhausted by assigned episodes")
-            anchor = available[0]
-            anchor.model.load_state_dict(self.policy.model.state_dict(), strict=True)
-            self.engine.anchors[self.next_anchor] = anchor
-            promoted = self.next_anchor
-            self.next_anchor += 1
-            self.engine.anchor_candidates = (
-                0,
-                *sorted(key for key in self.engine.anchors if key)[-self.config.snapshot_capacity :],
-            )
+            promoted = min(self.slot_updates, key=lambda slot: (self.slot_updates[slot], slot))
+            truncated = self.engine.truncate_slot(promoted)
+            for match, number in truncated:
+                for side in (0, 1):
+                    self.episode_metrics.pop((2 * match + side, number), None)
+                    self.partial_episodes.discard((2 * match + side, number))
+            self.engine.anchors[promoted].model.load_state_dict(self.policy.model.state_dict(), strict=True)
+            self.slot_updates[promoted] = self.update
+            # Rolling win counts must not combine different weights in one slot.
+            for row in self.anchor_win_history:
+                row.pop(promoted, None)
             if self.policy.device.type == "cuda":
                 torch.cuda.synchronize(self.policy.device)
             metrics["systems/snapshot_seconds"] = time.perf_counter() - snapshot_started
@@ -4226,6 +4333,17 @@ class Trainer:
                     ),
                 )
             )
+        metrics["systems/startup_capture_seconds"] = self.startup_seconds
+        metrics["systems/post_startup_compiles"] = float(
+            self.compilation_counter.snapshot() if self.compilation_counter is not None else 0
+        )
+        metrics["systems/post_startup_captures"] = float(
+            sum(
+                policy.post_startup_captures
+                for policy in (self.policy, *self.engine.anchors.values())
+                if isinstance(policy, TransformerPolicy)
+            )
+        )
         metrics["systems/update_seconds"] = time.perf_counter() - started
         metrics["systems/match_frames_per_second"] = rollout.frames / metrics["systems/update_seconds"]
         self.updating = False
@@ -4260,13 +4378,13 @@ def _environment() -> dict[str, str]:
     }
 
 
-def _configuration_digest(trainer: Trainer) -> str:
+def _configuration_identity(trainer: Trainer) -> dict[str, object]:
     engine = trainer.engine
     model = trainer.policy.model
     schema = [(name, tuple(value.shape), str(value.dtype)) for name, value in model.state_dict().items()]
     training = dataclasses.asdict(trainer.config)
     del training["deterministic"]
-    identity = {
+    identity: dict[str, object] = {
         "train": training,
         "sampler": dataclasses.asdict(engine.sampler.config),
         "schedule": dataclasses.asdict(engine.sampler.schedule),
@@ -4281,16 +4399,21 @@ def _configuration_digest(trainer: Trainer) -> str:
         "episode_reset": "shared_stocks_block_wait_v1",
         "rollout_storage": "dense_windows_v6",
         "selection_rng": "integer_counter_v3",
-        "opponent_layout": "fixed_anchor_ranges_v1" if engine.fixed_anchor_lanes else "sampled_anchor_lanes_v1",
+        "opponent_layout": "fixed_opponent_slots_v2",
+        "lane_roles": sorted(engine.lane_roles.items()),
     }
     if isinstance(trainer.policy, TransformerPolicy):
-        identity["decision_kernels"] = "dense_tick_window_graph_v5"
-        identity["reference_kernels"] = "actor_order_readonly_forward_v3"
+        identity["decision_kernels"] = "dense_tick_window_graph_v6"
+        identity["reference_kernels"] = "actor_order_chunk_graph_v4"
         identity["decoder_precision"] = trainer.policy.model.decoder_precision
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
         identity["statistics"] = {key: dataclasses.asdict(value) for key, value in trainer.policy.statistics.items()}
-    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return identity
+
+
+def _configuration_digest(trainer: Trainer) -> str:
+    return hashlib.sha256(json.dumps(_configuration_identity(trainer), sort_keys=True).encode()).hexdigest()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4344,7 +4467,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "scheduler": trainer.scheduler.state_dict(),
         "reference": anchors[0],
         "anchors": anchors,
-        "anchor_candidates": engine.anchor_candidates,
+        "slot_updates": trainer.slot_updates,
         "pool": engine.snapshot(),
         "clocks": engine.clocks,
         "cursor": engine.cursor,
@@ -4352,13 +4475,13 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "lambda_max": engine.sampler.lambda_max,
         "update": trainer.update,
         "actor_steps": trainer.actor_steps,
+        "pool_start_update": trainer.pool_start_update,
         "warming": trainer.warming,
         "warmup_moments": trainer.warmup_moments,
         "episode_metrics": trainer.episode_metrics,
         "partial_episodes": sorted(trainer.partial_episodes),
         "anchor_win_history": trainer.anchor_win_history,
         "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
-        "next_anchor": trainer.next_anchor,
         "evaluation_cursor": trainer.evaluation_cursor,
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
@@ -4527,6 +4650,8 @@ class CheckpointWorker:
 
 def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
     manifest = read_training_manifest(manifest_path)
+    if manifest["version"] != CHECKPOINT_VERSION:
+        raise ValueError("exact resume requires the fixed-slot checkpoint format")
     if manifest["configuration_sha256"] != _configuration_digest(trainer):
         raise ValueError("resume configuration mismatch")
     if manifest["environment"] != _environment() or manifest["provenance"] != provenance:
@@ -4556,8 +4681,12 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     groups = len(trainer.engine.groups)
     frames = trainer.engine.sampler.schedule.rollout_frames
     initial_clock = math.ceil(trainer.config.head_start_frames / frames) * frames
+    pool_start = saved["pool_start_update"]
+    if type(pool_start) is not int or not 0 <= pool_start <= saved["update"] or pool_start % groups:
+        raise ValueError("invalid fresh-pool update origin")
+    pool_updates = saved["update"] - pool_start
     expected_clocks = [
-        initial_clock + ((saved["update"] + groups - 1 - group) // groups) * frames for group in range(groups)
+        initial_clock + ((pool_updates + groups - 1 - group) // groups) * frames for group in range(groups)
     ]
     if (
         not isinstance(saved["clocks"], list)
@@ -4567,7 +4696,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         or saved["cursor"] != saved["update"] % groups
     ):
         raise ValueError("checkpoint pool progress mismatch")
-    for field in ("actor_steps", "sampler_cursor", "evaluation_cursor", "next_anchor"):
+    for field in ("actor_steps", "sampler_cursor", "evaluation_cursor"):
         if type(saved[field]) is not int or saved[field] < 0:
             raise ValueError("checkpoint progress counters must be nonnegative integers")
     partial = saved.get("partial_episodes")
@@ -4627,8 +4756,10 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.critic_optimizer.load_state_dict(saved["critic_optimizer"])
     trainer.scheduler.load_state_dict(saved["scheduler"])
     engine = trainer.engine
-    if len(saved["anchors"]) - 1 > len(trainer.snapshot_slots):
-        raise ValueError("checkpoint exceeds the preallocated snapshot slots")
+    if set(saved["anchors"]) != {0, 1, 2, 3} or set(saved["slot_updates"]) != {1, 2, 3}:
+        raise ValueError("checkpoint fixed snapshot slot mismatch")
+    if any(type(update) is not int or not 0 <= update <= saved["update"] for update in saved["slot_updates"].values()):
+        raise ValueError("invalid checkpoint slot weight update")
     reference = trainer.reference
     engine.anchors.clear()
     slots = iter(trainer.snapshot_slots)
@@ -4647,7 +4778,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     engine.restore_pool(saved["pool"])
     engine.clocks = saved["clocks"]
     engine.cursor = saved["cursor"]
-    engine.anchor_candidates = saved["anchor_candidates"]
+    trainer.slot_updates = saved["slot_updates"]
     engine.sampler.cursor = saved["sampler_cursor"]
     engine.sampler.lambda_max = saved["lambda_max"]
     engine._initialized = True
@@ -4655,13 +4786,13 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.updating = False
     engine.completed_update = trainer.update - 1
     trainer.actor_steps = saved["actor_steps"]
+    trainer.pool_start_update = saved["pool_start_update"]
     trainer.warming = saved["warming"]
     trainer.warmup_moments = saved["warmup_moments"]
     trainer.episode_metrics = saved["episode_metrics"]
     trainer.partial_episodes = set(cast(list[tuple[int, int]], partial))
     trainer.anchor_win_history = saved["anchor_win_history"]
     trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
-    trainer.next_anchor = saved["next_anchor"]
     trainer.evaluation_cursor = saved["evaluation_cursor"]
     trainer.policy.clear_caches()
     random.setstate(saved["python_rng"])
@@ -4671,6 +4802,115 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         torch.cuda.set_rng_state_all(saved["cuda_rng"])
 
 
+PILOT_SOURCE = "3d4ad115881857d0c6c1ba039e41225bd7df3fe8"
+
+
+def legacy_pilot_digest(trainer: Trainer) -> str:
+    identity = _configuration_identity(trainer)
+    identity["sampler"] = {**dataclasses.asdict(trainer.engine.sampler.config), "anchor_rate": 0.15}
+    identity["opponent_layout"] = "fixed_anchor_ranges_v1"
+    del identity["lane_roles"]
+    if isinstance(trainer.policy, TransformerPolicy):
+        identity["decision_kernels"] = "dense_tick_window_graph_v5"
+        identity["reference_kernels"] = "actor_order_readonly_forward_v3"
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def restore_pilot_learner(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> HeadStart | None:
+    """Migrate only the stopped update-256 learner; fresh matches are a new treatment."""
+    manifest = read_training_manifest(manifest_path)
+    if (manifest["format"], manifest["version"], manifest["update"]) != ("hal.o65.training.v8", 8, 256):
+        raise ValueError("learner resume requires the stopped pilot's v8 update-256 checkpoint")
+    if manifest["provenance"] != {**provenance, "git_sha": PILOT_SOURCE}:
+        raise ValueError("learner resume source or artifact mismatch")
+    if manifest["configuration_sha256"] != legacy_pilot_digest(trainer) or manifest["environment"] != _environment():
+        raise ValueError("learner resume configuration or environment mismatch")
+    paths = {}
+    for shard in manifest["shards"]:
+        path = manifest_path.parent / shard["name"]
+        if sha256(path) != shard["sha256"]:
+            raise ValueError("learner resume shard hash mismatch")
+        paths[shard["role"]] = path
+    expected = {"training", "actor"} | {
+        f"simulator_{g}_{s}" for g, group in enumerate(trainer.engine.groups) for s in range(len(group))
+    }
+    if set(paths) != expected:
+        raise ValueError("learner resume simulator topology mismatch")
+    actor_path = evaluation_actor_path(manifest_path)
+    saved = torch.load(paths["training"], map_location="cpu", weights_only=False)
+    if (
+        saved["version"] != 8
+        or saved["update"] != 256
+        or saved["warming"]
+        or set(saved["anchors"]) != {0, 1}
+        or saved["anchor_candidates"] != (0, 1)
+        or saved["next_anchor"] != 2
+        or saved["evaluation_cursor"] != 0
+        or saved["execution"]
+        != {
+            "deterministic": trainer.config.deterministic,
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        }
+        or saved["counter_rng"] != {"seed": trainer.config.seed, "key": trainer.engine.sampler.rng.key}
+        or not trainer.engine.sampler.config.lambda_min
+        <= saved["lambda_max"]
+        <= trainer.engine.sampler.config.lambda_max
+    ):
+        raise ValueError("learner resume state differs from the stopped pilot")
+    groups = len(trainer.engine.groups)
+    frames = trainer.engine.sampler.schedule.rollout_frames
+    initial = math.ceil(trainer.config.head_start_frames / frames) * frames
+    clocks = [initial + ((256 + groups - 1 - group) // groups) * frames for group in range(groups)]
+    if saved["clocks"] != clocks or saved["cursor"] != 256 % groups:
+        raise ValueError("learner resume pool progress mismatch")
+    actor = torch.load(actor_path, map_location="cpu", weights_only=False)
+    if actor["model"].keys() != saved["model"].keys() or any(
+        not torch.equal(value, saved["model"][name]) for name, value in actor["model"].items()
+    ):
+        raise ValueError("learner resume actor disagrees with training state")
+    if saved["anchors"][1].keys() != saved["model"].keys() or any(
+        not torch.equal(value, saved["model"][name]) for name, value in saved["anchors"][1].items()
+    ):
+        raise ValueError("learner resume snapshot is not the update-256 student")
+    reference = trainer.reference.model.state_dict()
+    if saved["reference"].keys() != reference.keys() or any(
+        not torch.equal(value, reference[name].cpu()) or not torch.equal(value, saved["anchors"][0][name])
+        for name, value in saved["reference"].items()
+    ):
+        raise ValueError("learner resume pi_ref mismatch")
+    if trainer.engine._initialized:
+        raise ValueError("learner migration requires a fresh uninitialized pool")
+    trainer.engine.sampler.lambda_max = saved["lambda_max"]
+    trainer.engine.initialize()
+    trainer.capture_startup()
+    head_start = trainer.head_start() if trainer.config.head_start_frames else None
+    trainer.policy.model.load_state_dict(saved["model"], strict=True)
+    trainer.actor_optimizer.load_state_dict(saved["actor_optimizer"])
+    trainer.critic_optimizer.load_state_dict(saved["critic_optimizer"])
+    trainer.scheduler.load_state_dict(saved["scheduler"])
+    trainer.engine.anchors[1].model.load_state_dict(saved["anchors"][1], strict=True)
+    # Head-start episodes used pi_ref, so end slot 1 before its first learned-weight tick.
+    for match, number in trainer.engine.truncate_slot(1):
+        for side in (0, 1):
+            trainer.partial_episodes.discard((2 * match + side, number))
+    trainer.slot_updates = {1: 256, 2: 0, 3: 0}
+    trainer.update = trainer.pool_start_update = 256
+    trainer.engine.completed_update = 255
+    trainer.actor_steps = saved["actor_steps"]
+    trainer.warming = False
+    trainer.warmup_moments = saved["warmup_moments"]
+    trainer.engine.sampler.lambda_max = saved["lambda_max"]
+    trainer.anchor_win_history = saved["anchor_win_history"]
+    # No simulator, episode accumulator or queue belongs to the new match pool.
+    random.setstate(saved["python_rng"])
+    np.random.set_state(saved["numpy_rng"])
+    torch.set_rng_state(saved["torch_rng"])
+    if torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(saved["cuda_rng"])
+
+    return head_start
+
+
 def print_progress(metrics: dict[str, float], *, warming: bool) -> None:
     games = int(metrics.get("gameplay/pi_ref_count_32_updates", 0))
     win_rate = f"{metrics['gameplay/pi_ref_win_rate_32_updates']:.3f}" if games else "n/a"
@@ -4678,6 +4918,8 @@ def print_progress(metrics: dict[str, float], *, warming: bool) -> None:
     print(
         f"update={int(metrics['global_step'])} warming={int(warming)} "
         f"seconds={metrics['systems/update_seconds']:.3f} "
+        f"compiles={int(metrics['systems/post_startup_compiles'])} "
+        f"captures={int(metrics['systems/post_startup_captures'])} "
         f"rollout={metrics['systems/rollout_seconds']:.3f} "
         f"preparation={metrics['systems/preparation_seconds']:.3f} "
         f"actor={metrics.get('systems/actor_seconds', 0):.3f} "
@@ -4727,12 +4969,15 @@ def run_training(
     with wandb.init(project=wandb_project, mode="disabled" if wandb_project is None else "online", config=resolved):
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
+        if trainer.pool_start_update and trainer.update == trainer.pool_start_update:
+            for line in (output / "metrics.jsonl").read_text().splitlines():
+                wandb.log(json.loads(line))
         if head_start is not None:
             metrics = head_start.metrics()
             (output / "head-start.json").write_text(
                 json.dumps({**dataclasses.asdict(head_start), "metrics": metrics}, indent=2)
             )
-            wandb.log({"global_step": 0, **metrics})
+            wandb.log({"global_step": trainer.update, **metrics})
             print(f"head_start_ended seconds={head_start.seconds:.3f}", flush=True)
         with (
             contextlib.closing(CheckpointWorker(output / "checkpoints", provenance, publisher)) as checkpoints,
@@ -4777,14 +5022,14 @@ class NativeCli:
     cpus: tuple[int, ...]
     updates: int
     groups: int = 4
-    matches_per_shard: int = 2
+    matches_per_shard: int = 16
     device: str = "cuda"
     max_frame: int = 28800
     resume: Path | None = None
+    resume_learner: Path | None = None
     training: TrainConfig = TrainConfig()
     verify_resume: bool = False
     verify_only: bool = False
-    fixed_anchor_lanes: bool = True
     wandb_project: str | None = None
     profiling: ProfileConfig | None = None
     decoder_precision: DecoderPrecision = "bf16"
@@ -4793,6 +5038,10 @@ class NativeCli:
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.resume_learner is not None and (
+            self.resume is not None or self.verify_resume or self.profiling is not None
+        ):
+            raise ValueError("learner resume requires a fresh pool, without exact resume or profiling")
         if self.publication is not None:
             self_play_publication.validate_args(self.publication)
             if self.output.resolve() != (self.publication.source / "train").resolve():
@@ -4820,6 +5069,8 @@ class NativeCli:
             raise ValueError("native runs need distinct available CPUs")
         if any(value < 1 for value in (self.groups, self.matches_per_shard, self.updates)):
             raise ValueError("groups, matches per shard, and updates must be positive integers")
+        if self.matches_per_shard < 4:
+            raise ValueError("native fixed-slot shards require at least four matches")
         if self.max_frame != -1 and self.max_frame < 0:
             raise ValueError("max frame must be -1 or nonnegative")
         if self.profiling is not None and (
@@ -4916,7 +5167,11 @@ def train_native(config: NativeCli) -> None:
             raise ValueError("sampler identity is outside the checkpoint vocabulary")
     manifests = checkpoint.provenance["data_manifests"]
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    if config.output.exists() and config.resume is None:
+    if (
+        config.output.exists()
+        and config.resume is None
+        and (config.resume_learner is None or set(config.output.iterdir()) != {config.output / "metrics.jsonl"})
+    ):
         raise FileExistsError(config.output)
     with contextlib.ExitStack() as resources:
         if cache is not None:
@@ -4946,16 +5201,20 @@ def train_native(config: NativeCli) -> None:
             policy,
             EpisodeSampler(sampling, schedule, CounterRng(config.training.seed)),
             {0: policy.frozen_copy()},
-            fixed_anchor_lanes=config.fixed_anchor_lanes,
         )
         trainer = Trainer(engine, config.training)
         head_start = None
-        if config.resume is None:
+        trainer.compilation_counter = resources.enter_context(count_compilation_starts())
+        if config.resume_learner is not None:
+            head_start = restore_pilot_learner(trainer, config.resume_learner, provenance)
+        elif config.resume is None:
             engine.initialize()
+            trainer.capture_startup()
             if config.training.head_start_frames:
                 head_start = trainer.head_start()
         else:
             restore_checkpoint(trainer, config.resume, provenance)
+            trainer.capture_startup()
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)
             return
@@ -4967,6 +5226,7 @@ def train_native(config: NativeCli) -> None:
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
+        native_config["startup_capture_seconds"] = trainer.startup_seconds
         native_config["startup_seconds"] = time.perf_counter() - startup_started
         native_config["compile_cache_status"] = {
             "directory": str(cache.directory) if cache is not None else None,
@@ -5684,12 +5944,12 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
             (
                 engine.clocks,
                 engine.cursor,
-                engine.anchor_candidates,
+                trainer.slot_updates,
                 trainer.update,
                 trainer.actor_steps,
+                trainer.pool_start_update,
                 trainer.warming,
                 trainer.warmup_moments,
-                trainer.next_anchor,
                 trainer.evaluation_cursor,
                 trainer.episode_metrics,
                 sorted(trainer.partial_episodes),

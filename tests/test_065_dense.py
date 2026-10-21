@@ -62,7 +62,7 @@ def test_device_selection_places_each_window_once_and_separates_matches(device: 
 
 
 def test_prepare_uses_behavior_outputs_without_student_scoring() -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     rollout = run.engine.collect(0)
     original = run.policy.evaluate_values
     calls = []
@@ -105,7 +105,7 @@ def test_tensor_counter_domains_keys_and_cpu_cuda_parity() -> None:
 
 @pytest.mark.parametrize("timeout", [False, True])
 def test_dense_slots_keep_cadence_and_episode_execution_masks(timeout: bool) -> None:
-    run = trainer(groups=1, length=13, timeout=timeout, delay=8, anchor_rate=0)
+    run = trainer(groups=1, length=13, timeout=timeout, delay=8)
     rollout = run.engine.collect(0)
     table = rollout.table
     players = 4
@@ -127,7 +127,7 @@ def test_dense_slots_keep_cadence_and_episode_execution_masks(timeout: bool) -> 
 
 
 def test_final_timeout_bootstrap_precedes_reset() -> None:
-    run = trainer(groups=1, length=256, timeout=True, delay=8, anchor_rate=0)
+    run = trainer(groups=1, length=256, timeout=True, delay=8)
     rollout = run.engine.collect(0)
     table = rollout.table
     for stream in range(4):
@@ -262,7 +262,7 @@ def test_shards_step_while_the_other_buffer_samples() -> None:
 
     policy = CheckingPolicy()
     shards = (WaitingShard((0,)), FakeShard((1,)))
-    engine = exp.RolloutEngine((shards,), policy, sampler(anchor_rate=0), {0: policy.frozen_copy()})
+    engine = exp.RolloutEngine((shards,), policy, sampler(), {0: policy.frozen_copy()})
     engine.initialize()
     engine.collect(0)
     assert simulation_started.is_set() and second_buffer_sampled.is_set()
@@ -280,7 +280,6 @@ def test_two_stream_resets_preserve_both_matches_and_resume(tmp_path: Path) -> N
         shard_type((0,), length=67, timeout=True, device="cuda"),
         shard_type((1,), length=67, timeout=True, device="cuda"),
     )
-    base.engine.sampler.config = dataclasses.replace(base.engine.sampler.config, anchor_rate=1)
     engine = exp.RolloutEngine((shards,), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()})
     engine.initialize()
     run = exp.Trainer(engine, base.config)
@@ -298,7 +297,7 @@ def test_two_stream_resets_preserve_both_matches_and_resume(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("timeout", [False, True])
 def test_bootstrap_only_runs_occupied_boundary_roles(timeout: bool) -> None:
-    run = trainer(groups=1, anchor_rate=0, length=67, timeout=timeout, delay=8)
+    run = trainer(groups=1, length=67, timeout=timeout, delay=8)
     rollout = run.engine.collect(0)
     original = run.policy.evaluate_values
     calls: list[tuple[int, int]] = []
@@ -314,7 +313,7 @@ def test_bootstrap_only_runs_occupied_boundary_roles(timeout: bool) -> None:
 
 @pytest.mark.parametrize("field", ["stream", "episode", "clock", "written"])
 def test_prepare_rejects_invalid_next_state(field: str) -> None:
-    run = trainer(groups=1, anchor_rate=0, length=1000000)
+    run = trainer(groups=1, length=1000000)
     rollout = run.engine.collect(0)
     table = rollout.table
     row = rollout.ids[0]
@@ -335,7 +334,7 @@ def test_restore_rejects_invalid_progress_before_model_mutation(field: str, tmp_
 
     from test_065_loop import PROVENANCE
 
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     manifest = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     raw = json.loads(manifest.read_text())
@@ -356,7 +355,7 @@ def test_restore_rejects_invalid_progress_before_model_mutation(field: str, tmp_
 
 
 def test_reused_rollout_clears_reward_padding_before_metrics() -> None:
-    run = trainer(groups=1, anchor_rate=0, length=13)
+    run = trainer(groups=1, length=13)
     first = run.engine.collect(0)
     first.table.rewards.fill_(123)
     following = run.engine.collect(1)
@@ -422,7 +421,7 @@ def test_dense_gae_rejects_nonfinite_training_values(value: float, field: str) -
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), -0.1])
 @pytest.mark.parametrize("reference", [False, True])
 def test_kl_rejects_invalid_executed_probabilities(value: float, reference: bool) -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     batch = run.prepare(run.engine.collect(0))
     policy = batch.old
     target = batch.reference
@@ -473,9 +472,7 @@ def test_buffer_acceptance_matches_serial_shards_with_staggered_ends(device: str
             StaggeredShard((8, 9), device=device),
             FakeShard((11, 2), length=1000000, device=device),
         )
-        engine = engine_type(
-            (shards,), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()}, fixed_anchor_lanes=True
-        )
+        engine = engine_type((shards,), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()})
         engine.initialize()
         return exp.Trainer(engine, base.config)
 
@@ -532,7 +529,7 @@ def test_buffer_acceptance_rejects_a_step_past_a_terminal_frame() -> None:
             first = super().step(inputs, active)[0]
             return first, first
 
-    base = trainer(groups=1, anchor_rate=0)
+    base = trainer(groups=1)
     shard = PastEndShard((3, 0), length=1)
     engine = exp.RolloutEngine(((shard,),), base.policy, base.engine.sampler, {0: base.policy.frozen_copy()})
     engine.initialize()

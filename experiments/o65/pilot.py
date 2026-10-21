@@ -34,6 +34,7 @@ class Args:
     cpus: tuple[int, ...] = ()
     checkpoint_retention: Literal["all", "compact"] = "compact"
     resume: bool = False
+    resume_learner: Path | None = None
     compile_cache: Path | None = None
     publish_directory: Path | None = None
     publish_volume: str | None = None
@@ -57,6 +58,7 @@ def training_command(
     checkpoint_every: int,
     warmup: int,
     compile_cache: Path | None = None,
+    resume_learner: Path | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -91,6 +93,8 @@ def training_command(
         "--training.checkpoint-interval",
         str(checkpoint_every),
     ]
+    if resume_learner is not None:
+        command.extend(("--resume-learner", str(resume_learner)))
     if compile_cache is not None:
         command.extend(("--compile-cache", str(compile_cache)))
     return command
@@ -216,6 +220,23 @@ def trim_interrupted_metrics(path: Path, update: int) -> None:
     path.write_text("".join(line + "\n" for line in keep))
 
 
+def inherit_metrics(source: Path, destination: Path, update: int) -> None:
+    lines = source.read_text().splitlines()
+    retained = []
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            if index != len(lines) - 1:
+                raise
+            break
+        if row["global_step"] <= update:
+            retained.append(line)
+    if not retained or json.loads(retained[-1])["global_step"] != update:
+        raise ValueError("learner migration requires metric history through update 256")
+    destination.write_text("".join(line + "\n" for line in retained))
+
+
 def terminate(_signal: int, _frame: object) -> None:
     raise SystemExit("pilot interrupted; resume from the latest published checkpoint")
 
@@ -302,7 +323,7 @@ def main(args: Args) -> None:
         delivery,
         run,
         cpus,
-        matches=1 if args.tiny else 64,
+        matches=4 if args.tiny else 64,
         groups=2 if args.tiny else 4,
         updates=updates,
         checkpoint_every=checkpoint_every,
@@ -314,8 +335,29 @@ def main(args: Args) -> None:
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
         command.extend(("--wandb-project", "hal-o65"))
     previous = latest_checkpoint(run / "checkpoints") if args.resume else None
+    if previous is None and args.resume_learner is not None:
+        if args.tiny:
+            raise ValueError("pilot learner migration requires the original full pilot configuration")
+        command.extend(("--resume-learner", str(args.resume_learner)))
+        source_metrics = args.resume_learner.parent.parent / "metrics.jsonl"
+        if run.exists():
+            run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
+        run.mkdir()
+        inherit_metrics(source_metrics, run / "metrics.jsonl", 256)
+        (output / "learner-resume.json").write_text(
+            json.dumps(
+                {
+                    "checkpoint": str(args.resume_learner),
+                    "manifest_sha256": hashlib.sha256(args.resume_learner.read_bytes()).hexdigest(),
+                    "source_metrics_sha256": hashlib.sha256(source_metrics.read_bytes()).hexdigest(),
+                    "pool": "fresh fixed opponent slots with pi_ref head start",
+                    "source_update": 256,
+                },
+                indent=2,
+            )
+        )
     restored_update = read_training_manifest(previous)["update"] if previous is not None else 0
-    if args.resume and previous is None and run.exists():
+    if args.resume and previous is None and args.resume_learner is None and run.exists():
         run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
     if previous is not None:
         trim_interrupted_metrics(run / "metrics.jsonl", restored_update)

@@ -20,6 +20,7 @@ from hal.models.replay_actor import ActorTargets
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class HeadStartRng(exp.CounterRng):
+    seed: int
     offsets: tuple[int, ...] = (0, 1, 127, 1200)
     maximum: int = 1200
 
@@ -30,7 +31,7 @@ class HeadStartRng(exp.CounterRng):
 
 
 def test_head_start_preserves_offsets_queues_and_next_update_on_resume(tmp_path: Path) -> None:
-    run = trainer(groups=2, anchor_rate=0, development=True)
+    run = trainer(groups=2, development=True)
     run.config = dataclasses.replace(run.config, head_start_frames=1200)
     run.engine.sampler.rng = HeadStartRng(65)
     before = exp._state_hash(run.policy.model.state_dict())
@@ -53,7 +54,7 @@ def test_head_start_preserves_offsets_queues_and_next_update_on_resume(tmp_path:
 
 @pytest.mark.parametrize("timeout", [False, True])
 def test_head_start_handles_ends_and_excludes_partial_monte_carlo_episodes(timeout: bool) -> None:
-    run = trainer(groups=2, length=129, timeout=timeout, development=True, anchor_rate=0)
+    run = trainer(groups=2, length=129, timeout=timeout, development=True)
     run.engine.sampler.rng = HeadStartRng(65)
     run.config = dataclasses.replace(run.config, head_start_frames=1200)
     result = run.head_start()
@@ -65,7 +66,7 @@ def test_head_start_handles_ends_and_excludes_partial_monte_carlo_episodes(timeo
 
 
 def test_partial_episodes_do_not_report_zero_complete_match_kl_costs() -> None:
-    run = trainer(groups=1, length=129, development=True, anchor_rate=0)
+    run = trainer(groups=1, length=129, development=True)
     run.engine.sampler.rng = HeadStartRng(65, (127, 127))
     run.config = dataclasses.replace(run.config, head_start_frames=1200)
     run.head_start()
@@ -108,8 +109,8 @@ def test_episode_sampling_matches_character_prior_identity_counts_and_beta() -> 
     stages = dict.fromkeys(config.stages, 0)
     draws = []
     for number in range(4000):
-        episode = sampling.sample(3, number, (0,))
-        assert episode == sampling.sample(3, number, (0,))
+        episode = sampling.sample(3, number, None)
+        assert episode == sampling.sample(3, number, None)
         characters = tuple(player.character for player in episode.players)
         counts["mixed"] += 22 in characters
         counts["orientation"] += characters == (22, 1)
@@ -134,7 +135,7 @@ def test_episode_sampling_matches_character_prior_identity_counts_and_beta() -> 
 
 
 def test_partial_512_window_step_uses_every_window_once_and_masks_padding() -> None:
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     prepared = run.prepare(run.engine.collect(0))
     source = prepared.windows
     windows = torch.arange(513) % len(source.rows)
@@ -189,7 +190,7 @@ def test_episode_u_reaches_rollout_reference_replay_and_both_critic_inputs() -> 
     meta = table.integers[ids]
     expected = torch.tensor(
         [
-            run.engine.sampler.sample(int(m), int(ep), (0,)).players[int(side)].percentile
+            run.engine.sampler.sample(int(m), int(ep), None).players[int(side)].percentile
             for m, ep, side in meta[:, [exp.MATCH, exp.EPISODE, exp.SIDE]]
         ]
     )
@@ -221,14 +222,14 @@ def test_episode_u_reaches_rollout_reference_replay_and_both_critic_inputs() -> 
 
 
 def test_resume_preserves_u_and_episode_metric_totals(tmp_path: Path) -> None:
-    run = trainer(groups=1, length=300, anchor_rate=0)
+    run = trainer(groups=1, length=300)
     run.run_update()
     before = dict(run.episode_metrics)
     run.anchor_win_history = [{0: (1, 2), 7: (0, 1)}]
     anchor_history = list(run.anchor_win_history)
     checkpoint = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     expected, metrics = run.run_update()
-    restored = trainer(groups=1, length=300, anchor_rate=0)
+    restored = trainer(groups=1, length=300)
     exp.restore_checkpoint(restored, checkpoint, PROVENANCE)
     assert restored.episode_metrics == before
     assert restored.anchor_win_history == anchor_history
@@ -267,7 +268,7 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
     table.integers[:4, exp.LENGTH] = 1
     table.duration[:4] = torch.tensor([2, 1, 3, 3])
     table.opponent_anchor[:4] = torch.tensor([0, 7, 0, -1])
-    episode = run.engine.sampler.sample(0, 0, (0,))
+    episode = run.engine.sampler.sample(0, 0, None)
 
     def completed(anchor: int, anchor_side: int, *, timeout: bool = False):
         players = tuple(
@@ -311,20 +312,6 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
     assert metrics["gameplay/pi_ref_win_rate_32_updates"] == 0
     metrics = run.anchor_metrics(empty)
     assert "gameplay/pi_ref_win_rate_32_updates" not in metrics
-
-    sampled = trainer(groups=1, length=3, anchor_rate=1)
-    sampled.engine.anchors[7] = sampled.policy.frozen_copy()
-    sampled.engine.anchor_candidates = (0, 7)
-    actual = sampled.engine.collect(0)
-    assert actual.resets > 0
-    meta = actual.table.integers[actual.ids]
-    for anchor, (match, episode_number, side) in zip(
-        actual.table.opponent_anchor[actual.ids].tolist(),
-        meta[:, [exp.MATCH, exp.EPISODE, exp.SIDE]].tolist(),
-        strict=True,
-    ):
-        episode = sampled.engine.sampler.sample(match, episode_number, (0,) if episode_number == 0 else (0, 7))
-        assert anchor == episode.players[1 - side].anchor
 
 
 def test_gradient_noise_estimate_uses_preclip_gradients_and_window_counts() -> None:

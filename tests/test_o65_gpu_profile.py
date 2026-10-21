@@ -171,7 +171,7 @@ def test_profile_rejects_training_side_effects(tmp_path: Path) -> None:
 def test_nsys_rejection_cleans_up_partially_attached_recorder(tmp_path: Path) -> None:
     from test_065_loop import trainer
 
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     with pytest.raises(TypeError, match="TransformerPolicy"):
         gpu_profile.profile_nsys(run, tmp_path)
     assert run.profile is None and run.engine.profile is None
@@ -254,8 +254,8 @@ def test_profile_disabled_preserves_next_batch_and_update(tmp_path: Path) -> Non
             finally:
                 self.phase_name = previous
 
-    control = trainer(groups=1, anchor_rate=0)
-    treatment = trainer(groups=1, anchor_rate=0)
+    control = trainer(groups=1)
+    treatment = trainer(groups=1)
     recorder = HostOnlyProfile(tmp_path, torch.device("cpu"), traces=False)
     treatment.profile = treatment.engine.profile = recorder
     for _ in range(2):

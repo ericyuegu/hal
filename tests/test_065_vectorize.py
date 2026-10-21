@@ -1,6 +1,5 @@
 """Dense policy graph ownership, anchors and resume invariants."""
 
-import dataclasses
 from pathlib import Path
 
 import pytest
@@ -72,66 +71,15 @@ def test_tick_queues_and_resume_through_odd_resets_and_unsorted_streams(tmp_path
     torch.testing.assert_close(ring.controllers, run.policy.device_wire_actions(ring.values), rtol=0, atol=0)
 
 
-def test_fixed_anchor_lanes_keep_counts_and_ports_through_resets() -> None:
-    from test_065_loop import FakeShard
-    from test_065_loop import exp as loop_exp
-    from test_065_loop import trainer
-
-    base = trainer(groups=1, development=True)
-    shard = FakeShard(tuple(range(16)), length=13, timeout=True)
-    anchors = {index: base.policy.frozen_copy() for index in range(3)}
-    engine = loop_exp.RolloutEngine(((shard,),), base.policy, base.engine.sampler, anchors, fixed_anchor_lanes=True)
-    engine.initialize()
-    assert engine.anchor_counts == (2,)
-    rollout = engine.collect(0)
-    assert rollout.resets > 0
-    for match, state in engine.matches.items():
-        assigned = [side for side, player in enumerate(state.episode.players) if player.anchor is not None]
-        assert assigned == ([match % 2] if match < 2 else [])
-    assert sum(player.anchor is not None for state in engine.matches.values() for player in state.episode.players) == 2
-
-
-def test_snapshot_weights_reuse_storage_only_after_the_last_episode_releases_it() -> None:
-    from test_065_loop import trainer
-
-    run = trainer(groups=1, anchor_rate=1)
-    run.config = dataclasses.replace(run.config, snapshot_interval=1, snapshot_capacity=1)
-    run.run_update()
-    first = run.engine.anchors[1]
-    addresses = tuple(parameter.data_ptr() for parameter in first.model.parameters())
-    weights = {name: value.detach().clone() for name, value in first.model.state_dict().items()}
-
-    def reset_with(anchor: int) -> None:
-        run.engine.anchor_candidates = (anchor,)
-        for shard in run.engine.groups[0]:
-            for lane, match in enumerate(shard.match_ids):
-                episode = run.engine.matches[match].episode.number + 1
-                run.engine._reset(shard, lane, match, run.engine.clocks[0], episode)
-
-    reset_with(1)
-    run.run_update()
-    assert run.engine.anchors[1] is first
-    assert run.engine.anchors[2] is not first
-    for name, value in weights.items():
-        torch.testing.assert_close(first.model.state_dict()[name], value, rtol=0, atol=0)
-    reset_with(2)
-    run.run_update()
-    assert 1 not in run.engine.anchors
-    assert run.engine.anchors[3] is first
-    assert tuple(parameter.data_ptr() for parameter in first.model.parameters()) == addresses
-    for name, value in run.policy.model.state_dict().items():
-        torch.testing.assert_close(first.model.state_dict()[name], value, rtol=0, atol=0)
-
-
 def test_resume_rejects_a_changed_opponent_layout(tmp_path: Path) -> None:
     from test_065_loop import PROVENANCE
     from test_065_loop import exp as loop_exp
     from test_065_loop import trainer
 
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     manifest = loop_exp.save_checkpoint(run, tmp_path, PROVENANCE)
-    run.engine.fixed_anchor_lanes = True
+    run.engine.lane_roles[0] = 0
     with pytest.raises(ValueError, match="configuration mismatch"):
         loop_exp.restore_checkpoint(run, manifest, PROVENANCE)
 
@@ -169,7 +117,7 @@ def test_verifier_restores_execution_mode_if_graph_cleanup_fails(tmp_path: Path)
                 raise RuntimeError("graph cleanup failed")
             super().clear_caches()
 
-    base = trainer(groups=1, anchor_rate=0)
+    base = trainer(groups=1)
     policy = FailOncePolicy("cpu")
     policy.model.load_state_dict(base.policy.model.state_dict())
     engine = loop_exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})

@@ -114,9 +114,16 @@ class Request:
     matches: int = 1024
     timeout_seconds: int = 1800
     created_unix: float = dataclasses.field(default_factory=time.time)
+    resume_learner: str | None = None
 
     def __post_init__(self) -> None:
         validate_name(self.name)
+        if self.resume_learner is not None:
+            path = Path(self.resume_learner)
+            if self.mode != "pilot" or path.is_absolute() or ".." in path.parts or path.name != "update-00000256.json":
+                raise ValueError("learner resume needs a relative update-256 path on the pilot volume")
+            if path.parts[0] == self.name:
+                raise ValueError("learner resume must use a new run name")
         if re.fullmatch(r"[0-9a-f]{40}", self.git_sha) is None:
             raise ValueError("expected a full published HAL Git SHA")
         if self.mode not in ("smoke", "profile", "pilot"):
@@ -151,7 +158,7 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         raise ValueError("O65 requires 16 distinct shard CPUs")
     delivery = REMOTE_ROOT / "delivery"
     if request.mode == "pilot":
-        return [
+        argv = [
             "/opt/venv/bin/python",
             "experiments/o65/pilot.py",
             "--output",
@@ -172,6 +179,9 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             "--r2-prefix",
             f"o65/pilot-results/{request.name}",
         ]
+        if request.resume_learner is not None:
+            argv.extend(("--resume-learner", str(RESULTS / request.resume_learner)))
+        return argv
     argv = [
         "/opt/venv/bin/python",
         "experiments/065_selfplay_ppo.py",
@@ -185,9 +195,9 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         "--output",
         str(WORK / request.name / "profile"),
         "--cpus",
-        *(str(cpu) for cpu in cpus),
+        *(str(cpu) for cpu in (cpus[:4] if request.mode == "smoke" else cpus)),
         "--matches-per-shard",
-        str(request.matches // 16),
+        str(request.matches // (4 if request.mode == "smoke" else 16)),
         "--groups",
         "1",
         "--compile-cache",
@@ -442,6 +452,7 @@ class Args:
     matches: int = 1024
     timeout_seconds: int | None = None
     dry_run: bool = False
+    resume_learner: str | None = None
     secret: str = "hal"
     output: Path = Path("runs/modal")
 
@@ -472,6 +483,7 @@ def main(args: Args) -> None:
         args.timeout_seconds
         if args.timeout_seconds is not None
         else (PILOT_TIMEOUT_SECONDS if args.mode == "pilot" else 1800),
+        resume_learner=args.resume_learner,
     )
     args.output.mkdir(parents=True, exist_ok=True)
     budget = ROOT / ("runs/modal-pilot/budget.jsonl" if args.mode == "pilot" else "runs/modal-floor/budget.jsonl")
@@ -523,6 +535,8 @@ def main(args: Args) -> None:
         "--output",
         str(args.output),
     ]
+    if args.resume_learner is not None:
+        launch_command.extend(("--resume-learner", args.resume_learner))
     print(f"Launch: {shlex.join(launch_command)}", flush=True)
     if args.mode == "pilot":
         print(json.dumps(pilot_estimate(), indent=2), flush=True)

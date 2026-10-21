@@ -263,7 +263,7 @@ def test_publication_leaves_training_free_and_reports_worker_failure(
     publisher = self_play_publication.CheckpointPublisher(
         self_play_publication.Args(source, destination, "test", "o65/pilot-results/test")
     )
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.config = dataclasses.replace(run.config, checkpoint_interval=1)
     try:
         training = source / "train"
@@ -414,7 +414,7 @@ def test_checkpoint_worker_serializes_publication_before_next_capture(
     from test_065_loop import trainer
 
     source, destination = tmp_path / "pilot", tmp_path / "volume"
-    run = trainer(groups=1, anchor_rate=0)
+    run = trainer(groups=1)
     run.run_update()
     started, release = threading.Event(), threading.Event()
     publisher = self_play_publication.CheckpointPublisher(
@@ -457,3 +457,27 @@ def test_checkpoint_worker_serializes_publication_before_next_capture(
             publisher.close()
     if not fail:
         assert _MODULE.latest_checkpoint(destination / "train/checkpoints").name == "update-00000002.json"
+
+
+def test_learner_resume_command_and_metric_history(tmp_path: Path) -> None:
+    path = tmp_path / "source/metrics.jsonl"
+    path.parent.mkdir()
+    path.write_text('{"global_step":255}\n{"global_step":256}\n{"global_step":257}\n{"global_')
+    target = tmp_path / "metrics.jsonl"
+    _MODULE.inherit_metrics(path, target, 256)
+    assert target.read_text() == '{"global_step":255}\n{"global_step":256}\n'
+    command = _MODULE.training_command(
+        tmp_path / "delivery",
+        tmp_path / "new/train",
+        tuple(range(16)),
+        matches=64,
+        groups=4,
+        updates=2000,
+        checkpoint_every=32,
+        warmup=32,
+        resume_learner=tmp_path / "source/checkpoints/update-00000256.json",
+    )
+    assert command[command.index("--resume-learner") + 1] == str(tmp_path / "source/checkpoints/update-00000256.json")
+    path.write_text('{"global_step":255}\n')
+    with pytest.raises(ValueError, match="metric history"):
+        _MODULE.inherit_metrics(path, target, 256)
