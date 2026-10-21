@@ -35,8 +35,9 @@ class QueueResidualHead(nn.Module):
         if max_queue < 1 or hidden_dim < 1:
             raise ValueError("critic queue capacity and hidden width must be positive")
         self.max_queue = max_queue
-        self.offset_embedding = nn.Embedding(max_queue, cfg.offset_embed_dim)
-        self.queue_encoder = SwiGLU(4 * cfg.action_embed_dim + cfg.offset_embed_dim, hidden_dim, hidden_dim)
+        # The encoder reads the whole queue in order, so each action keeps its
+        # firing offset; a pooled mean would keep only the set of actions.
+        self.queue_encoder = SwiGLU(max_queue * (4 * cfg.action_embed_dim + 1), hidden_dim, hidden_dim)
         self.residual = SwiGLU(cfg.temporal_d_model + 8 + hidden_dim, hidden_dim, 1, output_bias=True)
         nn.init.zeros_(self.residual.down.weight)
         nn.init.zeros_(self.residual.down.bias)
@@ -65,11 +66,9 @@ class QueueResidualHead(nn.Module):
         ):
             raise ValueError("opponent queue length is outside its capacity")
         offsets = torch.arange(self.max_queue, device=decoder_state.device)
-        embedded_offsets = self.offset_embedding(offsets).expand(batch, -1, -1)
-        frames = torch.cat((queue_embeddings.detach(), embedded_offsets), dim=-1)
-        valid = offsets[None] < queue_lengths[:, None]
-        pooled = torch.where(valid[..., None], frames, 0).sum(dim=1) / queue_lengths.clamp_min(1)[:, None]
-        queue = self.queue_encoder(pooled)
+        valid = (offsets[None] < queue_lengths[:, None])[..., None]
+        frames = torch.cat((torch.where(valid, queue_embeddings.detach(), 0), valid.to(queue_embeddings.dtype)), -1)
+        queue = self.queue_encoder(frames.flatten(1))
         inputs = torch.cat((decoder_state.detach(), condition, opponent_condition, queue), dim=-1)
         return self.residual(inputs).squeeze(-1).float()
 

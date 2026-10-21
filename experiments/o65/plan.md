@@ -198,9 +198,10 @@ The frozen percentile head stays in the checkpoint.
 We predict value from the existing value head plus a zero-initialized residual
 head. The residual reads detached decoder state immediately before the first
 ego draw, ego conditions, opponent conditions and the opponent's committed
-queue. Both conditions include u, log(lambda), D and R. We embed queued actions
-with offsets and take a masked mean before an MLP. The queue includes the
-remaining actions of an opponent's current chunk.
+queue. Both conditions include u, log(lambda), D and R. We embed each queued
+action, zero the padding, append a validity bit and flatten the queue in
+firing order into an MLP, so each action keeps its offset. The queue includes
+the remaining actions of an opponent's current chunk.
 
 We detach trunk and decoder features so critic fitting cannot move the actor.
 The critic uses its own optimizer, LR 3e-4 and four epochs on cached rollout

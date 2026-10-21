@@ -141,6 +141,20 @@ def test_queue_padding_is_invisible_even_for_nan_bytes() -> None:
     torch.testing.assert_close(policy.critic_residual(*inputs, queue, lengths), expected, rtol=0, atol=0)
 
 
+def test_critic_distinguishes_queued_actions_by_offset() -> None:
+    policy = model()
+    nn.init.normal_(policy.critic_residual.residual.down.weight)
+    inputs = (torch.randn(1, 32), torch.randn(1, 4), torch.randn(1, 4))
+    queue = torch.zeros(1, 14, 128)
+    queue[0, 0], queue[0, 5] = torch.randn(128), torch.randn(128)
+    swapped = queue.clone()
+    swapped[0, 0], swapped[0, 5] = queue[0, 5], queue[0, 0]
+    lengths = torch.tensor([6])
+    assert not torch.allclose(
+        policy.critic_residual(*inputs, queue, lengths), policy.critic_residual(*inputs, swapped, lengths)
+    )
+
+
 def test_executed_offsets_validate_proxy_and_production() -> None:
     validate_executed_offsets(config().head_offsets, ((8, 4), (10, 2)))
     production = tuple((d, r) for d in range(16, 22) for r in (2, 4) if d + r <= 24)
