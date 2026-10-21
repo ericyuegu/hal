@@ -80,6 +80,8 @@ def training_command(
         str(updates),
         "--training.windows-per-step",
         "512",
+        "--training.actor-microbatches",
+        "4",
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",

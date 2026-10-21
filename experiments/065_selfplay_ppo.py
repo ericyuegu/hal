@@ -2866,6 +2866,9 @@ class TrainConfig:
     critic_lr: float = 3e-4
     critic_epochs: int = 4
     windows_per_step: int = 512
+    # Each actor step and the reference pass run in this many window chunks,
+    # because every captured CUDA graph keeps a private pool at its peak size.
+    actor_microbatches: int = 1
     decisions_per_window: int = 16
     clip_epsilon: float = 0.2
     gradient_clip: float = 1.0
@@ -2883,6 +2886,7 @@ class TrainConfig:
         for name in (
             "critic_epochs",
             "windows_per_step",
+            "actor_microbatches",
             "decisions_per_window",
             "snapshot_interval",
             "snapshot_capacity",
@@ -2892,6 +2896,8 @@ class TrainConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if not 1 <= self.decisions_per_window <= 16:
             raise ValueError("at most 16 decisions can train per window")
+        if self.windows_per_step % self.actor_microbatches:
+            raise ValueError("actor microbatches must divide windows per step")
         for value in (self.warmup_steps, self.critic_warmup_updates, self.head_start_frames):
             if type(value) is not int or value < 0:
                 raise ValueError("warmup lengths must be nonnegative integers")
@@ -3665,7 +3671,11 @@ class Trainer:
                 None
                 if self.warming
                 else window_evaluation(
-                    self.reference.evaluate_reference(windows, placement.positions, placement.windows),
+                    self.reference.evaluate_reference(
+                        windows,
+                        placement.positions,
+                        placement.windows.reshape(-1, self.config.windows_per_step // self.config.actor_microbatches),
+                    ),
                     old.actions,
                     compact,
                 )
@@ -3918,17 +3928,44 @@ class Trainer:
                     )
                     advantages = dense_advantage[windows.rows]
                     statistics = advantage_statistics(advantage_moments(advantages.flatten(), selected.flatten()))
-                    targets = ActorTargets(
-                        table.behavior[windows.rows],
-                        advantages,
-                        selected,
-                        table.coefficients[windows.rows],
-                        tuple(value[windows.rows] for value in reference_dense),
-                        statistics.mean.float(),
-                        statistics.sigma.float(),
-                        selected.sum().float(),
+                    # Chunks share the step's statistics and denominator, so their
+                    # gradients sum to the gradient of the whole step.
+                    chunk = cfg.windows_per_step // cfg.actor_microbatches
+                    parts: list[tuple[ActorLoss, ReplayOutput]] = []
+                    total = tuple(torch.zeros_like(p) for p in self.policy.actor_parameters())
+                    for start in range(0, cfg.windows_per_step, chunk):
+                        ids = window_ids[start : start + chunk]
+                        part = batch.windows.take(ids, batch.placement.positions, ids >= 0)
+                        targets = ActorTargets(
+                            table.behavior[part.rows],
+                            advantages[start : start + chunk],
+                            selected[start : start + chunk],
+                            table.coefficients[part.rows],
+                            tuple(value[part.rows] for value in reference_dense),
+                            statistics.mean.float(),
+                            statistics.sigma.float(),
+                            selected.sum().float(),
+                        )
+                        parts.append(self.policy.actor_step(part, targets, clip_epsilon=cfg.clip_epsilon))
+                        if cfg.actor_microbatches > 1:
+                            for gradient, parameter in zip(total, self.policy.actor_parameters(), strict=True):
+                                if parameter.grad is not None:
+                                    gradient.add_(parameter.grad)
+                    if cfg.actor_microbatches > 1:
+                        for gradient, parameter in zip(total, self.policy.actor_parameters(), strict=True):
+                            if parameter.grad is None:
+                                parameter.grad = gradient
+                            else:
+                                parameter.grad.copy_(gradient)
+                    result = ActorLoss(
+                        *(
+                            torch.stack([getattr(loss, f.name) for loss, _ in parts]).sum(0)
+                            if getattr(parts[0][0], f.name).ndim == 0
+                            else torch.cat([getattr(loss, f.name) for loss, _ in parts])
+                            for f in dataclasses.fields(ActorLoss)
+                        )
                     )
-                    result, current = self.policy.actor_step(windows, targets, clip_epsilon=cfg.clip_epsilon)
+                    current = concatenate_replays([output for _, output in parts], 0)
                     _check_finite(
                         "actor loss, KL and joint ratio",
                         torch.cat(

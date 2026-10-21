@@ -103,8 +103,12 @@ updates record allocated and reserved bytes by phase. We preserve partial
 memory records in phase-memory.json after an OOM. The trainer uses
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. A three-update, 16-match
 RTX 3060 check passed graph capture and replay with this setting. It does not
-qualify the full pilot memory fit. The 512-window actor step
-must fit directly; an OOM requires review of the experiment settings.
+qualify the full pilot memory fit. Each 512-window actor step and the
+reference pass run as four 128-window chunks. Every captured CUDA graph keeps
+a private pool at its peak, and at 512 windows the reference graph alone
+exceeded the card. The chunks share the step's advantage statistics and
+denominator, so their summed gradient equals the whole step's gradient, and
+the optimizer still steps once per 512 windows.
 
 We evaluate the final checkpoint once against pi_ref in MSL. The frozen grid
 draws 32 distinct matchups without replacement from training weights using

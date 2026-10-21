@@ -1155,3 +1155,23 @@ def test_resume_maximum_is_diagnostic_when_vector_noise_is_unchanged() -> None:
     report = exp._compare_resume_updates(first, second, resumed)
     assert report.groups["model"]["error_max"] > report.groups["model"]["tolerance_max"]
     assert report.passed
+
+
+def test_actor_microbatches_match_the_whole_step() -> None:
+    run = transformer_trainer("cpu", decoder_precision="fp32")
+    batch = run.prepare(run.engine.collect(0))
+    actor = copy.deepcopy(run.policy.model.state_dict())
+    optimizer = copy.deepcopy(run.actor_optimizer.state_dict())
+    critic = copy.deepcopy(run.critic_optimizer.state_dict())
+    scheduler = copy.deepcopy(run.scheduler.state_dict())
+    run.fit(batch)
+    whole = copy.deepcopy(run.policy.model.state_dict())
+    assert any(not torch.equal(whole[name], value) for name, value in actor.items())
+    run.policy.model.load_state_dict(actor)
+    run.actor_optimizer.load_state_dict(optimizer)
+    run.critic_optimizer.load_state_dict(critic)
+    run.scheduler.load_state_dict(scheduler)
+    run.config = dataclasses.replace(run.config, actor_microbatches=2)
+    run.fit(batch)
+    for name, value in run.policy.model.state_dict().items():
+        torch.testing.assert_close(value, whole[name], rtol=1e-5, atol=1e-7, msg=name)
