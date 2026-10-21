@@ -8,8 +8,10 @@ job. Use [plan.md](plan.md) for the objective and frame conventions.
 ## Treatment and control
 
 We run 2,000 updates, including critic warmup, on four groups of 1,024 matches.
-Each group uses 16 shards with 64 lanes each. We reserve 154 matches per group
-for anchors, alternating anchor ports. Only student players train.
+Each group uses 16 shards with 64 lanes each. Each shard fixes 54 lanes to
+self-play, four to pi_ref and two to each of three snapshot slots. Thus each
+group has 160 anchor lanes (15.625%). Anchor ports are random per episode.
+Only student players train. Opponent roles stay fixed through resets.
 
 | Setting | Value |
 | --- | --- |
@@ -22,7 +24,7 @@ for anchors, alternating anchor ports. Only student players train.
 | Rollout | 256 frames per active match per update |
 | Seed and cadence | Seed 65, (D=8,R=4) and (D=10,R=2) |
 
-An update contributes about 3,788 student windows and eight actor steps.
+An update contributes about 3,776 student windows and eight actor steps.
 Padding in the final step contributes to neither decision selection,
 advantage normalization nor gradients. We reject unsupervised executed offsets.
 
@@ -74,6 +76,21 @@ final grid. Update sampler hashes in the delivery manifest after regeneration.
 
 We verify delivery, build MSL and the HAL adapter, then record the source,
 environment and build hashes. Simulator parity tests remain required.
+
+Before head starts, we compile and capture all fixed tick graphs for the
+student, pi_ref and three permanent snapshot objects, on every group and
+buffer. Both ports stay in each policy's batch, masked when it does not own
+them. Snapshot slots start from pi_ref. At each promotion we truncate all live
+episodes in the oldest slot's lanes, then copy student weights into that
+object. Boundary values bootstrap the student; no truncation counts as a win.
+The lanes reset before their next step. We need no retired slots.
+
+We also capture the fixed actor, reference-chunk and value graphs at startup.
+Each update logs post-startup compiler starts and capture attempts to W&B and
+stdout; a new capture fails with its key. The local check is three PPO updates
+at 16 matches with snapshot_interval=1, including resets. The relaunch must
+measure the complete pilot's graph memory; the local check cannot qualify a
+96 GiB fit.
 
 Before warmup, each match draws an independent integer offset uniformly from
 0 through 1,200 frames. Both players use pi_ref. Initial starts wait until
@@ -135,8 +152,9 @@ metrics retain the same results. Each update records anchor 0 under
 
 We include unfinished matches and countdown frames in exposure, exclude reset
 waits and truncation wins, preserve each episode's anchor id through reset
-processing. Training format v8 retains rolling counts through resume and removes
-the variance history used by the former warmup rule. It also preserves partial
+processing. Training format v9 retains rolling counts and records each slot's weight
+update and the fresh-pool update origin. Per-slot metrics record the weight
+update used for the rollout. A promotion clears that slot's rolling counts. It also preserves partial
 episodes from head starts and accounts for the initial 1,280-frame pool advance.
 
 We also record pre-clip gradient norms, cap fractions, conditional KL, entropy,
@@ -159,11 +177,30 @@ uv run python -m scripts.launch_o65_modal --mode pilot \
   --name o65-bigstep-pilot --dry-run --output runs/modal-pilot
 ```
 
-After publishing the reviewed o65-bigstep HEAD, launch with:
+The fixed-slot relaunch starts a new output directory and W&B run from the
+stopped pilot's update-256 learner. It validates commit `3d4ad115`, the original
+configuration, environment, artifact hashes, and actor/reference agreement.
+It restores model, both optimizers, scheduler, lambda_max, RNGs, counters and
+rolling win history. It copies snapshot 1 into permanent slot 1, and imports
+disk/W&B metrics through update 256. The new pool uses calibrated lambda_max
+and the usual pi_ref head start. Slot 1's partial head-start episodes truncate
+before its saved weights take effect. This is a learner migration with a
+fresh simulator pool, not exact continuation of the old experiment.
+
+Inspect this launch without a Modal request:
 
 ```sh
 uv run python -m scripts.launch_o65_modal --mode pilot \
-  --name o65-bigstep-pilot --timeout-seconds 36000
+  --name o65-fixed-resume --dry-run --output runs/fixed/modal \
+  --resume-learner o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json
+```
+
+After publishing the reviewed o65-bigstep HEAD, the operator can launch with:
+
+```sh
+uv run python -m scripts.launch_o65_modal --mode pilot \
+  --name o65-fixed-resume --timeout-seconds 36000 \
+  --resume-learner o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json
 ```
 
 The Modal Secret hal requires the four AWS/R2 variables and WANDB_API_KEY.
@@ -220,3 +257,6 @@ seed/start units. Missing bounds or incomplete win pairs leave the result
 inconclusive. Training metrics do not select the checkpoint or establish
 learning success. MSL-specific gains remain a risk; production and Dolphin
 validation require separate runs. We do not extend this run after viewing results.
+
+The v8 learner migration can be removed after the fixed-slot run has a validated
+v9 checkpoint. Reading old v8 actors for evaluation remains supported.

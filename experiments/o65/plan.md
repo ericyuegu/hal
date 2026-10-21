@@ -62,10 +62,21 @@ For each player, we independently draw:
 - log(lambda) uniformly from log(0.01) through log(lambda_max), plus an admitted
   (D,R) pair. Critic warmup calibrates lambda_max within the conditioner bounds.
 
-We assign about 15% of matches to student-versus-anchor play. The anchor uses
-pi_ref or a recent frozen snapshot, with its own sampled episode conditions.
-Only student players contribute training windows. We preserve anchor identity
-through the episode and retain snapshot weights while a match uses them.
+Each shard has fixed opponent roles. Of its 64 lanes, 54 use student self-play,
+four use pi_ref and two use each of three snapshot slots. We spread the ten
+anchor lanes across the shard. The anchor port is random at each episode reset;
+matchups, stages and player conditions keep the distributions above. Only
+student players contribute training windows. There is no per-episode anchor
+share or anchor-policy draw. A 16-lane development shard uses one lane per
+anchor slot and twelve self-play lanes.
+
+We create pi_ref and all three snapshot policy objects once. Snapshot slots
+start with pi_ref weights. Promotion selects the slot with the oldest weight
+update, breaking ties by slot number, and copies student weights in place.
+Before copying, we truncate all live episodes on that slot's lanes, across all
+groups. Their preceding rollouts already have nonterminal boundary bootstraps;
+truncations add no wins or full-episode critic diagnostics. Each lane resets
+before it next steps. No episode uses two sets of opponent weights.
 
 Before critic warmup, the pilot draws an independent integer head start from
 0 through 1,200 frames per match using a separate counter domain. Both players
@@ -246,8 +257,9 @@ replay the reference, calculate KL and GAE, fit the critic, then run one PPO
 epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
-Training format v8 retains pool snapshot v4 and removes the variance history
-used by the former warmup rule. It records partial episodes from head starts
+Training format v9 retains pool snapshot v4. It records the three slot weight
+updates and the update at which a fresh pool started. Exact resume rejects v8;
+evaluation can still read its actor. It records partial episodes from head starts
 and validates group progress from the initial pool clock. A checkpoint records model,
 optimizers, scheduler, compressed simulator states, the last 129 frame records,
 committed queues, group clocks, episode conditions and ids, pool position,
@@ -263,13 +275,33 @@ R2. Only one checkpoint can be in progress. If it is still running at the next
 checkpoint boundary, we wait and log the wait. A worker failure fails training
 before the next update. Resume uses the latest published checkpoint.
 
-The fixed-lane pilot preallocates snapshot policies and warms their rollout
-graphs on the first visit to each group. Each policy uses the full set of anchor
-lanes, with ownership masks on queue writes. Promotion copies weights in place;
-the next block prefill rebuilds its history. We reserve snapshot_capacity slots
-plus enough retired slots to cover the native timeout. With four groups, a
-28,800-frame timeout and a 256-update snapshot interval, this is five slots.
-Retired weights remain unchanged while an episode uses them.
+Tick batches retain both ports of each lane. The student has one row per
+player; each anchor has both ports of its own lanes. Ownership and activity
+masks control queue and behavior writes. Resets, waits, randomized ports and
+cadence changes cannot change a batch shape. For every group, buffer and policy,
+startup captures (append=1,R=4), (append=2,R=2) and (append=2,R=4), before head
+starts. Startup also captures fixed player-count value batches, diagnostic
+value batches, one padded reference chunk and the actor microbatch. Reference
+chunks reuse one graph regardless of the number of live windows.
+
+After startup we count Torch compiler starts and CUDA capture attempts. Every
+update logs both counts to disk, W&B and stdout. A new capture raises an error
+that names its graph key. Promotion keeps policy parameters, graph storage and
+batch layouts in place. The next block prefill rebuilds history with the new
+weights; no retired snapshot objects are needed.
+
+The fixed-slot relaunch has a separate learner migration mode, not exact
+resume. Its sole source is the v8 update-256 checkpoint from commit
+`3d4ad115881857d0c6c1ba039e41225bd7df3fe8`. It validates source, input hashes,
+environment, configuration, all shard hashes and actor/reference agreement.
+It restores student weights, both optimizers, scheduler, calibrated lambda_max,
+RNGs, actor-step and update counters, and rolling anchor wins. The saved snapshot
+goes into slot 1 with weight update 256; slots 2 and 3 retain pi_ref. The new
+pool samples with restored lambda_max, captures graphs and runs the usual
+pi_ref head start. Slot 1's head-start episodes truncate before its saved
+weights take effect. Simulator state, queues and partial-episode accumulators
+are discarded. This deliberate pool reset and fixed opponent distribution are
+a new treatment. Disk and new W&B history retain metrics through update 256.
 
 We derive independent counter draws from run seed, domain, logical stream id,
 episode, frame, offset and factor. We separate action draws, reset choices,
@@ -294,7 +326,9 @@ across ranks. CPU Gloo tests do not qualify CUDA/NCCL execution.
 The proxy pilot logs each training anchor separately: net stocks and damage
 per active minute, completed stockout wins/counts, pooled last-32-update
 wins/counts. Reset waits contribute no exposure; truncations contribute no wins.
-We preserve these counts through resume. We log KL by cadence and lambda bin,
+We preserve these counts through resume. Snapshot metrics use stable slot ids
+and record the update of the weights used for that rollout. Promotion clears
+that slot's rolling win counts before it next plays. We log KL by cadence and lambda bin,
 entropy, clipping, ratio quantiles, gradient norms, parameter movement,
 episode-age/u coverage, timing and memory. W&B uses global_step as data and
 metric step, with one slash per metric key.

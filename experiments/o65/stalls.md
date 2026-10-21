@@ -104,3 +104,63 @@ compare the next batch and optimizer update after synchronous and background
 writes, including real native state. Other tests check worker failure, failed
 writes before manifest publication, parameter address stability, CUDA graph
 outputs after weight copies, and graph reuse after retirement.
+
+## Fixed opponent slots
+
+The fixed-slot treatment starts at `1fcc925d`. It removes per-episode anchor
+selection and retirement. Each 64-lane shard has 54 self-play lanes, four
+pi_ref lanes and two lanes per snapshot slot, spread across the shard. Both
+ports occupy fixed policy rows. Masks protect queues and behavior outputs.
+Promotion truncates the selected slot's episodes before copying weights in
+place. The previous rollout's nonterminal boundary value supplies its student
+bootstrap. Snapshot metrics carry the slot's weight update; promotion clears
+that slot's rolling win counts.
+
+All tick, value, reference-chunk and actor graphs are prepared before the
+head start. Reference capture uses one padded chunk, so the number of live
+windows cannot change its graph. A late capture fails with its key. Stdout,
+disk metrics and W&B report compiler starts and capture attempts after startup.
+
+The sole RTX 3060 check used the pinned 17M proxy, seed 65, one native shard
+of 16 matches, the two development cadences, 256-frame rollouts, 32 windows
+per actor step, four critic epochs, no critic warmup, snapshot_interval=1 and
+a 16-frame maximum head start. Each anchor slot had one lane. max_frame=0
+forced native timeouts and block-boundary resets; this is execution evidence,
+not gameplay or learning evidence. No second GPU run was made.
+
+| Measurement | Fixed slots |
+| --- | ---: |
+| Startup capture, including cold compilation | 593.682 s |
+| Startup graphs | 18 |
+| Head start | 2.983 s |
+| Update 1 / 2 / 3 | 4.453 / 4.305 / 4.290 s |
+| Post-startup compiler starts, updates 1 / 2 / 3 | 0 / 0 / 0 |
+| Post-startup capture attempts, updates 1 / 2 / 3 | 0 / 0 / 0 |
+| Peak allocated / reserved during updates | 1.323 / 5.682 GiB |
+| Promotion 1 / 2 / 3 | 0.004 / 0.003 / 0.003 s |
+
+The earlier 3.196–3.211 s normal-game check used two eight-match shards and a
+different opponent layout. The timings above use one 16-match shard and forced
+resets, so they do not establish a throughput change. Logs and exact byte
+counts are in `runs/fixed/gpu.log` and `runs/fixed/gpu/measurement.json`.
+
+The stream speed rule defers pilot-scale graph memory to the relaunch. No
+pilot-scale memory estimate or mitigation is claimed. A 96 GiB fit remains
+unqualified.
+
+The v8 update-256 migration restores the learner and snapshot 1 into a fresh
+pool with the normal pi_ref head start. It validates the old configuration
+with its original layout identity; all other inputs must match. New v9
+checkpoints record the fresh-pool update origin and the three slot versions.
+The source manifest and resolved settings were fetched read-only from Modal
+volume hal-o65-profile. Reconstructing the original configuration on CPU gives
+its recorded SHA-256 exactly:
+`34643ee197ebff73969b5977929759dad71224d93961f9d4811ea0f465e21142`.
+The complete training/simulator shards were not downloaded or run locally.
+The committed launch passed a Modal dry run; no cloud job was launched.
+
+Changed-file Ruff and ty checks pass. The focused fixed-layout, pilot and Modal
+tests pass: 60 CPU tests and one GPU test. The GPU test emitted 15 compiler
+warnings. Full suites, parity audits and further GPU runs were excluded by
+the speed rule. `runs/fixed/validation.md` records commands and intermediate
+findings.
