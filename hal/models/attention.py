@@ -12,6 +12,8 @@ from jaxtyping import Float
 from jaxtyping import Int
 from loguru import logger
 from torch import Tensor
+from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.attention.varlen import varlen_attn
 
 AttnMask = Bool[Tensor, "B 1 L L"]
@@ -140,12 +142,42 @@ def rotate_positions(x: Tensor, positions: Tensor, rotary: Rotary) -> Tensor:
 
 @dataclass(frozen=True, slots=True)
 class KVMemory:
-    """Read view of a stream's bounded KV ring and its absolute positions."""
+    """Read view of a stream's bounded KV ring and its absolute positions.
+
+    ``prefix`` marks a cache whose valid keys occupy slots 0..query_position in
+    position order, so a per-row key count replaces the dense position mask.
+    """
 
     kv: Tensor
     positions: Tensor
     query_position: Tensor
     window: int
+    prefix: bool = False
+
+
+def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor, *, causal: bool) -> Tensor:
+    """Attend each row to its first ``lengths`` key slots.
+
+    Causal queries align to the end of the prefix: query i of Q sees slots below
+    lengths - Q + i + 1. A query without keys returns zeros. Compiled CUDA code
+    uses FlexAttention's decode kernel; eager code builds the equivalent mask.
+    """
+    batch, _, queries, _ = query.shape
+    capacity = key.shape[2]
+    if lengths.shape != (batch,):
+        raise ValueError("prefix attention lengths must be [B]")
+    if query.device.type == "cuda" and torch.compiler.is_compiling():
+
+        def keep(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
+            return kv < (lengths[b] - queries + q + 1 if causal else lengths[b])
+
+        block_mask = create_block_mask(keep, batch, None, queries, capacity, device=query.device)
+        return cast(Tensor, flex_attention(query, key, value, block_mask=block_mask))
+    slots = torch.arange(capacity, device=query.device)
+    limits = lengths[:, None] - queries + torch.arange(1, queries + 1, device=query.device)[None]
+    valid = slots[None, None] < (limits if causal else lengths[:, None].expand(batch, queries))[..., None]
+    attended = F.scaled_dot_product_attention(query, key, value, attn_mask=valid[:, None])
+    return torch.where(valid.any(-1)[:, None, :, None], attended, 0)
 
 
 def rmsnorm(x0: Float[Tensor, "... d"], eps: float = 1e-6) -> Float[Tensor, "... d"]:

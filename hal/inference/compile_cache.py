@@ -8,6 +8,7 @@ import os
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import torch
 
@@ -20,7 +21,7 @@ class CacheIdentity:
     gpu: str
     capability: tuple[int, int]
     source_sha256: str
-    format: str = "hal.o65.compile-cache.v1"
+    format: str = "hal.o65.compile-cache.v2"
 
     def encoded(self) -> bytes:
         return json.dumps(dataclasses.asdict(self), sort_keys=True).encode()
@@ -65,11 +66,41 @@ def _publish(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _read_manifest(path: Path, identity: CacheIdentity) -> list[dict[str, object]]:
+    entry = json.loads(path.read_text())
+    if not isinstance(entry, dict) or set(entry) != {"identity", "entries"} or entry["identity"] != identity.key:
+        raise ValueError("compiler artifact manifest mismatch")
+    entries = entry["entries"]
+    if not isinstance(entries, list):
+        raise ValueError("compiler artifact manifest mismatch")
+    for item in entries:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"sha256", "keys"}
+            or not isinstance(item["sha256"], str)
+            or len(item["sha256"]) != 64
+            or any(c not in "0123456789abcdef" for c in item["sha256"])
+            or not isinstance(item["keys"], dict)
+            or any(
+                not isinstance(kind, str) or not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)
+                for kind, keys in item["keys"].items()
+            )
+        ):
+            raise ValueError("compiler artifact manifest mismatch")
+    return entries
+
+
+def _key_set(keys: dict[str, list[str]]) -> set[tuple[str, str]]:
+    return {(kind, key) for kind, values in keys.items() for key in values}
+
+
 class CompileCache:
     """Select isolated modular caches before compilation; save portable artifacts.
 
     CUDA graphs contain process-local addresses and must be captured again.
-    A manifest is published after the artifact bytes and validated before load.
+    Each save records the artifacts its process used. Runs with different
+    shapes use different artifacts, so the manifest keeps every entry that no
+    later entry covers, and a load restores their union.
     """
 
     def __init__(self, root: Path, identity: CacheIdentity) -> None:
@@ -86,34 +117,24 @@ class CompileCache:
             _publish(metadata, identity.encoded())
         self.loaded = False
         self.loaded_counts: dict[str, int] = {}
-        payload: bytes | None = None
         manifest = self.directory / "artifacts.json"
-        if manifest.exists():
-            entry = json.loads(manifest.read_text())
-            if (
-                not isinstance(entry, dict)
-                or set(entry) != {"identity", "sha256", "counts"}
-                or entry["identity"] != identity.key
-                or not isinstance(entry["sha256"], str)
-                or len(entry["sha256"]) != 64
-                or any(c not in "0123456789abcdef" for c in entry["sha256"])
-                or not isinstance(entry["counts"], dict)
-                or any(
-                    not isinstance(key, str) or type(value) is not int or value < 0
-                    for key, value in entry["counts"].items()
-                )
-            ):
-                raise ValueError("compiler artifact manifest mismatch")
-            payload = (self.directory / f"{entry['sha256']}.bin").read_bytes()
-            if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+        self.entries = _read_manifest(manifest, identity) if manifest.exists() else []
+        payloads: list[bytes] = []
+        loaded_keys: set[tuple[str, str]] = set()
+        for item in self.entries:
+            payload = (self.directory / f"{item['sha256']}.bin").read_bytes()
+            if hashlib.sha256(payload).hexdigest() != item["sha256"]:
                 raise ValueError("compiler artifact hash mismatch")
-            self.loaded_counts = entry["counts"]
+            payloads.append(payload)
+            loaded_keys |= _key_set(cast(dict[str, list[str]], item["keys"]))
+        for kind, _ in loaded_keys:
+            self.loaded_counts[kind] = self.loaded_counts.get(kind, 0) + 1
         # Loose Inductor and Triton files stay on local disk; the packed artifact
         # is the persistent cache, and network volumes cap their file counts.
         scratch = Path(tempfile.mkdtemp(prefix=f"hal-compile-{identity.key[:12]}-"))
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(scratch / "inductor")
         os.environ["TRITON_CACHE_DIR"] = str(scratch / "triton")
-        if payload is not None:
+        for payload in payloads:
             if torch.compiler.load_cache_artifacts(payload) is None:
                 raise ValueError("Torch rejected compiler cache artifacts")
             self.loaded = True
@@ -123,11 +144,19 @@ class CompileCache:
         if artifacts is None:
             return False
         payload, info = artifacts
-        counts = {kind: len(keys) for kind, keys in info.artifacts.items()}
+        keys = {kind: sorted(str(key) for key in values) for kind, values in info.artifacts.items()}
+        used = _key_set(keys)
+        manifest = self.directory / "artifacts.json"
+        entries = _read_manifest(manifest, self.identity) if manifest.exists() else []
+        if any(used <= _key_set(cast(dict[str, list[str]], item["keys"])) for item in entries):
+            return False
         digest = hashlib.sha256(payload).hexdigest()
         _publish(self.directory / f"{digest}.bin", payload)
+        retained = [item for item in entries if not _key_set(cast(dict[str, list[str]], item["keys"])) <= used]
+        retained.append({"sha256": digest, "keys": keys})
         _publish(
-            self.directory / "artifacts.json",
-            json.dumps({"identity": self.identity.key, "sha256": digest, "counts": counts}, sort_keys=True).encode(),
+            manifest,
+            json.dumps({"identity": self.identity.key, "entries": retained}, sort_keys=True).encode(),
         )
+        self.entries = retained
         return True

@@ -8,11 +8,13 @@ from typing import cast
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.nn.attention.varlen import varlen_attn
 
 from hal.inference.cuda_graph import CapturedCall
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.attention import Block
 from hal.models.attention import KVMemory
+from hal.models.attention import prefix_attention
 from hal.models.attention import rmsnorm
 from hal.models.attention import rotate_positions
 
@@ -46,6 +48,7 @@ class KVCache:
         *,
         batch_size: int = 1,
         dtype: torch.dtype | None = None,
+        prefix: bool = False,
     ) -> None:
         if update_frames not in (1, 2, 4):
             raise ValueError("KV cache updates must contain one, two, or four frames")
@@ -56,6 +59,8 @@ class KVCache:
         self.max_update_frames = update_frames
         self.capacity = self.window + update_frames - 1
         self.batch_size = batch_size
+        # A prefix cache keeps slot == position for every valid key and never wraps.
+        self.prefix = prefix
         if dtype is None:
             dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
         self.layers = tuple(
@@ -101,7 +106,7 @@ class KVCache:
         return (*self.layers, self.history, self.positions, self.next_position, self.hidden)
 
     def memory(self) -> KVMemory:
-        return KVMemory(self.history, self.positions, self.next_position - 1, self.window)
+        return KVMemory(self.history, self.positions, self.next_position - 1, self.window, self.prefix)
 
     def row_view(self, row: int) -> KVCache:
         """Return a batch-one view of persistent storage without copying its KV tensors."""
@@ -112,6 +117,7 @@ class KVCache:
         view.max_update_frames = self.max_update_frames
         view.capacity = self.capacity
         view.batch_size = 1
+        view.prefix = self.prefix
         view.layers = tuple(layer[:, row : row + 1] for layer in self.layers)
         view.history = self.history[:, row : row + 1]
         view.positions = self.positions[row : row + 1]
@@ -221,7 +227,28 @@ def forward_tokens_with_kv_cache(model: ActionSequenceTransformer, x: Tensor, ca
     return _append_tokens(model, x, cache)
 
 
-def _append_tokens(model: ActionSequenceTransformer, x: Tensor, cache: KVCache) -> Tensor:
+def _restart_attention(q: Tensor, k: Tensor, v: Tensor, lengths: Tensor) -> Tensor:
+    """Attend a left-padded block to itself; the reset cache holds no other valid key."""
+    batch, heads, count, width = q.shape
+    # Each row's ignored left padding and real suffix are separate causal sequences.
+    sizes = torch.stack((count - lengths, lengths), dim=1).reshape(-1).to(torch.int32)
+    cumulative = torch.cat((sizes.new_zeros(1), sizes.cumsum(0, dtype=torch.int32)))
+    attended = varlen_attn(
+        q.transpose(1, 2).reshape(batch * count, heads, width),
+        k.transpose(1, 2).reshape(batch * count, heads, width),
+        v.transpose(1, 2).reshape(batch * count, heads, width),
+        cumulative,
+        cumulative,
+        count,
+        count,
+        window_size=(-1, 0),
+    )
+    return cast(Tensor, attended).view(batch, count, heads, width).transpose(1, 2)
+
+
+def _append_tokens(
+    model: ActionSequenceTransformer, x: Tensor, cache: KVCache, *, restart_lengths: Tensor | None = None
+) -> Tensor:
     batch, count, _ = x.shape
     positions = cache.next_position[:, None] + torch.arange(count, device=x.device)[None]
     slots = positions % cache.capacity
@@ -232,6 +259,7 @@ def _append_tokens(model: ActionSequenceTransformer, x: Tensor, cache: KVCache) 
         & (cache.positions[:, None, :] > positions[:, :, None] - lookback)
         & (cache.positions[:, None, :] >= 0)
     )
+    restart = restart_lengths is not None and cache.prefix and x.is_cuda
     for module, kv in zip(model.trunk.blocks, cache.layers, strict=True):
         block = cast(Block, module)
         attn = block.attn
@@ -241,7 +269,13 @@ def _append_tokens(model: ActionSequenceTransformer, x: Tensor, cache: KVCache) 
         k = rotate_positions(k.view(shape), positions, attn.rotary).transpose(1, 2)
         v = v.view(shape).transpose(1, 2)
         append_kv_rows(kv, slots, torch.stack((k, v)))
-        attended = F.scaled_dot_product_attention(q, kv[0], kv[1], attn_mask=valid[:, None])
+        if restart and q.dtype in (torch.float16, torch.bfloat16):
+            assert restart_lengths is not None
+            attended = _restart_attention(q, k, v, restart_lengths)
+        elif cache.prefix:
+            attended = prefix_attention(q, kv[0], kv[1], positions[:, -1] + 1, causal=True)
+        else:
+            attended = F.scaled_dot_product_attention(q, kv[0], kv[1], attn_mask=valid[:, None])
         attended = attended.transpose(1, 2).reshape(batch, count, attn.d_model)
         x = x + block.attn_scale * attn.c_proj(attended)
         x = x + block.mlp_scale * block.mlp(rmsnorm(x))
@@ -276,7 +310,7 @@ class BlockRestartCache:
         if model.cfg.L_ctx < 256 or model.cfg.attn_window:
             raise ValueError("block restart requires full causal attention and at least 256 context frames")
         self.model = model
-        self.cache = KVCache(model, 4, device, batch_size=batch_size, dtype=dtype)
+        self.cache = KVCache(model, 4, device, batch_size=batch_size, dtype=dtype, prefix=True)
         self.frames_in_block = torch.zeros(batch_size, device=device, dtype=torch.long)
 
     @property
@@ -290,14 +324,18 @@ class BlockRestartCache:
         else:
             self.frames_in_block[row] = 0
 
-    @torch.inference_mode()
-    def restart(self, previous_tokens: Tensor, lengths: Tensor) -> None:
+    @torch.no_grad()
+    def restart(self, previous_tokens: Tensor, lengths: Tensor, *, validate: bool = True) -> None:
+        """Rebuild the cache from at most 128 left-padded frames.
+
+        Compiled callers pass validate=False because the value check reads the device.
+        """
         batch, count, width = previous_tokens.shape
         if (batch, width) != (self.cache.batch_size, self.model.cfg.d_model) or not 0 <= count <= 128:
             raise ValueError("block prefill must be [B, at most 128, d_model]")
         if lengths.shape != (batch,) or lengths.dtype not in (torch.int32, torch.int64):
             raise ValueError("block prefill lengths must be integer [B]")
-        if bool(((lengths < 0) | (lengths > count)).any()):
+        if validate and bool(((lengths < 0) | (lengths > count)).any()):
             raise ValueError("block prefill lengths exceed the supplied history")
         lengths = lengths.to(previous_tokens.device, non_blocking=True)
         self.reset()
@@ -305,7 +343,7 @@ class BlockRestartCache:
             self.cache.next_position.copy_(lengths - count)
             valid = torch.arange(count, device=previous_tokens.device)[None] >= count - lengths[:, None]
             previous_tokens = torch.where(valid[..., None], previous_tokens, 0)
-            _append_tokens(self.model, previous_tokens, self.cache)
+            _append_tokens(self.model, previous_tokens, self.cache, restart_lengths=lengths)
             self.cache.hidden.masked_fill_((lengths == 0)[:, None, None], 0)
 
     @torch.inference_mode()

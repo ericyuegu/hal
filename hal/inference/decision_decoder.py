@@ -1,5 +1,6 @@
 """Sample and replay controller chunks with FP32 probability arithmetic."""
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
 
@@ -48,7 +49,6 @@ class DecisionDecoder:
                 model.temporal.decode_decisions,
                 max_delay=self.max_delay,
                 sampled_offsets=count,
-                forced_prefix_length=min(delay for delay, _ in configurations),
             )
             self.variants[count] = (
                 torch.compile(decode, fullgraph=True, dynamic=False)
@@ -125,7 +125,7 @@ class DecisionDecoder:
         with torch.autocast(hidden.device.type, dtype=torch.bfloat16, enabled=bf16, cache_enabled=False):
             hidden = hidden.float()
             if history is not None:
-                history = KVMemory(history.kv.to(dtype), history.positions, history.query_position, history.window)
+                history = dataclasses.replace(history, kv=history.kv.to(dtype))
             if self.compiled and hidden.is_cuda and sampled_actions is None:
                 return self._sample_graph(
                     hidden,

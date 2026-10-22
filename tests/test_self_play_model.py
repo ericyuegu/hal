@@ -2,7 +2,6 @@
 
 import math
 from dataclasses import replace
-from functools import partial
 from typing import cast
 
 import pytest
@@ -245,7 +244,7 @@ def test_parallel_decision_replay_matches_sequential_outputs_and_gradients(
     with torch.no_grad():
         actions = policy.codec.quantize(torch.rand(2, sampled_offsets, ACTION_DIM))
 
-    def evaluate(parallel: bool, prefix: int) -> tuple[torch.Tensor, ...]:
+    def evaluate(parallel: bool) -> tuple[torch.Tensor, ...]:
         policy.zero_grad(set_to_none=True)
         history = None
         if with_history:
@@ -253,11 +252,7 @@ def test_parallel_decision_replay_matches_sequential_outputs_and_gradients(
             history = KVMemory(
                 torch.stack((key, value)), torch.arange(9)[None].expand(2, -1), torch.tensor([8, 5]), 256
             )
-        decode = (
-            policy.temporal.replay_decisions
-            if parallel
-            else partial(policy.temporal.decode_decisions, forced_prefix_length=prefix)
-        )
+        decode = policy.temporal.replay_decisions if parallel else policy.temporal.decode_decisions
         output = decode(
             hidden,
             observed,
@@ -275,11 +270,8 @@ def test_parallel_decision_replay_matches_sequential_outputs_and_gradients(
         gradients = torch.cat([p.grad.flatten() for p in policy.parameters() if p.grad is not None])
         return output.log_probs.detach(), output.decoder_state.detach(), gradients
 
-    expected = evaluate(False, 0)
-    for parallel, prefix in ((False, 8), (True, 0)):
-        actual = evaluate(parallel, prefix)
-        for new, old in zip(actual, expected, strict=True):
-            torch.testing.assert_close(new, old, rtol=2e-4, atol=3e-6)
+    for new, old in zip(evaluate(False), evaluate(True), strict=True):
+        torch.testing.assert_close(new, old, rtol=2e-4, atol=3e-6)
 
 
 def test_replay_has_policy_gradient_and_decoder_state_is_before_draw() -> None:

@@ -451,7 +451,9 @@ def run_child(request: Request, output: Path, started: float) -> int:
         WANDB_MODE="online" if online else "disabled",
         HAL_NATIVE_LIBRARY=str(REMOTE_ROOT / "delivery/libhal_native.so"),
         TMPDIR=str(output / "tmp"),
-        TORCHINDUCTOR_COMPILE_THREADS="1",
+        # One worker limits cold-start disk use on the RTX PRO 6000; B200 hosts have
+        # the disk, and parallel Triton compilation shortens cold startup.
+        TORCHINDUCTOR_COMPILE_THREADS="8" if request.mode == "ddp" else "1",
         OMP_NUM_THREADS="2",
         MKL_NUM_THREADS="2",
         CUBLAS_WORKSPACE_CONFIG=":4096:8",

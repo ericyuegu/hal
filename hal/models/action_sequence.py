@@ -21,6 +21,7 @@ from hal.models.attention import Rotary
 from hal.models.attention import Trunk
 from hal.models.attention import TrunkConfig
 from hal.models.attention import apply_rotary_emb
+from hal.models.attention import prefix_attention
 from hal.models.attention import rotate_positions
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import BUTTONS_GROUP
@@ -429,6 +430,44 @@ class TemporalBlock(nn.Module):
         x = x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
         return x, (k, v)
 
+    def forward_slot(
+        self,
+        x: Tensor,
+        cache: tuple[Tensor, Tensor] | None,
+        slot: Tensor,
+        capacity: int,
+        modulation: Tensor | None,
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+        """Write each row's offset into K/V slot ``slot`` and attend to slots up to it.
+
+        Slot j holds offset j, so rows with different delays share one step while
+        each row reads only its own forced prefix and sampled tail.
+        """
+        if modulation is None:
+            scale_attn = shift_attn = scale_mlp = shift_mlp = None
+        else:
+            scale_attn, shift_attn, scale_mlp, shift_mlp = modulation.unbind(-2)
+        q, k, v = self._qkv(
+            x[:, None],
+            None if scale_attn is None else scale_attn[:, None],
+            None if shift_attn is None else shift_attn[:, None],
+        )
+        batch = x.shape[0]
+        if cache is None:
+            empty = k.new_zeros(batch, self.n_heads, capacity, self.head_dim)
+            cache = (empty, empty)
+        index = slot[:, None, None, None].expand(batch, self.n_heads, 1, self.head_dim)
+        keys = cache[0].scatter(2, index, k.transpose(1, 2))
+        values = cache[1].scatter(2, index, v.transpose(1, 2))
+        cos, sin = self.rotary.at(capacity, x.device)
+        q = apply_rotary_emb(q, cos[0, slot][:, None], sin[0, slot][:, None]).transpose(1, 2)
+        rotated_k = apply_rotary_emb(keys.transpose(1, 2), cos, sin).transpose(1, 2)
+        attended = prefix_attention(q, rotated_k, values, slot + 1, causal=False)
+        attended = attended.transpose(1, 2).contiguous().view_as(x)
+        x = x + self.scale * self.proj(attended)
+        x = x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
+        return x, (keys, values)
+
     def prefill(self, x: Tensor, modulation: Tensor | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         """Advance a known action prefix in parallel and retain its unrotated K/V."""
         if modulation is None:
@@ -481,6 +520,9 @@ class HistoryCrossAttention(nn.Module):
         query = self.query(decoder_rmsnorm(x)).view(batch, queries, self.n_heads, self.head_dim)
         query_positions = query_position[:, None].expand(batch, queries)
         query = rotate_positions(query, query_positions, self.rotary).transpose(1, 2)
+        if memory.prefix:
+            attended = prefix_attention(query, memory.kv[0], memory.kv[1], query_position + 1, causal=False)
+            return x + self.scale * self.output(attended.transpose(1, 2).reshape_as(x))
         valid = (
             (positions >= 0)
             & (positions <= query_position[:, None])
@@ -662,6 +704,39 @@ class CausalTemporalDecoder(nn.Module):
             block = cast(TemporalBlock, module)
             modulation = None if conditioning is None else conditioning[index]
             state, present = block.forward_step(state, past, modulation)
+            if index == 0:
+                if isinstance(history, KVMemory):
+                    state = self.history_attention.forward_with_kv_cache(state[:, None], history)[:, 0]
+                else:
+                    key, value, ctx_pad, prefix_positions = history
+                    state = self.history_attention.forward_projected(
+                        state[:, None],
+                        key,
+                        value,
+                        ctx_pad,
+                        prefix_positions,
+                        offsets_per_prefix=1,
+                    )[:, 0]
+            next_caches.append(present)
+        return decoder_rmsnorm(state), next_caches
+
+    def _decode_slot(
+        self,
+        previous: Tensor,
+        slot: Tensor,
+        capacity: int,
+        state_bias: Tensor,
+        caches: list[tuple[Tensor, Tensor] | None],
+        history: tuple[Tensor, Tensor, Tensor, Tensor] | KVMemory,
+        conditioning: tuple[Tensor, ...] | None,
+    ) -> tuple[Tensor, list[tuple[Tensor, Tensor] | None]]:
+        """Advance every row by one offset at its own depth ``slot``."""
+        state = decoder_rmsnorm(state_bias + self._step_features(previous, slot + 1))
+        next_caches: list[tuple[Tensor, Tensor] | None] = []
+        for index, (module, past) in enumerate(zip(self.blocks, caches, strict=True)):
+            block = cast(TemporalBlock, module)
+            modulation = None if conditioning is None else conditioning[index]
+            state, present = block.forward_slot(state, past, slot, capacity, modulation)
             if index == 0:
                 if isinstance(history, KVMemory):
                     state = self.history_attention.forward_with_kv_cache(state[:, None], history)[:, 0]
@@ -1218,13 +1293,14 @@ class CausalTemporalDecoder(nn.Module):
         ctx_pad: Tensor | None = None,
         history: KVMemory | None = None,
         sampled_actions: Tensor | None = None,
-        forced_prefix_length: int = 0,
     ) -> DecisionOutput:
         """Decode a padded batch; return only offsets D+1..D+R.
 
-        ``sampled_actions`` replays the same conditional path with gradients.
-        Uniforms are indexed by offset relative to D+1 and canonical factor.
-        The critic state precedes every sampled factor, including C-stick.
+        The forced queue prefills in parallel up to the largest delay. Each row
+        then samples R offsets from its own depth D; later queue slots never
+        reach its attention. ``sampled_actions`` replays the same conditional
+        path with gradients. Uniforms are indexed by offset relative to D+1 and
+        canonical factor. The critic state precedes every sampled factor.
         """
         batch = hidden.shape[0]
         if sampled_offsets not in (2, 4):
@@ -1244,30 +1320,30 @@ class CausalTemporalDecoder(nn.Module):
         present = torch.ones(batch, dtype=torch.bool, device=hidden.device)
         conditioning = self.return_conditioner(returns, present, policy_condition)
         memory = self._live_history(hidden, ctx_pad) if history is None else history
+        capacity = max_delay + sampled_offsets
         caches: list[tuple[Tensor, Tensor] | None] = [None] * len(self.blocks)
         previous = observed
-        if not 0 <= forced_prefix_length <= max_delay:
-            raise ValueError("forced prefill length exceeds the queue")
-        if forced_prefix_length:
-            _, caches = self._prefill_forced_prefix(
-                observed,
-                tuple(range(1, forced_prefix_length + 1)),
-                forced_queue[:, :forced_prefix_length],
-                bias,
-                memory,
-                conditioning,
+        if max_delay:
+            forced = torch.arange(max_delay, device=hidden.device)[None] < delay[:, None]
+            # Queue entries at or after a row's delay are not its actions; keep them valid indices.
+            queue = torch.where(forced[..., None], forced_queue, 0)
+            _, prefix = self._prefill_forced_prefix(
+                observed, tuple(range(1, max_delay + 1)), queue, bias, memory, conditioning
             )
-            previous = forced_queue[:, forced_prefix_length - 1]
+            caches = [
+                None
+                if cache is None
+                else (F.pad(cache[0], (0, 0, 0, sampled_offsets)), F.pad(cache[1], (0, 0, 0, sampled_offsets)))
+                for cache in prefix
+            ]
+            last = queue.gather(1, (delay - 1).clamp_min(0)[:, None, None].expand(-1, 1, CONTROLLER_GROUP_COUNT))
+            previous = torch.where((delay > 0)[:, None], last[:, 0], observed)
         states: list[Tensor] = []
         frames: list[Tensor] = []
         captured: dict[str, list[Tensor]] = {name: [] for name in CONTROLLER_GROUP_NAMES}
-        rows = torch.arange(batch, device=hidden.device)
-        # All rows replay the same dense chain. Only the forced length differs.
-        for depth in range(forced_prefix_length, max_delay + sampled_offsets):
-            state, caches = self._decode_step(previous, depth + 1, bias, caches, memory, conditioning)
+        for step in range(sampled_offsets):
+            state, caches = self._decode_slot(previous, delay + step, capacity, bias, caches, memory, conditioning)
             states.append(state)
-            relative = (depth - delay).clamp(0, sampled_offsets - 1)
-            forced = forced_queue[:, min(depth, max_delay - 1)] if max_delay else observed
             embedded: dict[str, Tensor] = {}
             picks: dict[str, Tensor] = {}
             for name in CONTROLLER_DECODE_ORDER:
@@ -1282,22 +1358,19 @@ class CausalTemporalDecoder(nn.Module):
                     logits = logits.masked_fill(self.codec.button_mask(picks["triggers"]), -torch.inf)
                 captured[name].append(logits)
                 pick = (
-                    sampled_actions[rows, relative, group]
+                    sampled_actions[:, step, group]
                     if sampled_actions is not None
-                    else sample_categorical(logits, argmax=False, uniform=uniforms[relative, group, rows])
+                    else sample_categorical(logits, argmax=False, uniform=uniforms[step, group])
                 )
-                pick = torch.where(depth < delay, forced[:, group], pick)
                 picks[name] = pick
                 embedded[name] = self.codec.group_embedding(name, pick)
             previous = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
             frames.append(previous)
-        indices = delay[:, None] - forced_prefix_length + torch.arange(sampled_offsets, device=hidden.device)[None]
-        actions = torch.stack(frames, dim=1)[rows[:, None], indices]
+        actions = torch.stack(frames, dim=1)
         distributions: list[Tensor] = []
         log_probs: list[Tensor] = []
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
-            logits = torch.stack(captured[name], dim=1)[rows[:, None], indices].float()
-            log_distribution = F.log_softmax(logits, dim=-1)
+            log_distribution = F.log_softmax(torch.stack(captured[name], dim=1).float(), dim=-1)
             distributions.append(log_distribution.exp())
             log_probs.append(log_distribution.gather(-1, actions[..., group, None]).squeeze(-1))
         valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
@@ -1306,7 +1379,7 @@ class CausalTemporalDecoder(nn.Module):
             valid,
             torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
             tuple(distributions),
-            torch.stack(states, dim=1)[rows, delay - forced_prefix_length],
+            states[0],
         )
 
     def replay_decisions(

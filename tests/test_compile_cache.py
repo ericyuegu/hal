@@ -53,8 +53,9 @@ def test_cache_roundtrip_and_corruption(tmp_path: Path, monkeypatch: pytest.Monk
     restored = compile_cache.CompileCache(tmp_path, identity())
     assert restored.loaded and loaded == [b"qualified graphs"]
     manifest = json.loads((cache.directory / "artifacts.json").read_text())
-    assert manifest["sha256"] == hashlib.sha256(loaded[0]).hexdigest()
-    (cache.directory / f"{manifest['sha256']}.bin").write_bytes(b"damaged")
+    digest = manifest["entries"][0]["sha256"]
+    assert digest == hashlib.sha256(loaded[0]).hexdigest()
+    (cache.directory / f"{digest}.bin").write_bytes(b"damaged")
     with pytest.raises(ValueError, match="hash mismatch"):
         compile_cache.CompileCache(tmp_path, identity())
     assert len(loaded) == 1
@@ -106,16 +107,17 @@ def test_source_hash_changes_with_model_code(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "changes",
+    "changes,entry_changes",
     [
-        {"identity": "b" * 64},
-        {"sha256": "../bad"},
-        {"counts": {"inductor": True}},
-        {"unknown": 1},
+        ({"identity": "b" * 64}, {}),
+        ({"unknown": 1}, {}),
+        ({}, {"sha256": "../bad"}),
+        ({}, {"keys": {"inductor": [1]}}),
+        ({}, {"unknown": 1}),
     ],
 )
 def test_cache_rejects_malformed_manifest_before_load(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changes: dict
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changes: dict, entry_changes: dict
 ) -> None:
     monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"graphs", SimpleNamespace(artifacts={})))
     cache = compile_cache.CompileCache(tmp_path, identity())
@@ -123,6 +125,7 @@ def test_cache_rejects_malformed_manifest_before_load(
     path = cache.directory / "artifacts.json"
     manifest = json.loads(path.read_text())
     manifest.update(changes)
+    manifest["entries"][0].update(entry_changes)
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="manifest mismatch"):
         compile_cache.CompileCache(tmp_path, identity())
@@ -133,3 +136,39 @@ def test_loose_compiler_files_stay_off_the_cache_root(tmp_path: Path) -> None:
     for name in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
         assert not Path(os.environ[name]).is_relative_to(tmp_path / "volume")
     assert sorted(path.name for path in cache.directory.iterdir()) == ["identity.json"]
+
+
+def test_cache_keeps_artifacts_from_runs_with_different_shapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saves = iter(
+        [
+            (b"1024 matches", {"inductor": ["tick-1024"], "autotune": ["a"]}),
+            (b"2048 matches", {"inductor": ["tick-2048"]}),
+            (b"1024 again", {"inductor": ["tick-1024"]}),
+            (b"both", {"inductor": ["tick-1024", "tick-2048"], "autotune": ["a"]}),
+        ]
+    )
+
+    def save() -> tuple[bytes, SimpleNamespace]:
+        payload, artifacts = next(saves)
+        return payload, SimpleNamespace(artifacts=artifacts)
+
+    loaded: list[bytes] = []
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", save)
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda data: loaded.append(data) or object())
+    assert compile_cache.CompileCache(tmp_path, identity()).save()
+    assert compile_cache.CompileCache(tmp_path, identity()).save()
+    assert loaded == [b"1024 matches"]
+    loaded.clear()
+    # A run whose artifacts an existing entry covers adds nothing.
+    assert not compile_cache.CompileCache(tmp_path, identity()).save()
+    assert loaded == [b"1024 matches", b"2048 matches"]
+    loaded.clear()
+    # A run that used both shapes replaces the entries it covers.
+    assert compile_cache.CompileCache(tmp_path, identity()).save()
+    assert loaded == [b"1024 matches", b"2048 matches"]
+    loaded.clear()
+    restored = compile_cache.CompileCache(tmp_path, identity())
+    assert loaded == [b"both"]
+    assert restored.loaded_counts == {"inductor": 2, "autotune": 1}

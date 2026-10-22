@@ -1310,9 +1310,9 @@ class TransformerPolicy:
         self.packed_builder = PackedColumnContextBuilder(statistics, native.OBSERVATION_FIELDS, self.device)
         self.decode_order = torch.tensor(DECODE_GROUP_INDICES, device=self.device)
         self.tick_decoder = DecisionDecoder(model, configurations, compiled=False)
-        self.forced_prefix_length = min(config.delay for config in schedule.configurations)
         self.tick_caches: dict[tuple[ActionRing, tuple[int, ...]], BlockRestartCache] = {}
         self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int], CapturedCall[None]] = {}
+        self.restart_graphs: dict[tuple[ActionRing, tuple[int, ...]], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
         self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
         self.reference_forward_model: SelfPlayTransformer | None = None
@@ -1501,7 +1501,7 @@ class TransformerPolicy:
             return True
         key = ring, (layout.buffer, len(layout.streams))
         graph_key = key, (1 if clock % 128 == 0 else 2), (4 if clock % 4 == 0 else 2)
-        return graph_key in self.tick_graphs
+        return graph_key in self.tick_graphs and (clock % 128 != 0 or key in self.restart_graphs)
 
     @torch.no_grad()
     def sample_tick(
@@ -1537,13 +1537,33 @@ class TransformerPolicy:
         enabled = self.device.type == "cuda"
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False):
             if restart:
-                features, observed = self._packed_context(states.packed(129))
-                tokens = self.model.context_tokens(features, observed)
-                lengths = meta[:, LENGTH] - 1
-                positions = torch.arange(128, device=self.device)[None] - (128 - lengths[:, None])
-                previous = tokens.gather(1, positions.clamp_min(0)[..., None].expand(-1, -1, tokens.shape[-1]))
-                previous = torch.where((positions >= 0)[..., None], previous, 0)
-                cache.restart(previous, lengths)
+                restart_inputs = (*states.packed(129), meta)
+                if not enabled:
+                    self._restart_block(cache, restart_inputs, validate=True)
+                else:
+                    captured_restart = self.restart_graphs.get(key)
+                    if captured_restart is None:
+                        self.admit_capture(("restart", key))
+                        static_restart = tuple(value.clone() for value in restart_inputs)
+
+                        def restart_block(static: tuple[Tensor, ...] = static_restart) -> None:
+                            self._restart_block(cache, static, validate=False)
+
+                        operation = torch.compile(
+                            restart_block,
+                            fullgraph=True,
+                            dynamic=False,
+                            options={"triton.cudagraphs": False},
+                        )
+                        with prepared_shape_compilation(64):
+                            captured_restart = CapturedCall(
+                                operation,
+                                static_restart,
+                                (*cache.cache.buffers(), cache.frames_in_block),
+                                device=self.device,
+                            )
+                        self.restart_graphs[key] = captured_restart
+                    captured_restart(restart_inputs)
             appended = 1 if restart else 2
             inputs = (
                 *states.packed(appended, tail=appended),
@@ -1630,7 +1650,7 @@ class TransformerPolicy:
                 len(states),
                 appended,
                 self.tick_decoder.max_delay + count,
-                self.tick_decoder.max_delay + count - self.forced_prefix_length,
+                count,
                 restart=restart,
             )
             if self.profile is not None:
@@ -1647,6 +1667,18 @@ class TransformerPolicy:
                     else contextlib.nullcontext()
                 ):
                     captured(inputs)
+
+    def _restart_block(self, cache: BlockRestartCache, inputs: tuple[Tensor, ...], *, validate: bool) -> None:
+        """Re-encode the previous 128 frames of each row into a fresh block cache."""
+        enabled = self.device.type == "cuda"
+        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False):
+            features, observed = self._packed_context(inputs[:5])
+            tokens = self.model.context_tokens(features, observed)
+            lengths = inputs[5][:, LENGTH] - 1
+            positions = torch.arange(128, device=self.device)[None] - (128 - lengths[:, None])
+            previous = tokens.gather(1, positions.clamp_min(0)[..., None].expand(-1, -1, tokens.shape[-1]))
+            previous = torch.where((positions >= 0)[..., None], previous, 0)
+            cache.restart(previous, lengths, validate=validate)
 
     def _tensor_action_uniforms(self, meta: Tensor, rng: CounterRng) -> Tensor:
         offsets = meta[:, DELAY][None, None] + torch.arange(1, 5, device=self.device)[:, None, None]
@@ -5558,7 +5590,13 @@ def read_native_sampler(path: Path) -> SamplerConfig:
 def train_native(config: NativeCli) -> None:
     with distributed.process_group(config.device) as device:
         if distributed.world_size() == 1:
-            train_native_rank(config)
+            # Single-GPU runs compile the same graphs as DDP rank 0 on cuda:0.
+            train_native_rank(
+                dataclasses.replace(
+                    config,
+                    compile_cache=config.compile_cache / "rank0" if config.compile_cache is not None else None,
+                )
+            )
             return
         if config.profiling is not None or config.verify_resume or config.resume_learner is not None:
             raise ValueError(
