@@ -1,6 +1,7 @@
 """Run bounded O65 smoke and profiling jobs on one Modal RTX PRO 6000."""
 
 import dataclasses
+import fcntl
 import hashlib
 import importlib.metadata
 import json
@@ -35,6 +36,8 @@ CPU_CORES = 17
 MEMORY_MIB = 65536
 # Published Modal rates checked 2026-10-20; reserve more for startup and CPU builds.
 GPU_USD_SECOND = 0.000842
+# https://modal.com/pricing, checked 2026-10-22.
+B200_USD_SECOND = 0.001736
 CPU_USD_SECOND = 0.0000131
 MEMORY_USD_GIB_SECOND = 0.00000222
 MAX_GPU_SECONDS = 7200
@@ -90,6 +93,38 @@ def record_budget(path: Path, name: str, seconds: float, reason: str) -> None:
         )
 
 
+def b200_budget(path: Path, name: str, dollars: float, cap: float, *, reserve: bool) -> None:
+    if not math.isfinite(cap) or cap <= 0 or not math.isfinite(dollars) or dollars <= 0:
+        raise ValueError("B200 budget and reservation must be finite and positive")
+    validate_name(name)
+    # Reserve dollars, rather than GPU seconds, so mixed node sizes share a cap.
+    with path.open("a+") as ledger:
+        fcntl.flock(ledger, fcntl.LOCK_EX)
+        ledger.seek(0)
+        total = 0.0
+        for line in ledger:
+            row = json.loads(line)
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"format", "name", "reserved_usd"}
+                or row["format"] != "hal.o65.b200-budget.v1"
+            ):
+                raise ValueError("unsupported B200 budget record")
+            validate_name(row["name"])
+            value = row["reserved_usd"]
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid B200 dollar reservation")
+            total += value
+        if total + dollars > cap:
+            raise ValueError("O65 B200 dollar budget exhausted")
+        if reserve:
+            ledger.write(
+                json.dumps({"format": "hal.o65.b200-budget.v1", "name": name, "reserved_usd": dollars}) + "\n"
+            )
+            ledger.flush()
+            os.fsync(ledger.fileno())
+
+
 def result_seconds(path: Path, exit_code: int) -> float:
     raw = json.loads(path.read_text())
     if (
@@ -112,7 +147,7 @@ def result_seconds(path: Path, exit_code: int) -> float:
 class Request:
     name: str
     git_sha: str
-    mode: Literal["smoke", "profile", "pilot"] = "profile"
+    mode: Literal["smoke", "profile", "pilot", "ddp"] = "profile"
     matches: int = 1024
     timeout_seconds: int = 1800
     created_unix: float = dataclasses.field(default_factory=time.time)
@@ -120,11 +155,19 @@ class Request:
     damage_weight: float = 1.0
     stock_weight: float = 120.0
     game_win_weight: float = 50.0
+    gpus: int = 1
+    ddp_updates: int = 256
 
     def __post_init__(self) -> None:
         validate_name(self.name)
+        if type(self.gpus) is not int or not 1 <= self.gpus <= 8 or (self.gpus > 1) != (self.mode == "ddp"):
+            raise ValueError("DDP requires 2..8 GPUs; existing modes require one GPU")
+        if type(self.ddp_updates) is not int or self.ddp_updates < 1:
+            raise ValueError("DDP updates must be a positive integer")
+        if self.mode == "ddp" and self.resume_learner is not None:
+            raise ValueError("DDP requires fresh training or same-world-size exact resume")
         weights = RewardWeights(self.damage_weight, self.stock_weight, self.game_win_weight)
-        if self.mode != "pilot" and weights != RewardWeights():
+        if self.mode not in ("pilot", "ddp") and weights != RewardWeights():
             raise ValueError("reward treatment flags require pilot mode")
         if self.resume_learner is not None:
             path = Path(self.resume_learner)
@@ -134,15 +177,17 @@ class Request:
                 raise ValueError("learner resume must use a new run name")
         if re.fullmatch(r"[0-9a-f]{40}", self.git_sha) is None:
             raise ValueError("expected a full published HAL Git SHA")
-        if self.mode not in ("smoke", "profile", "pilot"):
+        if self.mode not in ("smoke", "profile", "pilot", "ddp"):
             raise ValueError("unsupported run mode")
         allowed = (16,) if self.mode == "smoke" else (256, 1024, 2048, 4096)
         if self.mode == "pilot":
             allowed = (1024,)
+        if self.mode == "ddp":
+            allowed = (16, 1024)
         if type(self.matches) is not int or self.matches not in allowed:
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
         if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= (
-            PILOT_TIMEOUT_SECONDS if self.mode == "pilot" else 6600
+            PILOT_TIMEOUT_SECONDS if self.mode in ("pilot", "ddp") else 6600
         ):
             raise ValueError(f"timeout must be 60..6600 seconds (pilot: at most {PILOT_TIMEOUT_SECONDS})")
         if (
@@ -162,10 +207,11 @@ def remaining_seconds(request: Request, now: float) -> float:
 
 
 def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
-    if len(cpus) != 16 or len(set(cpus)) != 16:
-        raise ValueError("O65 requires 16 distinct shard CPUs")
+    expected = ((4 if request.matches == 16 else 16) * request.gpus) if request.mode == "ddp" else 16
+    if len(cpus) != expected or len(set(cpus)) != expected:
+        raise ValueError(f"O65 requires {expected} distinct shard CPUs")
     delivery = REMOTE_ROOT / "delivery"
-    if request.mode == "pilot":
+    if request.mode in ("pilot", "ddp"):
         argv = [
             "/opt/venv/bin/python",
             "experiments/o65/pilot.py",
@@ -193,6 +239,10 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             "--game-win-weight",
             str(request.game_win_weight),
         ]
+        if request.mode == "ddp":
+            argv.extend(("--gpus", str(request.gpus), "--updates", str(request.ddp_updates)))
+            if request.matches == 16:
+                argv.extend(("--tiny", "--no-wandb"))
         if request.resume_learner is not None:
             argv.extend(("--resume-learner", str(RESULTS / request.resume_learner)))
         return argv
@@ -233,19 +283,19 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
     return argv
 
 
-def select_cpus(allowed: set[int]) -> tuple[int, ...]:
+def select_cpus(allowed: set[int], cores: int = CPU_CORES) -> tuple[int, ...]:
     """Modal exposes virtual CPU IDs and hides the host's sysfs topology."""
-    if len(allowed) < CPU_CORES:
-        raise ValueError("Modal job needs at least 17 available CPU IDs")
-    return tuple(sorted(allowed))[:CPU_CORES]
+    if len(allowed) < cores:
+        raise ValueError(f"Modal job needs at least {cores} available CPU IDs")
+    return tuple(sorted(allowed))[:cores]
 
 
 def run_remote(request: Request) -> int:
     output = RESULTS / request.name
-    output.mkdir(parents=True, exist_ok=request.mode == "pilot")
+    output.mkdir(parents=True, exist_ok=request.mode in ("pilot", "ddp"))
     local = WORK / request.name
     local.mkdir(parents=True, exist_ok=False)
-    if request.mode == "pilot" and (output / "pilot").is_dir():
+    if request.mode in ("pilot", "ddp") and (output / "pilot").is_dir():
         stage_results(output / "pilot", local / "pilot")
     started = time.time()
     started_clock = time.perf_counter()
@@ -256,7 +306,7 @@ def run_remote(request: Request) -> int:
     finally:
         # Only the publisher may replace the pilot resume tree. A failed trainer
         # can have newer local checkpoints which were never published.
-        stage_results(local, output / "last-attempt" if request.mode == "pilot" else output)
+        stage_results(local, output / "last-attempt" if request.mode in ("pilot", "ddp") else output)
         (output / "result.json").write_text(
             json.dumps(
                 {
@@ -308,16 +358,19 @@ def stage_results(source: Path, destination: Path) -> None:
 
 def run_child(request: Request, output: Path, started: float) -> int:
     require_modal_version(importlib.metadata.version("modal"))
-    cpus = select_cpus(set(os.sched_getaffinity(0)))
+    shard_count = (4 if request.matches == 16 else 16) * request.gpus if request.mode == "ddp" else 16
+    cpus = select_cpus(set(os.sched_getaffinity(0)), shard_count + request.gpus)
     os.sched_setaffinity(0, set(cpus))
-    argv = command(request, cpus[:16])
+    argv = command(request, cpus[:shard_count])
     env = dict(os.environ)
-    if request.mode != "pilot":
+    if request.mode != "pilot" and (request.mode != "ddp" or request.matches == 16):
         env.pop("WANDB_API_KEY", None)
     elif not env.get("WANDB_API_KEY"):
         raise ValueError("the pilot requires W&B credentials in its Modal Secret")
     env.update(
-        WANDB_MODE="online" if request.mode == "pilot" else "disabled",
+        WANDB_MODE="online"
+        if request.mode == "pilot" or (request.mode == "ddp" and request.matches != 16)
+        else "disabled",
         HAL_NATIVE_LIBRARY=str(REMOTE_ROOT / "delivery/libhal_native.so"),
         TMPDIR=str(output / "tmp"),
         TORCHINDUCTOR_COMPILE_THREADS="1",
@@ -334,17 +387,18 @@ def run_child(request: Request, output: Path, started: float) -> int:
         "modal_sdk": importlib.metadata.version("modal"),
         "container_id": os.environ.get("MODAL_TASK_ID"),
         "cpus": cpus,
+        "world_size": request.gpus,
         "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
         "treatment": f"mode={request.mode}, active_matches={request.matches}; pilot: 512 windows, Beta u and pretraining identity prior",
         "control": "hash-pinned O63 with matched episode sampling"
-        if request.mode == "pilot"
+        if request.mode in ("pilot", "ddp")
         else "unchanged o65-dense trainer at 1024 active matches",
         "invariants": (
             "seed 65, proxy, simulator, D/R, reward, optimizer, 16 shards, 16 decisions per window; "
             + (
                 "four groups, 512 windows per step"
-                if request.mode == "pilot"
+                if request.mode in ("pilot", "ddp")
                 else "one group, 32 windows per step, 64 reference slots"
             )
         ),
@@ -356,7 +410,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
         log.flush()
         subprocess.run(["nvidia-smi", "-q"], stdout=log, stderr=subprocess.STDOUT, check=True)
     with (output / "run.log").open("a") as log:
-        if request.mode == "pilot":
+        if request.mode in ("pilot", "ddp"):
             return run_pilot_child(argv, env, log, remaining_seconds(request, time.time()) - 90)
         result = subprocess.run(
             argv,
@@ -461,7 +515,7 @@ def download(name: str, local: Path) -> None:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    mode: Literal["smoke", "profile", "pilot", "download"] = "profile"
+    mode: Literal["smoke", "profile", "pilot", "ddp", "download"] = "profile"
     name: str | None = None
     matches: int = 1024
     timeout_seconds: int | None = None
@@ -470,6 +524,9 @@ class Args:
     damage_weight: float = 1.0
     stock_weight: float = 120.0
     game_win_weight: float = 50.0
+    gpus: int = 1
+    ddp_updates: int = 256
+    b200_max_usd: float | None = None
     secret: str = "hal"
     output: Path = Path("runs/modal")
 
@@ -499,25 +556,48 @@ def main(args: Args) -> None:
         args.matches,
         args.timeout_seconds
         if args.timeout_seconds is not None
-        else (PILOT_TIMEOUT_SECONDS if args.mode == "pilot" else 1800),
+        else (PILOT_TIMEOUT_SECONDS if args.mode in ("pilot", "ddp") else 1800),
         resume_learner=args.resume_learner,
         damage_weight=args.damage_weight,
         stock_weight=args.stock_weight,
         game_win_weight=args.game_win_weight,
+        gpus=args.gpus,
+        ddp_updates=args.ddp_updates,
     )
     args.output.mkdir(parents=True, exist_ok=True)
-    budget = ROOT / ("runs/modal-pilot/budget.jsonl" if args.mode == "pilot" else "runs/modal-floor/budget.jsonl")
-    budget.parent.mkdir(parents=True, exist_ok=True)
-    # Reserve the full timeout for each call, including failures and client loss.
-    allowance = request.timeout_seconds + 360
-    reserved = reserved_seconds(budget) + allowance
-    rate = GPU_USD_SECOND + CPU_CORES * CPU_USD_SECOND + (MEMORY_MIB / 1024) * MEMORY_USD_GIB_SECOND
-    max_seconds, max_usd = (
-        (PILOT_TIMEOUT_SECONDS + 360, PILOT_MAX_USD) if args.mode == "pilot" else (MAX_GPU_SECONDS, MAX_USD)
+    budget = ROOT / (
+        "runs/modal-b200/budget.jsonl"
+        if args.mode == "ddp"
+        else "runs/modal-pilot/budget.jsonl"
+        if args.mode == "pilot"
+        else "runs/modal-floor/budget.jsonl"
     )
-    if reserved > max_seconds or reserved * rate + BUILD_RESERVE_USD > max_usd:
-        raise ValueError("O65 Modal time or cost budget exhausted")
-    keys = [*AWS_KEYS, *(["WANDB_API_KEY"] if args.mode == "pilot" else [])]
+    budget.parent.mkdir(parents=True, exist_ok=True)
+    allowance = request.timeout_seconds + 360
+    cores = ((4 if request.matches == 16 else 16) + 1) * request.gpus if args.mode == "ddp" else CPU_CORES
+    memory = MEMORY_MIB * request.gpus
+    rate = (
+        (B200_USD_SECOND * request.gpus if args.mode == "ddp" else GPU_USD_SECOND)
+        + cores * CPU_USD_SECOND
+        + (memory / 1024) * MEMORY_USD_GIB_SECOND
+    )
+    if args.mode == "ddp":
+        if args.b200_max_usd is None:
+            raise ValueError("B200 runs require --b200-max-usd; no default cap")
+        b200_budget(budget, name, allowance * rate + BUILD_RESERVE_USD, args.b200_max_usd, reserve=False)
+    else:
+        if args.b200_max_usd is not None:
+            raise ValueError("B200 dollar cap applies only to DDP runs")
+        reserved = reserved_seconds(budget) + allowance
+        max_seconds, max_usd = (
+            (PILOT_TIMEOUT_SECONDS + 360, PILOT_MAX_USD) if args.mode == "pilot" else (MAX_GPU_SECONDS, MAX_USD)
+        )
+        if reserved > max_seconds or reserved * rate + BUILD_RESERVE_USD > max_usd:
+            raise ValueError("O65 Modal time or cost budget exhausted")
+    keys = [
+        *AWS_KEYS,
+        *(["WANDB_API_KEY"] if args.mode == "pilot" or (args.mode == "ddp" and args.matches != 16) else []),
+    ]
     secret = modal.Secret.from_name(args.secret, required_keys=keys)
     if not args.dry_run:
         secret.hydrate()
@@ -526,9 +606,9 @@ def main(args: Args) -> None:
     worker = app.function(
         image=build_image(sha, secret),
         secrets=[secret],
-        gpu="RTX-PRO-6000",
-        cpu=(17.0, 17.0),
-        memory=(MEMORY_MIB, MEMORY_MIB),
+        gpu=f"B200:{request.gpus}" if args.mode == "ddp" else "RTX-PRO-6000",
+        cpu=(float(cores), float(cores)),
+        memory=(memory, memory),
         volumes={str(RESULTS): volume},
         timeout=request.timeout_seconds,
         startup_timeout=300,
@@ -555,6 +635,19 @@ def main(args: Args) -> None:
         "--output",
         str(args.output),
     ]
+    if args.mode == "ddp":
+        launch_command.extend(
+            (
+                "--gpus",
+                str(args.gpus),
+                "--ddp-updates",
+                str(args.ddp_updates),
+                "--matches",
+                str(args.matches),
+                "--b200-max-usd",
+                str(args.b200_max_usd),
+            )
+        )
     if args.resume_learner is not None:
         launch_command.extend(("--resume-learner", args.resume_learner))
     launch_command.extend(
@@ -573,7 +666,11 @@ def main(args: Args) -> None:
     if args.dry_run:
         plan = {
             "request": dataclasses.asdict(request),
-            "command": command(request, tuple(range(16))),
+            "command": command(request, tuple(range(cores - request.gpus if args.mode == "ddp" else 16))),
+            "gpu": f"B200:{request.gpus}" if args.mode == "ddp" else "RTX-PRO-6000",
+            "world_size": request.gpus,
+            "cpu_cores": cores,
+            "reserved_usd": allowance * rate + BUILD_RESERVE_USD,
             "volume": VOLUME,
             "image": IMAGE,
             "function_built": worker is not None,
@@ -582,7 +679,11 @@ def main(args: Args) -> None:
         (args.output / f"{name}-dry-run.json").write_text(json.dumps(plan, indent=2))
         print("Dry run: job built locally; no Modal requests or GPU allocation.", flush=True)
         return
-    record_budget(budget, name, allowance, "full timeout plus startup and teardown allowance")
+    if args.mode == "ddp":
+        assert args.b200_max_usd is not None
+        b200_budget(budget, name, allowance * rate + BUILD_RESERVE_USD, args.b200_max_usd, reserve=True)
+    else:
+        record_budget(budget, name, allowance, "full timeout plus startup and teardown allowance")
     with modal.enable_output(), app.run():
         print(f"App: {app.app_id}; name: {name}; SDK: {importlib.metadata.version('modal')}", flush=True)
         call = worker.spawn(request)
@@ -597,7 +698,10 @@ def main(args: Args) -> None:
                 indent=2,
             )
         )
-        print(f"Call: {call.object_id}; argv: {shlex.join(command(request, tuple(range(16))))}", flush=True)
+        print(
+            f"Call: {call.object_id}; argv: {shlex.join(command(request, tuple(range(cores - request.gpus if args.mode == 'ddp' else 16))))}",
+            flush=True,
+        )
         code = call.get()
     download(name, args.output)
     elapsed = result_seconds(args.output / name / "result.json", code)
@@ -605,7 +709,8 @@ def main(args: Args) -> None:
         # Include previous preempted attempts and builds in the conservative ledger.
         elapsed = max(elapsed, time.time() - request.created_unix)
     charged = min(allowance, elapsed + 360)
-    record_budget(budget, name, charged - allowance, "completed call; retain startup and teardown allowance")
+    if args.mode != "ddp":
+        record_budget(budget, name, charged - allowance, "completed call; retain startup and teardown allowance")
     if code:
         raise SystemExit(f"Modal job exited {code}; see {args.output / name / 'run.log'}")
     hashes = {}
