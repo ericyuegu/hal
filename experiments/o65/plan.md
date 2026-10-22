@@ -269,11 +269,13 @@ replay the reference, calculate KL and GAE, fit the critic, then run one PPO
 epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
-Training format v10 retains pool snapshot v4. It adds explicit reward weights
-to the manifest and retains the critic warmup origin in training state, so
+Training format v12 retains pool snapshot v4, behavior state on each rank, and
+distributed rank shards. Both pre-merge v11 formats are rejected for exact resume.
+It includes explicit reward weights
+in the manifest and retains the critic warmup origin in training state, so
 exact resume during a repeated warmup preserves its remaining duration.
 It records the three slot weight
-updates and the update at which a fresh pool started. Exact resume rejects v8/v9;
+updates and the update at which a fresh pool started. Exact resume rejects v8 through v11;
 evaluation can still read their actors. It records partial episodes from head starts
 and validates group progress from the initial pool clock. A checkpoint records model,
 optimizers, scheduler, compressed simulator states, the last 129 frame records,
@@ -360,7 +362,10 @@ We evaluate the final checkpoint once against pi_ref at u=0.95, lambda=1 and
 masked identity. A frozen grid uses 32 weighted training matchup draws, six
 stages and both orientations at (D=8,R=4), for 384 MSL matches. Each match
 starts at four stocks and zero damage, then continues to a stockout or the
-eight-minute timeout. We calculate confidence intervals over paired seed/start
+eight-minute timeout. The O64 final evaluation uses the same 384-game grid at (D=18,R=2),
+u=0.95, lambda=1 and masked identity, against the frozen O64 pi_ref.
+[production-protocol.md](production-protocol.md) freezes those settings.
+We calculate confidence intervals over paired seed/start
 samples. We preserve partial results after failure and consume the held-out
 set before play.
 

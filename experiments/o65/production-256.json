@@ -29,6 +29,13 @@
   "sampler_source_sha256": "1b87b0b12b62470858899f90e7726ec3bc7355066492e7489592bcf16987cec8",
   "evaluation_protocol": "experiments/o65/production-evaluation.json",
   "evaluation_protocol_sha256": "725f5cb1ae4afd0494b3ae7e2a11c2cfb62b78ab5725c9535885bcf544af26e0",
-  "evaluation_cadence": null,
-  "evaluation_status": "Choose a production cadence before held-out play; the plan specifies proxy (8,4), outside the O64 conditioner range."
+  "evaluation_cadence": [
+    18,
+    2
+  ],
+  "evaluation_status": "Frozen before held-out play; same starts, seeds, stages and port orientations as production-evaluation.json.",
+  "evaluation_u": 0.95,
+  "evaluation_lambda": 1.0,
+  "evaluation_games": 384,
+  "evaluation_identity": "masked"
 }

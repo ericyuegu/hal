@@ -1,0 +1,70 @@
+{
+  "checks": [
+    {
+      "command": "uv run ruff format --check experiments/065_selfplay_ppo.py experiments/o65/pilot.py hal/eval/action_behavior.py hal/eval/conditioned_matchups.py hal/eval/self_play_checkpoint.py hal/training/self_play_distributed.py hal/training/self_play_flops.py hal/training/self_play_publication.py scripts/eval_o65.py scripts/launch_o65_modal.py scripts/o65_production.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_ddp.py tests/test_o65_ddp_launch.py tests/test_o65_pilot.py tests/test_o65_production.py",
+      "result": "passed: 17 files; initial check requested reformatting scripts/o65_production.py, then fixed"
+    },
+    {
+      "command": "uv run ruff check experiments/065_selfplay_ppo.py experiments/o65/pilot.py hal/eval/action_behavior.py hal/eval/conditioned_matchups.py hal/eval/self_play_checkpoint.py hal/training/self_play_distributed.py hal/training/self_play_flops.py hal/training/self_play_publication.py scripts/eval_o65.py scripts/launch_o65_modal.py scripts/o65_production.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_ddp.py tests/test_o65_ddp_launch.py tests/test_o65_pilot.py tests/test_o65_production.py",
+      "result": "passed"
+    },
+    {
+      "command": "uv run ty check --python-version 3.14 --error-on-warning experiments/065_selfplay_ppo.py experiments/o65/pilot.py hal/eval/action_behavior.py hal/eval/conditioned_matchups.py hal/eval/self_play_checkpoint.py hal/training/self_play_distributed.py hal/training/self_play_flops.py hal/training/self_play_publication.py scripts/eval_o65.py scripts/launch_o65_modal.py scripts/o65_production.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_ddp.py tests/test_o65_ddp_launch.py tests/test_o65_pilot.py tests/test_o65_production.py",
+      "result": "passed, zero diagnostics"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES='' uv run pytest -q tests/test_o65_ddp.py tests/test_o65_ddp_launch.py --basetemp=\"$TMPDIR/pytest-merged-ddp\"",
+      "result": "collection failure: scripts namespace not on pytest executable sys.path; used python -m pytest"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES='' uv run python -m pytest -q tests/test_o65_ddp.py tests/test_o65_ddp_launch.py --basetemp=\"$TMPDIR/pytest-merged-ddp-fixed\"",
+      "result": "15 passed, 1 failed: test publication prefix did not satisfy the existing o65/pilot-results/ contract; fixture fixed"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES='' uv run python -m pytest -q tests/test_o65_ddp.py tests/test_o65_ddp_launch.py tests/test_o65_production.py tests/test_o65_pilot.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_fixed_layout.py tests/test_o65_reward.py tests/test_o65_evaluation.py -m \"not integration\" -k \"not cuda and not short_gpu\" --basetemp=\"$TMPDIR/pytest-handoff-merged\"",
+      "result": "190 passed, 4 failed, 12 deselected, no skips; stale manifest error expectation and three fresh-pool fixtures fixed"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 uv run python -m pytest -q tests/test_065_loop.py -m \"not integration\" -k \"training_manifest_binds or (muon_resume and not cuda) or resume_verifier_accepts_only\" --basetemp=\"$TMPDIR/pytest-fixture-fixes\"",
+      "result": "4 passed, 88 deselected, no skips"
+    },
+    {
+      "command": "CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 uv run python -m pytest -q tests/test_o65_ddp.py tests/test_o65_ddp_launch.py --basetemp=\"$TMPDIR/pytest-final-ddp\"",
+      "result": "17 passed, no skips"
+    },
+    {
+      "command": "uv run python -m scripts.launch_o65_modal --mode ddp --name o65-o64-check-dry --timeout-seconds 3600 --secret hal --output runs/o65-247m-ddp/dry-runs --gpus 2 --ddp-updates 2 --matches 16 --windows-per-step 1 --actor-microbatches 1 --b200-max-usd 10000.0 --measurement --damage-weight 0.1 --stock-weight 120.0 --game-win-weight 120.0 --dry-run",
+      "result": "passed; local job construction only, no Modal request, GPU allocation or budget reservation"
+    },
+    {
+      "command": "uv run python -m scripts.launch_o65_modal --mode ddp --name o65-o64-sweep-dry --timeout-seconds 10800 --secret hal --output runs/o65-247m-ddp/dry-runs --gpus 8 --ddp-updates 2 --matches 16 --windows-per-step 1 --actor-microbatches 1 --b200-max-usd 10000.0 --measurement --measurement-sizes 16/1 64/4 256/16 1024/64 2048/128 --damage-weight 0.1 --stock-weight 120.0 --game-win-weight 120.0 --dry-run",
+      "result": "passed; local job construction only, no Modal request, GPU allocation or budget reservation"
+    },
+    {
+      "command": "uv run python -m scripts.launch_o65_modal --mode ddp --name o65-o64-256-dry --timeout-seconds 36000 --secret hal --output runs/o65-247m-ddp/dry-runs --gpus 8 --ddp-updates 256 --matches 1024 --windows-per-step 64 --actor-microbatches 1 --b200-max-usd 10000.0 --damage-weight 0.1 --stock-weight 120.0 --game-win-weight 120.0 --dry-run",
+      "result": "passed; local job construction only, no Modal request, GPU allocation or budget reservation"
+    }
+  ],
+  "changed_python_files": [
+    "experiments/065_selfplay_ppo.py",
+    "experiments/o65/pilot.py",
+    "hal/eval/action_behavior.py",
+    "hal/eval/conditioned_matchups.py",
+    "hal/eval/self_play_checkpoint.py",
+    "hal/training/self_play_distributed.py",
+    "hal/training/self_play_flops.py",
+    "hal/training/self_play_publication.py",
+    "scripts/eval_o65.py",
+    "scripts/launch_o65_modal.py",
+    "scripts/o65_production.py",
+    "tests/test_065_columnar.py",
+    "tests/test_065_loop.py",
+    "tests/test_o65_ddp.py",
+    "tests/test_o65_ddp_launch.py",
+    "tests/test_o65_pilot.py",
+    "tests/test_o65_production.py"
+  ],
+  "omitted": "Full suites, integration suites, GPU/NCCL runs, repeated self-review and parity audits omitted under the speed rule.",
+  "review": "One review of the merge and launch path; fixed rank-local behavior restore order, output-directory race, active-match validation and rank id offsets, global rates/MFU and stale test fixtures.",
+  "commit_hooks": "Ruff passed. Broad ty hook skipped to follow scoped validation rule; scoped ty passed. Initial merge hook reformatted one file, then passed after restaging."
+}
