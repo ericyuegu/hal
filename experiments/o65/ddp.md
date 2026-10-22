@@ -25,7 +25,7 @@ Inside the job, it downloads from the recorded R2 key into `o64-inputs/` on Moda
 volume `hal-o65-profile`, rejects a hash mismatch, fetches and checks all 44
 statistics files, and records the input identity. The source image retains the
 existing pinned simulator/game delivery. Training uses all eleven production
-cadences, 512 rollout frames, four groups, reward (0.1,120,120), 32 critic warmup
+cadences, 512 rollout frames, one rollout group, reward (0.1,120,120), 32 critic warmup
 updates, and a 256-update endpoint. Thus the endpoint includes 224 PPO updates.
 Final evaluation follows [production-protocol.md](production-protocol.md).
 

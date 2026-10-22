@@ -129,7 +129,7 @@ def training_command(args: Args) -> list[str]:
         "--rollout-frames",
         "512",
         "--groups",
-        "4",
+        "1",
         "--updates",
         str(args.updates),
         "--training.windows-per-step",
