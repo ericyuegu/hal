@@ -1,0 +1,196 @@
+{
+  "observed_utc": "2026-10-22T07:18:47.641335+00:00",
+  "checkpoint": {
+    "path": "/home/ericgu/data/runs/o64-step-0098304/step-0098304.pt",
+    "sha256": "e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf",
+    "loaded_cpu": true,
+    "source_statistics_hashes_verified": 44,
+    "production_cadences_verified": 11,
+    "supervised_offsets": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      27,
+      30
+    ]
+  },
+  "changed_python_files": [
+    "experiments/065_selfplay_ppo.py",
+    "experiments/o65/pilot.py",
+    "hal/eval/action_behavior.py",
+    "hal/eval/conditioned_matchups.py",
+    "hal/eval/self_play_checkpoint.py",
+    "hal/training/self_play_flops.py",
+    "scripts/eval_o65.py",
+    "tests/test_065_columnar.py",
+    "tests/test_065_loop.py",
+    "tests/test_o65_pilot.py",
+    "tests/test_o65_production.py"
+  ],
+  "checks": [
+    {
+      "command": "uv run ruff format --check experiments/065_selfplay_ppo.py experiments/o65/pilot.py hal/eval/action_behavior.py hal/eval/conditioned_matchups.py hal/eval/self_play_checkpoint.py hal/training/self_play_flops.py scripts/eval_o65.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_pilot.py tests/test_o65_production.py",
+      "result": "passed"
+    },
+    {
+      "command": "uv run ruff check experiments/065_selfplay_ppo.py experiments/o65/pilot.py hal/eval/action_behavior.py hal/eval/conditioned_matchups.py hal/eval/self_play_checkpoint.py hal/training/self_play_flops.py scripts/eval_o65.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_pilot.py tests/test_o65_production.py",
+      "result": "passed"
+    },
+    {
+      "command": "uv run ty check --python-version 3.14 --error-on-warning experiments/065_selfplay_ppo.py experiments/o65/pilot.py hal/eval/action_behavior.py hal/eval/conditioned_matchups.py hal/eval/self_play_checkpoint.py hal/training/self_play_flops.py scripts/eval_o65.py tests/test_065_columnar.py tests/test_065_loop.py tests/test_o65_pilot.py tests/test_o65_production.py",
+      "result": "passed"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_fixed_layout.py tests/test_o65_reward.py -k \"not short_gpu\" --basetemp \"$TMPDIR/pytest-existing\"",
+      "result": "16 passed, 2 deselected"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_production.py --basetemp \"$TMPDIR/pytest-production\"",
+      "result": "5 passed at that revision"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_production.py tests/test_o65_pilot.py -k \"not log_evaluation\" --basetemp \"$TMPDIR/pytest-final\"",
+      "result": "28 passed at that revision"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_production.py tests/test_o65_pilot.py --basetemp \"$TMPDIR/pytest-handoff\"",
+      "result": "30 passed at that revision"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_production.py --basetemp \"$TMPDIR/pytest-production-final\"",
+      "result": "8 passed at that revision"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_evaluation.py -k \"score or summary or checkpoint_rejects or immutable\" --basetemp \"$TMPDIR/pytest-evaluation\"",
+      "result": "2 passed, 32 deselected"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_evaluation.py -k \"death_metrics or zero_damage_proxy or bc_loader_rejects or checkpoint_rejects\" --basetemp \"$TMPDIR/pytest-eval-final\"",
+      "result": "3 failed (BC arm lookup preceded representation rejection), 3 passed, 28 deselected; fixed"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_evaluation.py -k \"death_metrics or zero_damage_proxy or bc_loader_rejects or checkpoint_rejects\" --basetemp \"$TMPDIR/pytest-eval-corrected\"",
+      "result": "6 passed, 28 deselected"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_production.py tests/test_065_columnar.py -k \"not cuda\" --basetemp \"$TMPDIR/pytest-countdown\"",
+      "result": "4 failed (old-format test retained new reward_weights field), 15 passed, 3 deselected; fixture fixed"
+    },
+    {
+      "command": "uv run pytest -q tests/test_o65_production.py tests/test_065_columnar.py -k \"not cuda\" --basetemp \"$TMPDIR/pytest-countdown-fixed\"",
+      "result": "19 passed, 3 deselected"
+    }
+  ],
+  "environment_failure": {
+    "command": "git commit (pre-commit ty hook)",
+    "result": "initial failure: missing cairosvg in fresh local virtual environment; installed cairosvg locally, hook passed; no dependency-file change"
+  },
+  "omitted_checks": "Full and integration suites omitted under the stream speed rule. No pytest skips occurred; deselections are recorded above.",
+  "gpu": {
+    "device": "NVIDIA GeForce RTX 3060 12 GB",
+    "groups": 1,
+    "matches": 4,
+    "rollout_frames": 512,
+    "cadences": [
+      [
+        16,
+        4
+      ],
+      [
+        21,
+        2
+      ]
+    ],
+    "windows_per_step": 1,
+    "decisions_per_window": 1,
+    "critic_epochs": 1,
+    "requested_updates": 2,
+    "warmup_updates": 0,
+    "reward_weights": {
+      "damage": 0.1,
+      "stock": 120,
+      "game_win": 120
+    },
+    "first_attempt": {
+      "status": "OOM before actor update",
+      "completed_updates": 0,
+      "startup_seconds": 516.78,
+      "startup_graphs": 18,
+      "phase_memory": {
+        "memory/first_ppo_rollout_peak_allocated_bytes": 7559883264.0,
+        "memory/first_ppo_rollout_peak_reserved_bytes": 10051649536.0,
+        "memory/first_ppo_preparation_peak_allocated_bytes": 7632593920.0,
+        "memory/first_ppo_preparation_peak_reserved_bytes": 10192158720.0,
+        "memory/first_ppo_reference_peak_allocated_bytes": 7632593920.0,
+        "memory/first_ppo_reference_peak_reserved_bytes": 10192158720.0,
+        "memory/first_ppo_optimization_peak_allocated_bytes": 9239901696.0,
+        "memory/first_ppo_optimization_peak_reserved_bytes": 11737759744.0,
+        "memory/first_ppo_critic_peak_allocated_bytes": 8671977984.0,
+        "memory/first_ppo_critic_peak_reserved_bytes": 11240734720.0
+      },
+      "log": "runs/o64-check/gpu-1.log",
+      "sampler": "pilot diagnostic sampler"
+    },
+    "retry": {
+      "status": "oom",
+      "delay_seconds": 60,
+      "sampler": "full O64 production sampler",
+      "log": "runs/o64-check/gpu-2.log",
+      "seconds": 108.80225777998567,
+      "allocated": 8647722496,
+      "reserved": 11737759744,
+      "error": "O65 CUDA OOM in optimization; configured actor step is 1 windows. Stop this run and inspect phase-memory.json. No automatic batch-size change is allowed.",
+      "completed_updates": 0,
+      "startup_seconds": 58.203,
+      "startup_graphs": 18,
+      "phase_memory": {
+        "memory/first_ppo_rollout_peak_allocated_bytes": 7559881216.0,
+        "memory/first_ppo_rollout_peak_reserved_bytes": 10051649536.0,
+        "memory/first_ppo_preparation_peak_allocated_bytes": 7632591872.0,
+        "memory/first_ppo_preparation_peak_reserved_bytes": 10192158720.0,
+        "memory/first_ppo_reference_peak_allocated_bytes": 7632591872.0,
+        "memory/first_ppo_reference_peak_reserved_bytes": 10192158720.0,
+        "memory/first_ppo_optimization_peak_allocated_bytes": 9239899648.0,
+        "memory/first_ppo_optimization_peak_reserved_bytes": 11744051200.0,
+        "memory/first_ppo_critic_peak_allocated_bytes": 8671975936.0,
+        "memory/first_ppo_critic_peak_reserved_bytes": 11240734720.0
+      }
+    },
+    "qualification": "Failed: both attempts exhausted 12-GB VRAM before the actor update. No completed PPO-loss, per-update behavior or achieved-MFU result is claimed. Architecture/counter unit tests pass. B200 execution is still required.",
+    "command": "O64_CHECK_OUTPUT=runs/o64-check/gpu-{1,2} PYTHONPATH=/home/ericgu/src/melee-sim-light:. MSL_CORE_LIBRARY=/home/ericgu/src/melee-sim-light/build/melee_core/python/libmelee_core.so PYTORCH_ALLOC_CONF=expandable_segments:True TORCHINDUCTOR_CACHE_DIR=\"$TMPDIR/inductor\" TORCHINDUCTOR_COMPILE_THREADS=2 uv run python runs/o64-check/gpu_check.py",
+    "git_sha": "6c640e9aceb0db4e575c88faab0849e6158d2e86",
+    "source_script": "import json,os,sys,time\nfrom pathlib import Path\nsys.path.insert(0,str(Path('tests').resolve()))\nfrom test_065_loop import exp\nimport torch\nargs=exp.NativeCli(\n    checkpoint=Path('/home/ericgu/data/runs/o64-step-0098304/step-0098304.pt'),\n    sampler=Path('experiments/o65/production-sampler.json'),\n    data_dir=Path('/home/ericgu/src/melee-sim-light/data'),\n    output=Path(os.environ['O64_CHECK_OUTPUT']),\n    cpus=(min(os.sched_getaffinity(0)),),groups=1,matches_per_shard=4,\n    updates=2,rollout_frames=512,cadence='production',\n    configurations=(exp.DelayReplan(16,4),exp.DelayReplan(21,2)),\n    training=exp.TrainConfig(critic_warmup_updates=0,windows_per_step=1,decisions_per_window=1,critic_epochs=1,checkpoint_interval=2,reward_weights=exp.native.RewardWeights(0.1,120,120)),\n)\nt=time.perf_counter()\ntry:\n    exp.train_native(args)\nexcept (torch.cuda.OutOfMemoryError, RuntimeError) as error:\n    print(json.dumps({'status':'oom','seconds':time.perf_counter()-t,'allocated':torch.cuda.max_memory_allocated(),'reserved':torch.cuda.max_memory_reserved(),'error':str(error)}),flush=True)\n    raise\n"
+  },
+  "other_corrected_failures": [
+    {
+      "command": "uv run ty check --python-version 3.14 --error-on-warning tests/test_o65_production.py",
+      "failure": "7 diagnostics from object return annotation on the dynamic test helper; corrected to the established Any test seam; final check passed"
+    },
+    {
+      "command": "CPU O64 checkpoint load with load_evaluation_checkpoint",
+      "failure": "One local source statistics fixture was missing; SDK fallback had no R2 environment credentials. Downloaded the missing Aklo statistics with rclone into this worktree; final load and all 44 statistics hashes passed"
+    }
+  ],
+  "precommit_document_checks": "Skipped on the JSON/Markdown input commit because it contained no Python files; all Python commits passed Ruff and ty hooks after the local cairosvg install."
+}

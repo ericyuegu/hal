@@ -19,7 +19,7 @@ than O63. Supervised offsets are 1..24, 27 and 30. Keep all eleven admitted
 production cadences. Padded decoder positions can reach 25; only supervised
 executed positions enter policy and KL losses.
 
-Prepare the full-corpus sampler with the existing builder, using retained O64
+Rebuild the recorded full-corpus sampler with the existing builder, using retained O64
 manifests and the pinned professional identity sidecar:
 
 ```sh
@@ -59,7 +59,8 @@ Training logs `behavior/student_*` across all student exposure,
 which both players are active. Offstage uses the walkable stage edge. Shield
 counts entries into the shield-state set. Zero-damage self-destructs mean stock
 losses without positive damage since respawn, not native KO attribution.
-Counts retain state across update and exact-resume boundaries (training v11).
+Counts exclude countdown frames and retain state across update and exact-resume
+boundaries (training v11).
 Held-out match events include the same student and reference counts and rates.
 
 `flops/*` estimates dense matrix and attention work from the loaded architecture,
@@ -68,3 +69,11 @@ time. `mfu/*` uses the hardware peak in `hal/training/mfu.py`; an unknown peak
 logs `mfu/bf16_peak_known=0` and omits utilization. B200 uses 2,250 dense BF16
 TFLOP/s. Small FP32 heads, nonlinearities, optimizer and simulator work are
 outside the BF16 interpretation described in the FLOP estimator.
+
+The local check and its one-minute retry both exhausted 3060 VRAM before the
+actor update (four matches, one window, one decision per window, 512 frames,
+D16/R4 and D21/R2). No PPO update completed. Startup captured 18 graphs in
+516.8 seconds cold and 58.2 seconds on retry. See
+[production-checks.json](production-checks.json) for commands, failures and
+phase memory. The held-out cadence remains undecided: the plan's proxy D8/R4
+is outside O64's conditioner range. Choose and record it before evaluation.
