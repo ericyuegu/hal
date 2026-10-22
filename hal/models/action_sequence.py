@@ -457,7 +457,7 @@ class TemporalBlock(nn.Module):
         if cache is None:
             empty = k.new_zeros(batch, self.n_heads, capacity, self.head_dim)
             cache = (empty, empty)
-        cos, sin = self.rotary.at(capacity, x.device)
+        cos, sin = self.rotary.at(capacity, x.device, k.dtype)
         slot_cos, slot_sin = cos[0, slot][:, None], sin[0, slot][:, None]
         q = apply_rotary_emb(q, slot_cos, slot_sin).transpose(1, 2)
         k = apply_rotary_emb(k, slot_cos, slot_sin)
@@ -472,7 +472,7 @@ class TemporalBlock(nn.Module):
 
     def rotate_keys(self, keys: Tensor) -> Tensor:
         """Rotate unrotated [B, H, L, head_dim] keys by their slot positions."""
-        cos, sin = self.rotary.at(keys.shape[2], keys.device)
+        cos, sin = self.rotary.at(keys.shape[2], keys.device, keys.dtype)
         return apply_rotary_emb(keys.transpose(1, 2), cos, sin).transpose(1, 2)
 
     def prefill(self, x: Tensor, modulation: Tensor | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
