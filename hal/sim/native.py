@@ -73,6 +73,25 @@ FRAME_DTYPE = np.dtype(
 
 
 @dataclass(frozen=True, slots=True)
+class RewardWeights:
+    damage: float = 1.0
+    stock: float = 120.0
+    game_win: float = 50.0
+
+    def __post_init__(self) -> None:
+        for name, value in asdict(self).items():
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or not 0 <= value <= float(np.finfo(np.float32).max)
+            ):
+                raise ValueError(f"{name} reward weight must be finite, nonnegative and representable as float32")
+
+
+DEFAULT_REWARD_WEIGHTS = RewardWeights()
+
+
+@dataclass(frozen=True, slots=True)
 class NativePlayer:
     """Use libmelee's internal character kind; Ice Climbers is Popo (10)."""
 
@@ -286,7 +305,13 @@ class NativeRolloutBatch:
     """
 
     def __init__(
-        self, data_dir: Path, batch_size: int, *, chunk_frames: int = 256, records: NDArray | None = None
+        self,
+        data_dir: Path,
+        batch_size: int,
+        *,
+        chunk_frames: int = 256,
+        records: NDArray | None = None,
+        reward_weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
     ) -> None:
         if (
             type(batch_size) is not int
@@ -300,6 +325,7 @@ class NativeRolloutBatch:
             raise RuntimeError(f"melee_sim ABI {_ABI_VERSION} is required")
         self._sim = sim
         self.batch_size = batch_size
+        self.reward_weights = reward_weights
         self._manifest_sha = _manifest_sha256(Path(data_dir).expanduser().resolve())
         self._library_sha = hashlib.sha256(Path(sim.native_library_path()).read_bytes()).hexdigest()
         self._configs: list[NativeMatch | None] = [None] * batch_size
@@ -346,6 +372,9 @@ class NativeRolloutBatch:
                 str(library).encode(),
                 str(raw).encode(),
                 self.batch_size,
+                self.reward_weights.damage,
+                self.reward_weights.stock,
+                self.reward_weights.game_win,
                 native_bridge.pointer(records),
                 ctypes.byref(self._handle),
             ),

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-ABI_VERSION = 2
+ABI_VERSION = 3
 
 
 class PlayerConfig(ctypes.Structure):
@@ -78,7 +78,10 @@ def _load(path: Path) -> tuple[ctypes.CDLL, str]:
         "hal_native_schema": ([], ctypes.c_char_p),
         "hal_native_frame_size": ([], size),
         "hal_native_error": ([ctypes.c_int], ctypes.c_char_p),
-        "hal_native_create": ([ctypes.c_char_p, ctypes.c_char_p, u32, ptr, ctypes.POINTER(ptr)], ctypes.c_int),
+        "hal_native_create": (
+            [ctypes.c_char_p, ctypes.c_char_p, u32, *([ctypes.c_float] * 3), ptr, ctypes.POINTER(ptr)],
+            ctypes.c_int,
+        ),
         "hal_native_destroy": ([ptr], None),
         "hal_native_reset": ([ptr, ptr, ptr], ctypes.c_int),
         "hal_native_step": ([ptr, ptr, stride, stride, stride, ptr, stride], ctypes.c_int),

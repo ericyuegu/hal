@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HAL_ABI 2
+#define HAL_ABI 3
 #define HAL_CORE_ABI 2
 
 typedef struct {
@@ -30,6 +30,9 @@ typedef struct {
   void *library;
   MslBatch *batch;
   uint32_t count;
+  float damage_weight;
+  float stock_weight;
+  float game_win_weight;
   HalFrame *frames;
   MslInput *inputs;
   float (*actions)[2][14];
@@ -115,13 +118,20 @@ void hal_native_destroy(HalBatch *b) {
 }
 
 int hal_native_create(const char *library, const char *data, uint32_t count,
+                      float damage_weight, float stock_weight, float game_win_weight,
                       HalFrame *frames, HalBatch **out) {
-  if (!library || !data || !count || !frames || !out)
+  if (!library || !data || !count || !frames || !out ||
+      !isfinite(damage_weight) || damage_weight < 0 ||
+      !isfinite(stock_weight) || stock_weight < 0 ||
+      !isfinite(game_win_weight) || game_win_weight < 0)
     return 14;
   *out = NULL;
   HalBatch *b = calloc(1, sizeof(*b));
   if (!b)
     return 2;
+  b->damage_weight = damage_weight;
+  b->stock_weight = stock_weight;
+  b->game_win_weight = game_win_weight;
   b->library = dlopen(library, RTLD_NOW | RTLD_LOCAL);
   if (!b->library) {
     hal_native_destroy(b);
@@ -415,9 +425,9 @@ static int finish_step(HalBatch *b) {
         damage[p] = 0.0f;
     }
     float difference = damage[1] - damage[0];
-    float base = 120 * (loss[1] - loss[0]) + 50 * (final[1] - final[0]);
-    f->reward[0] = base + difference;
-    f->reward[1] = -base + (damage[0] - damage[1]);
+    float base = b->stock_weight * (loss[1] - loss[0]) + b->game_win_weight * (final[1] - final[0]);
+    f->reward[0] = base + b->damage_weight * difference;
+    f->reward[1] = -base + b->damage_weight * (damage[0] - damage[1]);
     f->terminated = b->terminals[i].stockout != 0;
     f->truncated = b->terminals[i].max_frame_reached != 0 && !f->terminated;
   }

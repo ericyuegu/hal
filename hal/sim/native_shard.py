@@ -46,7 +46,15 @@ class NativeShard:
     to protect its source buffer. Select a CPU from the GPU's NUMA socket.
     """
 
-    def __init__(self, data_dir: Path, batch_size: int, *, cpu: int, records: NDArray | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        batch_size: int,
+        *,
+        cpu: int,
+        records: NDArray | None = None,
+        reward_weights: native.RewardWeights = native.DEFAULT_REWARD_WEIGHTS,
+    ) -> None:
         if type(cpu) is not int or cpu not in os.sched_getaffinity(0):
             raise ValueError("cpu must be in the caller's allowed CPU set")
         self._executor = ThreadPoolExecutor(max_workers=1, initializer=_bind_cpu, initargs=(cpu,))
@@ -54,7 +62,7 @@ class NativeShard:
         self.last_step_seconds = 0.0
         try:
             self._batch = self._executor.submit(
-                native.NativeRolloutBatch, data_dir, batch_size, records=records
+                native.NativeRolloutBatch, data_dir, batch_size, records=records, reward_weights=reward_weights
             ).result()
         except BaseException:
             self._executor.shutdown(wait=True)

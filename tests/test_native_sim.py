@@ -308,6 +308,35 @@ def test_reward_matches_canonical_float32_bytes(
         np.testing.assert_array_equal(frame.reward[0].view(np.uint32), expected_pair.view(np.uint32))
 
 
+@pytest.mark.parametrize(
+    ("old_stock", "new_stock", "new_percent", "expected"),
+    [
+        ((4, 4), (3, 4), (0.0, 0.0), -17.0),
+        ((4, 1), (4, 0), (0.0, 0.0), 40.0),
+        ((4, 4), (4, 4), (5.0, 25.0), 5.0),
+    ],
+)
+def test_configurable_reward_weights(
+    fake_sim: Path,
+    old_stock: tuple[int, int],
+    new_stock: tuple[int, int],
+    new_percent: tuple[float, float],
+    expected: float,
+) -> None:
+    _test_library(fake_sim).msl_test_set_reward(0, *old_stock, *new_stock, 0.0, 0.0, *new_percent)
+    with native.NativeRolloutBatch(fake_sim, 1, reward_weights=native.RewardWeights(0.25, 17.0, 23.0)) as batch:
+        batch.reset(_matches(1), np.array([True]))
+        frame = batch.step(np.zeros((1, 2, ACTION_DIM), dtype=np.float32), np.array([True]))
+        assert frame.reward.tolist() == [[expected, -expected]]
+
+
+@pytest.mark.parametrize("field", ["damage", "stock", "game_win"])
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), 1e100])
+def test_reward_weights_reject_invalid_values(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match="reward weight"):
+        replace(native.RewardWeights(), **{field: value})
+
+
 def test_disappearing_fighter_follower_and_items_clear_without_touching_masked_lane(fake_sim: Path) -> None:
     base = _matches(2)
     matches = tuple(
