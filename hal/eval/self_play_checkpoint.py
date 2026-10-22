@@ -277,7 +277,7 @@ def load_evaluation_checkpoint(
         precision = "bf16" if decoder_precision is None else decoder_precision
         saved = raw["cfg"]
         production = saved["experiment_id"] == "064_production_percentile_v1"
-        if saved["checkpoint_format_version"] != (6 if production else 5) or saved["arm"] != "bootstrap30":
+        if saved["checkpoint_format_version"] != (6 if production else 5):
             raise ValueError("unsupported BC checkpoint version or treatment")
         if (
             saved["mds_schema_version"] != SCHEMA_VERSION
@@ -285,6 +285,8 @@ def load_evaluation_checkpoint(
             or saved["return_conditioning"] is not True
         ):
             raise ValueError("BC representation or return conditioning differs")
+        if saved.get("arm") != "bootstrap30":
+            raise ValueError("unsupported BC checkpoint treatment")
         cfg = ActionSequenceConfig(
             d_model=256,
             n_layers=12,
