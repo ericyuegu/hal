@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -107,8 +108,11 @@ class CompileCache:
             if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
                 raise ValueError("compiler artifact hash mismatch")
             self.loaded_counts = entry["counts"]
-        os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(self.directory / "inductor")
-        os.environ["TRITON_CACHE_DIR"] = str(self.directory / "triton")
+        # Loose Inductor and Triton files stay on local disk; the packed artifact
+        # is the persistent cache, and network volumes cap their file counts.
+        scratch = Path(tempfile.mkdtemp(prefix=f"hal-compile-{identity.key[:12]}-"))
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(scratch / "inductor")
+        os.environ["TRITON_CACHE_DIR"] = str(scratch / "triton")
         if payload is not None:
             if torch.compiler.load_cache_artifacts(payload) is None:
                 raise ValueError("Torch rejected compiler cache artifacts")

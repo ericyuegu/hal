@@ -126,3 +126,10 @@ def test_cache_rejects_malformed_manifest_before_load(
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="manifest mismatch"):
         compile_cache.CompileCache(tmp_path, identity())
+
+
+def test_loose_compiler_files_stay_off_the_cache_root(tmp_path: Path) -> None:
+    cache = compile_cache.CompileCache(tmp_path / "volume", identity())
+    for name in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
+        assert not Path(os.environ[name]).is_relative_to(tmp_path / "volume")
+    assert sorted(path.name for path in cache.directory.iterdir()) == ["identity.json"]
