@@ -37,9 +37,12 @@ from hal.data.schema import Rank
 from hal.eval.action_behavior import COUNT_NAMES
 from hal.eval.action_behavior import BehaviorCounts
 from hal.eval.action_behavior import BehaviorTracker
+from hal.eval.self_play_checkpoint import DISTRIBUTED_TRAINING_FORMAT
+from hal.eval.self_play_checkpoint import DISTRIBUTED_TRAINING_VERSION
 from hal.eval.self_play_checkpoint import EVALUATION_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_VERSION
+from hal.eval.self_play_checkpoint import CheckpointShard
 from hal.eval.self_play_checkpoint import evaluation_actor_path
 from hal.eval.self_play_checkpoint import evaluation_checkpoint_metadata
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
@@ -74,6 +77,7 @@ from hal.sim import native_shard
 from hal.sim.inputs import native_controller_readback
 from hal.sim.native_shard import NativeShard
 from hal.training import mfu
+from hal.training import self_play_distributed as distributed
 from hal.training import self_play_publication
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.self_play_flops import SelfPlayFlops
@@ -3451,7 +3455,12 @@ def parameter_metrics(
 
 @torch.no_grad()
 def action_statistics(
-    model: SelfPlayTransformer, old: PolicyEvaluation, reference: PolicyEvaluation, executed: Tensor
+    model: SelfPlayTransformer,
+    old: PolicyEvaluation,
+    reference: PolicyEvaluation,
+    executed: Tensor,
+    *,
+    totals: distributed.MetricTotals | None = None,
 ) -> dict[str, float]:
     metrics = {}
     for factor, name in enumerate(FACTOR_ORDER):
@@ -3474,6 +3483,10 @@ def action_statistics(
                 histogram = mean.new_zeros(6).scatter_add_(0, bins, mean)
                 for index, value in enumerate(histogram):
                     metrics[f"action/{label}_{name}_magnitude_bin{index}"] = float(value)
+    if totals is not None:
+        count = float(executed[:, ::4].sum())
+        for key, value in metrics.items():
+            totals.ratio(key, value * count, count)
     return metrics
 
 
@@ -3497,7 +3510,10 @@ def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, 
 
 @torch.no_grad()
 def reward_component_metrics(
-    rollout: Rollout, weights: native.RewardWeights = native.DEFAULT_REWARD_WEIGHTS
+    rollout: Rollout,
+    weights: native.RewardWeights = native.DEFAULT_REWARD_WEIGHTS,
+    *,
+    totals: distributed.MetricTotals | None = None,
 ) -> dict[str, float]:
     table = rollout.table
     meta = table.integers[rollout.ids]
@@ -3516,6 +3532,9 @@ def reward_component_metrics(
         result[f"return/{name}_positive"] = float(torch.where(valid, positive, 0).sum() / len(meta))
         result[f"return/{name}_negative"] = float(torch.where(valid, negative, 0).sum() / len(meta))
         result[f"return/{name}_reward"] = float(torch.where(valid, positive + negative, 0).sum() / len(meta))
+    if totals is not None:
+        for key, value in result.items():
+            totals.ratio(key, value * len(meta), len(meta))
     return result
 
 
@@ -3621,6 +3640,7 @@ class Trainer:
         if engine.sampler.rng.seed != config.seed:
             raise ValueError("trainer and counter RNG seeds must agree")
         self.profile: UpdateProfile | None = None
+        self.metric_totals = distributed.MetricTotals(engine.policy.device)
         self.memory = PhaseMemory(engine.policy.device, config.windows_per_step)
         self.engine = engine
         self.policy = engine.policy
@@ -3665,10 +3685,11 @@ class Trainer:
         engine = self.engine
         cursor = engine.cursor
         frames = engine.sampler.schedule.rollout_frames
-        print(
-            f"startup_capture_started groups={len(engine.groups)} matches_per_group={[len(ids) for ids in engine.group_matches]}",
-            flush=True,
-        )
+        if distributed.rank() == 0:
+            print(
+                f"startup_capture_started groups={len(engine.groups)} matches_per_group={[len(ids) for ids in engine.group_matches]}",
+                flush=True,
+            )
         for group, matches in enumerate(engine.group_matches):
             engine.cursor = group
             previous = engine.stores[group]
@@ -3735,10 +3756,11 @@ class Trainer:
         self.startup_seconds = time.perf_counter() - started
         if self.compilation_counter is not None:
             self.compilation_counter.starts = 0
-        print(
-            f"startup_capture seconds={self.startup_seconds:.3f} graphs={sum(p.capture_count for p in policies if isinstance(p, TransformerPolicy))}",
-            flush=True,
-        )
+        if distributed.rank() == 0:
+            print(
+                f"startup_capture seconds={self.startup_seconds:.3f} graphs={sum(p.capture_count for p in policies if isinstance(p, TransformerPolicy))}",
+                flush=True,
+            )
 
     @torch.no_grad()
     def head_start(self) -> HeadStart:
@@ -3829,17 +3851,25 @@ class Trainer:
         for anchor, (stocks, damage_total, duration) in zip(anchors, exposure, strict=True):
             prefix = "gameplay/pi_ref" if anchor == 0 else f"gameplay/anchor{anchor}"
             if duration:
-                metrics[f"{prefix}_net_stocks_per_min"] = stocks * 3600 / duration
-                metrics[f"{prefix}_net_damage_per_min"] = damage_total * 3600 / duration
+                metrics[f"{prefix}_net_stocks_per_min"] = self.metric_totals.ratio(
+                    f"{prefix}_net_stocks_per_min", stocks * 3600, duration
+                )
+                metrics[f"{prefix}_net_damage_per_min"] = self.metric_totals.ratio(
+                    f"{prefix}_net_damage_per_min", damage_total * 3600, duration
+                )
             wins, count = completed.get(anchor, (0, 0))
-            metrics[f"{prefix}_count"] = float(count)
+            metrics[f"{prefix}_count"] = self.metric_totals.total(f"{prefix}_count", count)
             if count:
-                metrics[f"{prefix}_win_rate"] = wins / count
+                metrics[f"{prefix}_win_rate"] = self.metric_totals.ratio(f"{prefix}_win_rate", wins, count)
             recent_wins = sum(row.get(anchor, (0, 0))[0] for row in self.anchor_win_history)
             recent_count = sum(row.get(anchor, (0, 0))[1] for row in self.anchor_win_history)
-            metrics[f"{prefix}_count_32_updates"] = float(recent_count)
+            metrics[f"{prefix}_count_32_updates"] = self.metric_totals.total(
+                f"{prefix}_count_32_updates", recent_count
+            )
             if recent_count:
-                metrics[f"{prefix}_win_rate_32_updates"] = recent_wins / recent_count
+                metrics[f"{prefix}_win_rate_32_updates"] = self.metric_totals.ratio(
+                    f"{prefix}_win_rate_32_updates", recent_wins, recent_count
+                )
         return metrics
 
     @torch.no_grad()
@@ -3907,15 +3937,29 @@ class Trainer:
         metrics["critic/monte_carlo_episode_count"] = float(len(values))
         if values:
             v, target = torch.tensor(values, dtype=torch.float64), torch.tensor(returns, dtype=torch.float64)
-            metrics["critic/monte_carlo_initial_value"] = float(v.mean())
-            metrics["critic/monte_carlo_task_return"] = sum(task_returns) / len(task_returns)
-            metrics["critic/monte_carlo_return"] = float(target.mean())
-            metrics["critic/monte_carlo_rmse"] = float((v - target).square().mean().sqrt())
+            metrics["critic/monte_carlo_initial_value"] = self.metric_totals.mean(
+                "critic/monte_carlo_initial_value", v
+            )
+            metrics["critic/monte_carlo_task_return"] = self.metric_totals.ratio(
+                "critic/monte_carlo_task_return", sum(task_returns), len(task_returns)
+            )
+            metrics["critic/monte_carlo_return"] = self.metric_totals.mean("critic/monte_carlo_return", target)
+            metrics["critic/monte_carlo_rmse"] = math.sqrt(
+                self.metric_totals.ratio(
+                    "critic/monte_carlo_rmse", float((v - target).square().sum()), v.numel(), kind="rmse"
+                )
+            )
         if costs_done:
-            metrics["return/completed_match_kl_cost"] = sum(costs_done) / len(costs_done)
+            metrics["return/completed_match_kl_cost"] = self.metric_totals.ratio(
+                "return/completed_match_kl_cost", sum(costs_done), len(costs_done)
+            )
         for index, rows in bins.items():
-            metrics[f"return/completed_episode_u{index}"] = sum(row[0] for row in rows) / len(rows)
-            metrics[f"gameplay/win_rate_u{index}"] = sum(row[1] for row in rows) / len(rows)
+            metrics[f"return/completed_episode_u{index}"] = self.metric_totals.ratio(
+                f"return/completed_episode_u{index}", sum(row[0] for row in rows), len(rows)
+            )
+            metrics[f"gameplay/win_rate_u{index}"] = self.metric_totals.ratio(
+                f"gameplay/win_rate_u{index}", sum(row[1] for row in rows), len(rows)
+            )
         return metrics
 
     @torch.no_grad()
@@ -4012,12 +4056,19 @@ class Trainer:
         advantages = result.advantages.flatten()[ids]
         targets = result.value_targets.flatten()[ids]
         selected = placement.selected.flatten()[compact]
-        steps = tuple(placement.windows.unbind(0))
+        step_count = distributed.maximum(len(placement.windows), device)
+        step_windows = torch.full((step_count, self.config.windows_per_step), -1, dtype=torch.long, device=device)
+        step_windows[: len(placement.windows)] = placement.windows
+        steps = tuple(step_windows.unbind(0))
         executed = decisions.executed_factors_JF
         metrics = {
-            "critic/explained_variance": explained_variance(values, targets),
-            "policy/kl_per_frame": float(torch.where(executed, kl, 0).sum() / executed[:, ::4].sum().clamp_min(1)),
-            "return/interval_reward": float(frame_rewards.sum(-1).mean()),
+            "critic/explained_variance": self.metric_totals.explained_variance(
+                "critic/explained_variance", values, targets
+            ),
+            "policy/kl_per_frame": self.metric_totals.ratio(
+                "policy/kl_per_frame", float(torch.where(executed, kl, 0).sum()), float(executed[:, ::4].sum())
+            ),
+            "return/interval_reward": self.metric_totals.mean("return/interval_reward", frame_rewards.sum(-1)),
             "data/anchor_share": sum(
                 player.anchor is not None for state in self.engine.matches.values() for player in state.episode.players
             )
@@ -4041,15 +4092,19 @@ class Trainer:
         for index in range(4):
             mask = bins == index
             if bool(mask.any()):
-                metrics[f"return/interval_reward_lambda{index}"] = float(frame_rewards[mask].sum(-1).mean())
-                metrics[f"policy/kl_per_frame_lambda{index}"] = float(
-                    torch.where(executed[mask], kl[mask], 0).sum() / executed[mask, ::4].sum().clamp_min(1)
+                metrics[f"return/interval_reward_lambda{index}"] = self.metric_totals.mean(
+                    f"return/interval_reward_lambda{index}", frame_rewards[mask].sum(-1)
+                )
+                metrics[f"policy/kl_per_frame_lambda{index}"] = self.metric_totals.ratio(
+                    f"policy/kl_per_frame_lambda{index}",
+                    float(torch.where(executed[mask], kl[mask], 0).sum()),
+                    float(executed[mask, ::4].sum()),
                 )
         for position in range(4):
             mask = (decisions.decision_frame_J % 128) // 32 == position
             if bool(mask.any()):
-                metrics[f"critic/explained_variance_position{position}"] = explained_variance(
-                    values[mask], targets[mask]
+                metrics[f"critic/explained_variance_position{position}"] = self.metric_totals.explained_variance(
+                    f"critic/explained_variance_position{position}", values[mask], targets[mask]
                 )
         for name, column in (("identity", IDENTITY), ("character", CHARACTER), ("stage", STAGE)):
             keys, counts = torch.unique(meta[:, column], return_counts=True)
@@ -4076,47 +4131,67 @@ class Trainer:
                 slots=dataclasses.replace(shorter.slots, positions_WK=length[:, None] - 1),
             )
             difference = (self.policy.evaluate_values(shorter).flatten() - all_values[final_rows]).abs()
-            metrics["critic/bootstrap_context_gap"] = float(
-                torch.where(final_valid, difference, 0).sum() / final_valid.sum()
+            metrics["critic/bootstrap_context_gap"] = self.metric_totals.mean(
+                "critic/bootstrap_context_gap", difference[final_valid]
             )
         for timing in self.engine.sampler.schedule.configurations:
             mask = (decisions.delay_J == timing.delay) & (decisions.replan_J == timing.replan)
             if not bool(mask.any()):
                 continue
             suffix = f"d{timing.delay}_r{timing.replan}"
-            metrics[f"policy/kl_per_frame_{suffix}"] = float(kl[mask].sum() / executed[mask, ::4].sum().clamp_min(1))
-            metrics[f"critic/advantage_mean_{suffix}"] = float(advantages[mask].mean())
-            metrics[f"critic/advantage_std_{suffix}"] = float(advantages[mask].std(unbiased=False))
-            metrics[f"critic/explained_variance_{suffix}"] = explained_variance(values[mask], targets[mask])
+            metrics[f"policy/kl_per_frame_{suffix}"] = self.metric_totals.ratio(
+                f"policy/kl_per_frame_{suffix}",
+                float(torch.where(executed[mask], kl[mask], 0).sum()),
+                float(executed[mask, ::4].sum()),
+            )
+            metrics[f"critic/advantage_mean_{suffix}"] = self.metric_totals.mean(
+                f"critic/advantage_mean_{suffix}", advantages[mask]
+            )
+            metrics[f"critic/advantage_std_{suffix}"] = self.metric_totals.std(
+                f"critic/advantage_std_{suffix}", advantages[mask]
+            )
+            metrics[f"critic/explained_variance_{suffix}"] = self.metric_totals.explained_variance(
+                f"critic/explained_variance_{suffix}", values[mask], targets[mask]
+            )
         for factor, distribution in zip(FACTOR_ORDER, old.distributions, strict=True):
             entropy = -(distribution * torch.where(distribution > 0, distribution, 1).log()).sum(-1)
             valid = torch.arange(4, device=device)[None] < decisions.replan_J[:, None]
-            metrics[f"policy/entropy_{factor}"] = float(entropy[valid].mean())
+            metrics[f"policy/entropy_{factor}"] = self.metric_totals.mean(f"policy/entropy_{factor}", entropy[valid])
         for index, factor in enumerate(FACTOR_ORDER):
             frames = executed[:, index::4]
             if bool(frames.any()):
-                metrics[f"policy/kl_{factor}_per_frame"] = float(kl[:, index::4][frames].mean())
+                metrics[f"policy/kl_{factor}_per_frame"] = self.metric_totals.mean(
+                    f"policy/kl_{factor}_per_frame", kl[:, index::4][frames]
+                )
         if reference is not None and isinstance(self.policy, TransformerPolicy):
-            metrics.update(action_statistics(self.policy.model, old, reference, executed))
-        metrics.update(reward_component_metrics(rollout, self.config.reward_weights))
+            metrics.update(action_statistics(self.policy.model, old, reference, executed, totals=self.metric_totals))
+        metrics.update(reward_component_metrics(rollout, self.config.reward_weights, totals=self.metric_totals))
 
         ages = table.age[ids]
         age_bins = torch.bucketize(ages, ages.new_tensor((128, 512, 2048, 8192)))
         for index, value in enumerate(torch.bincount(age_bins, minlength=5).float() / len(ids)):
-            metrics[f"data/episode_age_bin{index}"] = float(value)
-        metrics["data/episode_age_mean_frames"] = float(ages.float().mean())
+            metrics[f"data/episode_age_bin{index}"] = self.metric_totals.ratio(
+                f"data/episode_age_bin{index}", float(value) * len(ids), len(ids)
+            )
+        metrics["data/episode_age_mean_frames"] = self.metric_totals.mean("data/episode_age_mean_frames", ages)
         u_bins = torch.bucketize(table.conditions[ids, 2], table.conditions.new_tensor((0.5, 0.75, 0.9, 0.97)))
         entropy = torch.stack([-(p * torch.where(p > 0, p, 1).log()).sum(-1) for p in old.distributions]).sum(0)
         for index in range(5):
             mask = u_bins == index
             frames = executed[:, ::4] & mask[:, None]
             if bool(mask.any()):
-                metrics[f"return/interval_reward_u{index}"] = float(frame_rewards[mask].sum(-1).mean())
-            if bool(frames.any()):
-                metrics[f"policy/kl_per_frame_u{index}"] = float(
-                    torch.where(executed & mask[:, None], kl, 0).sum() / frames.sum()
+                metrics[f"return/interval_reward_u{index}"] = self.metric_totals.mean(
+                    f"return/interval_reward_u{index}", frame_rewards[mask].sum(-1)
                 )
-                metrics[f"policy/entropy_u{index}"] = float(entropy[frames].mean())
+            if bool(frames.any()):
+                metrics[f"policy/kl_per_frame_u{index}"] = self.metric_totals.ratio(
+                    f"policy/kl_per_frame_u{index}",
+                    float(torch.where(executed & mask[:, None], kl, 0).sum()),
+                    float(frames.sum()),
+                )
+                metrics[f"policy/entropy_u{index}"] = self.metric_totals.mean(
+                    f"policy/entropy_u{index}", entropy[frames]
+                )
         return PreparedUpdate(
             rollout,
             decisions,
@@ -4150,6 +4225,7 @@ class Trainer:
             features = batch.old.features.detached()
             count = len(batch.values)
             selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
+            global_count = distributed.sum_tensor(selected.sum())
             for _ in range(cfg.critic_epochs):
                 self.critic_optimizer.zero_grad(set_to_none=True)
                 loss = critic_loss(
@@ -4157,9 +4233,11 @@ class Trainer:
                     batch.targets,
                     selected,
                     value_scale=cfg.value_scale,
+                    reduction=DecisionReduction(global_count, distributed.world_size()),
                 )
                 _check_finite("critic loss", loss)
                 loss.backward()
+                distributed.average_gradients(self.policy.critic_parameters())
                 norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                 )
@@ -4205,7 +4283,9 @@ class Trainer:
                         & live[:, None]
                     )
                     advantages = dense_advantage[windows.rows]
-                    statistics = advantage_statistics(advantage_moments(advantages.flatten(), selected.flatten()))
+                    statistics = advantage_statistics(
+                        distributed.sum_tensor(advantage_moments(advantages.flatten(), selected.flatten()))
+                    )
                     # Chunks share the step's statistics and denominator, so their
                     # gradients sum to the gradient of the whole step.
                     chunk = cfg.windows_per_step // cfg.actor_microbatches
@@ -4222,7 +4302,7 @@ class Trainer:
                             tuple(value[part.rows] for value in reference_dense),
                             statistics.mean.float(),
                             statistics.sigma.float(),
-                            selected.sum().float(),
+                            statistics.count.float() / distributed.world_size(),
                         )
                         parts.append(self.policy.actor_step(part, targets, clip_epsilon=cfg.clip_epsilon))
                         if cfg.actor_microbatches > 1:
@@ -4254,7 +4334,9 @@ class Trainer:
                             )
                         ),
                     )
-                    noise.add(int(live.sum()), int(selected.sum()))
+                    distributed.average_gradients(self.policy.actor_parameters())
+                    global_windows = distributed.sum_tensor(live.sum())
+                    noise.add(int(global_windows), int(statistics.count))
                     norm = torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )
@@ -4274,7 +4356,9 @@ class Trainer:
                         .detach()
                     )
                     old_log_ratios.append(log_ratio)
-                    metrics[f"policy/old_log_ratio_step{step}"] = float(log_ratio.mean())
+                    metrics[f"policy/old_log_ratio_step{step}"] = self.metric_totals.mean(
+                        f"policy/old_log_ratio_step{step}", log_ratio
+                    )
                     assert table.evaluation is not None
                     new = window_evaluation(
                         current,
@@ -4284,7 +4368,9 @@ class Trainer:
                     previous = _take_evaluation(table.evaluation, windows.rows.flatten())
                     mask = (current.factor_mask_WKF & selected[..., None]).flatten(0, 1)
                     old_kl = factor_kl(new, previous, mask)
-                    metrics[f"policy/old_kl_step{step}"] = float(torch.where(mask, old_kl, 0).sum() / selected.sum())
+                    metrics[f"policy/old_kl_step{step}"] = self.metric_totals.ratio(
+                        f"policy/old_kl_step{step}", float(torch.where(mask, old_kl, 0).sum()), float(selected.sum())
+                    )
         ratio = torch.cat(ratios)
         metrics.update(gradient_metrics("actor", actor_norms, cfg.gradient_clip))
         metrics.update(noise.metrics())
@@ -4293,10 +4379,14 @@ class Trainer:
             {
                 "policy/loss": float(torch.stack(policy_losses).mean()),
                 "policy/kl_loss": float(torch.stack(kl_losses).mean()),
-                "policy/clip_fraction": float(((ratio - 1).abs() > cfg.clip_epsilon).float().mean()),
-                "policy/ratio_p01": float(ratio.quantile(0.01)),
-                "policy/ratio_p99": float(ratio.quantile(0.99)),
-                "policy/old_log_ratio_p99": float(torch.cat(old_log_ratios).abs().quantile(0.99)),
+                "policy/clip_fraction": self.metric_totals.mean(
+                    "policy/clip_fraction", ((ratio - 1).abs() > cfg.clip_epsilon).float()
+                ),
+                "policy/ratio_p01": float(ratio.quantile(0.01)) if ratio.numel() else math.nan,
+                "policy/ratio_p99": float(ratio.quantile(0.99)) if ratio.numel() else math.nan,
+                "policy/old_log_ratio_p99": float(torch.cat(old_log_ratios).abs().quantile(0.99))
+                if ratio.numel()
+                else math.nan,
                 "systems/actor_seconds": time.perf_counter() - started,
             }
         )
@@ -4306,11 +4396,12 @@ class Trainer:
         for timing in self.engine.sampler.schedule.configurations:
             mask = (batch.decisions.delay_J == timing.delay) & (batch.decisions.replan_J == timing.replan)
             values = batch.advantages[mask].double()
+            moments = distributed.sum_tensor(advantage_moments(values, torch.ones_like(values, dtype=torch.bool)))
             previous = self.warmup_moments.get(timing, (0, 0.0, 0.0))
             self.warmup_moments[timing] = (
-                previous[0] + len(values),
-                previous[1] + float(values.sum()),
-                previous[2] + float(values.square().sum()),
+                previous[0] + int(moments[0]),
+                previous[1] + float(moments[1]),
+                previous[2] + float(moments[2]),
             )
         if self.update + 1 < self.warmup_start_update + self.config.critic_warmup_updates:
             return {}
@@ -4339,6 +4430,13 @@ class Trainer:
             self.reference.work_flops.get("reference", 0) if isinstance(self.reference, TransformerPolicy) else 0
         )
         critic = 3 * self.policy.flops.critic * len(batch.values) * self.config.critic_epochs
+        rollout, actor, preparation, critic, frames, values = distributed.sum_tensor(
+            torch.tensor(
+                [rollout, actor, preparation, critic, batch.rollout.frames, len(batch.values)],
+                device=self.policy.device,
+                dtype=torch.float64,
+            )
+        ).tolist()
         peak = (
             mfu.bf16_dense_peak_flops(torch.cuda.get_device_name(self.policy.device))
             if self.policy.device.type == "cuda"
@@ -4347,10 +4445,10 @@ class Trainer:
         result: dict[str, float] = {"mfu/bf16_peak_known": float(peak is not None)}
         decisions = metrics["data/trained_decisions"]
         for name, work, units, seconds in (
-            ("rollout", rollout, batch.rollout.frames, metrics["systems/rollout_seconds"]),
+            ("rollout", rollout, frames, metrics["systems/rollout_seconds"]),
             ("actor", actor, decisions, metrics.get("systems/actor_seconds", 0)),
-            ("critic", critic, len(batch.values), metrics["systems/critic_seconds"]),
-            ("preparation", preparation, len(batch.values), metrics["systems/preparation_seconds"]),
+            ("critic", critic, values, metrics["systems/critic_seconds"]),
+            ("preparation", preparation, values, metrics["systems/preparation_seconds"]),
         ):
             result[f"flops/{name}_total"] = float(work)
             if units:
@@ -4358,7 +4456,7 @@ class Trainer:
             if work and seconds > 0:
                 result[f"throughput/{name}_tflops"] = work / seconds / 1e12
                 if peak is not None:
-                    result[f"mfu/{name}"] = mfu.model_flops_utilization(work, seconds, peak)
+                    result[f"mfu/{name}"] = mfu.model_flops_utilization(work, seconds, distributed.world_size() * peak)
         return result
 
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
@@ -4368,6 +4466,7 @@ class Trainer:
         for policy in (self.policy, *self.engine.anchors.values()):
             if isinstance(policy, TransformerPolicy):
                 policy.work_flops.clear()
+        self.metric_totals = distributed.MetricTotals(self.policy.device)
         started = time.perf_counter()
         native_shards = [
             shard for shard in self.engine.groups[self.engine.cursor] if isinstance(shard, NativeSimulatorShard)
@@ -4398,6 +4497,12 @@ class Trainer:
         metrics.update(self.anchor_metrics(rollout))
         for role, counts in rollout.behavior:
             metrics.update(counts.metrics(role))
+            active = float(counts.counts[-2])
+            for name, count in zip(COUNT_NAMES, counts.counts, strict=True):
+                self.metric_totals.total(f"behavior/{role}_{name}_count", float(count))
+            for name, count in zip(COUNT_NAMES[:-2], counts.counts[:-2], strict=True):
+                self.metric_totals.ratio(f"behavior/{role}_{name}_per_min", float(count) * 3600, active)
+            self.metric_totals.ratio(f"behavior/{role}_offstage_fraction", float(counts.counts[-1]), active)
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True
         for index, (shard, previous) in enumerate(zip(native_shards, before, strict=True)):
@@ -4431,10 +4536,11 @@ class Trainer:
             if self.policy.device.type == "cuda":
                 torch.cuda.synchronize(self.policy.device)
             metrics["systems/snapshot_seconds"] = time.perf_counter() - snapshot_started
-            print(
-                f"snapshot update={self.update} anchor={promoted} seconds={metrics['systems/snapshot_seconds']:.3f}",
-                flush=True,
-            )
+            if distributed.rank() == 0:
+                print(
+                    f"snapshot update={self.update} anchor={promoted} seconds={metrics['systems/snapshot_seconds']:.3f}",
+                    flush=True,
+                )
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
             metrics["systems/peak_allocated_bytes"] = float(
@@ -4463,7 +4569,9 @@ class Trainer:
                     ),
                 )
             )
-        metrics.update(self.flops_metrics(batch, metrics))
+        self.metric_totals.ratio(
+            "systems/reset_idle_fraction", rollout.idle_frames, rollout.frames + rollout.idle_frames
+        )
         metrics["systems/startup_capture_seconds"] = self.startup_seconds
         metrics["systems/post_startup_compiles"] = float(
             self.compilation_counter.snapshot() if self.compilation_counter is not None else 0
@@ -4477,6 +4585,10 @@ class Trainer:
         )
         metrics["systems/update_seconds"] = time.perf_counter() - started
         metrics["systems/match_frames_per_second"] = rollout.frames / metrics["systems/update_seconds"]
+        if self.update == 1 or self.update % 16 == 0 or self.update % self.config.snapshot_interval == 0:
+            distributed.check_parameters(tuple(self.policy.model.parameters()))
+        metrics = self.metric_totals.reduce(metrics)
+        metrics.update(self.flops_metrics(batch, metrics))
         self.updating = False
         return batch, metrics
 
@@ -4503,7 +4615,7 @@ def _environment() -> dict[str, str]:
         "numpy": np.__version__,
         "cuda": str(torch.version.cuda),
         "device": torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu",
-        "world_size": "1",
+        "world_size": str(distributed.world_size()),
         "tf32_matmul": str(torch.backends.cuda.matmul.allow_tf32),
         "tf32_cudnn": str(torch.backends.cudnn.allow_tf32),
     }
@@ -4540,6 +4652,14 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
         identity["model"] = dataclasses.asdict(trainer.policy.model.cfg)
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
         identity["statistics"] = {key: dataclasses.asdict(value) for key, value in trainer.policy.statistics.items()}
+    if distributed.world_size() > 1:
+        base = min(engine.matches)
+        identity["world_size"] = distributed.world_size()
+        identity["execution_device"] = trainer.policy.device.type
+        identity["groups"] = [
+            [[match - base for match in shard.match_ids] for shard in group] for group in engine.groups
+        ]
+        identity["lane_roles"] = sorted((match - base, role) for match, role in engine.lane_roles.items())
     return identity
 
 
@@ -4554,6 +4674,7 @@ class CheckpointSnapshot:
     simulators: tuple[tuple[str, bytes | NativePoolSnapshot], ...]
     actor: dict[str, object] | None
     manifest: dict[str, object]
+    rank_shards: tuple[CheckpointShard, ...] = ()
 
 
 def _checkpoint_tensors(value: object) -> Iterator[Tensor]:
@@ -4619,9 +4740,21 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
         "torch_rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        "cuda_rng": (
+            [torch.cuda.get_rng_state(trainer.policy.device)]
+            if distributed.world_size() > 1
+            else torch.cuda.get_rng_state_all()
+        )
+        if trainer.policy.device.type == "cuda" or (distributed.world_size() == 1 and torch.cuda.is_available())
+        else [],
         "counter_rng": {"seed": engine.sampler.rng.seed, "key": engine.sampler.rng.key},
     }
+    if distributed.world_size() > 1:
+        state["version"] = DISTRIBUTED_TRAINING_VERSION
+        state["distributed_rank"] = distributed.rank()
+        if distributed.rank() != 0:
+            for name in ("model", "actor_optimizer", "critic_optimizer", "scheduler", "reference", "anchors"):
+                del state[name]
     # Prepopulate deepcopy's memo so it preserves shared tensor references while
     # batching device-to-pinned-host copies on the current training stream.
     memo: dict[int, object] = {}
@@ -4646,7 +4779,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
     for role, shard, future in pending:
         simulators.append((role, NativePoolSnapshot(shard.match_ids, shard.max_frame, future.result())))
     actor: dict[str, object] | None = None
-    if isinstance(trainer.policy, TransformerPolicy):
+    if isinstance(trainer.policy, TransformerPolicy) and distributed.rank() == 0:
         actor = {
             **evaluation_checkpoint_metadata(
                 trainer.policy.model,
@@ -4661,8 +4794,8 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
             "model": state["model"],
         }
     manifest: dict[str, object] = {
-        "format": TRAINING_FORMAT,
-        "version": CHECKPOINT_VERSION,
+        "format": DISTRIBUTED_TRAINING_FORMAT if distributed.world_size() > 1 else TRAINING_FORMAT,
+        "version": DISTRIBUTED_TRAINING_VERSION if distributed.world_size() > 1 else CHECKPOINT_VERSION,
         "experiment": "065_selfplay_ppo",
         "update": trainer.update,
         "configuration_sha256": _configuration_digest(trainer),
@@ -4681,7 +4814,7 @@ def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
     buffer = io.BytesIO()
     torch.save(snapshot.state, buffer)
     name, digest = _durable_file(directory, buffer.getvalue(), "rank0.pt")
-    shards = [{"name": name, "sha256": digest, "role": "training"}]
+    shards: list[CheckpointShard] = [{"name": name, "sha256": digest, "role": "training"}, *snapshot.rank_shards]
     for role, state in snapshot.simulators:
         payload = encode_native_pool(state) if isinstance(state, NativePoolSnapshot) else state
         name, digest = _durable_file(directory, zlib.compress(payload), "sim.zlib")
@@ -4710,7 +4843,33 @@ def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
 
 
 def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str]) -> Path:
-    return write_checkpoint(capture_checkpoint(trainer, provenance), directory)
+    snapshot = capture_checkpoint(trainer, provenance)
+    if distributed.world_size() == 1:
+        return write_checkpoint(snapshot, directory)
+    import io
+
+    directory.mkdir(parents=True, exist_ok=True)
+    local: list[CheckpointShard] = []
+    if distributed.rank() != 0:
+        buffer = io.BytesIO()
+        torch.save(snapshot.state, buffer)
+        name, digest = _durable_file(directory, buffer.getvalue(), "rank.pt")
+        local.append({"name": name, "sha256": digest, "role": f"rank{distributed.rank()}"})
+        for role, state in snapshot.simulators:
+            payload = encode_native_pool(state) if isinstance(state, NativePoolSnapshot) else state
+            name, digest = _durable_file(directory, zlib.compress(payload), "sim.zlib")
+            local.append({"name": name, "sha256": digest, "role": f"rank{distributed.rank()}_{role}"})
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    shards = tuple(shard for rows in distributed.gather_objects(local) for shard in rows)
+    target = directory / f"update-{trainer.update:08d}.json"
+    if distributed.rank() == 0:
+        write_checkpoint(dataclasses.replace(snapshot, rank_shards=shards), directory)
+    distributed.gather_objects(True)
+    return target
 
 
 def _write_and_publish_checkpoint(
@@ -4784,8 +4943,10 @@ class CheckpointWorker:
 
 def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
     manifest = read_training_manifest(manifest_path)
-    if manifest["version"] != CHECKPOINT_VERSION:
-        raise ValueError("exact resume requires the fixed-slot checkpoint format")
+    distributed.validate_world_size(manifest["environment"]["world_size"])
+    expected_version = DISTRIBUTED_TRAINING_VERSION if distributed.world_size() > 1 else CHECKPOINT_VERSION
+    if manifest["version"] != expected_version:
+        raise ValueError("exact resume requires the fixed-slot checkpoint format for this world size")
     if manifest["reward_weights"] != dataclasses.asdict(trainer.config.reward_weights) or manifest[
         "configuration_sha256"
     ] != _configuration_digest(trainer):
@@ -4804,9 +4965,25 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if isinstance(trainer.policy, TransformerPolicy):
         expected_roles.add("actor")
         evaluation_actor_path(manifest_path)
+    if distributed.world_size() > 1:
+        expected_roles |= {f"rank{rank}" for rank in range(1, distributed.world_size())}
+        expected_roles |= {
+            f"rank{rank}_simulator_{g}_{s}"
+            for rank in range(1, distributed.world_size())
+            for g, group in enumerate(trainer.engine.groups)
+            for s in range(len(group))
+        }
     if set(paths) != expected_roles:
         raise ValueError("checkpoint simulator topology mismatch")
     saved = torch.load(paths["training"], map_location="cpu", weights_only=False)
+    if distributed.rank() != 0:
+        local = torch.load(paths[f"rank{distributed.rank()}"], map_location="cpu", weights_only=False)
+        shared_names = {"model", "actor_optimizer", "critic_optimizer", "scheduler", "reference", "anchors"}
+        if set(local) != set(saved) - shared_names:
+            raise ValueError("checkpoint rank state schema mismatch")
+        saved.update(local)
+    if distributed.world_size() > 1 and saved.get("distributed_rank") != distributed.rank():
+        raise ValueError("checkpoint rank identity mismatch")
     behavior = BehaviorTracker(len(trainer.engine.behavior_tracker.state))
     behavior.restore(saved["behavior_state"])
     warmup_start = saved["warmup_start_update"]
@@ -4819,7 +4996,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if (
         type(saved["version"]) is not int
         or type(saved["update"]) is not int
-        or saved["version"] != CHECKPOINT_VERSION
+        or saved["version"] != expected_version
         or saved["update"] != manifest["update"]
     ):
         raise ValueError("checkpoint shard identity mismatch")
@@ -4919,7 +5096,10 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
             raise ValueError("checkpoint reference and anchor zero disagree")
     for group_id, group in enumerate(engine.groups):
         for shard_id, shard in enumerate(group):
-            shard.restore(zlib.decompress(paths[f"simulator_{group_id}_{shard_id}"].read_bytes()))
+            role = f"simulator_{group_id}_{shard_id}"
+            if distributed.rank() != 0:
+                role = f"rank{distributed.rank()}_{role}"
+            shard.restore(zlib.decompress(paths[role].read_bytes()))
     engine.restore_pool(saved["pool"])
     engine.clocks = saved["clocks"]
     engine.cursor = saved["cursor"]
@@ -4945,8 +5125,11 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     random.setstate(saved["python_rng"])
     np.random.set_state(saved["numpy_rng"])
     torch.set_rng_state(saved["torch_rng"])
-    if torch.cuda.is_available():
+    if distributed.world_size() > 1 and trainer.policy.device.type == "cuda":
+        torch.cuda.set_rng_state(saved["cuda_rng"][0], trainer.policy.device)
+    elif distributed.world_size() == 1 and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(saved["cuda_rng"])
+    distributed.check_parameters(tuple(trainer.policy.model.parameters()))
 
 
 PILOT_SOURCE = "3d4ad115881857d0c6c1ba039e41225bd7df3fe8"
@@ -5120,6 +5303,18 @@ def run_training(
     }
     if isinstance(trainer.policy, TransformerPolicy):
         resolved["decoder_precision"] = trainer.policy.model.decoder_precision
+    if distributed.world_size() > 1:
+        run_distributed_training(
+            trainer,
+            updates,
+            output,
+            provenance,
+            resolved,
+            wandb_project=wandb_project,
+            publisher=publisher,
+            head_start=head_start,
+        )
+        return
     (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
     with wandb.init(project=wandb_project, mode="disabled" if wandb_project is None else "online", config=resolved):
         wandb.define_metric("global_step")
@@ -5157,6 +5352,59 @@ def run_training(
                 log.flush()
                 if trainer.update % trainer.config.checkpoint_interval == 0 or trainer.update == updates:
                     checkpoints.submit(trainer)
+
+
+def run_distributed_training(
+    trainer: Trainer,
+    updates: int,
+    output: Path,
+    provenance: dict[str, str],
+    resolved: dict[str, object],
+    *,
+    wandb_project: str | None,
+    publisher: self_play_publication.CheckpointPublisher | None,
+    head_start: HeadStart | None,
+) -> None:
+    import wandb
+
+    primary = distributed.rank() == 0
+    trainer.memory.output = output if primary else output / f"rank{distributed.rank()}"
+    if not primary:
+        trainer.memory.output.mkdir(exist_ok=True)
+    with contextlib.ExitStack() as resources:
+        log = None
+        if primary:
+            resources.enter_context(
+                wandb.init(
+                    project=wandb_project, mode="disabled" if wandb_project is None else "online", config=resolved
+                )
+            )
+            wandb.define_metric("global_step")
+            wandb.define_metric("*", step_metric="global_step")
+            log = resources.enter_context((output / "metrics.jsonl").open("a"))
+            (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
+            if head_start is not None:
+                (output / "head-start.json").write_text(json.dumps(dataclasses.asdict(head_start), indent=2))
+                wandb.log({"global_step": trainer.update, **head_start.metrics()})
+        while trainer.update < updates:
+            warming = trainer.warming
+            batch, metrics = trainer.run_update()
+            del batch
+            if primary:
+                assert log is not None
+                print_progress(metrics, warming=warming)
+                resolved["calibrated_lambda_max"] = trainer.engine.sampler.lambda_max
+                (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
+                wandb.log(metrics)
+                log.write(json.dumps(metrics, sort_keys=True) + "\n")
+                log.flush()
+            if trainer.update % trainer.config.checkpoint_interval == 0 or trainer.update == updates:
+                # All ranks finish durable local state before rank zero publishes.
+                checkpoint = save_checkpoint(trainer, output / "checkpoints", provenance)
+                if primary and publisher is not None:
+                    publisher.submit(checkpoint)
+                    publisher.wait()
+                distributed.gather_objects(True)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -5296,6 +5544,33 @@ def read_native_sampler(path: Path) -> SamplerConfig:
 
 
 def train_native(config: NativeCli) -> None:
+    with distributed.process_group(config.device) as device:
+        if distributed.world_size() == 1:
+            train_native_rank(config)
+            return
+        if config.profiling is not None or config.verify_resume or config.resume_learner is not None:
+            raise ValueError(
+                "DDP supports fresh training and exact resume; profiling and learner migration require one GPU"
+            )
+        cpus = distributed.split_cpus(config.cpus, distributed.world_size(), distributed.rank())
+        controller_cpus = sorted(set(os.sched_getaffinity(0)) - set(config.cpus))
+        affinity = set(cpus)
+        if len(controller_cpus) >= distributed.world_size():
+            affinity.add(controller_cpus[distributed.rank()])
+        os.sched_setaffinity(0, affinity)
+        train_native_rank(
+            dataclasses.replace(
+                config,
+                cpus=cpus,
+                device=str(device),
+                compile_cache=config.compile_cache / f"rank{distributed.rank()}"
+                if config.compile_cache is not None
+                else None,
+            )
+        )
+
+
+def train_native_rank(config: NativeCli) -> None:
     startup_started = time.perf_counter()
     torch.set_num_threads(2)
     if config.training.deterministic:
@@ -5354,7 +5629,7 @@ def train_native(config: NativeCli) -> None:
         if cache is not None:
             resources.callback(cache.save)
         groups = []
-        next_match = 0
+        next_match = distributed.rank() * config.groups * len(config.cpus) * config.matches_per_shard
         for _ in range(config.groups):
             shards: list[NativeSimulatorShard] = []
             for cpu in config.cpus:
@@ -5390,6 +5665,7 @@ def train_native(config: NativeCli) -> None:
             {0: policy.frozen_copy()},
         )
         trainer = Trainer(engine, config.training)
+        distributed.check_parameters(tuple(policy.model.parameters()))
         head_start = None
         trainer.compilation_counter = resources.enter_context(count_compilation_starts())
         if config.resume_learner is not None:
@@ -5407,7 +5683,7 @@ def train_native(config: NativeCli) -> None:
             return
         publisher = (
             resources.enter_context(contextlib.closing(self_play_publication.CheckpointPublisher(config.publication)))
-            if config.publication is not None
+            if config.publication is not None and distributed.rank() == 0
             else None
         )
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))

@@ -44,9 +44,17 @@ class Args:
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
+    gpus: int = 1
+    updates: int | None = None
 
     def __post_init__(self) -> None:
         RewardWeights(self.damage_weight, self.stock_weight, self.game_win_weight)
+        if type(self.gpus) is not int or not 1 <= self.gpus <= 8:
+            raise ValueError("gpus must be 1..8 on one node")
+        if self.updates is not None and (self.gpus == 1 or type(self.updates) is not int or self.updates < 1):
+            raise ValueError("update override requires multiple GPUs and a positive count")
+        if self.gpus > 1 and self.resume_learner is not None:
+            raise ValueError("multi-GPU pilot supports exact resume, not legacy learner migration")
 
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
@@ -68,6 +76,7 @@ def training_command(
     compile_cache: Path | None = None,
     resume_learner: Path | None = None,
     reward_weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
+    gpus: int = 1,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -112,6 +121,10 @@ def training_command(
         command.extend(("--resume-learner", str(resume_learner)))
     if compile_cache is not None:
         command.extend(("--compile-cache", str(compile_cache)))
+    if gpus > 1:
+        if len(cpus) % gpus:
+            raise ValueError("shard CPUs must divide evenly across ranks")
+        command[1:1] = ["-m", "torch.distributed.run", "--standalone", "--nnodes=1", "--nproc-per-node", str(gpus)]
     return command
 
 
@@ -269,9 +282,15 @@ def consume_held_out(output: Path, update: int, protocol: Path) -> Path:
 
 
 def bind_pilot_identity(
-    output: Path, git_sha: str, *, tiny: bool, reward_weights: RewardWeights = DEFAULT_REWARD_WEIGHTS
+    output: Path,
+    git_sha: str,
+    *,
+    tiny: bool,
+    reward_weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
+    world_size: int = 1,
+    updates: int | None = None,
 ) -> None:
-    record = {
+    record: dict[str, object] = {
         "format": "hal.o65.pilot-identity.v2",
         "git_sha": git_sha,
         "tiny": tiny,
@@ -281,6 +300,9 @@ def bind_pilot_identity(
             for name in ("pilot-inputs.json", "pilot-sampler.json", "pilot-evaluation.json")
         },
     }
+    if world_size > 1:
+        record["world_size"] = world_size
+        record["updates"] = updates
     path = output / "pilot-identity.json"
     if path.is_file():
         if json.loads(path.read_text()) != record:
@@ -300,12 +322,23 @@ def main(args: Args) -> None:
     output.mkdir(parents=True, exist_ok=args.resume)
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     reward_weights = RewardWeights(args.damage_weight, args.stock_weight, args.game_win_weight)
-    bind_pilot_identity(output, sha, tiny=args.tiny, reward_weights=reward_weights)
+    bind_pilot_identity(
+        output,
+        sha,
+        tiny=args.tiny,
+        reward_weights=reward_weights,
+        world_size=args.gpus,
+        updates=args.updates if args.updates is not None else (256 if args.gpus > 1 else None),
+    )
     available = tuple(sorted(os.sched_getaffinity(0)))
-    cpus = args.cpus or available[: 2 if args.tiny else 16]
-    if len(cpus) != (2 if args.tiny else 16) or len(set(cpus)) != len(cpus) or set(cpus) - set(available):
+    shard_cpus = (4 if args.tiny else 16) * args.gpus if args.gpus > 1 else (2 if args.tiny else 16)
+    cpus = args.cpus or available[:shard_cpus]
+    if len(cpus) != shard_cpus or len(set(cpus)) != len(cpus) or set(cpus) - set(available):
         raise ValueError("pilot needs 2 (tiny) or 16 distinct available CPUs; select physical cores on the GPU socket")
-    if not args.tiny:
+    if args.gpus > 1:
+        if torch.cuda.device_count() != args.gpus:
+            raise ValueError("multi-GPU pilot requires one visible CUDA device per rank")
+    elif not args.tiny:
         if not args.wandb:
             raise ValueError("the hardware pilot requires W&B logging")
         if not os.environ.get("WANDB_API_KEY"):
@@ -337,7 +370,7 @@ def main(args: Args) -> None:
     execute(["bash", str(ROOT / "docker/o65-build-msl.sh"), str(delivery)], output / "build.log", environment)
     protocol = ROOT / "experiments/o65/pilot-evaluation.json"
     run = output / "train"
-    updates = 4 if args.tiny else 2000
+    updates = (args.updates if args.updates is not None else 256) if args.gpus > 1 else (4 if args.tiny else 2000)
     checkpoint_every = 1 if args.tiny else 32
     command = training_command(
         delivery,
@@ -350,6 +383,7 @@ def main(args: Args) -> None:
         warmup=0 if args.tiny else 32,
         compile_cache=args.compile_cache,
         reward_weights=reward_weights,
+        gpus=args.gpus,
     )
     if args.wandb:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
@@ -414,7 +448,7 @@ def main(args: Args) -> None:
     last = next(row for row in reversed(metrics) if "train/warming" in row)
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):
         raise RuntimeError("pilot ended without calibrated PPO training; inspect warmup before extending")
-    if not args.tiny and not (output / "held-out/results.json").is_file():
+    if args.gpus == 1 and not args.tiny and not (output / "held-out/results.json").is_file():
         consume_held_out(output, updates, protocol)
         publish(args, output)
         execute(

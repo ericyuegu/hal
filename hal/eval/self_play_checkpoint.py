@@ -31,8 +31,10 @@ from hal.sim.native import RewardWeights
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v11"
-TRAINING_VERSION = 11
+TRAINING_FORMAT = "hal.o65.training.v12"
+TRAINING_VERSION = 12
+DISTRIBUTED_TRAINING_FORMAT = TRAINING_FORMAT
+DISTRIBUTED_TRAINING_VERSION = TRAINING_VERSION
 
 
 class CheckpointShard(TypedDict):
@@ -68,12 +70,13 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
     }
     if not isinstance(manifest, dict):
         raise ValueError("checkpoint manifest schema changed")
-    if manifest.get("version") in (10, TRAINING_VERSION):
+    if manifest.get("version") in (10, 11, TRAINING_VERSION):
         fields.add("reward_weights")
     if set(manifest) != fields:
         raise ValueError("checkpoint manifest schema changed")
     if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
         (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v11", 11),
         ("hal.o65.training.v10", 10),
         ("hal.o65.training.v9", 9),
         ("hal.o65.training.v8", 8),
@@ -81,7 +84,7 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         raise ValueError("unsupported checkpoint identity")
     if type(manifest["version"]) is not int or type(manifest["update"]) is not int or manifest["update"] < 0:
         raise ValueError("invalid checkpoint update")
-    if manifest["version"] in (10, TRAINING_VERSION):
+    if manifest["version"] in (10, 11, TRAINING_VERSION):
         weights = manifest["reward_weights"]
         if not isinstance(weights, dict) or set(weights) != {"damage", "stock", "game_win"}:
             raise ValueError("invalid checkpoint reward weights")
@@ -135,6 +138,11 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         suffix = {"training": "rank0.pt", "actor": "actor.pt"}.get(role)
         if suffix is None and re.fullmatch(r"simulator_[0-9]+_[0-9]+", role):
             suffix = "sim.zlib"
+        if manifest["version"] in (11, DISTRIBUTED_TRAINING_VERSION):
+            if re.fullmatch(r"rank[1-9][0-9]*", role):
+                suffix = "rank.pt"
+            elif re.fullmatch(r"rank[1-9][0-9]*_simulator_[0-9]+_[0-9]+", role):
+                suffix = "sim.zlib"
         if suffix is None or shard["name"] != f"{shard['sha256']}.{suffix}":
             raise ValueError("invalid checkpoint shard role or filename")
         roles.add(shard["role"])

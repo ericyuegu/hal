@@ -49,7 +49,7 @@ def compact_checkpoints(directory: Path, latest: int) -> None:
             retired.mkdir(exist_ok=True)
             target = retired / path.name
             path.rename(target)
-    for pattern in ("*.rank0.pt", "*.sim.zlib"):
+    for pattern in ("*.rank0.pt", "*.rank.pt", "*.sim.zlib"):
         for path in directory.glob(pattern):
             if path.name not in retained:
                 path.unlink()
