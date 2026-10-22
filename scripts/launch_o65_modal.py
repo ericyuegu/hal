@@ -24,6 +24,7 @@ import tyro
 from modal.types import FileEntryType
 
 from hal.sim.native import RewardWeights
+from scripts import o65_production
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = Path("/opt/o65-hal")
@@ -157,6 +158,10 @@ class Request:
     game_win_weight: float = 50.0
     gpus: int = 1
     ddp_updates: int = 256
+    windows_per_step: int | None = None
+    actor_microbatches: int = 1
+    measurement: bool = False
+    measurement_sizes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_name(self.name)
@@ -166,6 +171,34 @@ class Request:
             raise ValueError("DDP updates must be a positive integer")
         if self.mode == "ddp" and self.resume_learner is not None:
             raise ValueError("DDP requires fresh training or same-world-size exact resume")
+        if self.mode == "ddp":
+            o65_production.shards_per_gpu(self.matches)
+            if type(self.windows_per_step) is not int or self.windows_per_step < 1:
+                raise ValueError("O64 DDP requires explicit positive windows-per-step")
+            if (
+                type(self.actor_microbatches) is not int
+                or self.actor_microbatches < 1
+                or self.windows_per_step % self.actor_microbatches
+            ):
+                raise ValueError("actor microbatches must divide windows per step")
+            if not self.measurement and self.ddp_updates != 256:
+                raise ValueError("O64 training requires 256 updates; use measurement for short checks")
+            if (self.damage_weight, self.stock_weight, self.game_win_weight) != (0.1, 120.0, 120.0):
+                raise ValueError("O64 DDP requires outcome reward (0.1, 120, 120)")
+        elif self.windows_per_step is not None or self.measurement or self.measurement_sizes:
+            raise ValueError("measurement and window settings require DDP")
+        if self.measurement_sizes and not self.measurement:
+            raise ValueError("measurement sizes require measurement mode")
+        for size in self.measurement_sizes:
+            pair = size.split("/")
+            if len(pair) != 2 or not all(value.isdecimal() for value in pair):
+                raise ValueError("measurement sizes must be matches/windows pairs")
+            matches, windows = map(int, pair)
+            o65_production.shards_per_gpu(matches)
+            if windows < 1 or windows % self.actor_microbatches:
+                raise ValueError("measurement windows must be positive and divisible by actor microbatches")
+        if len(set(self.measurement_sizes)) != len(self.measurement_sizes):
+            raise ValueError("measurement sizes must be distinct")
         weights = RewardWeights(self.damage_weight, self.stock_weight, self.game_win_weight)
         if self.mode not in ("pilot", "ddp") and weights != RewardWeights():
             raise ValueError("reward treatment flags require pilot mode")
@@ -182,9 +215,7 @@ class Request:
         allowed = (16,) if self.mode == "smoke" else (256, 1024, 2048, 4096)
         if self.mode == "pilot":
             allowed = (1024,)
-        if self.mode == "ddp":
-            allowed = (16, 1024)
-        if type(self.matches) is not int or self.matches not in allowed:
+        if self.mode != "ddp" and (type(self.matches) is not int or self.matches not in allowed):
             raise ValueError(f"{self.mode} matches must be one of {allowed}")
         if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= (
             PILOT_TIMEOUT_SECONDS if self.mode in ("pilot", "ddp") else 6600
@@ -207,11 +238,56 @@ def remaining_seconds(request: Request, now: float) -> float:
 
 
 def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
-    expected = ((4 if request.matches == 16 else 16) * request.gpus) if request.mode == "ddp" else 16
+    expected = o65_production.shards_per_gpu(request.matches) * request.gpus if request.mode == "ddp" else 16
     if len(cpus) != expected or len(set(cpus)) != expected:
         raise ValueError(f"O65 requires {expected} distinct shard CPUs")
     delivery = REMOTE_ROOT / "delivery"
-    if request.mode in ("pilot", "ddp"):
+    if request.mode == "ddp":
+        assert request.windows_per_step is not None
+        argv = [
+            "/opt/venv/bin/python",
+            "-m",
+            "scripts.o65_production",
+            "--output",
+            str(
+                WORK
+                / request.name
+                / (f"measure-m{request.matches}-w{request.windows_per_step}" if request.measurement else "pilot")
+            ),
+            "--delivery",
+            str(delivery),
+            "--checkpoint",
+            str(RESULTS / "o64-inputs/step-0098304.pt"),
+            "--cpus",
+            *(str(cpu) for cpu in cpus),
+            "--gpus",
+            str(request.gpus),
+            "--matches",
+            str(request.matches),
+            "--windows-per-step",
+            str(request.windows_per_step),
+            "--actor-microbatches",
+            str(request.actor_microbatches),
+            "--updates",
+            str(request.ddp_updates),
+            "--compile-cache",
+            str(RESULTS / "compile-cache"),
+        ]
+        if request.measurement:
+            argv.append("--measurement")
+        else:
+            argv.extend(
+                (
+                    "--publish-directory",
+                    str(RESULTS / request.name / "pilot"),
+                    "--publish-volume",
+                    VOLUME,
+                    "--r2-prefix",
+                    f"o65/pilot-results/{request.name}",
+                )
+            )
+        return argv
+    if request.mode == "pilot":
         argv = [
             "/opt/venv/bin/python",
             "experiments/o65/pilot.py",
@@ -239,10 +315,6 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             "--game-win-weight",
             str(request.game_win_weight),
         ]
-        if request.mode == "ddp":
-            argv.extend(("--gpus", str(request.gpus), "--updates", str(request.ddp_updates)))
-            if request.matches == 16:
-                argv.extend(("--tiny", "--no-wandb"))
         if request.resume_learner is not None:
             argv.extend(("--resume-learner", str(RESULTS / request.resume_learner)))
         return argv
@@ -295,7 +367,7 @@ def run_remote(request: Request) -> int:
     output.mkdir(parents=True, exist_ok=request.mode in ("pilot", "ddp"))
     local = WORK / request.name
     local.mkdir(parents=True, exist_ok=False)
-    if request.mode in ("pilot", "ddp") and (output / "pilot").is_dir():
+    if not request.measurement and request.mode in ("pilot", "ddp") and (output / "pilot").is_dir():
         stage_results(output / "pilot", local / "pilot")
     started = time.time()
     started_clock = time.perf_counter()
@@ -358,19 +430,25 @@ def stage_results(source: Path, destination: Path) -> None:
 
 def run_child(request: Request, output: Path, started: float) -> int:
     require_modal_version(importlib.metadata.version("modal"))
-    shard_count = (4 if request.matches == 16 else 16) * request.gpus if request.mode == "ddp" else 16
+    sizes = tuple(tuple(map(int, size.split("/"))) for size in request.measurement_sizes)
+    shard_count = (
+        max(o65_production.shards_per_gpu(matches) for matches in (request.matches, *(size[0] for size in sizes)))
+        * request.gpus
+        if request.mode == "ddp"
+        else 16
+    )
     cpus = select_cpus(set(os.sched_getaffinity(0)), shard_count + request.gpus)
     os.sched_setaffinity(0, set(cpus))
-    argv = command(request, cpus[:shard_count])
+    first_count = o65_production.shards_per_gpu(request.matches) * request.gpus if request.mode == "ddp" else 16
+    argv = command(request, cpus[:first_count])
     env = dict(os.environ)
-    if request.mode != "pilot" and (request.mode != "ddp" or request.matches == 16):
+    online = request.mode == "pilot" or (request.mode == "ddp" and not request.measurement)
+    if not online:
         env.pop("WANDB_API_KEY", None)
     elif not env.get("WANDB_API_KEY"):
         raise ValueError("the pilot requires W&B credentials in its Modal Secret")
     env.update(
-        WANDB_MODE="online"
-        if request.mode == "pilot" or (request.mode == "ddp" and request.matches != 16)
-        else "disabled",
+        WANDB_MODE="online" if online else "disabled",
         HAL_NATIVE_LIBRARY=str(REMOTE_ROOT / "delivery/libhal_native.so"),
         TMPDIR=str(output / "tmp"),
         TORCHINDUCTOR_COMPILE_THREADS="1",
@@ -388,6 +466,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
         "container_id": os.environ.get("MODAL_TASK_ID"),
         "cpus": cpus,
         "world_size": request.gpus,
+        "checkpoint_sha256": o65_production.O64_SHA256 if request.mode == "ddp" else None,
         "cpu_topology": "Modal virtual CPU IDs; physical core and NUMA topology are not exposed",
         "started_unix": started,
         "treatment": f"mode={request.mode}, active_matches={request.matches}; pilot: 512 windows, Beta u and pretraining identity prior",
@@ -403,13 +482,36 @@ def run_child(request: Request, output: Path, started: float) -> int:
             )
         ),
     }
+    if request.mode == "ddp":
+        identity.update(
+            treatment=f"O64 outcome PPO; matches per GPU={request.matches}, windows per actor step={request.windows_per_step}",
+            control="frozen O64 step-0098304 with matched episode sampling",
+            invariants="seed 65, full-corpus sampler, 11 production cadences, 512 rollout frames, four groups, 16 decisions per window, outcome reward (0.1,120,120)",
+        )
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
+    if request.mode == "ddp":
+        o65_production.stage_checkpoint(RESULTS / "o64-inputs")
+        modal.Volume.from_name(VOLUME).commit()
     with (output / "topology.txt").open("w") as log:
         log.write("Modal virtual CPU IDs; physical core and NUMA topology are not exposed.\n")
         log.write(Path("/proc/cpuinfo").read_text())
         log.flush()
         subprocess.run(["nvidia-smi", "-q"], stdout=log, stderr=subprocess.STDOUT, check=True)
     with (output / "run.log").open("a") as log:
+        if request.measurement:
+            results = []
+            for matches, windows in sizes or ((request.matches, request.windows_per_step),):
+                assert windows is not None
+                selected = dataclasses.replace(
+                    request, matches=matches, windows_per_step=windows, measurement_sizes=()
+                )
+                count = o65_production.shards_per_gpu(matches) * request.gpus
+                code = run_pilot_child(
+                    command(selected, cpus[:count]), env, log, remaining_seconds(request, time.time()) - 90
+                )
+                results.append({"matches": matches, "windows": windows, "exit_code": code})
+                (output / "measurement-sweep.json").write_text(json.dumps(results, indent=2))
+            return next((row["exit_code"] for row in results if row["exit_code"]), 0)
         if request.mode in ("pilot", "ddp"):
             return run_pilot_child(argv, env, log, remaining_seconds(request, time.time()) - 90)
         result = subprocess.run(
@@ -517,15 +619,19 @@ def download(name: str, local: Path) -> None:
 class Args:
     mode: Literal["smoke", "profile", "pilot", "ddp", "download"] = "profile"
     name: str | None = None
-    matches: int = 1024
+    matches: int | None = None
     timeout_seconds: int | None = None
     dry_run: bool = False
     resume_learner: str | None = None
-    damage_weight: float = 1.0
+    damage_weight: float | None = None
     stock_weight: float = 120.0
-    game_win_weight: float = 50.0
+    game_win_weight: float | None = None
     gpus: int = 1
     ddp_updates: int = 256
+    windows_per_step: int | None = None
+    actor_microbatches: int = 1
+    measurement: bool = False
+    measurement_sizes: tuple[str, ...] = ()
     b200_max_usd: float | None = None
     secret: str = "hal"
     output: Path = Path("runs/modal")
@@ -538,6 +644,12 @@ def main(args: Args) -> None:
             raise ValueError("download requires a run name")
         download(args.name, args.output)
         return
+    if args.mode == "ddp":
+        if args.b200_max_usd is None:
+            raise ValueError("B200 runs require --b200-max-usd; no default cap")
+        if args.matches is None or args.windows_per_step is None:
+            raise ValueError("O64 DDP requires --matches per GPU and --windows-per-step")
+    matches = 1024 if args.matches is None else args.matches
     if not args.dry_run and subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise ValueError("commit changes before launching published source")
     branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip()
@@ -548,21 +660,27 @@ def main(args: Args) -> None:
         )
         if published.split()[:1] != [sha]:
             raise ValueError(f"push {branch} HEAD before launching")
-    name = args.name or f"{args.mode}-{args.matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
+    name = args.name or f"{args.mode}-{matches}-{datetime.now(UTC):%Y%m%d-%H%M%S}"
     request = Request(
         name,
         sha,
         args.mode,
-        args.matches,
+        matches,
         args.timeout_seconds
         if args.timeout_seconds is not None
         else (PILOT_TIMEOUT_SECONDS if args.mode in ("pilot", "ddp") else 1800),
         resume_learner=args.resume_learner,
-        damage_weight=args.damage_weight,
+        damage_weight=args.damage_weight if args.damage_weight is not None else (0.1 if args.mode == "ddp" else 1.0),
         stock_weight=args.stock_weight,
-        game_win_weight=args.game_win_weight,
+        game_win_weight=args.game_win_weight
+        if args.game_win_weight is not None
+        else (120.0 if args.mode == "ddp" else 50.0),
         gpus=args.gpus,
         ddp_updates=args.ddp_updates,
+        windows_per_step=args.windows_per_step,
+        actor_microbatches=args.actor_microbatches,
+        measurement=args.measurement,
+        measurement_sizes=args.measurement_sizes,
     )
     args.output.mkdir(parents=True, exist_ok=True)
     budget = ROOT / (
@@ -574,7 +692,15 @@ def main(args: Args) -> None:
     )
     budget.parent.mkdir(parents=True, exist_ok=True)
     allowance = request.timeout_seconds + 360
-    cores = ((4 if request.matches == 16 else 16) + 1) * request.gpus if args.mode == "ddp" else CPU_CORES
+    maximum_shards = (
+        max(
+            o65_production.shards_per_gpu(count)
+            for count in (request.matches, *(int(size.split("/")[0]) for size in request.measurement_sizes))
+        )
+        if args.mode == "ddp"
+        else 16
+    )
+    cores = (maximum_shards + 1) * request.gpus if args.mode == "ddp" else CPU_CORES
     memory = MEMORY_MIB * request.gpus
     rate = (
         (B200_USD_SECOND * request.gpus if args.mode == "ddp" else GPU_USD_SECOND)
@@ -596,7 +722,7 @@ def main(args: Args) -> None:
             raise ValueError("O65 Modal time or cost budget exhausted")
     keys = [
         *AWS_KEYS,
-        *(["WANDB_API_KEY"] if args.mode == "pilot" or (args.mode == "ddp" and args.matches != 16) else []),
+        *(["WANDB_API_KEY"] if args.mode == "pilot" or (args.mode == "ddp" and not args.measurement) else []),
     ]
     secret = modal.Secret.from_name(args.secret, required_keys=keys)
     if not args.dry_run:
@@ -643,21 +769,29 @@ def main(args: Args) -> None:
                 "--ddp-updates",
                 str(args.ddp_updates),
                 "--matches",
-                str(args.matches),
+                str(request.matches),
+                "--windows-per-step",
+                str(request.windows_per_step),
+                "--actor-microbatches",
+                str(request.actor_microbatches),
                 "--b200-max-usd",
                 str(args.b200_max_usd),
             )
         )
+        if request.measurement:
+            launch_command.append("--measurement")
+        if request.measurement_sizes:
+            launch_command.extend(("--measurement-sizes", *request.measurement_sizes))
     if args.resume_learner is not None:
         launch_command.extend(("--resume-learner", args.resume_learner))
     launch_command.extend(
         (
             "--damage-weight",
-            str(args.damage_weight),
+            str(request.damage_weight),
             "--stock-weight",
             str(args.stock_weight),
             "--game-win-weight",
-            str(args.game_win_weight),
+            str(request.game_win_weight),
         )
     )
     print(f"Launch: {shlex.join(launch_command)}", flush=True)
@@ -666,7 +800,27 @@ def main(args: Args) -> None:
     if args.dry_run:
         plan = {
             "request": dataclasses.asdict(request),
-            "command": command(request, tuple(range(cores - request.gpus if args.mode == "ddp" else 16))),
+            "command": command(
+                request,
+                tuple(
+                    range(o65_production.shards_per_gpu(request.matches) * request.gpus if args.mode == "ddp" else 16)
+                ),
+            ),
+            "measurement_commands": [
+                command(
+                    dataclasses.replace(
+                        request,
+                        matches=int(size.split("/")[0]),
+                        windows_per_step=int(size.split("/")[1]),
+                        measurement_sizes=(),
+                    ),
+                    tuple(range(o65_production.shards_per_gpu(int(size.split("/")[0])) * request.gpus)),
+                )
+                for size in request.measurement_sizes
+            ],
+            "checkpoint": {"key": o65_production.O64_KEY, "sha256": o65_production.O64_SHA256}
+            if args.mode == "ddp"
+            else None,
             "gpu": f"B200:{request.gpus}" if args.mode == "ddp" else "RTX-PRO-6000",
             "world_size": request.gpus,
             "cpu_cores": cores,
@@ -699,7 +853,7 @@ def main(args: Args) -> None:
             )
         )
         print(
-            f"Call: {call.object_id}; argv: {shlex.join(command(request, tuple(range(cores - request.gpus if args.mode == 'ddp' else 16))))}",
+            f"Call: {call.object_id}; argv: {shlex.join(command(request, tuple(range(o65_production.shards_per_gpu(request.matches) * request.gpus if args.mode == 'ddp' else 16))))}",
             flush=True,
         )
         code = call.get()

@@ -747,7 +747,7 @@ def test_training_manifest_binds_exported_actor_and_update(tmp_path: Path) -> No
     saved["update"] -= 1
     saved["version"] = 1
     manifest.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="unsupported checkpoint identity"):
+    with pytest.raises(ValueError, match="checkpoint manifest schema changed"):
         evaluation_actor_path(manifest)
     saved["version"] = exp.CHECKPOINT_VERSION
     manifest.write_text(json.dumps(saved))
@@ -896,7 +896,9 @@ def test_muon_resume_restores_state_and_matches_measured_next_update(tmp_path: P
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
     run = transformer_trainer(device, development=True)
-    run = exp.Trainer(run.engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
+    engine = exp.RolloutEngine(run.engine.groups, run.policy, run.engine.sampler, {0: run.reference})
+    engine.initialize()
+    run = exp.Trainer(engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
     run.run_update()
     boundary = exp._resume_state_hashes(run)
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
@@ -1052,7 +1054,9 @@ def test_resume_verifier_accepts_only_calibrated_update_noise(tmp_path: Path, la
             return result
 
     base = trainer(groups=1)
-    run = NoisyTrainer(base.engine, base.config)
+    engine = exp.RolloutEngine(base.engine.groups, base.policy, base.engine.sampler, {0: base.reference})
+    engine.initialize()
+    run = NoisyTrainer(engine, base.config)
     before = exp._resume_state_hashes(run)
     if passed:
         exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)

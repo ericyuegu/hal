@@ -8,10 +8,43 @@ instruction count; BF16 peak normalization also includes the small FP32 heads.
 
 from dataclasses import dataclass
 
+import torch
 from torch import nn
 
 from hal.models.self_play import SelfPlayTransformer
+from hal.training import mfu
+from hal.training import self_play_distributed as distributed
 from hal.wire import ITEM_SLOTS
+
+
+def phase_metrics(
+    work: tuple[float, float, float, float],
+    frames: int,
+    values: int,
+    metrics: dict[str, float],
+    *,
+    device: torch.device,
+    peak: float | None,
+) -> dict[str, float]:
+    rollout, actor, preparation, critic, frames_total, values_total = distributed.sum_tensor(
+        torch.tensor((*work, frames, values), device=device, dtype=torch.float64)
+    ).tolist()
+    result: dict[str, float] = {"mfu/bf16_peak_known": float(peak is not None)}
+    for name, flops, units in (
+        ("rollout", rollout, frames_total),
+        ("actor", actor, metrics["data/trained_decisions"]),
+        ("preparation", preparation, values_total),
+        ("critic", critic, values_total),
+    ):
+        seconds = metrics.get(f"systems/{name}_seconds", 0)
+        result[f"flops/{name}_total"] = flops
+        if units:
+            result[f"flops/{name}_per_{'match_frame' if name == 'rollout' else 'decision'}"] = flops / units
+        if flops and seconds > 0:
+            result[f"throughput/{name}_tflops"] = flops / seconds / 1e12
+            if peak is not None:
+                result[f"mfu/{name}"] = mfu.model_flops_utilization(flops, seconds, distributed.world_size() * peak)
+    return result
 
 
 def linear_weights(module: nn.Module) -> int:

@@ -81,6 +81,7 @@ from hal.training import self_play_distributed as distributed
 from hal.training import self_play_publication
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
 from hal.training.self_play_flops import SelfPlayFlops
+from hal.training.self_play_flops import phase_metrics
 from hal.wire import ACTION_DIM
 
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
@@ -3327,7 +3328,9 @@ class PhaseMemory:
         self.active = False
         self.first_checked = False
         self.actor_checked = False
+        self.measure_all = False
         self.peaks: dict[str, tuple[int, int]] = {}
+        self.seconds: dict[str, float] = {}
         self.stack: list[str] = []
         self.output: Path | None = None
 
@@ -3339,6 +3342,7 @@ class PhaseMemory:
             self.record()
             torch.cuda.reset_peak_memory_stats(self.device)
             self.stack.append(f"{self.label}_{name}")
+        started = time.perf_counter()
         try:
             yield
         except torch.cuda.OutOfMemoryError as error:
@@ -3351,6 +3355,8 @@ class PhaseMemory:
             ) from error
         finally:
             if measure:
+                torch.cuda.synchronize(self.device)
+                self.seconds[f"{self.label}_{name}"] = time.perf_counter() - started
                 self.record()
                 self.stack.pop()
                 torch.cuda.reset_peak_memory_stats(self.device)
@@ -3374,9 +3380,12 @@ class PhaseMemory:
 
     def metrics(self) -> dict[str, float]:
         return {
-            f"memory/{name}_peak_{kind}_bytes": float(value)
-            for name, values in self.peaks.items()
-            for kind, value in zip(("allocated", "reserved"), values, strict=True)
+            **{f"systems/{name}_seconds": seconds for name, seconds in self.seconds.items()},
+            **{
+                f"memory/{name}_peak_{kind}_bytes": float(value)
+                for name, values in self.peaks.items()
+                for kind, value in zip(("allocated", "reserved"), values, strict=True)
+            },
         }
 
 
@@ -4430,34 +4439,19 @@ class Trainer:
             self.reference.work_flops.get("reference", 0) if isinstance(self.reference, TransformerPolicy) else 0
         )
         critic = 3 * self.policy.flops.critic * len(batch.values) * self.config.critic_epochs
-        rollout, actor, preparation, critic, frames, values = distributed.sum_tensor(
-            torch.tensor(
-                [rollout, actor, preparation, critic, batch.rollout.frames, len(batch.values)],
-                device=self.policy.device,
-                dtype=torch.float64,
-            )
-        ).tolist()
         peak = (
             mfu.bf16_dense_peak_flops(torch.cuda.get_device_name(self.policy.device))
             if self.policy.device.type == "cuda"
             else None
         )
-        result: dict[str, float] = {"mfu/bf16_peak_known": float(peak is not None)}
-        decisions = metrics["data/trained_decisions"]
-        for name, work, units, seconds in (
-            ("rollout", rollout, frames, metrics["systems/rollout_seconds"]),
-            ("actor", actor, decisions, metrics.get("systems/actor_seconds", 0)),
-            ("critic", critic, values, metrics["systems/critic_seconds"]),
-            ("preparation", preparation, values, metrics["systems/preparation_seconds"]),
-        ):
-            result[f"flops/{name}_total"] = float(work)
-            if units:
-                result[f"flops/{name}_per_{'match_frame' if name == 'rollout' else 'decision'}"] = work / units
-            if work and seconds > 0:
-                result[f"throughput/{name}_tflops"] = work / seconds / 1e12
-                if peak is not None:
-                    result[f"mfu/{name}"] = mfu.model_flops_utilization(work, seconds, distributed.world_size() * peak)
-        return result
+        return phase_metrics(
+            (rollout, actor, preparation, critic),
+            batch.rollout.frames,
+            len(batch.values),
+            metrics,
+            device=self.policy.device,
+            peak=peak,
+        )
 
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
         if self.updating:
@@ -4479,7 +4473,10 @@ class Trainer:
             torch.cuda.synchronize(self.policy.device)
             torch.cuda.reset_peak_memory_stats(self.policy.device)
         self.memory.active = self.policy.device.type == "cuda" and (
-            not self.memory.first_checked or not self.memory.actor_checked and not self.warming
+            self.memory.measure_all
+            or not self.memory.first_checked
+            or not self.memory.actor_checked
+            and not self.warming
         )
         self.memory.label = "first_warmup" if self.warming else "first_ppo"
         with self.memory.phase("rollout"), phase(self.profile, "rollout"):
@@ -5442,9 +5439,20 @@ class NativeCli:
     decoder_precision: DecoderPrecision = "bf16"
     compile_cache: Path | None = None
     publication: self_play_publication.Args | None = None
+    measurement: bool = False
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.measurement and (
+            self.training.critic_warmup_updates
+            or self.resume is not None
+            or self.resume_learner is not None
+            or self.publication is not None
+            or self.profiling is not None
+            or self.wandb_project is not None
+            or self.verify_resume
+        ):
+            raise ValueError("measurement requires fresh PPO, no warmup, publication, profiling, W&B or resume")
         if type(self.rollout_frames) is not int or self.rollout_frames < 128 or self.rollout_frames % 128:
             raise ValueError("rollout frames must contain whole 128-frame blocks")
         if self.cadence not in ("development", "production"):
@@ -5480,10 +5488,14 @@ class NativeCli:
             raise ValueError("native runs need distinct available CPUs")
         if any(value < 1 for value in (self.groups, self.matches_per_shard, self.updates)):
             raise ValueError("groups, matches per shard, and updates must be positive integers")
+        processes = int(os.environ.get("WORLD_SIZE", "1"))
         if self.active_matches_per_gpu is not None and (
             type(self.active_matches_per_gpu) is not int
-            or self.active_matches_per_gpu < 4 * len(self.cpus)
-            or self.active_matches_per_gpu % len(self.cpus)
+            or processes < 1
+            or len(self.cpus) % processes
+            or len(self.cpus) < processes
+            or self.active_matches_per_gpu < 4 * (len(self.cpus) // processes)
+            or self.active_matches_per_gpu % (len(self.cpus) // processes)
             or self.matches_per_shard != 16
         ):
             raise ValueError(
@@ -5562,6 +5574,10 @@ def train_native(config: NativeCli) -> None:
             dataclasses.replace(
                 config,
                 cpus=cpus,
+                matches_per_shard=config.matches_per_shard
+                if config.active_matches_per_gpu is None
+                else config.active_matches_per_gpu // len(cpus),
+                active_matches_per_gpu=None,
                 device=str(device),
                 compile_cache=config.compile_cache / f"rank{distributed.rank()}"
                 if config.compile_cache is not None
@@ -5619,8 +5635,9 @@ def train_native_rank(config: NativeCli) -> None:
             raise ValueError("sampler identity is outside the checkpoint vocabulary")
     manifests = checkpoint.provenance["data_manifests"]
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    output_exists = config.output.exists() if distributed.rank() == 0 else False
     if (
-        config.output.exists()
+        distributed.gather_objects(output_exists)[0]
         and config.resume is None
         and (config.resume_learner is None or set(config.output.iterdir()) != {config.output / "metrics.jsonl"})
     ):
@@ -5629,15 +5646,15 @@ def train_native_rank(config: NativeCli) -> None:
         if cache is not None:
             resources.callback(cache.save)
         groups = []
-        next_match = distributed.rank() * config.groups * len(config.cpus) * config.matches_per_shard
+        matches_per_shard = (
+            config.matches_per_shard
+            if config.active_matches_per_gpu is None
+            else config.active_matches_per_gpu // len(config.cpus)
+        )
+        next_match = distributed.rank() * config.groups * len(config.cpus) * matches_per_shard
         for _ in range(config.groups):
             shards: list[NativeSimulatorShard] = []
             for cpu in config.cpus:
-                matches_per_shard = (
-                    config.matches_per_shard
-                    if config.active_matches_per_gpu is None
-                    else config.active_matches_per_gpu // len(config.cpus)
-                )
                 ids = tuple(range(next_match, next_match + matches_per_shard))
                 shard = NativeSimulatorShard(
                     config.data_dir,
@@ -5705,6 +5722,9 @@ def train_native_rank(config: NativeCli) -> None:
                 (config.output / "oom-memory.txt").write_text(torch.cuda.memory_summary())
                 raise
             return
+        if config.measurement:
+            run_measurement(trainer, config, provenance, native_config)
+            return
         run_training(
             trainer,
             config.updates,
@@ -5717,6 +5737,26 @@ def train_native_rank(config: NativeCli) -> None:
         )
         if config.verify_resume:
             verify_checkpoint_resume(trainer, config.output, provenance)
+
+
+def run_measurement(
+    trainer: Trainer, config: NativeCli, provenance: dict[str, str], native_config: dict[str, object]
+) -> None:
+    primary = distributed.rank() == 0
+    config.output.mkdir(parents=True, exist_ok=True)
+    trainer.memory.output = config.output / f"rank{distributed.rank()}"
+    trainer.memory.measure_all = True
+    if primary:
+        (config.output / "resolved.json").write_text(
+            json.dumps({"run": native_config, "provenance": provenance, "environment": _environment()}, indent=2)
+        )
+    for _ in range(config.updates):
+        batch, metrics = trainer.run_update()
+        del batch
+        if primary:
+            with (config.output / "metrics.jsonl").open("a") as log:
+                log.write(json.dumps(metrics, sort_keys=True) + "\n")
+            print(json.dumps({"measurement": True, **metrics}, sort_keys=True), flush=True)
 
 
 class TraceEvent(TypedDict, total=False):
