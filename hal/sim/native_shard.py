@@ -17,10 +17,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hal.sim import native
-from hal.sim.inputs import native_controller_readback
 from hal.wire import ACTION_DIM
 
-STAGING_DTYPE = np.dtype([("records", native.FRAME_DTYPE), ("observed", np.float32, (2, ACTION_DIM))])
+# "applied" holds the submitted inputs. The caller converts the whole batch to
+# observed controller state with native_controller_readback in one call, since
+# per-shard numpy work in worker threads serializes on the GIL.
+STAGING_DTYPE = np.dtype([("records", native.FRAME_DTYPE), ("applied", np.float32, (2, ACTION_DIM))])
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +163,7 @@ class NativeShard:
             if frame.records is None:
                 raise ValueError("packed stepping requires native records")
             np.copyto(output[index]["records"], frame.records)
-            np.copyto(output[index]["observed"], native_controller_readback(frame.applied_action))
+            np.copyto(output[index]["applied"], frame.applied_action)
             active &= ~(frame.terminated | frame.truncated)
             packing += time.perf_counter() - before
             count += 1

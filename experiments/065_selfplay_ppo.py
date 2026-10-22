@@ -1387,6 +1387,7 @@ class TransformerPolicy:
         self.startup_finished = False
         self.tick_caches.clear()
         self.tick_graphs.clear()
+        self.restart_graphs.clear()
         self.current_layouts.clear()
         self.value_graphs.clear()
         self.reference_graphs.clear()
@@ -1490,6 +1491,10 @@ class TransformerPolicy:
         }
         self.tick_graphs = {
             key: graph for key, graph in self.tick_graphs.items() if key[0][0] is not ring or key[0] in current
+        }
+        # A restart graph writes the cache it captured, so it goes with that cache.
+        self.restart_graphs = {
+            key: graph for key, graph in self.restart_graphs.items() if key[0] is not ring or key in current
         }
         buffers = {layout.buffer for layout in layouts}
         self.current_layouts = {
@@ -2628,6 +2633,9 @@ class RolloutEngine:
         }
         worker_wait = time.perf_counter() - waiting_started
         copying_started = time.perf_counter()
+        # Convert submitted inputs to observed controller state in place, before the device copy.
+        applied = staging.host_output["applied"]
+        applied[...] = native_controller_readback(applied)
         staging.device_output.copy_(staging.output, non_blocking=True)
         if staging.output_copied is not None:
             staging.output_copied.record()
@@ -2674,7 +2682,7 @@ class RolloutEngine:
                             records["reward"].copy(),
                             records["terminated"].copy(),
                             records["truncated"].copy(),
-                            host["observed"].copy(),
+                            host["applied"].copy(),
                             records["frame_id"].copy(),
                         )
                     )
@@ -2948,10 +2956,16 @@ class RolloutEngine:
                         ids = self._stage_tick(clock, update, table, pending)
                     ready = all(self._tick_ready(buffer, clock) for buffer in buffers)
                     futures: list[PendingStep] = []
+                    previous_stream: torch.cuda.Stream | None = None
                     for buffer in buffers:
                         inference_stream = buffer.stream if ready else default_stream
                         if ready and buffer.stream is not None:
                             buffer.stream.wait_stream(cast(torch.cuda.Stream, default_stream))
+                            # Each buffer's graphs follow the previous buffer's, so its inputs
+                            # reach the simulator while the GPU runs the next buffer.
+                            if previous_stream is not None:
+                                buffer.stream.wait_stream(previous_stream)
+                            previous_stream = buffer.stream
                         with (
                             torch.cuda.stream(inference_stream)
                             if inference_stream is not None
@@ -2972,13 +2986,18 @@ class RolloutEngine:
                                 else contextlib.nullcontext()
                             ):
                                 futures.extend(self._submit_buffer(workers, buffer))
+                    # Completions run on the last buffer's stream, behind every tick graph, so their
+                    # eager writes never run beside a graph. The host completes a buffer while the
+                    # GPU still runs later buffers.
+                    completion_stream = buffers[-1].stream
                     for buffer in buffers:
                         staging = self.staging.get(id(buffer))
                         if staging is not None:
                             staging.release_inputs()
-                    for buffer in buffers:
                         with (
-                            torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext()
+                            torch.cuda.stream(completion_stream)
+                            if completion_stream is not None
+                            else contextlib.nullcontext()
                         ):
                             completed = self._complete_buffer(buffer, futures)
                         for shard, rows in completed:
@@ -2991,7 +3010,9 @@ class RolloutEngine:
                             ):
                                 raise ValueError("simulator stepped beyond an episode boundary")
                         with (
-                            torch.cuda.stream(buffer.stream) if buffer.stream is not None else contextlib.nullcontext()
+                            torch.cuda.stream(completion_stream)
+                            if completion_stream is not None
+                            else contextlib.nullcontext()
                         ):
                             for offset in range(2):
                                 accepted: list[tuple[SimulatorShard, ShardFrames]] = []

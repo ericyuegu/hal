@@ -160,13 +160,14 @@ def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor,
 
     Causal queries align to the end of the prefix: query i of Q sees slots below
     lengths - Q + i + 1. A query without keys returns zeros. Compiled CUDA code
-    uses FlexAttention's decode kernel; eager code builds the equivalent mask.
+    uses FlexAttention's decode kernel; eager code and heads narrower than 16
+    build the equivalent mask, since FlexAttention in torch 2.11 rejects them.
     """
     batch, _, queries, _ = query.shape
     capacity = key.shape[2]
     if lengths.shape != (batch,):
         raise ValueError("prefix attention lengths must be [B]")
-    if query.device.type == "cuda" and torch.compiler.is_compiling():
+    if query.device.type == "cuda" and torch.compiler.is_compiling() and query.shape[-1] >= 16:
 
         def keep(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
             return kv < (lengths[b] - queries + q + 1 if causal else lengths[b])
