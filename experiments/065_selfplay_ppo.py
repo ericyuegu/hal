@@ -801,7 +801,14 @@ class NativeSimulatorShard:
             self.copied_bytes += self._output.numel() + self._observed.numel() * self._observed.element_size()
         self._device_frame += 1
         return ShardFrames(
-            packed, actions, columns, frame.reward.copy(), frame.terminated.copy(), frame.truncated.copy(), observed
+            packed,
+            actions,
+            columns,
+            frame.reward.copy(),
+            frame.terminated.copy(),
+            frame.truncated.copy(),
+            observed,
+            frame.frame_id.copy(),
         )
 
     def step(self, inputs: Tensor, active: NDArray[np.bool_]) -> tuple[ShardFrames, ...]:
@@ -1056,6 +1063,7 @@ class ShardFrames:
     terminal: NDArray[np.bool_]
     timeout: NDArray[np.bool_]
     host_actions: NDArray[np.float32]
+    frame_ids: NDArray[np.int32]
 
     def __post_init__(self) -> None:
         count = len(self.rewards)
@@ -1066,6 +1074,8 @@ class ShardFrames:
             or self.actions.dtype != torch.float32
             or self.host_actions.shape != (count, 2, ACTION_DIM)
             or self.host_actions.dtype != np.float32
+            or self.frame_ids.shape != (count,)
+            or self.frame_ids.dtype != np.int32
             or self.columns.shape != (count, len(native.OBSERVATION_FIELDS))
             or self.columns.dtype != np.uint32
             or self.columns.flags.writeable
@@ -2628,6 +2638,7 @@ class RolloutEngine:
                             records["terminated"].copy(),
                             records["truncated"].copy(),
                             host["observed"].copy(),
+                            records["frame_id"].copy(),
                         )
                     )
                 completed.append((shard, tuple(rows)))
@@ -2689,7 +2700,7 @@ class RolloutEngine:
         for shard in shards:
             if isinstance(shard, NativeSimulatorShard):
                 shard.stepped_frames += int(self._active(shard).sum())
-        self.observe_behavior(frames.columns[active_host], host_lanes[active_host])
+        self.observe_behavior(frames.columns[active_host], host_lanes[active_host], frames.frame_ids[active_host])
         ends = active_host & (terminals | truncations)
         for source in np.flatnonzero(ends):
             lane = int(host_lanes[source])
@@ -2787,7 +2798,9 @@ class RolloutEngine:
                     resets += 1
         return resets
 
-    def observe_behavior(self, columns: NDArray[np.uint32], lanes: NDArray[np.int64]) -> None:
+    def observe_behavior(
+        self, columns: NDArray[np.uint32], lanes: NDArray[np.int64], frame_ids: NDArray[np.int32]
+    ) -> None:
         if not len(lanes):
             return
         group = self.cursor
@@ -2806,6 +2819,7 @@ class RolloutEngine:
             player_bits("percent").view(np.float32).astype(np.float64),
             player_bits("position_x").view(np.float32).astype(np.float64),
             stage,
+            playing=frame_ids >= 0,
         )
         counts = tracker.counts[streams]
         roles = self.assignments[group].reshape(-1, 2)[lanes]
@@ -3014,6 +3028,7 @@ def concatenate_shard_frames(frames: Sequence[ShardFrames]) -> ShardFrames:
         np.concatenate([frame.terminal for frame in frames]),
         np.concatenate([frame.timeout for frame in frames]),
         np.concatenate([frame.host_actions for frame in frames]),
+        np.concatenate([frame.frame_ids for frame in frames]),
     )
 
 

@@ -81,6 +81,7 @@ class FakeShard:
             terminal.copy(),
             timeout.copy(),
             actions.copy(),
+            records["frame_id"].copy(),
         )
 
     def reset(self, lane: int, episode: Any) -> Any:

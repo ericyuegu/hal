@@ -199,3 +199,13 @@ def test_o64_rejects_missing_or_unknown_architecture_fields(tmp_path: Path, fiel
     )
     with pytest.raises(ValueError, match="architecture fields"):
         load_evaluation_checkpoint(path, device=torch.device("cpu"))
+
+
+def test_behavior_exposure_excludes_countdown() -> None:
+    tracker = BehaviorTracker(2)
+    action = np.full((1, 2), melee.Action.FSMASH_MID.value, dtype=np.int64)
+    stock = np.full((1, 2), 4, dtype=np.int64)
+    zero = np.zeros((1, 2), dtype=np.float64)
+    tracker.observe(np.array([0, 1]), action, stock, zero, zero, np.array([25]), playing=np.array([False]))
+    assert not tracker.counts.any()
+    assert (tracker.state[:, 0] == melee.Action.FSMASH_MID.value).all()

@@ -108,6 +108,8 @@ class BehaviorTracker:
         percent: NDArray[np.float64],
         x: NDArray[np.float64],
         stage: NDArray[np.int64],
+        *,
+        playing: NDArray[np.bool_] | None = None,
     ) -> None:
         if action.shape != (len(streams) // 2, 2) or any(value.shape != action.shape for value in (stock, percent, x)):
             raise ValueError("behavior columns must contain both ports of each match")
@@ -116,12 +118,16 @@ class BehaviorTracker:
         previous = self.state[streams]
         flat = action.ravel()
         active = (~np.isin(action, _INACTIVE) & (action >= 0) & np.isfinite(x)).all(-1).repeat(2)
+        if playing is not None:
+            if playing.shape != (len(action),):
+                raise ValueError("behavior playing mask must have one entry per match")
+            active &= playing.repeat(2)
         for column, states in enumerate(EVENT_STATES.values()):
             entered = np.isin(flat, tuple(states)) & ~np.isin(previous[:, 0], tuple(states))
             self.counts[streams, column] += entered & active
         damage = previous[:, 2].astype(bool) | ((percent.ravel() > 0) & ~np.isin(flat, _INACTIVE))
         lost = stock.ravel() < previous[:, 1]
-        self.counts[streams, -3] += lost & ~damage
+        self.counts[streams, -3] += lost & ~damage & (True if playing is None else playing.repeat(2))
         self.counts[streams, -2] += active
         self.counts[streams, -1] += active & (np.abs(x.ravel()) > _EDGES[stage].repeat(2))
         self.state[streams, 0] = flat

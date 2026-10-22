@@ -84,6 +84,7 @@ def test_native_scatter_uses_batched_strided_coordinates(device: str) -> None:
         raw["terminated"].copy(),
         raw["truncated"].copy(),
         raw["applied_action"].copy(),
+        raw["frame_id"].copy(),
     )
     store = exp.FrameStore(5, 3, torch.device(device))
     coordinates = torch.tensor([[1, 2, 1], [4, 0, 2], [2, 1, 0]], device=device)
@@ -152,6 +153,7 @@ def test_old_training_checkpoint_is_rejected_before_loading(version: int, tmp_pa
     manifest = json.loads(path.read_text())
     manifest["format"] = f"hal.o65.training.v{version}"
     manifest["version"] = version
+    del manifest["reward_weights"]
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="unsupported checkpoint identity"):
         loop_exp.restore_checkpoint(run, path, PROVENANCE)
@@ -170,6 +172,7 @@ def test_native_frame_batch_rejects_nonfinite_rewards_and_conflicting_end_flags(
         np.zeros(1, dtype=np.bool_),
         np.zeros(1, dtype=np.bool_),
         np.zeros((1, 2, ACTION_DIM), dtype=np.float32),
+        np.zeros(1, dtype=np.int32),
     )
     with pytest.raises(ValueError, match="finite"):
         dataclasses.replace(frame, rewards=np.array([[0, np.nan]], dtype=np.float32))
