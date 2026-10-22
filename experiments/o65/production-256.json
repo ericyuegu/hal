@@ -1,0 +1,34 @@
+{
+  "treatment": "o65-o64-outcome-256",
+  "control": "frozen O64 step-0098304 under identical match conditions",
+  "checkpoint": "/home/ericgu/data/runs/o64-step-0098304/step-0098304.pt",
+  "checkpoint_sha256": "e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf",
+  "cadence": "production",
+  "rollout_frames": 512,
+  "updates": 256,
+  "groups": 4,
+  "active_matches_per_gpu": null,
+  "sampler": "experiments/o65/production-sampler.json",
+  "training": {
+    "seed": 65,
+    "reward_weights": {
+      "damage": 0.1,
+      "stock": 120.0,
+      "game_win": 120.0
+    },
+    "critic_warmup_updates": 32,
+    "checkpoint_interval": 32,
+    "snapshot_interval": 64,
+    "windows_per_step": null,
+    "actor_microbatches": null,
+    "decisions_per_window": 16,
+    "head_start_frames": 1200
+  },
+  "capacity_status": "MEASURE ON B200: set active_matches_per_gpu, windows_per_step and actor_microbatches before launch; O64 full PPO memory is unresolved in o65-memory/performance.md. Proxy estimates do not qualify O64.",
+  "sampler_sha256": "1605d4c7be39cf77115a28d9ea559e041cff4f491ca4b9155c08a94c655e7daf",
+  "sampler_source_sha256": "1b87b0b12b62470858899f90e7726ec3bc7355066492e7489592bcf16987cec8",
+  "evaluation_protocol": "experiments/o65/production-evaluation.json",
+  "evaluation_protocol_sha256": "725f5cb1ae4afd0494b3ae7e2a11c2cfb62b78ab5725c9535885bcf544af26e0",
+  "evaluation_cadence": null,
+  "evaluation_status": "Choose a production cadence before held-out play; the plan specifies proxy (8,4), outside the O64 conditioner range."
+}

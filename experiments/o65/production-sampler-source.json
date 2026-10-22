@@ -1,0 +1,2599 @@
+{
+  "format": "hal.o65.sampler-source.v2",
+  "checkpoint_sha256": "e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf",
+  "sources": {
+    "ranked-anonymized-1-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/ranked-anonymized-1-policy-world-v8/manifest.jsonl",
+      "sha256": "95b432d7d6c93d53dfe82617ea3ca7347da3c253f159895553b1e4d9d5718552",
+      "train_rows": 112188,
+      "checkpoint_train_index_sha256": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8"
+    },
+    "ranked-anonymized-2-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/ranked-anonymized-2-policy-world-v8/manifest.jsonl",
+      "sha256": "d32608b6714bd5aac6ee497d232bda5eeb07d9cca53af1bda69f1b066fd18e90",
+      "train_rows": 146455,
+      "checkpoint_train_index_sha256": "f629a8a01eada6904ad16be2ddebe3037c9564e0af812794b75c2a826a8a204c"
+    },
+    "ranked-anonymized-3-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/ranked-anonymized-3-policy-world-v8/manifest.jsonl",
+      "sha256": "ce9bfb6caf67434aede1a1f180b5a06469515b98bb9d1184414dd03c04eec1d8",
+      "train_rows": 124398,
+      "checkpoint_train_index_sha256": "8acb765a597f965bc59bf6c982a2a784f051ac2f5366906f180a04b909943c57"
+    },
+    "ranked-anonymized-4-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/ranked-anonymized-4-policy-world-v8/manifest.jsonl",
+      "sha256": "faa79e2364938a9275d88b34a469043eee6e38f544b9ab26562e0c8add61c967",
+      "train_rows": 143465,
+      "checkpoint_train_index_sha256": "b4424eebc9724e4fb94e3b16f21d2f357cd178212915604ec675f782daea17b5"
+    },
+    "ranked-anonymized-5-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/ranked-anonymized-5-policy-world-v8/manifest.jsonl",
+      "sha256": "5542546cf3979d04b13894a6e5228b5e9b79e2989553f3d1ee1ca004935a6022",
+      "train_rows": 128830,
+      "checkpoint_train_index_sha256": "94b56ea16d6549564b39342a8c882f214d8b3d747b99a28e291d12bfa4a5c7cc"
+    },
+    "ranked-anonymized-6-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/ranked-anonymized-6-policy-world-v8/manifest.jsonl",
+      "sha256": "6374070e35f66ad060e813764c62080740f891a2b434407159f033263010e7cd",
+      "train_rows": 166189,
+      "checkpoint_train_index_sha256": "ee58ce5241a510c609e15e9283903163ff941187ccf9a4bff0716b45e157a083"
+    },
+    "professional-aklo-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-aklo-policy-world-v8/manifest.jsonl",
+      "sha256": "3b982beee5712c5bda604aa949c1f120279f9af534032bc9cf0df7d1431a75ef",
+      "train_rows": 18820,
+      "checkpoint_train_index_sha256": "1ae04b2ffd57fe0bb1bac86933f61b4fbad151bfe7956f607f6ff19521895f64"
+    },
+    "professional-amsa-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-amsa-policy-world-v8/manifest.jsonl",
+      "sha256": "499d32bd4a8f4ed20f465892dd34411f699cc199abbb47d98bff3333d06d59bb",
+      "train_rows": 23641,
+      "checkpoint_train_index_sha256": "11945989cd7a99fb38a0e52fc6306fa2b9e72eb6c7094d656f069b02878ac17f"
+    },
+    "professional-axe-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-axe-policy-world-v8/manifest.jsonl",
+      "sha256": "99be1a0b0de3dd9b309c93fe53d8898fff17b945f0b967c1d955722b6df9c896",
+      "train_rows": 1604,
+      "checkpoint_train_index_sha256": "263f972bb6e629c7e87106d1e2f57d6477ab32d291515dc7fe38f6f316e6e270"
+    },
+    "professional-billybopeep-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-billybopeep-policy-world-v8/manifest.jsonl",
+      "sha256": "6bf8c157217a2632dd9d8e2ca7fe989bead04759c10fdebe4bc6c1cd21fcd085",
+      "train_rows": 749,
+      "checkpoint_train_index_sha256": "7da1a1c4157937ff28c28af4da8ba1103ee81fedb93e4fe820789ca29e2709c7"
+    },
+    "professional-bobbybigballz-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-bobbybigballz-policy-world-v8/manifest.jsonl",
+      "sha256": "6217f8437f29160fe728627a428d4a1f53fbbb567e0b94ee15fa0e929de95687",
+      "train_rows": 2521,
+      "checkpoint_train_index_sha256": "53cae8c1df6a2c13e0e3ab32bf8595be4b9c6438ee54ac0e54bbaa5669f0dcbe"
+    },
+    "professional-cody-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-cody-policy-world-v8/manifest.jsonl",
+      "sha256": "586e888b8937b632dbd8412562116efc9d5eacfff43330c176b660a0601e7e33",
+      "train_rows": 62189,
+      "checkpoint_train_index_sha256": "abb6d3e1f790302096270edb6a82c69a646dbd99b544e3ed35507bef293dfb8b"
+    },
+    "professional-cookbook-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-cookbook-policy-world-v8/manifest.jsonl",
+      "sha256": "63f28058e2350a8cee84e93dd40fc9eddf4eecfbe8aa6107ed13d6664631a2a1",
+      "train_rows": 20103,
+      "checkpoint_train_index_sha256": "e855d5c4e871259092bd2f7772a5f80f1ea7c732d223eeb729e1760dadd1c585"
+    },
+    "professional-daniel-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-daniel-policy-world-v8/manifest.jsonl",
+      "sha256": "5b33b00217f73bf1ea2489feef4e052b1229e2127a055e21df62a8dc67ee0065",
+      "train_rows": 7984,
+      "checkpoint_train_index_sha256": "f2683e42e5a3e2dd2525c5643af7ed9b4536b398aa295a0ffec56b6493144d42"
+    },
+    "professional-desertsnoopy-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-desertsnoopy-policy-world-v8/manifest.jsonl",
+      "sha256": "9e5f5f2564e593c6fa08812de0fdbb607df0909522159cf73d4f55b83216ff37",
+      "train_rows": 26728,
+      "checkpoint_train_index_sha256": "23b0af01ab6102edc6be234bfa6055f0c22e7591d5965763524a3ecd4f9b9099"
+    },
+    "professional-druggedfox-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-druggedfox-policy-world-v8/manifest.jsonl",
+      "sha256": "3c6191b55e0d99a5b55c27b67a4d0ed8127a1dae7bfc354500ae9892e6c9ae3f",
+      "train_rows": 436,
+      "checkpoint_train_index_sha256": "8e4c425e9a62b317df3c11d85d8d172f2be16d2270a8f6279180f2bb79a48687"
+    },
+    "professional-fknsilver-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-fknsilver-policy-world-v8/manifest.jsonl",
+      "sha256": "0e398357507604731bbd53e8825a2772ed02de910309b84895f6e6d97f7da92f",
+      "train_rows": 5503,
+      "checkpoint_train_index_sha256": "5ff82418f1a3be4d8c9ea0822b204f88cbea0165c93cb5ba5f19fbadb2692966"
+    },
+    "professional-franz-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-franz-policy-world-v8/manifest.jsonl",
+      "sha256": "3e09b5caf5e1f665d95719bf6f575da78db6ab134d2cdde73b28770a4d70901a",
+      "train_rows": 15159,
+      "checkpoint_train_index_sha256": "5e5720294243254007952fb8f2289b81485fc98ac1df3db304c286286ef80cd7"
+    },
+    "professional-frenzy-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-frenzy-policy-world-v8/manifest.jsonl",
+      "sha256": "fa37f304f5f6297c6b1c83f855494136053ab4d539a7b707b3af80e423b8dcb6",
+      "train_rows": 19640,
+      "checkpoint_train_index_sha256": "46a9cce7517bc03fde2b3cf70efedade5092bc3841c23711bafc1fac30da18e5"
+    },
+    "professional-friend-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-friend-policy-world-v8/manifest.jsonl",
+      "sha256": "d86b1e50834811834d89c3f72be6161850014dd583d3f50baa4f87de00b19896",
+      "train_rows": 8433,
+      "checkpoint_train_index_sha256": "05c6821f857d21c20ae1582cdd7362ad230f8f72c933e44aecf9f0cb351bcd67"
+    },
+    "professional-ginger-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-ginger-policy-world-v8/manifest.jsonl",
+      "sha256": "6d600e7c1fea2dafd539a5326058cbf829e56db360fafa935885151171190897",
+      "train_rows": 20062,
+      "checkpoint_train_index_sha256": "b494bee53cb3c48b2ac673d1aae0ee82926e6cdf8f940d35a20ef6cbfaab1203"
+    },
+    "professional-gosu-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-gosu-policy-world-v8/manifest.jsonl",
+      "sha256": "d8723b849568b91269482d28d8d12447e44c8dfaa3cf4cfe54e5e184c51b4266",
+      "train_rows": 20314,
+      "checkpoint_train_index_sha256": "08e743b829bcb7c46abdae6d31386f2eb384f90998ded32967b4287a9bb3043d"
+    },
+    "professional-grab2win-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-grab2win-policy-world-v8/manifest.jsonl",
+      "sha256": "f4943f91480b3c3c4b631955a5cc4416594873c5b1fa8f8d3948d650ce4313ee",
+      "train_rows": 5624,
+      "checkpoint_train_index_sha256": "acafaf1e3406166a35f42d5fafb269009218ec6f43237834338236aed875d1e6"
+    },
+    "professional-iliketurtles-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-iliketurtles-policy-world-v8/manifest.jsonl",
+      "sha256": "3b54c2c32a88852340ed64467bdb7cd236cfbb9d51baba00d82dc2e239a5b0e2",
+      "train_rows": 14667,
+      "checkpoint_train_index_sha256": "7690dc9b46de6b2ff7a8f0e99f3f01a21f91388c8a0ab2d4f593a080bf6ae70e"
+    },
+    "professional-isdsar-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-isdsar-policy-world-v8/manifest.jsonl",
+      "sha256": "c6a6d561c53dba0d8667006e3b96bedaef9731a58b55755fd6c831f30affdd57",
+      "train_rows": 5528,
+      "checkpoint_train_index_sha256": "6ce04e9378f414f6cfc5dc27bd2ff3e5a58db798aa38abc37a659408f0da4ecf"
+    },
+    "professional-jchu-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-jchu-policy-world-v8/manifest.jsonl",
+      "sha256": "78954d93ce3c0f67a008e57836881871bacf1db4b06c7eda4633569827a7302c",
+      "train_rows": 3235,
+      "checkpoint_train_index_sha256": "403f4f38ab482976c61d76748ff0400f1d502e51ab022347ace87feb9fa9fc35"
+    },
+    "professional-jahridin-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-jahridin-policy-world-v8/manifest.jsonl",
+      "sha256": "e173aae76e58eac72be590feca6f8cfa199130c136f880540c4f42bef8c43fc3",
+      "train_rows": 25987,
+      "checkpoint_train_index_sha256": "899064901131096198ed9855bd606ff887a20fdb996bfeffacbb72b4a5802a38"
+    },
+    "professional-kjh-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-kjh-policy-world-v8/manifest.jsonl",
+      "sha256": "3ba808024316f35e420ffc983f152901d59e7b694a7b943cd64c252dfc3d1877",
+      "train_rows": 2172,
+      "checkpoint_train_index_sha256": "32deb8672642e653f89de565e58c3737abf4b7d03110286cb05d8d355ddb2b4b"
+    },
+    "professional-kodorin-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-kodorin-policy-world-v8/manifest.jsonl",
+      "sha256": "0a3ca67543dd318496ca6fe61c2354f3263dec3e25b2af42402f25cb621cce51",
+      "train_rows": 8677,
+      "checkpoint_train_index_sha256": "24d36b73c2f5d06b4fffc1aa014f369cf93c99cdc0097ff1f98c87649b18a41b"
+    },
+    "professional-krudo-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-krudo-policy-world-v8/manifest.jsonl",
+      "sha256": "5dc512be9bc0e6bc4f59b02c875c31ace44d1083256dbd2bbffd11964ee0a530",
+      "train_rows": 9577,
+      "checkpoint_train_index_sha256": "a595bec356530f73a898d6fd0c7fa98eab3efecc05072f0536c87ecc29265f2c"
+    },
+    "professional-m2k-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-m2k-policy-world-v8/manifest.jsonl",
+      "sha256": "761b2d495ae7ca1936ad96682f362d47a1a74fccf27ae2bd6e2cb92b1aac59a8",
+      "train_rows": 7892,
+      "checkpoint_train_index_sha256": "da529b454a8a84860c328572f9c2a31694e5983ed46c5ab6579c9ac2c674fbca"
+    },
+    "professional-mang0-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-mang0-policy-world-v8/manifest.jsonl",
+      "sha256": "e0c54cadd31d014d7eeb50819ce95f061f5114aaf960ba157ee98739b8f783a3",
+      "train_rows": 30157,
+      "checkpoint_train_index_sha256": "cb1a23eebefc78e98dcf36f3bf6d32e66e1f1c4b00ee908e78e5988536445340"
+    },
+    "professional-mof-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-mof-policy-world-v8/manifest.jsonl",
+      "sha256": "2976396d5693c0f7066ff789a172784f693dee59982f268d7053198bc529b966",
+      "train_rows": 1225,
+      "checkpoint_train_index_sha256": "eeebeb685c3be5e77cedb8446ea8cc358f5d16286c8d7fdce469b2a9b51bc174"
+    },
+    "professional-monotheon-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-monotheon-policy-world-v8/manifest.jsonl",
+      "sha256": "8154ed91189279dc82318195d65f5c16da5fcd30f037f65685302ef8003d7882",
+      "train_rows": 16301,
+      "checkpoint_train_index_sha256": "8d1e2f996b6aae3fd17f971f8310b1b4beb5b2d97d7faed402dab42714da4492"
+    },
+    "professional-nicki-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-nicki-policy-world-v8/manifest.jsonl",
+      "sha256": "2937bc5da51f361ccbe07e3c339b5d47c3016506526c300c1e046d35cf3751b1",
+      "train_rows": 2482,
+      "checkpoint_train_index_sha256": "ac07fe70c0e0a2ea31a3f3a764b53d1216248d3689d5b4558781bf843b5c0e6c"
+    },
+    "professional-rapm-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-rapm-policy-world-v8/manifest.jsonl",
+      "sha256": "9deb8a285a6db26cc149ad807b6d9693c1816e7e45d4df908f9411823b68839c",
+      "train_rows": 604,
+      "checkpoint_train_index_sha256": "58bf73d0868f5e51ef06c1f9f0eb64c5f8153cc77f4053d60c7568d5f20852d1"
+    },
+    "professional-redx-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-redx-policy-world-v8/manifest.jsonl",
+      "sha256": "b8994fc33d6c820a3d88fa41c4357ee2fb015049225063d8e91344bfcc2fc155",
+      "train_rows": 1424,
+      "checkpoint_train_index_sha256": "d54d66e26e97327452da4762eeddf8e2700ec9ef88cff9960a039eda97e766f5"
+    },
+    "professional-siddward-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-siddward-policy-world-v8/manifest.jsonl",
+      "sha256": "900f73b8162e6ec3bbe3ef493101513d4d2f7b40bd70d1f26bf73ba3d70aade0",
+      "train_rows": 16208,
+      "checkpoint_train_index_sha256": "69b182eda72df5700505cf52c9f7302fcf9acb4771f42bf3f4fb6d2a0538b895"
+    },
+    "professional-solobattle-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-solobattle-policy-world-v8/manifest.jsonl",
+      "sha256": "81282e0dbe5091fbbaa5ecae06475d4430ce80213965a116b7c2f64f89f1372a",
+      "train_rows": 26915,
+      "checkpoint_train_index_sha256": "eb5084e6340490b9f312f9b0a8ca194d5755a8e83c63043d65668fc482c94bb7"
+    },
+    "professional-technospider-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-technospider-policy-world-v8/manifest.jsonl",
+      "sha256": "ba6de4255a81f6817dc2d4b2cf1d49ade1572611336e9eb43573141106f1bcd5",
+      "train_rows": 4442,
+      "checkpoint_train_index_sha256": "1558eadd94b43150e6ab0bd2edb15c036a2136b5aa2766a675df83ee8474cb52"
+    },
+    "professional-trif-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-trif-policy-world-v8/manifest.jsonl",
+      "sha256": "2b0423c1c0fe73280a5ceeae5e05ba4ca479f620ce463763b879ba3a6268dfbc",
+      "train_rows": 13872,
+      "checkpoint_train_index_sha256": "16f2905d2894807f2f950063bb8387ce69b5a918523f42556b997385f3c5f462"
+    },
+    "professional-uhhei-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-uhhei-policy-world-v8/manifest.jsonl",
+      "sha256": "dcbc954c30f8ec2b875c845aee938a3be589c4684f71f06cdf93a408f049174a",
+      "train_rows": 6888,
+      "checkpoint_train_index_sha256": "f5414ac89182f6a2af547149cac3d52ce38cfad5549db45e6e1e9979fa6b6101"
+    },
+    "professional-ycz-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-ycz-policy-world-v8/manifest.jsonl",
+      "sha256": "15ae8b56d744d869b295e19da74818fe3fccb6b345e0ab6544a6cf370774d9b9",
+      "train_rows": 7358,
+      "checkpoint_train_index_sha256": "597c813dd86e341848d0436d3dac80316fc76ee9d29683a699c114df832c5897"
+    },
+    "professional-zain-policy-world-v8": {
+      "manifest": "runs/o64-check/training-sources/professional-zain-policy-world-v8/manifest.jsonl",
+      "sha256": "ca954a99ff0797cd2b38587de70ecedb2a135f7c78e78874e6871322a4b741f5",
+      "train_rows": 8724,
+      "checkpoint_train_index_sha256": "6f35dfbb1f5353138b73866a99e3599034f93d859f70cfb421adc484cedf6549"
+    }
+  },
+  "identity_sidecar_sha256": "54ccf8a2497fe240313117297ca2ea31158e08db2cc53c67e7aa46853a8dac1c",
+  "count_unit": "player appearances per character in the checkpoint training rows; no validation/test rows",
+  "matchup_prior": "sqrt(replay count) over every unordered ranked-anonymized-1 training pair; minimum 1 replay",
+  "matchup_counts": [
+    {
+      "characters": [
+        0,
+        0
+      ],
+      "count": 6
+    },
+    {
+      "characters": [
+        0,
+        1
+      ],
+      "count": 219
+    },
+    {
+      "characters": [
+        0,
+        2
+      ],
+      "count": 83
+    },
+    {
+      "characters": [
+        0,
+        3
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        0,
+        4
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        0,
+        5
+      ],
+      "count": 3
+    },
+    {
+      "characters": [
+        0,
+        6
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        0,
+        7
+      ],
+      "count": 80
+    },
+    {
+      "characters": [
+        0,
+        8
+      ],
+      "count": 20
+    },
+    {
+      "characters": [
+        0,
+        9
+      ],
+      "count": 53
+    },
+    {
+      "characters": [
+        0,
+        10
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        0,
+        12
+      ],
+      "count": 24
+    },
+    {
+      "characters": [
+        0,
+        13
+      ],
+      "count": 45
+    },
+    {
+      "characters": [
+        0,
+        14
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        0,
+        15
+      ],
+      "count": 53
+    },
+    {
+      "characters": [
+        0,
+        16
+      ],
+      "count": 16
+    },
+    {
+      "characters": [
+        0,
+        17
+      ],
+      "count": 22
+    },
+    {
+      "characters": [
+        0,
+        18
+      ],
+      "count": 126
+    },
+    {
+      "characters": [
+        0,
+        19
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        0,
+        20
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        0,
+        21
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        0,
+        22
+      ],
+      "count": 230
+    },
+    {
+      "characters": [
+        0,
+        24
+      ],
+      "count": 10
+    },
+    {
+      "characters": [
+        0,
+        25
+      ],
+      "count": 27
+    },
+    {
+      "characters": [
+        0,
+        26
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        1,
+        1
+      ],
+      "count": 5394
+    },
+    {
+      "characters": [
+        1,
+        2
+      ],
+      "count": 3673
+    },
+    {
+      "characters": [
+        1,
+        3
+      ],
+      "count": 282
+    },
+    {
+      "characters": [
+        1,
+        4
+      ],
+      "count": 57
+    },
+    {
+      "characters": [
+        1,
+        5
+      ],
+      "count": 176
+    },
+    {
+      "characters": [
+        1,
+        6
+      ],
+      "count": 441
+    },
+    {
+      "characters": [
+        1,
+        7
+      ],
+      "count": 4335
+    },
+    {
+      "characters": [
+        1,
+        8
+      ],
+      "count": 542
+    },
+    {
+      "characters": [
+        1,
+        9
+      ],
+      "count": 3069
+    },
+    {
+      "characters": [
+        1,
+        10
+      ],
+      "count": 1393
+    },
+    {
+      "characters": [
+        1,
+        12
+      ],
+      "count": 617
+    },
+    {
+      "characters": [
+        1,
+        13
+      ],
+      "count": 1594
+    },
+    {
+      "characters": [
+        1,
+        14
+      ],
+      "count": 1060
+    },
+    {
+      "characters": [
+        1,
+        15
+      ],
+      "count": 3340
+    },
+    {
+      "characters": [
+        1,
+        16
+      ],
+      "count": 391
+    },
+    {
+      "characters": [
+        1,
+        17
+      ],
+      "count": 864
+    },
+    {
+      "characters": [
+        1,
+        18
+      ],
+      "count": 5949
+    },
+    {
+      "characters": [
+        1,
+        19
+      ],
+      "count": 76
+    },
+    {
+      "characters": [
+        1,
+        20
+      ],
+      "count": 240
+    },
+    {
+      "characters": [
+        1,
+        21
+      ],
+      "count": 766
+    },
+    {
+      "characters": [
+        1,
+        22
+      ],
+      "count": 10381
+    },
+    {
+      "characters": [
+        1,
+        23
+      ],
+      "count": 35
+    },
+    {
+      "characters": [
+        1,
+        24
+      ],
+      "count": 399
+    },
+    {
+      "characters": [
+        1,
+        25
+      ],
+      "count": 1064
+    },
+    {
+      "characters": [
+        1,
+        26
+      ],
+      "count": 211
+    },
+    {
+      "characters": [
+        2,
+        2
+      ],
+      "count": 529
+    },
+    {
+      "characters": [
+        2,
+        3
+      ],
+      "count": 85
+    },
+    {
+      "characters": [
+        2,
+        4
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        2,
+        5
+      ],
+      "count": 57
+    },
+    {
+      "characters": [
+        2,
+        6
+      ],
+      "count": 153
+    },
+    {
+      "characters": [
+        2,
+        7
+      ],
+      "count": 1344
+    },
+    {
+      "characters": [
+        2,
+        8
+      ],
+      "count": 150
+    },
+    {
+      "characters": [
+        2,
+        9
+      ],
+      "count": 1072
+    },
+    {
+      "characters": [
+        2,
+        10
+      ],
+      "count": 346
+    },
+    {
+      "characters": [
+        2,
+        12
+      ],
+      "count": 239
+    },
+    {
+      "characters": [
+        2,
+        13
+      ],
+      "count": 573
+    },
+    {
+      "characters": [
+        2,
+        14
+      ],
+      "count": 240
+    },
+    {
+      "characters": [
+        2,
+        15
+      ],
+      "count": 984
+    },
+    {
+      "characters": [
+        2,
+        16
+      ],
+      "count": 132
+    },
+    {
+      "characters": [
+        2,
+        17
+      ],
+      "count": 262
+    },
+    {
+      "characters": [
+        2,
+        18
+      ],
+      "count": 1912
+    },
+    {
+      "characters": [
+        2,
+        19
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        2,
+        20
+      ],
+      "count": 116
+    },
+    {
+      "characters": [
+        2,
+        21
+      ],
+      "count": 205
+    },
+    {
+      "characters": [
+        2,
+        22
+      ],
+      "count": 3464
+    },
+    {
+      "characters": [
+        2,
+        23
+      ],
+      "count": 3
+    },
+    {
+      "characters": [
+        2,
+        24
+      ],
+      "count": 102
+    },
+    {
+      "characters": [
+        2,
+        25
+      ],
+      "count": 343
+    },
+    {
+      "characters": [
+        2,
+        26
+      ],
+      "count": 97
+    },
+    {
+      "characters": [
+        3,
+        3
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        3,
+        5
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        3,
+        6
+      ],
+      "count": 10
+    },
+    {
+      "characters": [
+        3,
+        7
+      ],
+      "count": 88
+    },
+    {
+      "characters": [
+        3,
+        8
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        3,
+        9
+      ],
+      "count": 70
+    },
+    {
+      "characters": [
+        3,
+        10
+      ],
+      "count": 26
+    },
+    {
+      "characters": [
+        3,
+        12
+      ],
+      "count": 6
+    },
+    {
+      "characters": [
+        3,
+        13
+      ],
+      "count": 40
+    },
+    {
+      "characters": [
+        3,
+        14
+      ],
+      "count": 23
+    },
+    {
+      "characters": [
+        3,
+        15
+      ],
+      "count": 54
+    },
+    {
+      "characters": [
+        3,
+        16
+      ],
+      "count": 18
+    },
+    {
+      "characters": [
+        3,
+        17
+      ],
+      "count": 27
+    },
+    {
+      "characters": [
+        3,
+        18
+      ],
+      "count": 116
+    },
+    {
+      "characters": [
+        3,
+        19
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        3,
+        20
+      ],
+      "count": 9
+    },
+    {
+      "characters": [
+        3,
+        21
+      ],
+      "count": 18
+    },
+    {
+      "characters": [
+        3,
+        22
+      ],
+      "count": 177
+    },
+    {
+      "characters": [
+        3,
+        24
+      ],
+      "count": 18
+    },
+    {
+      "characters": [
+        3,
+        25
+      ],
+      "count": 30
+    },
+    {
+      "characters": [
+        3,
+        26
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        4,
+        5
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        4,
+        6
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        4,
+        7
+      ],
+      "count": 30
+    },
+    {
+      "characters": [
+        4,
+        8
+      ],
+      "count": 6
+    },
+    {
+      "characters": [
+        4,
+        9
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        4,
+        10
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        4,
+        12
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        4,
+        13
+      ],
+      "count": 14
+    },
+    {
+      "characters": [
+        4,
+        14
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        4,
+        15
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        4,
+        16
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        4,
+        17
+      ],
+      "count": 3
+    },
+    {
+      "characters": [
+        4,
+        18
+      ],
+      "count": 30
+    },
+    {
+      "characters": [
+        4,
+        19
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        4,
+        20
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        4,
+        22
+      ],
+      "count": 51
+    },
+    {
+      "characters": [
+        4,
+        24
+      ],
+      "count": 6
+    },
+    {
+      "characters": [
+        4,
+        25
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        4,
+        26
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        5,
+        6
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        5,
+        7
+      ],
+      "count": 85
+    },
+    {
+      "characters": [
+        5,
+        8
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        5,
+        9
+      ],
+      "count": 20
+    },
+    {
+      "characters": [
+        5,
+        10
+      ],
+      "count": 20
+    },
+    {
+      "characters": [
+        5,
+        12
+      ],
+      "count": 27
+    },
+    {
+      "characters": [
+        5,
+        13
+      ],
+      "count": 38
+    },
+    {
+      "characters": [
+        5,
+        14
+      ],
+      "count": 26
+    },
+    {
+      "characters": [
+        5,
+        15
+      ],
+      "count": 46
+    },
+    {
+      "characters": [
+        5,
+        16
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        5,
+        17
+      ],
+      "count": 17
+    },
+    {
+      "characters": [
+        5,
+        18
+      ],
+      "count": 86
+    },
+    {
+      "characters": [
+        5,
+        19
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        5,
+        20
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        5,
+        21
+      ],
+      "count": 9
+    },
+    {
+      "characters": [
+        5,
+        22
+      ],
+      "count": 133
+    },
+    {
+      "characters": [
+        5,
+        23
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        5,
+        24
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        5,
+        25
+      ],
+      "count": 34
+    },
+    {
+      "characters": [
+        5,
+        26
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        6,
+        6
+      ],
+      "count": 12
+    },
+    {
+      "characters": [
+        6,
+        7
+      ],
+      "count": 154
+    },
+    {
+      "characters": [
+        6,
+        8
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        6,
+        9
+      ],
+      "count": 106
+    },
+    {
+      "characters": [
+        6,
+        10
+      ],
+      "count": 33
+    },
+    {
+      "characters": [
+        6,
+        12
+      ],
+      "count": 46
+    },
+    {
+      "characters": [
+        6,
+        13
+      ],
+      "count": 57
+    },
+    {
+      "characters": [
+        6,
+        14
+      ],
+      "count": 36
+    },
+    {
+      "characters": [
+        6,
+        15
+      ],
+      "count": 130
+    },
+    {
+      "characters": [
+        6,
+        16
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        6,
+        17
+      ],
+      "count": 46
+    },
+    {
+      "characters": [
+        6,
+        18
+      ],
+      "count": 220
+    },
+    {
+      "characters": [
+        6,
+        19
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        6,
+        20
+      ],
+      "count": 10
+    },
+    {
+      "characters": [
+        6,
+        21
+      ],
+      "count": 23
+    },
+    {
+      "characters": [
+        6,
+        22
+      ],
+      "count": 364
+    },
+    {
+      "characters": [
+        6,
+        24
+      ],
+      "count": 10
+    },
+    {
+      "characters": [
+        6,
+        25
+      ],
+      "count": 47
+    },
+    {
+      "characters": [
+        6,
+        26
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        7,
+        7
+      ],
+      "count": 573
+    },
+    {
+      "characters": [
+        7,
+        8
+      ],
+      "count": 178
+    },
+    {
+      "characters": [
+        7,
+        9
+      ],
+      "count": 1024
+    },
+    {
+      "characters": [
+        7,
+        10
+      ],
+      "count": 325
+    },
+    {
+      "characters": [
+        7,
+        12
+      ],
+      "count": 214
+    },
+    {
+      "characters": [
+        7,
+        13
+      ],
+      "count": 588
+    },
+    {
+      "characters": [
+        7,
+        14
+      ],
+      "count": 282
+    },
+    {
+      "characters": [
+        7,
+        15
+      ],
+      "count": 952
+    },
+    {
+      "characters": [
+        7,
+        16
+      ],
+      "count": 154
+    },
+    {
+      "characters": [
+        7,
+        17
+      ],
+      "count": 247
+    },
+    {
+      "characters": [
+        7,
+        18
+      ],
+      "count": 2071
+    },
+    {
+      "characters": [
+        7,
+        19
+      ],
+      "count": 17
+    },
+    {
+      "characters": [
+        7,
+        20
+      ],
+      "count": 85
+    },
+    {
+      "characters": [
+        7,
+        21
+      ],
+      "count": 187
+    },
+    {
+      "characters": [
+        7,
+        22
+      ],
+      "count": 3438
+    },
+    {
+      "characters": [
+        7,
+        23
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        7,
+        24
+      ],
+      "count": 123
+    },
+    {
+      "characters": [
+        7,
+        25
+      ],
+      "count": 430
+    },
+    {
+      "characters": [
+        7,
+        26
+      ],
+      "count": 93
+    },
+    {
+      "characters": [
+        8,
+        8
+      ],
+      "count": 16
+    },
+    {
+      "characters": [
+        8,
+        9
+      ],
+      "count": 165
+    },
+    {
+      "characters": [
+        8,
+        10
+      ],
+      "count": 37
+    },
+    {
+      "characters": [
+        8,
+        12
+      ],
+      "count": 27
+    },
+    {
+      "characters": [
+        8,
+        13
+      ],
+      "count": 53
+    },
+    {
+      "characters": [
+        8,
+        14
+      ],
+      "count": 45
+    },
+    {
+      "characters": [
+        8,
+        15
+      ],
+      "count": 133
+    },
+    {
+      "characters": [
+        8,
+        16
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        8,
+        17
+      ],
+      "count": 34
+    },
+    {
+      "characters": [
+        8,
+        18
+      ],
+      "count": 241
+    },
+    {
+      "characters": [
+        8,
+        19
+      ],
+      "count": 17
+    },
+    {
+      "characters": [
+        8,
+        20
+      ],
+      "count": 19
+    },
+    {
+      "characters": [
+        8,
+        21
+      ],
+      "count": 17
+    },
+    {
+      "characters": [
+        8,
+        22
+      ],
+      "count": 391
+    },
+    {
+      "characters": [
+        8,
+        24
+      ],
+      "count": 10
+    },
+    {
+      "characters": [
+        8,
+        25
+      ],
+      "count": 51
+    },
+    {
+      "characters": [
+        8,
+        26
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        9,
+        9
+      ],
+      "count": 319
+    },
+    {
+      "characters": [
+        9,
+        10
+      ],
+      "count": 271
+    },
+    {
+      "characters": [
+        9,
+        12
+      ],
+      "count": 191
+    },
+    {
+      "characters": [
+        9,
+        13
+      ],
+      "count": 336
+    },
+    {
+      "characters": [
+        9,
+        14
+      ],
+      "count": 214
+    },
+    {
+      "characters": [
+        9,
+        15
+      ],
+      "count": 657
+    },
+    {
+      "characters": [
+        9,
+        16
+      ],
+      "count": 94
+    },
+    {
+      "characters": [
+        9,
+        17
+      ],
+      "count": 190
+    },
+    {
+      "characters": [
+        9,
+        18
+      ],
+      "count": 1471
+    },
+    {
+      "characters": [
+        9,
+        19
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        9,
+        20
+      ],
+      "count": 57
+    },
+    {
+      "characters": [
+        9,
+        21
+      ],
+      "count": 149
+    },
+    {
+      "characters": [
+        9,
+        22
+      ],
+      "count": 2391
+    },
+    {
+      "characters": [
+        9,
+        23
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        9,
+        24
+      ],
+      "count": 71
+    },
+    {
+      "characters": [
+        9,
+        25
+      ],
+      "count": 290
+    },
+    {
+      "characters": [
+        9,
+        26
+      ],
+      "count": 56
+    },
+    {
+      "characters": [
+        10,
+        10
+      ],
+      "count": 39
+    },
+    {
+      "characters": [
+        10,
+        12
+      ],
+      "count": 107
+    },
+    {
+      "characters": [
+        10,
+        13
+      ],
+      "count": 169
+    },
+    {
+      "characters": [
+        10,
+        14
+      ],
+      "count": 96
+    },
+    {
+      "characters": [
+        10,
+        15
+      ],
+      "count": 248
+    },
+    {
+      "characters": [
+        10,
+        16
+      ],
+      "count": 40
+    },
+    {
+      "characters": [
+        10,
+        17
+      ],
+      "count": 100
+    },
+    {
+      "characters": [
+        10,
+        18
+      ],
+      "count": 558
+    },
+    {
+      "characters": [
+        10,
+        19
+      ],
+      "count": 21
+    },
+    {
+      "characters": [
+        10,
+        20
+      ],
+      "count": 25
+    },
+    {
+      "characters": [
+        10,
+        21
+      ],
+      "count": 71
+    },
+    {
+      "characters": [
+        10,
+        22
+      ],
+      "count": 1064
+    },
+    {
+      "characters": [
+        10,
+        23
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        10,
+        24
+      ],
+      "count": 39
+    },
+    {
+      "characters": [
+        10,
+        25
+      ],
+      "count": 104
+    },
+    {
+      "characters": [
+        10,
+        26
+      ],
+      "count": 36
+    },
+    {
+      "characters": [
+        12,
+        12
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        12,
+        13
+      ],
+      "count": 94
+    },
+    {
+      "characters": [
+        12,
+        14
+      ],
+      "count": 56
+    },
+    {
+      "characters": [
+        12,
+        15
+      ],
+      "count": 151
+    },
+    {
+      "characters": [
+        12,
+        16
+      ],
+      "count": 28
+    },
+    {
+      "characters": [
+        12,
+        17
+      ],
+      "count": 65
+    },
+    {
+      "characters": [
+        12,
+        18
+      ],
+      "count": 220
+    },
+    {
+      "characters": [
+        12,
+        19
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        12,
+        20
+      ],
+      "count": 13
+    },
+    {
+      "characters": [
+        12,
+        21
+      ],
+      "count": 32
+    },
+    {
+      "characters": [
+        12,
+        22
+      ],
+      "count": 495
+    },
+    {
+      "characters": [
+        12,
+        23
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        12,
+        24
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        12,
+        25
+      ],
+      "count": 66
+    },
+    {
+      "characters": [
+        12,
+        26
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        13,
+        13
+      ],
+      "count": 106
+    },
+    {
+      "characters": [
+        13,
+        14
+      ],
+      "count": 133
+    },
+    {
+      "characters": [
+        13,
+        15
+      ],
+      "count": 409
+    },
+    {
+      "characters": [
+        13,
+        16
+      ],
+      "count": 50
+    },
+    {
+      "characters": [
+        13,
+        17
+      ],
+      "count": 84
+    },
+    {
+      "characters": [
+        13,
+        18
+      ],
+      "count": 684
+    },
+    {
+      "characters": [
+        13,
+        19
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        13,
+        20
+      ],
+      "count": 39
+    },
+    {
+      "characters": [
+        13,
+        21
+      ],
+      "count": 90
+    },
+    {
+      "characters": [
+        13,
+        22
+      ],
+      "count": 1411
+    },
+    {
+      "characters": [
+        13,
+        23
+      ],
+      "count": 3
+    },
+    {
+      "characters": [
+        13,
+        24
+      ],
+      "count": 55
+    },
+    {
+      "characters": [
+        13,
+        25
+      ],
+      "count": 123
+    },
+    {
+      "characters": [
+        13,
+        26
+      ],
+      "count": 40
+    },
+    {
+      "characters": [
+        14,
+        14
+      ],
+      "count": 17
+    },
+    {
+      "characters": [
+        14,
+        15
+      ],
+      "count": 205
+    },
+    {
+      "characters": [
+        14,
+        16
+      ],
+      "count": 43
+    },
+    {
+      "characters": [
+        14,
+        17
+      ],
+      "count": 102
+    },
+    {
+      "characters": [
+        14,
+        18
+      ],
+      "count": 310
+    },
+    {
+      "characters": [
+        14,
+        19
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        14,
+        20
+      ],
+      "count": 14
+    },
+    {
+      "characters": [
+        14,
+        21
+      ],
+      "count": 31
+    },
+    {
+      "characters": [
+        14,
+        22
+      ],
+      "count": 731
+    },
+    {
+      "characters": [
+        14,
+        24
+      ],
+      "count": 48
+    },
+    {
+      "characters": [
+        14,
+        25
+      ],
+      "count": 74
+    },
+    {
+      "characters": [
+        14,
+        26
+      ],
+      "count": 9
+    },
+    {
+      "characters": [
+        15,
+        15
+      ],
+      "count": 280
+    },
+    {
+      "characters": [
+        15,
+        16
+      ],
+      "count": 85
+    },
+    {
+      "characters": [
+        15,
+        17
+      ],
+      "count": 171
+    },
+    {
+      "characters": [
+        15,
+        18
+      ],
+      "count": 1330
+    },
+    {
+      "characters": [
+        15,
+        19
+      ],
+      "count": 21
+    },
+    {
+      "characters": [
+        15,
+        20
+      ],
+      "count": 70
+    },
+    {
+      "characters": [
+        15,
+        21
+      ],
+      "count": 140
+    },
+    {
+      "characters": [
+        15,
+        22
+      ],
+      "count": 2399
+    },
+    {
+      "characters": [
+        15,
+        23
+      ],
+      "count": 7
+    },
+    {
+      "characters": [
+        15,
+        24
+      ],
+      "count": 72
+    },
+    {
+      "characters": [
+        15,
+        25
+      ],
+      "count": 314
+    },
+    {
+      "characters": [
+        15,
+        26
+      ],
+      "count": 31
+    },
+    {
+      "characters": [
+        16,
+        16
+      ],
+      "count": 10
+    },
+    {
+      "characters": [
+        16,
+        17
+      ],
+      "count": 25
+    },
+    {
+      "characters": [
+        16,
+        18
+      ],
+      "count": 156
+    },
+    {
+      "characters": [
+        16,
+        19
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        16,
+        21
+      ],
+      "count": 23
+    },
+    {
+      "characters": [
+        16,
+        22
+      ],
+      "count": 277
+    },
+    {
+      "characters": [
+        16,
+        24
+      ],
+      "count": 6
+    },
+    {
+      "characters": [
+        16,
+        25
+      ],
+      "count": 38
+    },
+    {
+      "characters": [
+        16,
+        26
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        17,
+        17
+      ],
+      "count": 23
+    },
+    {
+      "characters": [
+        17,
+        18
+      ],
+      "count": 385
+    },
+    {
+      "characters": [
+        17,
+        19
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        17,
+        20
+      ],
+      "count": 26
+    },
+    {
+      "characters": [
+        17,
+        21
+      ],
+      "count": 39
+    },
+    {
+      "characters": [
+        17,
+        22
+      ],
+      "count": 660
+    },
+    {
+      "characters": [
+        17,
+        23
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        17,
+        24
+      ],
+      "count": 28
+    },
+    {
+      "characters": [
+        17,
+        25
+      ],
+      "count": 101
+    },
+    {
+      "characters": [
+        17,
+        26
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        18,
+        18
+      ],
+      "count": 1287
+    },
+    {
+      "characters": [
+        18,
+        19
+      ],
+      "count": 47
+    },
+    {
+      "characters": [
+        18,
+        20
+      ],
+      "count": 110
+    },
+    {
+      "characters": [
+        18,
+        21
+      ],
+      "count": 252
+    },
+    {
+      "characters": [
+        18,
+        22
+      ],
+      "count": 5305
+    },
+    {
+      "characters": [
+        18,
+        23
+      ],
+      "count": 12
+    },
+    {
+      "characters": [
+        18,
+        24
+      ],
+      "count": 162
+    },
+    {
+      "characters": [
+        18,
+        25
+      ],
+      "count": 455
+    },
+    {
+      "characters": [
+        18,
+        26
+      ],
+      "count": 94
+    },
+    {
+      "characters": [
+        19,
+        19
+      ],
+      "count": 2
+    },
+    {
+      "characters": [
+        19,
+        22
+      ],
+      "count": 59
+    },
+    {
+      "characters": [
+        19,
+        24
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        19,
+        25
+      ],
+      "count": 9
+    },
+    {
+      "characters": [
+        19,
+        26
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        20,
+        20
+      ],
+      "count": 3
+    },
+    {
+      "characters": [
+        20,
+        21
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        20,
+        22
+      ],
+      "count": 233
+    },
+    {
+      "characters": [
+        20,
+        23
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        20,
+        24
+      ],
+      "count": 5
+    },
+    {
+      "characters": [
+        20,
+        25
+      ],
+      "count": 30
+    },
+    {
+      "characters": [
+        20,
+        26
+      ],
+      "count": 1
+    },
+    {
+      "characters": [
+        21,
+        21
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        21,
+        22
+      ],
+      "count": 501
+    },
+    {
+      "characters": [
+        21,
+        23
+      ],
+      "count": 3
+    },
+    {
+      "characters": [
+        21,
+        24
+      ],
+      "count": 19
+    },
+    {
+      "characters": [
+        21,
+        25
+      ],
+      "count": 70
+    },
+    {
+      "characters": [
+        21,
+        26
+      ],
+      "count": 22
+    },
+    {
+      "characters": [
+        22,
+        22
+      ],
+      "count": 4701
+    },
+    {
+      "characters": [
+        22,
+        23
+      ],
+      "count": 60
+    },
+    {
+      "characters": [
+        22,
+        24
+      ],
+      "count": 273
+    },
+    {
+      "characters": [
+        22,
+        25
+      ],
+      "count": 837
+    },
+    {
+      "characters": [
+        22,
+        26
+      ],
+      "count": 191
+    },
+    {
+      "characters": [
+        24,
+        24
+      ],
+      "count": 15
+    },
+    {
+      "characters": [
+        24,
+        25
+      ],
+      "count": 38
+    },
+    {
+      "characters": [
+        24,
+        26
+      ],
+      "count": 4
+    },
+    {
+      "characters": [
+        25,
+        25
+      ],
+      "count": 41
+    },
+    {
+      "characters": [
+        25,
+        26
+      ],
+      "count": 8
+    },
+    {
+      "characters": [
+        26,
+        26
+      ],
+      "count": 3
+    }
+  ]
+}
