@@ -1,4 +1,4 @@
-"""Publish self-play actors for evaluation and load the recorded O63 proxy."""
+"""Publish self-play actors for evaluation and load the O63 proxy and O64 production checkpoint."""
 
 import hashlib
 import json
@@ -15,6 +15,7 @@ from typing import cast
 
 import torch
 
+from hal import streams
 from hal.data.feature_stats import FeatureStats
 from hal.data.feature_stats import load_consolidated_mixture_stats
 from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
@@ -30,8 +31,8 @@ from hal.sim.native import RewardWeights
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v10"
-TRAINING_VERSION = 10
+TRAINING_FORMAT = "hal.o65.training.v11"
+TRAINING_VERSION = 11
 
 
 class CheckpointShard(TypedDict):
@@ -67,19 +68,20 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
     }
     if not isinstance(manifest, dict):
         raise ValueError("checkpoint manifest schema changed")
-    if manifest.get("version") == TRAINING_VERSION:
+    if manifest.get("version") in (10, TRAINING_VERSION):
         fields.add("reward_weights")
     if set(manifest) != fields:
         raise ValueError("checkpoint manifest schema changed")
     if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
         (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v10", 10),
         ("hal.o65.training.v9", 9),
         ("hal.o65.training.v8", 8),
     ):
         raise ValueError("unsupported checkpoint identity")
     if type(manifest["version"]) is not int or type(manifest["update"]) is not int or manifest["update"] < 0:
         raise ValueError("invalid checkpoint update")
-    if manifest["version"] == TRAINING_VERSION:
+    if manifest["version"] in (10, TRAINING_VERSION):
         weights = manifest["reward_weights"]
         if not isinstance(weights, dict) or set(weights) != {"damage", "stock", "game_win"}:
             raise ValueError("invalid checkpoint reward weights")
@@ -264,21 +266,25 @@ def load_evaluation_checkpoint(
     if path.suffix == ".json":
         path = evaluation_actor_path(path)
     digest = sha256(path)
-    raw = torch.load(path, map_location="cpu", weights_only=False)
+    raw = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     if not isinstance(raw, dict):
         raise ValueError("evaluation checkpoint must be a mapping")
-    is_bc = isinstance(raw.get("cfg"), dict) and raw["cfg"].get("experiment_id") == "063_percentile_conditioning_v1"
+    is_bc = isinstance(raw.get("cfg"), dict) and raw["cfg"].get("experiment_id") in (
+        "063_percentile_conditioning_v1",
+        "064_production_percentile_v1",
+    )
     if is_bc:
         precision = "bf16" if decoder_precision is None else decoder_precision
         saved = raw["cfg"]
-        if saved["checkpoint_format_version"] != 5:
-            raise ValueError("unsupported O63 checkpoint version")
+        production = saved["experiment_id"] == "064_production_percentile_v1"
+        if saved["checkpoint_format_version"] != (6 if production else 5) or saved["arm"] != "bootstrap30":
+            raise ValueError("unsupported BC checkpoint version or treatment")
         if (
             saved["mds_schema_version"] != SCHEMA_VERSION
             or saved["policy_world_schema_version"] != POLICY_WORLD_SCHEMA_VERSION
             or saved["return_conditioning"] is not True
         ):
-            raise ValueError("O63 representation or return conditioning differs")
+            raise ValueError("BC representation or return conditioning differs")
         cfg = ActionSequenceConfig(
             d_model=256,
             n_layers=12,
@@ -290,14 +296,32 @@ def load_evaluation_checkpoint(
             group_head_dim=256,
             value_hidden_dim=128,
         )
+        if production:
+            cfg = ActionSequenceConfig(sample_chunk_length=30, head_offsets=(*range(1, 25), 27, 30))
         if saved["architecture"] != {name: getattr(cfg, name) for name in saved["architecture"]}:
-            raise ValueError("O63 proxy architecture differs")
-        ranges = ConditioningRanges((math.log(0.01), math.log(100)), (8, 10), (2, 4))
+            raise ValueError("BC architecture differs")
+        ranges = ConditioningRanges((math.log(0.01), math.log(100)), (16, 21) if production else (8, 10), (2, 4))
+        if production and tuple(saved["source_names"]) != tuple(
+            source.name for source in streams.POLICY_WORLD_V8_SOURCES
+        ):
+            raise ValueError("O64 requires the full pretraining corpus")
         paths = source_stats_paths(tuple(saved["source_names"]), None)
-        if len(paths) != 1:
+        if not production and len(paths) != 1:
             raise ValueError("O63 development requires a single statistics source")
-        statistics_digest = sha256(paths[0])
-        stats = load_consolidated_mixture_stats(paths, (1.0,), expected_mds_schema_version=SCHEMA_VERSION)
+        statistics_hashes = {name: sha256(path) for name, path in zip(saved["source_names"], paths, strict=True)}
+        if production and statistics_hashes != raw["provenance"]["source_statistics_sha256"]:
+            raise ValueError("O64 feature statistics hash mismatch")
+        statistics_digest = (
+            statistics_hashes[saved["source_names"][0]]
+            if not production
+            else hashlib.sha256(json.dumps(statistics_hashes, sort_keys=True).encode()).hexdigest()
+        )
+        weights = (
+            tuple(float(streams.POLICY_WORLD_V8_TRAIN_REPLAYS[name]) for name in saved["source_names"])
+            if production
+            else (1.0,)
+        )
+        stats = load_consolidated_mixture_stats(paths, weights, expected_mds_schema_version=SCHEMA_VERSION)
         provenance = {
             "reference_sha256": digest,
             "git_sha": raw["provenance"]["git_sha"],
@@ -305,7 +329,7 @@ def load_evaluation_checkpoint(
             "data_manifests": raw["provenance"]["source_manifest_sha256"],
             "statistics_sha256": statistics_digest,
         }
-        queue, critic = 14, 128
+        queue, critic = (24, 512) if production else (14, 128)
     else:
         if (
             set(raw)

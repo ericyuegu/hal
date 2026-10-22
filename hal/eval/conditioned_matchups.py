@@ -24,6 +24,7 @@ from peppi_py.game import EndMethod
 from hal.data.behavior import EDGE_X
 from hal.data.behavior import onsets
 from hal.data.schema import MDS_PER_FRAME_DTYPES
+from hal.eval.action_behavior import sequence_counts
 from hal.eval.batched_self_play import BatchedSelfPlayModel
 from hal.eval.batched_self_play import BatchedSelfPlayPolicy
 from hal.eval.batched_self_play import EvaluationStream
@@ -251,6 +252,20 @@ def score_match(
         events[f"{role}_offstage_fraction"] = float((np.abs(columns["position_x"]) > edge).mean())
         damage = summary.p1_damage_taken if port == 1 else summary.p2_damage_taken
         events[f"{role}_damage_taken_per_min"] = damage / minutes
+    behavior = sequence_counts(
+        *(
+            np.stack([trajectory.post[port][name] for port in (1, 2)], -1).astype(dtype)
+            for name, dtype in (
+                ("action", np.int64),
+                ("stock", np.int64),
+                ("percent", np.float64),
+                ("position_x", np.float64),
+            )
+        ),
+        stage=start.stage,
+    )
+    for role, port in (("student", focal_port), ("pi_ref", 3 - focal_port)):
+        events.update(behavior[port - 1].metrics(role))
     events["timeout"] = float(stop_reason == "timeout")
     events["frame_budget"] = float(stop_reason == "frame_budget")
     events["match_minutes"] = minutes

@@ -530,3 +530,31 @@ def test_learner_resume_records_source_and_treatment_weights(tmp_path: Path, mon
     assert json.loads((output / "pilot-identity.json").read_text())["reward_weights"] == weights
     assert dataclasses.asdict(commands[0].training.reward_weights) == weights
     assert commands[0].resume_learner == source
+
+
+def test_final_behavior_metrics_keep_one_slash_and_global_step(tmp_path: Path) -> None:
+    interval = {"mean": 2.0, "low": 1.0, "high": 3.0}
+    result = {
+        "format": "hal.o65.evaluation-results.v2",
+        "split": "held_out",
+        "groups": [
+            {
+                "metrics": {
+                    "msl": {
+                        "net_stocks_per_min": interval,
+                        "win_rate": interval,
+                        "events": {"behavior/student_smash_per_min": interval},
+                        "matches": 2,
+                        "completed_pairs": 1,
+                        "net_stock_lcb": 1,
+                    }
+                }
+            }
+        ],
+    }
+    (tmp_path / "results.json").write_text(json.dumps(result))
+    _MODULE.log_evaluation(tmp_path, 256, {}, online=False)
+    metrics = json.loads((tmp_path / "wandb-metrics.json").read_text())
+    assert metrics["global_step"] == 256
+    assert metrics["evaluation/held_out_msl_cell0_behavior_student_smash_per_min"] == 2
+    assert all(name.count("/") <= 1 for name in metrics)

@@ -162,7 +162,8 @@ def log_evaluation(path: Path, update: int, environment: dict[str, str], *, onli
                         metrics[f"{prefix}_{name}_{statistic}"] = float(value)
             for name, interval in values.get("events", {}).items():
                 if interval["mean"] is not None:
-                    metrics[f"{prefix}_{name}"] = float(interval["mean"])
+                    metric_name = name.replace("/", "_")
+                    metrics[f"{prefix}_{metric_name}"] = float(interval["mean"])
             for name in ("matches", "completed_pairs", "net_stock_lcb"):
                 if values[name] is not None:
                     metrics[f"{prefix}_{name}"] = float(values[name])

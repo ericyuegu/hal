@@ -27,7 +27,7 @@ class Args:
     data_dir: Path | None = None
     protocol: Path | None = None
     lambda_grid: tuple[float, ...] = ()
-    cadence_grid: tuple[Literal["8/4", "10/2"], ...] = ()
+    cadence_grid: tuple[str, ...] = ()
     split: Literal["selection", "held_out"] = "selection"
     simulators: tuple[Literal["msl", "dolphin"], ...] = ("msl", "dolphin")
     lambda_value: float = 1.0

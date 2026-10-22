@@ -34,6 +34,9 @@ from torch import Tensor
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import Rank
+from hal.eval.action_behavior import COUNT_NAMES
+from hal.eval.action_behavior import BehaviorCounts
+from hal.eval.action_behavior import BehaviorTracker
 from hal.eval.self_play_checkpoint import EVALUATION_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_VERSION
@@ -70,8 +73,10 @@ from hal.sim import native_bridge
 from hal.sim import native_shard
 from hal.sim.inputs import native_controller_readback
 from hal.sim.native_shard import NativeShard
+from hal.training import mfu
 from hal.training import self_play_publication
 from hal.training.muon import SingleDeviceMuonWithAuxAdam
+from hal.training.self_play_flops import SelfPlayFlops
 from hal.wire import ACTION_DIM
 
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
@@ -1161,6 +1166,7 @@ class Rollout:
     elapsed: float
     results: tuple[EpisodeResult, ...]
     idle_frames: int = 0
+    behavior: tuple[tuple[str, BehaviorCounts], ...] = ()
 
 
 class DenseRollout:
@@ -1271,6 +1277,8 @@ class TransformerPolicy:
         self.post_startup_captures = 0
         self.capture_count = 0
         self.model = model.eval()
+        self.flops = SelfPlayFlops.from_model(model)
+        self.work_flops: dict[str, int] = defaultdict(int)
         self.schedule = schedule
         self.statistics = statistics
         for stat in statistics.values():
@@ -1287,6 +1295,7 @@ class TransformerPolicy:
         self.packed_builder = PackedColumnContextBuilder(statistics, native.OBSERVATION_FIELDS, self.device)
         self.decode_order = torch.tensor(DECODE_GROUP_INDICES, device=self.device)
         self.tick_decoder = DecisionDecoder(model, configurations, compiled=False)
+        self.forced_prefix_length = min(config.delay for config in schedule.configurations)
         self.tick_caches: dict[tuple[ActionRing, tuple[int, ...]], BlockRestartCache] = {}
         self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
@@ -1602,6 +1611,13 @@ class TransformerPolicy:
                 else:
                     # CPU tests execute the same fixed-slot operation without capture.
                     captured = None
+            self.work_flops["rollout"] += self.flops.rollout(
+                len(states),
+                appended,
+                self.tick_decoder.max_delay + count,
+                self.tick_decoder.max_delay + count - self.forced_prefix_length,
+                restart=restart,
+            )
             if self.profile is not None:
                 self.profile.work["rollout/trunk_tokens"] += len(states) * (appended + (128 if restart else 0))
                 self.profile.work["rollout/decoder_tokens"] += len(states) * (self.tick_decoder.max_delay + count)
@@ -1757,6 +1773,7 @@ class TransformerPolicy:
                 # Each replay reuses output storage; retain this chunk before the next.
                 chunks.append(concatenate_replays((captured(part),), 0))
             output = concatenate_replays(chunks, 0)
+        self.work_flops["reference"] += self.flops.replay(padded_windows, padded_slots, self.max_delay + 4, 4)
         if self.profile is not None:
             phase_name = self.profile.phase_name
             self.profile.work[f"{phase_name}/trunk_tokens"] += padded_windows * 256
@@ -1811,6 +1828,10 @@ class TransformerPolicy:
 
     @torch.no_grad()
     def evaluate_values(self, batch: ReplayBatch) -> Tensor:
+        self.work_flops["value"] += (
+            self.flops.replay(len(batch.records), batch.rows.shape[1], self.max_delay + 1, 0)
+            + batch.rows.numel() * self.flops.critic
+        )
         if self.profile is not None:
             phase_name = self.profile.phase_name
             self.profile.work[f"{phase_name}/trunk_tokens"] += batch.records.shape[0] * batch.records.shape[1]
@@ -1831,6 +1852,9 @@ class TransformerPolicy:
     def actor_step(
         self, batch: ReplayBatch, targets: ActorTargets, *, clip_epsilon: float
     ) -> tuple[ActorLoss, ReplayOutput]:
+        self.work_flops["actor"] += 3 * self.flops.replay(
+            len(batch.records), batch.rows.shape[1], self.max_delay + 4, 4
+        )
         if self.profile is not None:
             phase_name = self.profile.phase_name
             self.profile.work[f"{phase_name}/trunk_tokens"] += batch.records.shape[0] * batch.records.shape[1]
@@ -2048,6 +2072,8 @@ class RolloutEngine:
             for shard in group
             for match, role in zip(shard.match_ids, opponent_slots(len(shard.match_ids)), strict=True)
         }
+        self.behavior_tracker = BehaviorTracker(2 * (max(ids) + 1))
+        self.behavior_totals: dict[str, NDArray[np.int64]] = {}
         self.locations = {
             match: (group, lane)
             for group, matches in enumerate(self.group_matches)
@@ -2298,6 +2324,7 @@ class RolloutEngine:
         ring = self.rings[group]
         ring.reset(at, (episode.players[0].timing.delay, episode.players[1].timing.delay))
         ring.controllers[at].copy_(self.policy.device_wire_actions(ring.values[at]))
+        self.behavior_tracker.reset(np.array([2 * match, 2 * match + 1], dtype=np.int64))
         self.matches[match] = MatchState(episode, clock)
         self._publish_episode(group, at, match, position, episode, clock)
 
@@ -2662,6 +2689,7 @@ class RolloutEngine:
         for shard in shards:
             if isinstance(shard, NativeSimulatorShard):
                 shard.stepped_frames += int(self._active(shard).sum())
+        self.observe_behavior(frames.columns[active_host], host_lanes[active_host])
         ends = active_host & (terminals | truncations)
         for source in np.flatnonzero(ends):
             lane = int(host_lanes[source])
@@ -2759,6 +2787,36 @@ class RolloutEngine:
                     resets += 1
         return resets
 
+    def observe_behavior(self, columns: NDArray[np.uint32], lanes: NDArray[np.int64]) -> None:
+        if not len(lanes):
+            return
+        group = self.cursor
+        matches = np.asarray(self.group_matches[group], dtype=np.int64)[lanes]
+        streams = (2 * matches[:, None] + np.arange(2)[None]).ravel()
+
+        def player_bits(suffix: str) -> NDArray[np.uint32]:
+            return np.stack([columns[:, NATIVE_COLUMN_LAYOUT[f"p{side}_{suffix}"][0]] for side in (1, 2)], -1)
+
+        stage = columns[:, NATIVE_COLUMN_LAYOUT["stage"][0]].view(np.int32).astype(np.int64)
+        tracker = self.behavior_tracker
+        tracker.observe(
+            streams,
+            player_bits("action").view(np.int32).astype(np.int64),
+            player_bits("stock").view(np.int32).astype(np.int64),
+            player_bits("percent").view(np.float32).astype(np.float64),
+            player_bits("position_x").view(np.float32).astype(np.float64),
+            stage,
+        )
+        counts = tracker.counts[streams]
+        roles = self.assignments[group].reshape(-1, 2)[lanes]
+        for role, mask in (
+            ("student", roles < 0),
+            ("student_pi_ref", (roles < 0) & (roles[:, ::-1] == 0)),
+            ("pi_ref", roles == 0),
+        ):
+            self.behavior_totals[role] += counts[mask.ravel()].sum(0)
+        tracker.counts[streams] = 0
+
     def _active(self, shard: SimulatorShard) -> NDArray[np.bool_]:
         return self.live_host[self.cursor][self.shard_lanes[id(shard)]]
 
@@ -2767,6 +2825,9 @@ class RolloutEngine:
             raise ValueError("initialize or restore the pool before rollout")
         started = time.perf_counter()
         self.results = []
+        self.behavior_totals = {
+            role: np.zeros(len(COUNT_NAMES), dtype=np.int64) for role in ("student", "student_pi_ref", "pi_ref")
+        }
         group_id = self.cursor
         shards = self.groups[group_id]
         self.transfer_timings.clear()
@@ -2934,6 +2995,7 @@ class RolloutEngine:
             time.perf_counter() - started,
             tuple(self.results),
             count * len(matches) - frames_stepped,
+            tuple((role, BehaviorCounts(counts)) for role, counts in self.behavior_totals.items()),
         )
 
 
@@ -4250,10 +4312,47 @@ class Trainer:
         self.warming = False
         return {"train/warmup_ended": 1.0}
 
+    def flops_metrics(self, batch: PreparedUpdate, metrics: dict[str, float]) -> dict[str, float]:
+        if not isinstance(self.policy, TransformerPolicy):
+            return {}
+        policies = (self.policy, *self.engine.anchors.values())
+        rollout = sum(
+            policy.work_flops.get("rollout", 0) for policy in policies if isinstance(policy, TransformerPolicy)
+        )
+        actor = self.policy.work_flops.get("actor", 0)
+        preparation = self.policy.work_flops.get("value", 0) + (
+            self.reference.work_flops.get("reference", 0) if isinstance(self.reference, TransformerPolicy) else 0
+        )
+        critic = 3 * self.policy.flops.critic * len(batch.values) * self.config.critic_epochs
+        peak = (
+            mfu.bf16_dense_peak_flops(torch.cuda.get_device_name(self.policy.device))
+            if self.policy.device.type == "cuda"
+            else None
+        )
+        result: dict[str, float] = {"mfu/bf16_peak_known": float(peak is not None)}
+        decisions = metrics["data/trained_decisions"]
+        for name, work, units, seconds in (
+            ("rollout", rollout, batch.rollout.frames, metrics["systems/rollout_seconds"]),
+            ("actor", actor, decisions, metrics.get("systems/actor_seconds", 0)),
+            ("critic", critic, len(batch.values), metrics["systems/critic_seconds"]),
+            ("preparation", preparation, len(batch.values), metrics["systems/preparation_seconds"]),
+        ):
+            result[f"flops/{name}_total"] = float(work)
+            if units:
+                result[f"flops/{name}_per_{'match_frame' if name == 'rollout' else 'decision'}"] = work / units
+            if work and seconds > 0:
+                result[f"throughput/{name}_tflops"] = work / seconds / 1e12
+                if peak is not None:
+                    result[f"mfu/{name}"] = mfu.model_flops_utilization(work, seconds, peak)
+        return result
+
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
         if self.updating:
             raise ValueError("previous update did not finish; restore an update-boundary checkpoint")
         self.updating = True
+        for policy in (self.policy, *self.engine.anchors.values()):
+            if isinstance(policy, TransformerPolicy):
+                policy.work_flops.clear()
         started = time.perf_counter()
         native_shards = [
             shard for shard in self.engine.groups[self.engine.cursor] if isinstance(shard, NativeSimulatorShard)
@@ -4282,6 +4381,8 @@ class Trainer:
             metrics = self.fit(batch)
         metrics.update(self.completed_metrics(rollout, batch.kl))
         metrics.update(self.anchor_metrics(rollout))
+        for role, counts in rollout.behavior:
+            metrics.update(counts.metrics(role))
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True
         for index, (shard, previous) in enumerate(zip(native_shards, before, strict=True)):
@@ -4347,6 +4448,7 @@ class Trainer:
                     ),
                 )
             )
+        metrics.update(self.flops_metrics(batch, metrics))
         metrics["systems/startup_capture_seconds"] = self.startup_seconds
         metrics["systems/post_startup_compiles"] = float(
             self.compilation_counter.snapshot() if self.compilation_counter is not None else 0
@@ -4494,6 +4596,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "warmup_start_update": trainer.warmup_start_update,
         "warmup_moments": trainer.warmup_moments,
         "episode_metrics": trainer.episode_metrics,
+        "behavior_state": engine.behavior_tracker.state.copy(),
         "partial_episodes": sorted(trainer.partial_episodes),
         "anchor_win_history": trainer.anchor_win_history,
         "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
@@ -4689,6 +4792,8 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if set(paths) != expected_roles:
         raise ValueError("checkpoint simulator topology mismatch")
     saved = torch.load(paths["training"], map_location="cpu", weights_only=False)
+    behavior = BehaviorTracker(len(trainer.engine.behavior_tracker.state))
+    behavior.restore(saved["behavior_state"])
     warmup_start = saved["warmup_start_update"]
     if (
         type(warmup_start) is not int
@@ -4815,6 +4920,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.warming = saved["warming"]
     trainer.warmup_start_update = warmup_start
     trainer.warmup_moments = saved["warmup_moments"]
+    engine.behavior_tracker.restore(saved["behavior_state"])
     trainer.episode_metrics = saved["episode_metrics"]
     trainer.partial_episodes = set(cast(list[tuple[int, int]], partial))
     trainer.anchor_win_history = saved["anchor_win_history"]
@@ -5056,7 +5162,11 @@ class NativeCli:
     cpus: tuple[int, ...]
     updates: int
     groups: int = 4
+    rollout_frames: int = 256
+    cadence: Literal["development", "production"] = "development"
+    configurations: tuple[DelayReplan, ...] = ()
     matches_per_shard: int = 16
+    active_matches_per_gpu: int | None = None
     device: str = "cuda"
     max_frame: int = 28800
     resume: Path | None = None
@@ -5072,6 +5182,10 @@ class NativeCli:
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if type(self.rollout_frames) is not int or self.rollout_frames < 128 or self.rollout_frames % 128:
+            raise ValueError("rollout frames must contain whole 128-frame blocks")
+        if self.cadence not in ("development", "production"):
+            raise ValueError("unsupported cadence")
         if self.resume_learner is not None and (
             self.resume is not None or self.verify_resume or self.profiling is not None
         ):
@@ -5103,6 +5217,15 @@ class NativeCli:
             raise ValueError("native runs need distinct available CPUs")
         if any(value < 1 for value in (self.groups, self.matches_per_shard, self.updates)):
             raise ValueError("groups, matches per shard, and updates must be positive integers")
+        if self.active_matches_per_gpu is not None and (
+            type(self.active_matches_per_gpu) is not int
+            or self.active_matches_per_gpu < 4 * len(self.cpus)
+            or self.active_matches_per_gpu % len(self.cpus)
+            or self.matches_per_shard != 16
+        ):
+            raise ValueError(
+                "active matches must divide across CPUs with at least four per shard; leave matches_per_shard at its default"
+            )
         if self.matches_per_shard < 4:
             raise ValueError("native fixed-slot shards require at least four matches")
         if self.max_frame != -1 and self.max_frame < 0:
@@ -5193,7 +5316,12 @@ def train_native(config: NativeCli) -> None:
     )
     checkpoint.model.requires_grad_(True)
     checkpoint.model.percentile_head.requires_grad_(False)
-    schedule = development_config(checkpoint.model.head_offsets)
+    factory = production_config if config.cadence == "production" else development_config
+    schedule = factory(checkpoint.model.head_offsets, rollout_frames=config.rollout_frames)
+    if config.configurations:
+        if not set(config.configurations) <= set(schedule.configurations):
+            raise ValueError("requested configurations are outside the selected cadence")
+        schedule = dataclasses.replace(schedule, configurations=config.configurations)
     policy = TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics)
     sampling = read_native_sampler(config.sampler)
     for row in sampling.identities:
@@ -5215,7 +5343,12 @@ def train_native(config: NativeCli) -> None:
         for _ in range(config.groups):
             shards: list[NativeSimulatorShard] = []
             for cpu in config.cpus:
-                ids = tuple(range(next_match, next_match + config.matches_per_shard))
+                matches_per_shard = (
+                    config.matches_per_shard
+                    if config.active_matches_per_gpu is None
+                    else config.active_matches_per_gpu // len(config.cpus)
+                )
+                ids = tuple(range(next_match, next_match + matches_per_shard))
                 shard = NativeSimulatorShard(
                     config.data_dir,
                     ids,
@@ -5226,7 +5359,7 @@ def train_native(config: NativeCli) -> None:
                 )
                 resources.callback(shard.close)
                 shards.append(shard)
-                next_match += config.matches_per_shard
+                next_match += matches_per_shard
             groups.append(tuple(shards))
         provenance = {
             "git_sha": git_sha,
@@ -5991,6 +6124,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.warmup_moments,
                 trainer.evaluation_cursor,
                 trainer.episode_metrics,
+                trainer.engine.behavior_tracker.state,
                 sorted(trainer.partial_episodes),
                 trainer.anchor_win_history,
             )
