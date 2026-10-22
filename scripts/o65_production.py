@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import torch
@@ -31,7 +32,7 @@ def stage_checkpoint(directory: Path) -> Path:
     if not checkpoint.exists():
         temporary = checkpoint.with_suffix(".partial")
         try:
-            with r2.client() as client:
+            with closing(r2.client()) as client:
                 client.download_file(r2.bucket(), O64_KEY, str(temporary))
             if sha256(temporary) != O64_SHA256:
                 raise ValueError("O64 checkpoint SHA-256 mismatch")
