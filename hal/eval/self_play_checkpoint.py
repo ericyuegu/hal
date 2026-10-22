@@ -298,6 +298,16 @@ def load_evaluation_checkpoint(
         )
         if production:
             cfg = ActionSequenceConfig(sample_chunk_length=30, head_offsets=(*range(1, 25), 27, 30))
+            architecture_fields = set(asdict(cfg)) - {
+                "main_stick_layout",
+                "player_vocab_sha256",
+                "hidden_std_multiplier",
+                "player_vocab_size",
+                "return_conditioning",
+                "depth_alpha",
+            }
+            if not isinstance(saved["architecture"], dict) or set(saved["architecture"]) != architecture_fields:
+                raise ValueError("O64 architecture fields changed")
         if saved["architecture"] != {name: getattr(cfg, name) for name in saved["architecture"]}:
             raise ValueError("BC architecture differs")
         ranges = ConditioningRanges((math.log(0.01), math.log(100)), (16, 21) if production else (8, 10), (2, 4))

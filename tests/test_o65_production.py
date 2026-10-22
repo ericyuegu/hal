@@ -14,10 +14,14 @@ from test_065_loop import exp
 from test_065_loop import trainer
 from test_o65_evaluation import small_model
 
+from hal.data.policy_world_schema import POLICY_WORLD_SCHEMA_VERSION
+from hal.data.schema import SCHEMA_VERSION
 from hal.eval.action_behavior import COUNT_NAMES
 from hal.eval.action_behavior import EVENT_STATES
 from hal.eval.action_behavior import BehaviorTracker
 from hal.eval.action_behavior import sequence_counts
+from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
+from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.self_play import validate_executed_offsets
 from hal.training.self_play_flops import SelfPlayFlops
 
@@ -160,3 +164,38 @@ def test_native_cli_rejects_invalid_rollout_and_active_match_counts(tmp_path: Pa
         dataclasses.replace(args, rollout_frames=510)
     with pytest.raises(ValueError, match="active matches"):
         dataclasses.replace(args, active_matches_per_gpu=3)
+
+
+@pytest.mark.parametrize("field", ["head_offsets", "unknown_field"])
+def test_o64_rejects_missing_or_unknown_architecture_fields(tmp_path: Path, field: str) -> None:
+    architecture = dataclasses.asdict(ActionSequenceConfig(sample_chunk_length=30, head_offsets=O64_OFFSETS))
+    for name in (
+        "main_stick_layout",
+        "player_vocab_sha256",
+        "hidden_std_multiplier",
+        "player_vocab_size",
+        "return_conditioning",
+        "depth_alpha",
+    ):
+        architecture.pop(name)
+    if field == "head_offsets":
+        architecture.pop(field)
+    else:
+        architecture[field] = 1
+    path = tmp_path / "invalid.pt"
+    torch.save(
+        {
+            "cfg": {
+                "experiment_id": "064_production_percentile_v1",
+                "checkpoint_format_version": 6,
+                "arm": "bootstrap30",
+                "mds_schema_version": SCHEMA_VERSION,
+                "policy_world_schema_version": POLICY_WORLD_SCHEMA_VERSION,
+                "return_conditioning": True,
+                "architecture": architecture,
+            }
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match="architecture fields"):
+        load_evaluation_checkpoint(path, device=torch.device("cpu"))
