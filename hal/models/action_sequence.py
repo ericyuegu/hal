@@ -441,7 +441,8 @@ class TemporalBlock(nn.Module):
         """Write each row's offset into K/V slot ``slot`` and attend to slots up to it.
 
         Slot j holds offset j, so rows with different delays share one step while
-        each row reads only its own forced prefix and sampled tail.
+        each row reads only its own forced prefix and sampled tail. The cache
+        holds rotated keys, so each step rotates only the key it writes.
         """
         if modulation is None:
             scale_attn = shift_attn = scale_mlp = shift_mlp = None
@@ -456,17 +457,23 @@ class TemporalBlock(nn.Module):
         if cache is None:
             empty = k.new_zeros(batch, self.n_heads, capacity, self.head_dim)
             cache = (empty, empty)
+        cos, sin = self.rotary.at(capacity, x.device)
+        slot_cos, slot_sin = cos[0, slot][:, None], sin[0, slot][:, None]
+        q = apply_rotary_emb(q, slot_cos, slot_sin).transpose(1, 2)
+        k = apply_rotary_emb(k, slot_cos, slot_sin)
         index = slot[:, None, None, None].expand(batch, self.n_heads, 1, self.head_dim)
         keys = cache[0].scatter(2, index, k.transpose(1, 2))
         values = cache[1].scatter(2, index, v.transpose(1, 2))
-        cos, sin = self.rotary.at(capacity, x.device)
-        q = apply_rotary_emb(q, cos[0, slot][:, None], sin[0, slot][:, None]).transpose(1, 2)
-        rotated_k = apply_rotary_emb(keys.transpose(1, 2), cos, sin).transpose(1, 2)
-        attended = prefix_attention(q, rotated_k, values, slot + 1, causal=False)
+        attended = prefix_attention(q, keys, values, slot + 1, causal=False)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
         x = x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
         return x, (keys, values)
+
+    def rotate_keys(self, keys: Tensor) -> Tensor:
+        """Rotate unrotated [B, H, L, head_dim] keys by their slot positions."""
+        cos, sin = self.rotary.at(keys.shape[2], keys.device)
+        return apply_rotary_emb(keys.transpose(1, 2), cos, sin).transpose(1, 2)
 
     def prefill(self, x: Tensor, modulation: Tensor | None) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         """Advance a known action prefix in parallel and retain its unrotated K/V."""
@@ -479,7 +486,7 @@ class TemporalBlock(nn.Module):
         query = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         key = apply_rotary_emb(k, cos, sin).transpose(1, 2)
         value = v.transpose(1, 2)
-        attended = F.scaled_dot_product_attention(query, key, value, is_causal=True)
+        attended = short_causal_attention(query, key, value)
         attended = attended.transpose(1, 2).contiguous().view_as(x)
         x = x + self.scale * self.proj(attended)
         x = x + self.mlp_scale * self.down(F.silu(self.up(self._modulated_norm(x, scale_mlp, shift_mlp))))
@@ -1330,11 +1337,15 @@ class CausalTemporalDecoder(nn.Module):
             _, prefix = self._prefill_forced_prefix(
                 observed, tuple(range(1, max_delay + 1)), queue, bias, memory, conditioning
             )
+            # The prefill returns unrotated keys for forward_step; forward_slot reads rotated ones.
             caches = [
                 None
                 if cache is None
-                else (F.pad(cache[0], (0, 0, 0, sampled_offsets)), F.pad(cache[1], (0, 0, 0, sampled_offsets)))
-                for cache in prefix
+                else (
+                    F.pad(cast(TemporalBlock, block).rotate_keys(cache[0]), (0, 0, 0, sampled_offsets)),
+                    F.pad(cache[1], (0, 0, 0, sampled_offsets)),
+                )
+                for block, cache in zip(self.blocks, prefix, strict=True)
             ]
             last = queue.gather(1, (delay - 1).clamp_min(0)[:, None, None].expand(-1, 1, CONTROLLER_GROUP_COUNT))
             previous = torch.where((delay > 0)[:, None], last[:, 0], observed)

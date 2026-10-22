@@ -454,6 +454,8 @@ def run_child(request: Request, output: Path, started: float) -> int:
         # One worker limits cold-start disk use on the RTX PRO 6000; B200 hosts have
         # the disk, and parallel Triton compilation shortens cold startup.
         TORCHINDUCTOR_COMPILE_THREADS="8" if request.mode == "ddp" else "1",
+        # Programmatic dependent launch shortened B200 rollout ticks by about 4%.
+        TORCHINDUCTOR_ENABLE_PDL="1" if request.mode == "ddp" else "0",
         OMP_NUM_THREADS="2",
         MKL_NUM_THREADS="2",
         CUBLAS_WORKSPACE_CONFIG=":4096:8",
@@ -588,7 +590,12 @@ def build_image(sha: str, secret: modal.Secret) -> modal.Image:
         .env({"PYTHONPATH": root, "UV_PROJECT_ENVIRONMENT": "/opt/venv"})
         .workdir(root)
         .run_commands(image_commands(sha), secrets=[secret])
-        .env({"PYTHONPATH": f"{root}:{root}/delivery/msl"})
+        .env(
+            {
+                "PYTHONPATH": f"{root}:{root}/delivery/msl",
+                "MSL_CORE_LIBRARY": f"{root}/delivery/msl/build/melee_core/python-release/libmelee_core.so",
+            }
+        )
     )
 
 

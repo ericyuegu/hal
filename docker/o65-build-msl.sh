@@ -14,5 +14,7 @@ from pathlib import Path
 from tools.data.raw import validate_raw_dir
 validate_raw_dir(Path(sys.argv[1]), verify_hashes=True)
 PY
-make -C "$delivery/msl" native python-library -j "${MSL_BUILD_JOBS:-2}" PY="$(command -v python)"
+# The strict O1 release library produced bit-identical frames to the O0 library and steps 2.4x faster.
+# The image sets MSL_CORE_LIBRARY to build/melee_core/python-release/libmelee_core.so.
+make -C "$delivery/msl" native python-release -j "${MSL_BUILD_JOBS:-2}" PY="$(command -v python)"
 python -m hal.sim.native_build --native-source "$delivery/msl" --output "$delivery/libhal_native.so"
