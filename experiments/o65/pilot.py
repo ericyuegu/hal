@@ -20,6 +20,8 @@ import tyro
 import wandb
 
 from hal.eval.self_play_checkpoint import read_training_manifest
+from hal.sim.native import DEFAULT_REWARD_WEIGHTS
+from hal.sim.native import RewardWeights
 from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,10 +37,16 @@ class Args:
     checkpoint_retention: Literal["all", "compact"] = "compact"
     resume: bool = False
     resume_learner: Path | None = None
+    damage_weight: float = 1.0
+    stock_weight: float = 120.0
+    game_win_weight: float = 50.0
     compile_cache: Path | None = None
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
+
+    def __post_init__(self) -> None:
+        RewardWeights(self.damage_weight, self.stock_weight, self.game_win_weight)
 
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
@@ -59,6 +67,7 @@ def training_command(
     warmup: int,
     compile_cache: Path | None = None,
     resume_learner: Path | None = None,
+    reward_weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -92,6 +101,12 @@ def training_command(
         "1200",
         "--training.checkpoint-interval",
         str(checkpoint_every),
+        "--training.reward-weights.damage",
+        str(reward_weights.damage),
+        "--training.reward-weights.stock",
+        str(reward_weights.stock),
+        "--training.reward-weights.game-win",
+        str(reward_weights.game_win),
     ]
     if resume_learner is not None:
         command.extend(("--resume-learner", str(resume_learner)))
@@ -252,11 +267,14 @@ def consume_held_out(output: Path, update: int, protocol: Path) -> Path:
     return consumed
 
 
-def bind_pilot_identity(output: Path, git_sha: str, *, tiny: bool) -> None:
+def bind_pilot_identity(
+    output: Path, git_sha: str, *, tiny: bool, reward_weights: RewardWeights = DEFAULT_REWARD_WEIGHTS
+) -> None:
     record = {
-        "format": "hal.o65.pilot-identity.v1",
+        "format": "hal.o65.pilot-identity.v2",
         "git_sha": git_sha,
         "tiny": tiny,
+        "reward_weights": dataclasses.asdict(reward_weights),
         "inputs": {
             name: hashlib.sha256((ROOT / "experiments/o65" / name).read_bytes()).hexdigest()
             for name in ("pilot-inputs.json", "pilot-sampler.json", "pilot-evaluation.json")
@@ -280,7 +298,8 @@ def main(args: Args) -> None:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=args.resume)
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    bind_pilot_identity(output, sha, tiny=args.tiny)
+    reward_weights = RewardWeights(args.damage_weight, args.stock_weight, args.game_win_weight)
+    bind_pilot_identity(output, sha, tiny=args.tiny, reward_weights=reward_weights)
     available = tuple(sorted(os.sched_getaffinity(0)))
     cpus = args.cpus or available[: 2 if args.tiny else 16]
     if len(cpus) != (2 if args.tiny else 16) or len(set(cpus)) != len(cpus) or set(cpus) - set(available):
@@ -329,6 +348,7 @@ def main(args: Args) -> None:
         checkpoint_every=checkpoint_every,
         warmup=0 if args.tiny else 32,
         compile_cache=args.compile_cache,
+        reward_weights=reward_weights,
     )
     if args.wandb:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
@@ -344,6 +364,7 @@ def main(args: Args) -> None:
             run.rename(run.with_name(f"train-interrupted-{time.time_ns()}"))
         run.mkdir()
         inherit_metrics(source_metrics, run / "metrics.jsonl", 256)
+        source_weights = read_training_manifest(args.resume_learner)["reward_weights"]
         (output / "learner-resume.json").write_text(
             json.dumps(
                 {
@@ -352,6 +373,9 @@ def main(args: Args) -> None:
                     "source_metrics_sha256": hashlib.sha256(source_metrics.read_bytes()).hexdigest(),
                     "pool": "fresh fixed opponent slots with pi_ref head start",
                     "source_update": 256,
+                    "source_reward_weights": source_weights,
+                    "reward_weights": dataclasses.asdict(reward_weights),
+                    "critic_warmup_updates": 32 if source_weights != dataclasses.asdict(reward_weights) else 0,
                 },
                 indent=2,
             )

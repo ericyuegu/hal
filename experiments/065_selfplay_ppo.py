@@ -733,7 +733,14 @@ class NativeSimulatorShard:
     """Step native matches using pinned buffers for device transfers."""
 
     def __init__(
-        self, data_dir: Path, match_ids: tuple[int, ...], *, cpu: int, device: torch.device, max_frame: int = 28800
+        self,
+        data_dir: Path,
+        match_ids: tuple[int, ...],
+        *,
+        cpu: int,
+        device: torch.device,
+        max_frame: int = 28800,
+        reward_weights: native.RewardWeights = native.DEFAULT_REWARD_WEIGHTS,
     ) -> None:
         if not match_ids or len(set(match_ids)) != len(match_ids) or min(match_ids) < 0:
             raise ValueError("native shard needs distinct nonnegative match ids")
@@ -755,7 +762,7 @@ class NativeSimulatorShard:
         self.copied_bytes = 0
         self.timings: list[ShardTiming] = []
         self._configs = [native.NativeMatch(25, (native.NativePlayer(1, 1), native.NativePlayer(2, 22)), 0)] * count
-        self.shard = NativeShard(data_dir, count, cpu=cpu, records=self._records)
+        self.shard = NativeShard(data_dir, count, cpu=cpu, records=self._records, reward_weights=reward_weights)
 
     def _before_write(self) -> None:
         if self._event is not None:
@@ -2951,6 +2958,7 @@ def concatenate_shard_frames(frames: Sequence[ShardFrames]) -> ShardFrames:
 @dataclasses.dataclass(frozen=True, slots=True)
 class TrainConfig:
     seed: int = 65
+    reward_weights: native.RewardWeights = native.RewardWeights()
     actor_optimizer: Literal["muon", "adam"] = "muon"
     actor_lr: float = 1e-5
     critic_lr: float = 3e-4
@@ -3411,7 +3419,9 @@ def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, 
 
 
 @torch.no_grad()
-def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
+def reward_component_metrics(
+    rollout: Rollout, weights: native.RewardWeights = native.DEFAULT_REWARD_WEIGHTS
+) -> dict[str, float]:
     table = rollout.table
     meta = table.integers[rollout.ids]
     side = meta[:, SIDE]
@@ -3419,13 +3429,16 @@ def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
     losses, damage, wins = frame_components(table, rollout.ids)
     result = {}
     rows = torch.arange(len(meta), device=meta.device)[:, None]
-    for name, value, scale in (("damage", damage, 1.0), ("stock", losses, 120.0), ("win", wins, 50.0)):
+    for name, value, scale in (
+        ("damage", damage, weights.damage),
+        ("stock", losses, weights.stock),
+        ("win", wins, weights.game_win),
+    ):
         positive = value[rows, torch.arange(4, device=meta.device), 1 - side[:, None]] * scale
         negative = -value[rows, torch.arange(4, device=meta.device), side[:, None]] * scale
-        net = (positive + negative) / scale
         result[f"return/{name}_positive"] = float(torch.where(valid, positive, 0).sum() / len(meta))
         result[f"return/{name}_negative"] = float(torch.where(valid, negative, 0).sum() / len(meta))
-        result[f"return/{name}_reward"] = float(torch.where(valid, net * scale, 0).sum() / len(meta))
+        result[f"return/{name}_reward"] = float(torch.where(valid, positive + negative, 0).sum() / len(meta))
     return result
 
 
@@ -3548,6 +3561,7 @@ class Trainer:
         self.update = 0
         self.actor_steps = 0
         self.pool_start_update = 0
+        self.warmup_start_update = 0
         self.warming = config.critic_warmup_updates > 0
         self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
         if set(engine.anchors) != {0}:
@@ -3856,7 +3870,7 @@ class Trainer:
         ):
             reference = (
                 None
-                if self.warming
+                if self.warming and self.warmup_start_update == 0
                 else window_evaluation(
                     self.reference.evaluate_reference(
                         windows,
@@ -4007,7 +4021,7 @@ class Trainer:
                 metrics[f"policy/kl_{factor}_per_frame"] = float(kl[:, index::4][frames].mean())
         if reference is not None and isinstance(self.policy, TransformerPolicy):
             metrics.update(action_statistics(self.policy.model, old, reference, executed))
-        metrics.update(reward_component_metrics(rollout))
+        metrics.update(reward_component_metrics(rollout, self.config.reward_weights))
 
         ages = table.age[ids]
         age_bins = torch.bucketize(ages, ages.new_tensor((128, 512, 2048, 8192)))
@@ -4221,7 +4235,7 @@ class Trainer:
                 previous[1] + float(values.sum()),
                 previous[2] + float(values.square().sum()),
             )
-        if self.update + 1 < self.config.critic_warmup_updates:
+        if self.update + 1 < self.warmup_start_update + self.config.critic_warmup_updates:
             return {}
         spreads = []
         for count, total, squares in self.warmup_moments.values():
@@ -4477,6 +4491,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "actor_steps": trainer.actor_steps,
         "pool_start_update": trainer.pool_start_update,
         "warming": trainer.warming,
+        "warmup_start_update": trainer.warmup_start_update,
         "warmup_moments": trainer.warmup_moments,
         "episode_metrics": trainer.episode_metrics,
         "partial_episodes": sorted(trainer.partial_episodes),
@@ -4533,6 +4548,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "experiment": "065_selfplay_ppo",
         "update": trainer.update,
         "configuration_sha256": _configuration_digest(trainer),
+        "reward_weights": dataclasses.asdict(trainer.config.reward_weights),
         "environment": _environment(),
         "provenance": dict(provenance),
     }
@@ -4652,7 +4668,9 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     manifest = read_training_manifest(manifest_path)
     if manifest["version"] != CHECKPOINT_VERSION:
         raise ValueError("exact resume requires the fixed-slot checkpoint format")
-    if manifest["configuration_sha256"] != _configuration_digest(trainer):
+    if manifest["reward_weights"] != dataclasses.asdict(trainer.config.reward_weights) or manifest[
+        "configuration_sha256"
+    ] != _configuration_digest(trainer):
         raise ValueError("resume configuration mismatch")
     if manifest["environment"] != _environment() or manifest["provenance"] != provenance:
         raise ValueError("resume environment or checkpoint mismatch")
@@ -4671,6 +4689,13 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if set(paths) != expected_roles:
         raise ValueError("checkpoint simulator topology mismatch")
     saved = torch.load(paths["training"], map_location="cpu", weights_only=False)
+    warmup_start = saved["warmup_start_update"]
+    if (
+        type(warmup_start) is not int
+        or not 0 <= warmup_start <= saved["update"]
+        or saved["warming"] != (saved["update"] < warmup_start + trainer.config.critic_warmup_updates)
+    ):
+        raise ValueError("invalid checkpoint critic warmup progress")
     if (
         type(saved["version"]) is not int
         or type(saved["update"]) is not int
@@ -4788,6 +4813,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.actor_steps = saved["actor_steps"]
     trainer.pool_start_update = saved["pool_start_update"]
     trainer.warming = saved["warming"]
+    trainer.warmup_start_update = warmup_start
     trainer.warmup_moments = saved["warmup_moments"]
     trainer.episode_metrics = saved["episode_metrics"]
     trainer.partial_episodes = set(cast(list[tuple[int, int]], partial))
@@ -4803,10 +4829,12 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
 
 
 PILOT_SOURCE = "3d4ad115881857d0c6c1ba039e41225bd7df3fe8"
+PILOT_ADAPTER_SHA256 = "29f92fca9dfc77ef89ac86de51ccfaab20bbeffb87874b9348d503793f564145"
 
 
 def legacy_pilot_digest(trainer: Trainer) -> str:
     identity = _configuration_identity(trainer)
+    del cast(dict[str, object], identity["train"])["reward_weights"]
     identity["sampler"] = {**dataclasses.asdict(trainer.engine.sampler.config), "anchor_rate": 0.15}
     identity["opponent_layout"] = "fixed_anchor_ranges_v1"
     del identity["lane_roles"]
@@ -4821,7 +4849,11 @@ def restore_pilot_learner(trainer: Trainer, manifest_path: Path, provenance: dic
     manifest = read_training_manifest(manifest_path)
     if (manifest["format"], manifest["version"], manifest["update"]) != ("hal.o65.training.v8", 8, 256):
         raise ValueError("learner resume requires the stopped pilot's v8 update-256 checkpoint")
-    if manifest["provenance"] != {**provenance, "git_sha": PILOT_SOURCE}:
+    if manifest["provenance"] != {
+        **provenance,
+        "git_sha": PILOT_SOURCE,
+        "adapter_sha256": PILOT_ADAPTER_SHA256,
+    }:
         raise ValueError("learner resume source or artifact mismatch")
     if manifest["configuration_sha256"] != legacy_pilot_digest(trainer) or manifest["environment"] != _environment():
         raise ValueError("learner resume configuration or environment mismatch")
@@ -4897,8 +4929,10 @@ def restore_pilot_learner(trainer: Trainer, manifest_path: Path, provenance: dic
     trainer.update = trainer.pool_start_update = 256
     trainer.engine.completed_update = 255
     trainer.actor_steps = saved["actor_steps"]
-    trainer.warming = False
-    trainer.warmup_moments = saved["warmup_moments"]
+    reward_changed = manifest["reward_weights"] != dataclasses.asdict(trainer.config.reward_weights)
+    trainer.warmup_start_update = trainer.update if reward_changed else 0
+    trainer.warming = reward_changed and trainer.config.critic_warmup_updates > 0
+    trainer.warmup_moments = {} if reward_changed else saved["warmup_moments"]
     trainer.engine.sampler.lambda_max = saved["lambda_max"]
     trainer.anchor_win_history = saved["anchor_win_history"]
     # No simulator, episode accumulator or queue belongs to the new match pool.
@@ -5183,7 +5217,12 @@ def train_native(config: NativeCli) -> None:
             for cpu in config.cpus:
                 ids = tuple(range(next_match, next_match + config.matches_per_shard))
                 shard = NativeSimulatorShard(
-                    config.data_dir, ids, cpu=cpu, device=policy.device, max_frame=config.max_frame
+                    config.data_dir,
+                    ids,
+                    cpu=cpu,
+                    device=policy.device,
+                    max_frame=config.max_frame,
+                    reward_weights=config.training.reward_weights,
                 )
                 resources.callback(shard.close)
                 shards.append(shard)

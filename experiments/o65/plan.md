@@ -130,10 +130,22 @@ $$
 
 Each c_i includes history, the committed prefix, earlier sampled factors and
 the same episode u. We score the reference along the sampled student path.
-Summed conditional KL estimates the chunk KL. We use HAL's canonical float32
-reward: damage dealt minus taken, 120 per stock difference, plus 50 on the
-deciding stock. Both reward and KL accrue per executed frame, so lambda keeps
-its units of reward per nat across cadences.
+Summed conditional KL estimates the chunk KL. The float32 frame reward is
+damage_weight times damage dealt minus taken, plus stock_weight per net stock
+taken and game_win_weight per net deciding stock taken. Defaults are 1, 120
+and 50. We reject negative, non-finite or non-float32-representable weights.
+Both reward and KL accrue per executed frame, so lambda keeps its units of
+reward per nat across cadences. We record all three weights in training config,
+resolved config, checkpoint manifests, pilot identity and W&B config.
+
+The `o65-outcome-reward` treatment uses damage 0.1, stock 120 and game win 120.
+Its control is the finished pilot `hal-o65/o65-debug-7965557b-6f4d1e097e`,
+which used 1, 120 and 50 and achieved a 0.92 win rate and +1.27 net stocks/min
+over 384 held-out MSL games against pi_ref. Both runs migrate the same update-256
+learner from `o65-pilot-3d4ad115`. Inputs, seed, sampling, optimizer settings,
+training endpoint and evaluation protocol stay fixed. The changed reward
+requires a new 32-update critic warmup before PPO resumes.
+See [pilot-protocol.md](pilot-protocol.md) for the launch command.
 
 ### Advantages
 
@@ -257,9 +269,12 @@ replay the reference, calculate KL and GAE, fit the critic, then run one PPO
 epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
-Training format v9 retains pool snapshot v4. It records the three slot weight
-updates and the update at which a fresh pool started. Exact resume rejects v8;
-evaluation can still read its actor. It records partial episodes from head starts
+Training format v10 retains pool snapshot v4. It adds explicit reward weights
+to the manifest and retains the critic warmup origin in training state, so
+exact resume during a repeated warmup preserves its remaining duration.
+It records the three slot weight
+updates and the update at which a fresh pool started. Exact resume rejects v8/v9;
+evaluation can still read their actors. It records partial episodes from head starts
 and validates group progress from the initial pool clock. A checkpoint records model,
 optimizers, scheduler, compressed simulator states, the last 129 frame records,
 committed queues, group clocks, episode conditions and ids, pool position,
@@ -302,6 +317,14 @@ pi_ref head start. Slot 1's head-start episodes truncate before its saved
 weights take effect. Simulator state, queues and partial-episode accumulators
 are discarded. This deliberate pool reset and fixed opponent distribution are
 a new treatment. Disk and new W&B history retain metrics through update 256.
+This source predates reward configuration and implies damage 1, stock 120 and
+game win 50. Migration validates its pinned adapter hash separately from the
+new configurable adapter. It may change the reward weights; learner-resume.json
+records source and new weights. If weights differ, updates 257 through 288 fit
+only the critic, then recalibrate lambda_max with fresh warmup moments.
+Reference KL remains in these targets because the restored actor differs from
+pi_ref. PPO resumes at update 289. Matching weights preserve the previous
+migration behavior. Full resume rejects any change to reward weights.
 
 We derive independent counter draws from run seed, domain, logical stream id,
 episode, frame, offset and factor. We separate action draws, reset choices,
@@ -348,8 +371,8 @@ set before play.
   cycling, though changing episode conditions limit direct comparisons.
 - Small lambda and large D can increase KL. We monitor advantage scale and KL
   by cadence and lambda bin. Rare characters need separate checks.
-- Damage reward can favor safe damage over a risky stock. An outcome-focused
-  reward comparison remains a separate scientific treatment.
+- Damage reward can favor safe damage over a risky stock. The outcome-weighted
+  comparison above tests a reduced damage weight and a larger deciding-stock weight.
 - Competitive pressure can reduce identity style. Camping and timed-game
   behavior remain research limits; timeouts currently truncate the task.
 - Privileged opponent inputs enter only the critic. We retain ego history

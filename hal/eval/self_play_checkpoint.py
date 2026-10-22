@@ -26,11 +26,12 @@ from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_decoder_precision
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
+from hal.sim.native import RewardWeights
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v9"
-TRAINING_VERSION = 9
+TRAINING_FORMAT = "hal.o65.training.v10"
+TRAINING_VERSION = 10
 
 
 class CheckpointShard(TypedDict):
@@ -48,6 +49,7 @@ class TrainingManifest(TypedDict):
     environment: dict[str, str]
     provenance: dict[str, str]
     shards: list[CheckpointShard]
+    reward_weights: dict[str, float]
 
 
 def read_training_manifest(manifest_path: Path) -> TrainingManifest:
@@ -63,15 +65,27 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         "provenance",
         "shards",
     }
-    if not isinstance(manifest, dict) or set(manifest) != fields:
+    if not isinstance(manifest, dict):
+        raise ValueError("checkpoint manifest schema changed")
+    if manifest.get("version") == TRAINING_VERSION:
+        fields.add("reward_weights")
+    if set(manifest) != fields:
         raise ValueError("checkpoint manifest schema changed")
     if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
         (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v9", 9),
         ("hal.o65.training.v8", 8),
     ):
         raise ValueError("unsupported checkpoint identity")
     if type(manifest["version"]) is not int or type(manifest["update"]) is not int or manifest["update"] < 0:
         raise ValueError("invalid checkpoint update")
+    if manifest["version"] == TRAINING_VERSION:
+        weights = manifest["reward_weights"]
+        if not isinstance(weights, dict) or set(weights) != {"damage", "stock", "game_win"}:
+            raise ValueError("invalid checkpoint reward weights")
+        RewardWeights(weights["damage"], weights["stock"], weights["game_win"])
+    else:
+        manifest["reward_weights"] = asdict(RewardWeights())
     provenance = manifest["provenance"]
     expected_provenance = {
         "git_sha",

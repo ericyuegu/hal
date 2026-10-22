@@ -42,6 +42,33 @@ Final evaluation fixes u=0.95, masked identity and lambda=1 on both sides.
 The larger actor step, broader episode sampling and sampled u are scientific
 treatments. Cleanup preserves these settings, reward, precision and masks.
 
+### Outcome-weighted reward comparison
+
+The control is the finished pilot `hal-o65/o65-debug-7965557b-6f4d1e097e`:
+384 held-out MSL games against pi_ref gave a 0.92 win rate and +1.27 net
+stocks/min. Its reward weights were damage 1, stock 120 and game win 50.
+The new run `o65-outcome-reward` changes only the reward to damage 0.1, stock
+120 and game win 120. Game win is the bonus on the deciding stock, in addition
+to the stock reward. We retain the checkpoint, seed, episode sampling, optimizer
+settings, 2,000-update endpoint and final evaluation grid from the control.
+
+Both runs use learner resume from the same original update-256 checkpoint:
+`o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json`. That v8
+checkpoint implies the default reward weights. Changed weights restart a
+32-update critic warmup at update 256: actor weights, actor optimizer and
+scheduler stay fixed through updates 257..288. The critic targets include
+reference KL because the restored actor differs from pi_ref. Fresh advantage
+moments recalibrate lambda_max at update 288, and PPO starts at update 289.
+Matching weights skip this repeated warmup. Full resume preserves warmup
+progress and rejects changed reward weights.
+
+The three weights are finite, nonnegative float32 values, set with
+`--damage-weight`, `--stock-weight` and `--game-win-weight` on pilot.py and the
+Modal launcher. Defaults remain 1, 120 and 50. Pilot identity, resolved config,
+training manifest v10 and W&B config record the weights. learner-resume.json
+records both source and new weights. The legacy source adapter hash is pinned;
+the new run records the configurable adapter's hash and requires it on resume.
+
 ## Inputs
 
 The committed files record the fixed inputs:
@@ -152,7 +179,7 @@ metrics retain the same results. Each update records anchor 0 under
 
 We include unfinished matches and countdown frames in exposure, exclude reset
 waits and truncation wins, preserve each episode's anchor id through reset
-processing. Training format v9 retains rolling counts and records each slot's weight
+processing. Training format v10 retains rolling counts and records each slot's weight
 update and the fresh-pool update origin. Per-slot metrics record the weight
 update used for the rollout. A promotion clears that slot's rolling counts. It also preserves partial
 episodes from head starts and accounts for the initial 1,280-frame pool advance.
@@ -169,6 +196,27 @@ stocks lost at zero damage since respawn. The last measure is a self-destruct
 proxy because native observations contain no KO-credit field.
 
 ## Launch and storage
+
+Inspect the outcome-weighted launch from the launch worktree setup, without
+a Modal request:
+
+```sh
+uv run python -m scripts.launch_o65_modal --mode pilot \
+  --name o65-outcome-reward --dry-run --output runs/reward/modal \
+  --damage-weight 0.1 --stock-weight 120 --game-win-weight 120 \
+  --resume-learner o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json
+```
+
+After publishing the reviewed o65-bigstep HEAD, the operator can launch with:
+
+```sh
+uv run python -m scripts.launch_o65_modal --mode pilot \
+  --name o65-outcome-reward --timeout-seconds 36000 \
+  --damage-weight 0.1 --stock-weight 120 --game-win-weight 120 \
+  --resume-learner o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json
+```
+
+The following commands record the earlier pilot and fixed-slot launches.
 
 Inspect the job locally without a Modal request:
 
@@ -259,4 +307,4 @@ learning success. MSL-specific gains remain a risk; production and Dolphin
 validation require separate runs. We do not extend this run after viewing results.
 
 The v8 learner migration can be removed after the fixed-slot run has a validated
-v9 checkpoint. Reading old v8 actors for evaluation remains supported.
+checkpoint in the current format. Reading old v8/v9 actors for evaluation remains supported.

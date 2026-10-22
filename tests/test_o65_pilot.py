@@ -227,6 +227,10 @@ def test_completed_pilot_cannot_resume_under_different_source(tmp_path: Path) ->
     _MODULE.bind_pilot_identity(tmp_path, "a" * 40, tiny=False)
     with pytest.raises(ValueError, match="source or inputs differ"):
         _MODULE.bind_pilot_identity(tmp_path, "b" * 40, tiny=False)
+    with pytest.raises(ValueError, match="source or inputs differ"):
+        _MODULE.bind_pilot_identity(
+            tmp_path, "a" * 40, tiny=False, reward_weights=_MODULE.RewardWeights(0.1, 120, 120)
+        )
     assert _MODULE.latest_checkpoint(tmp_path / "train/checkpoints").name == "update-00002000.json"
 
 
@@ -476,8 +480,53 @@ def test_learner_resume_command_and_metric_history(tmp_path: Path) -> None:
         checkpoint_every=32,
         warmup=32,
         resume_learner=tmp_path / "source/checkpoints/update-00000256.json",
+        reward_weights=_MODULE.RewardWeights(0.1, 120, 120),
     )
     assert command[command.index("--resume-learner") + 1] == str(tmp_path / "source/checkpoints/update-00000256.json")
+    for flag, expected in (("damage", "0.1"), ("stock", "120"), ("game-win", "120")):
+        assert command[command.index(f"--training.reward-weights.{flag}") + 1] == expected
     path.write_text('{"global_step":255}\n')
     with pytest.raises(ValueError, match="metric history"):
         _MODULE.inherit_metrics(path, target, 256)
+
+
+def test_learner_resume_records_source_and_treatment_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_065_loop import exp
+
+    source = write_boundary(tmp_path / "source/train/checkpoints", 256)
+    (source.parent.parent / "metrics.jsonl").write_text('{"global_step":256}\n')
+    output = tmp_path / "outcome"
+    commands: list[exp.NativeCli] = []
+
+    def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
+        if command[1] == str(_MODULE.ROOT / "experiments/065_selfplay_ppo.py"):
+            config = tyro.cli(exp.NativeCli, args=command[3:])
+            commands.append(config)
+            (config.output / "metrics.jsonl").write_text(
+                '{"global_step":2000,"train/warming":0,"train/actor_steps":1}\n'
+            )
+
+    monkeypatch.setattr(_MODULE, "execute", execute)
+    monkeypatch.setattr(_MODULE, "log_evaluation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_MODULE.os, "sched_getaffinity", lambda _pid: set(range(17)))
+    monkeypatch.setattr(_MODULE.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(_MODULE.torch.cuda, "get_device_name", lambda: "RTX PRO 6000")
+    monkeypatch.setenv("WANDB_API_KEY", "test-unused")
+    _MODULE.main(
+        _MODULE.Args(
+            output,
+            local_delivery=tmp_path / "delivery",
+            resume_learner=source,
+            damage_weight=0.1,
+            stock_weight=120.0,
+            game_win_weight=120.0,
+            checkpoint_retention="all",
+        )
+    )
+    weights = {"damage": 0.1, "stock": 120.0, "game_win": 120.0}
+    record = json.loads((output / "learner-resume.json").read_text())
+    assert record["source_reward_weights"] == {"damage": 1.0, "stock": 120.0, "game_win": 50.0}
+    assert record["reward_weights"] == weights and record["critic_warmup_updates"] == 32
+    assert json.loads((output / "pilot-identity.json").read_text())["reward_weights"] == weights
+    assert dataclasses.asdict(commands[0].training.reward_weights) == weights
+    assert commands[0].resume_learner == source

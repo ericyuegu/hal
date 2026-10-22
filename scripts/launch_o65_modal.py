@@ -22,6 +22,8 @@ import modal
 import tyro
 from modal.types import FileEntryType
 
+from hal.sim.native import RewardWeights
+
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = Path("/opt/o65-hal")
 RESULTS = Path("/o65-results")
@@ -115,9 +117,15 @@ class Request:
     timeout_seconds: int = 1800
     created_unix: float = dataclasses.field(default_factory=time.time)
     resume_learner: str | None = None
+    damage_weight: float = 1.0
+    stock_weight: float = 120.0
+    game_win_weight: float = 50.0
 
     def __post_init__(self) -> None:
         validate_name(self.name)
+        weights = RewardWeights(self.damage_weight, self.stock_weight, self.game_win_weight)
+        if self.mode != "pilot" and weights != RewardWeights():
+            raise ValueError("reward treatment flags require pilot mode")
         if self.resume_learner is not None:
             path = Path(self.resume_learner)
             if self.mode != "pilot" or path.is_absolute() or ".." in path.parts or path.name != "update-00000256.json":
@@ -178,6 +186,12 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             VOLUME,
             "--r2-prefix",
             f"o65/pilot-results/{request.name}",
+            "--damage-weight",
+            str(request.damage_weight),
+            "--stock-weight",
+            str(request.stock_weight),
+            "--game-win-weight",
+            str(request.game_win_weight),
         ]
         if request.resume_learner is not None:
             argv.extend(("--resume-learner", str(RESULTS / request.resume_learner)))
@@ -453,6 +467,9 @@ class Args:
     timeout_seconds: int | None = None
     dry_run: bool = False
     resume_learner: str | None = None
+    damage_weight: float = 1.0
+    stock_weight: float = 120.0
+    game_win_weight: float = 50.0
     secret: str = "hal"
     output: Path = Path("runs/modal")
 
@@ -484,6 +501,9 @@ def main(args: Args) -> None:
         if args.timeout_seconds is not None
         else (PILOT_TIMEOUT_SECONDS if args.mode == "pilot" else 1800),
         resume_learner=args.resume_learner,
+        damage_weight=args.damage_weight,
+        stock_weight=args.stock_weight,
+        game_win_weight=args.game_win_weight,
     )
     args.output.mkdir(parents=True, exist_ok=True)
     budget = ROOT / ("runs/modal-pilot/budget.jsonl" if args.mode == "pilot" else "runs/modal-floor/budget.jsonl")
@@ -537,6 +557,16 @@ def main(args: Args) -> None:
     ]
     if args.resume_learner is not None:
         launch_command.extend(("--resume-learner", args.resume_learner))
+    launch_command.extend(
+        (
+            "--damage-weight",
+            str(args.damage_weight),
+            "--stock-weight",
+            str(args.stock_weight),
+            "--game-win-weight",
+            str(args.game_win_weight),
+        )
+    )
     print(f"Launch: {shlex.join(launch_command)}", flush=True)
     if args.mode == "pilot":
         print(json.dumps(pilot_estimate(), indent=2), flush=True)

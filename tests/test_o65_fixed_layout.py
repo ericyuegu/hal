@@ -173,7 +173,8 @@ def legacy_checkpoint(run: Any, directory: Path) -> Path:
     state["cursor"] = 256 % groups
     state.pop("slot_updates")
     state.pop("pool_start_update")
-    provenance = {**PROVENANCE, "git_sha": exp.PILOT_SOURCE}
+    state.pop("warmup_start_update")
+    provenance = {**PROVENANCE, "git_sha": exp.PILOT_SOURCE, "adapter_sha256": exp.PILOT_ADAPTER_SHA256}
     manifest = {
         **snapshot.manifest,
         "format": "hal.o65.training.v8",
@@ -181,6 +182,7 @@ def legacy_checkpoint(run: Any, directory: Path) -> Path:
         "provenance": provenance,
         "configuration_sha256": exp.legacy_pilot_digest(run),
     }
+    manifest.pop("reward_weights")
     actor = {
         "format": exp.EVALUATION_FORMAT,
         "model": state["model"],
