@@ -171,12 +171,11 @@ def bench(sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int) -
     code = _run(sandbox, command)
     report = output / "rollout-profile.json"
     local = LOCAL_RESULTS / f"{name}.json"
-    try:
-        with sandbox.open(str(report), "rb") as remote:
-            local.write_bytes(remote.read())
-        print(f"report: {local}", flush=True)
-    except FileNotFoundError:
+    if _run(sandbox, f"test -f {report}"):
         print("no report written", flush=True)
+        return code
+    local.write_bytes(sandbox.filesystem.read_bytes(str(report)))
+    print(f"report: {local}", flush=True)
     return code
 
 

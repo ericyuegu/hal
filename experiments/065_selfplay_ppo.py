@@ -991,8 +991,8 @@ class TickLayout:
     buffer: int = 0
 
     def __post_init__(self) -> None:
-        if self.buffer not in (0, 1):
-            raise ValueError("tick buffer must be zero or one")
+        if self.buffer not in (0, 1, ALL_BUFFERS):
+            raise ValueError("tick buffer must be zero, one or ALL_BUFFERS")
         if not self.streams or len(self.streams) != len(self.lanes):
             raise ValueError("tick layout lanes must match nonempty streams")
         if len(set(self.streams)) != len(self.streams):
@@ -1003,6 +1003,10 @@ class TickLayout:
             self.streams
         ):
             raise ValueError("tick layout streams must own distinct queues")
+
+
+# Anchor layouts span every buffer: one graph per anchor and tick, sampled with the first buffer.
+ALL_BUFFERS = -1
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -2139,6 +2143,7 @@ class RolloutEngine:
         self.device_lanes = {key: torch.from_numpy(lanes).to(policy.device) for key, lanes in self.shard_lanes.items()}
         self.buffer_device_lanes: dict[int, Tensor] = {}
         self.staging: dict[int, BufferStaging] = {}
+        self.anchor_streams: dict[tuple[int, int | None], torch.cuda.Stream] = {}
         self.transfer_timings: list[BufferTiming] = []
         buffers: list[tuple[RolloutBuffer, ...]] = []
         for shards in groups:
@@ -2494,24 +2499,29 @@ class RolloutEngine:
             logical = np.asarray(self.group_matches[group], dtype=np.int64).repeat(2) * 2 + np.tile(
                 (0, 1), len(self.group_matches[group])
             )
-            for buffer in self.buffers[group]:
-                in_buffer = np.isin(np.arange(players) // 2, buffer.lanes)
-                for owner in (-1, *anchor_ids):
-                    # Both ports occupy slots; only the episode's owner writes queues.
-                    owned = np.array(
-                        [owner == -1 or self.lane_roles[match] == owner for match in self.group_matches[group]]
-                    ).repeat(2)
-                    selected = np.flatnonzero(in_buffer & owned)
-                    if not len(selected):
-                        continue
-                    anchor = None if owner < 0 else int(owner)
-                    key = buffer.index, anchor
-                    self.group_slots[group][key] = torch.from_numpy(selected).to(self.policy.device)
-                    self.tick_layouts[key] = TickLayout(
-                        tuple(logical[selected].tolist()),
-                        tuple((selected // 2).tolist()),
-                        buffer.index,
-                    )
+            # The student runs per buffer, so each buffer's simulator step overlaps the next
+            # buffer's student graph. Anchor rows are few and latency-bound, so each anchor
+            # runs once per tick over its rows in every buffer.
+            student_layouts = tuple(
+                (buffer.index, np.isin(np.arange(players) // 2, buffer.lanes), -1) for buffer in self.buffers[group]
+            )
+            anchor_layouts = tuple((ALL_BUFFERS, np.ones(players, dtype=np.bool_), owner) for owner in anchor_ids)
+            for buffer_index, in_buffer, owner in (*student_layouts, *anchor_layouts):
+                # Both ports occupy slots; only the episode's owner writes queues.
+                owned = np.array(
+                    [owner == -1 or self.lane_roles[match] == owner for match in self.group_matches[group]]
+                ).repeat(2)
+                selected = np.flatnonzero(in_buffer & owned)
+                if not len(selected):
+                    continue
+                anchor = None if owner < 0 else int(owner)
+                key = buffer_index, anchor
+                self.group_slots[group][key] = torch.from_numpy(selected).to(self.policy.device)
+                self.tick_layouts[key] = TickLayout(
+                    tuple(logical[selected].tolist()),
+                    tuple((selected // 2).tolist()),
+                    buffer_index,
+                )
             if self.policy.device.type == "cuda":
                 layout_ready = torch.cuda.Event()
                 layout_ready.record()
@@ -2527,30 +2537,53 @@ class RolloutEngine:
         clock: int,
         table: DenseRollout,
         ids: Tensor,
+        *,
+        concurrent: bool = False,
     ) -> None:
-        ring = self.rings[self.cursor]
-        for key, layout in self.tick_layouts.items():
-            buffer_index, anchor = key
-            if buffer_index != buffer.index:
-                continue
-            policy = self.policy if anchor is None else self.anchors[anchor]
-            selected = ids[self.group_slots[self.cursor][key]]
-            owner = -1 if anchor is None else anchor
-            enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == owner
-            rows = TickInputs(table, selected, enabled)
-            with (
-                torch.profiler.record_function(
-                    f"o65_graph/buffer{buffer_index}/policy{owner}/rows{len(layout.streams)}"
-                )
-                if self.profile is not None and self.profile.active_trace
-                else contextlib.nullcontext()
-            ):
-                policy.sample_tick(rows, self.sampler.rng, layout, ring, clock=clock)
+        first = buffer.index == self.buffers[self.cursor][0].index
+        anchors = [key for key in self.tick_layouts if first and key[0] == ALL_BUFFERS]
+        if concurrent and anchors:
+            # Anchor graphs write disjoint rows in place, so they run side by side. A student
+            # graph rewrites its buffer's anchor rows with their old values, so students wait.
+            current = torch.cuda.current_stream(self.policy.device)
+            side = []
+            for key in anchors:
+                stream = self.anchor_streams.get(key)
+                if stream is None:
+                    stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device)
+                stream.wait_stream(current)
+                with torch.cuda.stream(stream):
+                    self._sample_layout(key, clock, table, ids)
+                side.append(stream)
+            for stream in side:
+                current.wait_stream(stream)
+        else:
+            for key in anchors:
+                self._sample_layout(key, clock, table, ids)
+        for key in self.tick_layouts:
+            if key[0] == buffer.index:
+                self._sample_layout(key, clock, table, ids)
+
+    def _sample_layout(self, key: tuple[int, int | None], clock: int, table: DenseRollout, ids: Tensor) -> None:
+        buffer_index, anchor = key
+        layout = self.tick_layouts[key]
+        policy = self.policy if anchor is None else self.anchors[anchor]
+        selected = ids[self.group_slots[self.cursor][key]]
+        owner = -1 if anchor is None else anchor
+        enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == owner
+        rows = TickInputs(table, selected, enabled)
+        with (
+            torch.profiler.record_function(f"o65_graph/buffer{buffer_index}/policy{owner}/rows{len(layout.streams)}")
+            if self.profile is not None and self.profile.active_trace
+            else contextlib.nullcontext()
+        ):
+            policy.sample_tick(rows, self.sampler.rng, layout, self.rings[self.cursor], clock=clock)
 
     def _tick_ready(self, buffer: RolloutBuffer, clock: int) -> bool:
         ring = self.rings[self.cursor]
+        first = buffer.index == self.buffers[self.cursor][0].index
         for (buffer_index, anchor), layout in self.tick_layouts.items():
-            if buffer_index != buffer.index:
+            if buffer_index != buffer.index and not (first and buffer_index == ALL_BUFFERS):
                 continue
             policy = self.policy if anchor is None else self.anchors[anchor]
             if not policy.tick_ready(layout, ring, clock=clock):
@@ -2979,7 +3012,7 @@ class RolloutEngine:
                             else contextlib.nullcontext()
                         ):
                             with sample(self.profile, "gpu_tick", work=float(len(buffer.lanes)), limit=0):
-                                self._sample_buffer(buffer, clock, table, ids)
+                                self._sample_buffer(buffer, clock, table, ids, concurrent=ready)
                             if ready:
                                 futures.extend(self._submit_buffer(workers, buffer))
                     if not ready:
