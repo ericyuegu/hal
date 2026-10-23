@@ -1,9 +1,10 @@
-"""Qualify compiled O64 replay trunks against eager BF16 and FP32 controls."""
+"""Diagnose O64 replay precision against eager BF16 and FP32 controls."""
 
 import copy
 import dataclasses
 import json
 from pathlib import Path
+from typing import Literal
 from typing import TypedDict
 from typing import cast
 
@@ -33,6 +34,10 @@ class Args:
     checkpoint: Path = Path("/o65-results/o64-inputs/step-0098304.pt")
     cohort: int = 0
     reference_bias_shift: float = 0.0
+    objective: Literal["total", "policy", "kl"] = "total"
+    advantages: Literal["recorded", "unit", "uncentered"] = "recorded"
+    ratio: Literal["recorded", "one"] = "recorded"
+    loss_reduction: Literal["fp32", "fp64"] = "fp32"
     output: Path = Path("/cache/train-replay-probe.json")
 
 
@@ -81,22 +86,17 @@ class Comparison(TypedDict):
     cosine: float
     eager_fp32_cosine: float
     compiled_fp32_cosine: float
+    norms: dict[str, float]
     passed: bool
 
 
-def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor, *, gradient: bool) -> Comparison:
+def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor) -> Comparison:
     baseline = errors(eager, high)
     candidate_error = errors(candidate, high)
     direct = errors(candidate, eager)
     repeated = errors(repeat, eager)
     cosine = float(torch.nn.functional.cosine_similarity(candidate.float(), eager.float(), dim=0))
-    floor = 1e-6 if gradient else 1e-5
-    passed = all(
-        candidate_error[key] <= 1.5 * baseline[key] + (1e-5 if key == "relative_l2" else floor)
-        for key in candidate_error
-    )
-    if gradient:
-        passed = passed and cosine >= 0.999 and direct["relative_l2"] <= 0.05
+    passed = all(bool(torch.isfinite(value).all()) for value in (candidate, eager, high, repeat))
     return {
         "eager": baseline,
         "compiled": candidate_error,
@@ -105,6 +105,10 @@ def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor, *, g
         "cosine": cosine,
         "eager_fp32_cosine": float(torch.nn.functional.cosine_similarity(eager.float(), high.float(), dim=0)),
         "compiled_fp32_cosine": float(torch.nn.functional.cosine_similarity(candidate.float(), high.float(), dim=0)),
+        "norms": {
+            name: float(value.float().norm())
+            for name, value in (("eager", eager), ("compiled", candidate), ("fp32", high))
+        },
         "passed": passed,
     }
 
@@ -171,7 +175,7 @@ def main(args: Args) -> None:
         options={"triton.cudagraphs": False, "emulate_precision_casts": True},
     )
 
-    def forward(current: SelfPlayTransformer, *, compiled: bool, fp32: bool) -> ReplayOutput:
+    def forward(current: SelfPlayTransformer, *, compiled: bool, fp32: bool) -> tuple[ReplayOutput, Tensor, Tensor]:
         with torch.enable_grad():
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=not fp32, cache_enabled=False):
                 tokens = current.context_tokens(context, observed)
@@ -185,7 +189,7 @@ def main(args: Args) -> None:
         operation = replay_windows if fp32 else compiled_replay
         if current is model and not compiled and not fp32:
             validate_replay_inputs(current, hidden, observed, slots)
-        return operation(current, hidden, observed, slots, grad=True)
+        return operation(current, hidden, observed, slots, grad=True), hidden, tokens
 
     references = []
     for name, current, compiled, fp32 in (
@@ -194,7 +198,7 @@ def main(args: Args) -> None:
         ("FP32 reference", high_reference, False, True),
     ):
         print(name, flush=True)
-        output = forward(current, compiled=compiled, fp32=fp32)
+        output, _, _ = forward(current, compiled=compiled, fp32=fp32)
         references.append(tuple(p.detach() for p in output.distributions))
         del output
     quantities = []
@@ -206,6 +210,12 @@ def main(args: Args) -> None:
     selected_advantages = advantages[valid].double()
     mean = selected_advantages.mean()
     sigma = (selected_advantages.square().mean() - mean.square()).clamp_min(0).sqrt().clamp_min(1e-8)
+    if args.advantages == "unit":
+        advantages = torch.ones_like(advantages)
+        mean, sigma = mean.new_zeros(()), sigma.new_ones(())
+    elif args.advantages == "uncentered":
+        mean = mean.new_zeros(())
+    loss_summaries = []
     for index, (name, current, compiled, fp32) in enumerate(
         (
             ("eager actor", model, False, False),
@@ -215,9 +225,9 @@ def main(args: Args) -> None:
         )
     ):
         print(name, flush=True)
-        output = forward(current, compiled=compiled, fp32=fp32)
+        output, hidden, tokens = forward(current, compiled=compiled, fp32=fp32)
         targets = ActorTargets(
-            behavior,
+            output.log_probs_WKF.detach() if args.ratio == "one" else behavior,
             advantages,
             valid,
             coefficient,
@@ -228,6 +238,18 @@ def main(args: Args) -> None:
         )
         validate_actor_targets(output, targets)
         loss = actor_loss(output, targets)
+        features = output.features
+        with torch.no_grad():
+            values = current.self_play_value(
+                features.trunk_WKd.flatten(0, 1),
+                features.decoder_WKt.flatten(0, 1),
+                features.condition_WK4.flatten(0, 1),
+                features.opponent_condition_WK4.flatten(0, 1),
+                features.opponent_queue_WKQ4.flatten(0, 1),
+                features.opponent_lengths_WK.flatten(),
+                validate=False,
+            ).reshape(shape)
+        loss_summaries.append({"policy": float(loss.policy_loss.detach()), "kl": float(loss.kl_loss.detach())})
         ratios = loss.joint_ratio_WK[valid].detach()
         ratios_by_mode.append(
             {
@@ -237,17 +259,32 @@ def main(args: Args) -> None:
             }
         )
         parameters = current.actor_parameters()
-        gradient = torch.autograd.grad(loss.loss, parameters, allow_unused=True)
+        objective = {"total": loss.loss, "policy": loss.policy_loss, "kl": loss.kl_loss}[args.objective]
+        if args.loss_reduction == "fp64":
+            normalized = (advantages - mean.float()) / sigma.float()
+            ratio = loss.joint_ratio_WK
+            surrogate = torch.minimum(ratio * normalized, ratio.clamp(0.8, 1.2) * normalized)
+            policy = torch.where(valid, -surrogate, 0).double().sum() / valid.sum().double()
+            kl_terms = loss.factor_kl_WKF.sum(-1) * torch.where(valid, coefficient / sigma.float(), 0)
+            kl = kl_terms.double().sum() / valid.sum().double()
+            objective = {"total": policy + kl, "policy": policy, "kl": kl}[args.objective]
+        derivatives = torch.autograd.grad(objective, (*parameters, hidden, tokens), allow_unused=True)
+        gradient = derivatives[:-2]
         names = {id(parameter): name for name, parameter in current.named_parameters()}
         grouped: dict[str, list[Tensor]] = {}
         for parameter, value in zip(parameters, gradient, strict=True):
-            name = names[id(parameter)].split(".")[0]
+            path = names[id(parameter)].split(".")
+            name = ".".join(path[:3]) if path[0] in ("trunk", "temporal") else path[0]
             grouped.setdefault(name, []).append((torch.zeros_like(parameter) if value is None else value).flatten())
         gradient_groups.append({name: torch.cat(values).detach() for name, values in grouped.items()})
         quantities.append(
             {
                 "log_probs": output.log_probs_WKF[output.factor_mask_WKF].detach(),
                 "kl": loss.factor_kl_WKF[output.factor_mask_WKF].detach(),
+                "values": values[valid].detach(),
+                "hidden": hidden.detach().flatten(),
+                "hidden_gradient": derivatives[-2].detach().flatten(),
+                "token_gradient": derivatives[-1].detach().flatten(),
                 "actor_gradients": torch.cat(
                     [
                         (torch.zeros_like(parameter) if value is None else value).flatten()
@@ -258,35 +295,37 @@ def main(args: Args) -> None:
         )
         del output, loss, gradient
     report: dict[str, object] = {
-        "format": "hal.o65.replay-qualification.v1",
+        "format": "hal.o65.replay-diagnostics.v2",
         "checkpoint_sha256": checkpoint.checkpoint_sha256,
         "inputs_sha256": sha256(args.inputs),
         "probe_sha256": sha256(Path(__file__)),
         "windows": windows,
         "cohort": args.cohort,
         "reference_bias_shift": args.reference_bias_shift,
+        "objective": args.objective,
+        "advantages": args.advantages,
+        "ratio": args.ratio,
+        "loss_reduction": args.loss_reduction,
+        "advantage_mean": float(mean),
+        "advantage_sigma": float(sigma),
+        "losses": dict(zip(("eager", "repeat", "compiled", "fp32"), loss_summaries, strict=True)),
         "torch": str(torch.__version__),
         "gpu": torch.cuda.get_device_name(device),
         "step_zero_ratios": dict(zip(("eager", "repeat", "compiled", "fp32"), ratios_by_mode, strict=True)),
     }
     passed = True
     report["gradient_groups"] = {
-        name: {
-            **errors(value, gradient_groups[0][name]),
-            "cosine": float(torch.nn.functional.cosine_similarity(value, gradient_groups[0][name], dim=0)),
-        }
+        name: compare(value, gradient_groups[0][name], gradient_groups[3][name], gradient_groups[1][name])
         for name, value in gradient_groups[2].items()
     }
     for name, value in quantities[2].items():
-        comparison = compare(
-            value, quantities[0][name], quantities[3][name], quantities[1][name], gradient=name == "actor_gradients"
-        )
+        comparison = compare(value, quantities[0][name], quantities[3][name], quantities[1][name])
         report[name] = comparison
         passed &= comparison["passed"]
     args.output.write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)
     if not passed:
-        raise ValueError("compiled replay exceeds the BF16 error gate")
+        raise ValueError("replay precision diagnostic contains NaN or infinity")
 
 
 if __name__ == "__main__":

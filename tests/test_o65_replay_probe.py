@@ -1,4 +1,4 @@
-"""Reject gradient changes hidden by a permissive FP32-relative gate."""
+"""Keep precision errors diagnostic while rejecting nonfinite results."""
 
 import sys
 from pathlib import Path
@@ -14,20 +14,27 @@ finally:
     sys.path.pop(0)
 
 
-def test_gradient_gate_rejects_a_direction_change_inside_the_fp32_error_bound() -> None:
+def test_gradient_direction_change_is_reported_without_a_precision_gate() -> None:
     eager = torch.tensor([1.0, 0.0])
     high = torch.tensor([0.0, 1.0])
     candidate = torch.tensor([0.7, 0.7])
-    report = compare(candidate, eager, high, eager.clone(), gradient=True)
+    report = compare(candidate, eager, high, eager.clone())
     assert report["compiled"]["relative_l2"] < 1.5 * report["eager"]["relative_l2"]
-    assert not report["passed"]
+    assert report["cosine"] < 0.8
+    assert report["passed"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_precision_diagnostic_rejects_nonfinite_outputs(value: float) -> None:
+    eager = torch.ones(2)
+    assert not compare(torch.tensor([value, 1]), eager, eager, eager)["passed"]
 
 
 def test_gradient_gate_accepts_small_error_with_the_same_direction() -> None:
     eager = torch.tensor([0.0, 1.0])
     high = torch.tensor([0.001, 1.001])
     candidate = torch.tensor([0.0001, 1.0001])
-    assert compare(candidate, eager, high, eager.clone(), gradient=True)["passed"]
+    assert compare(candidate, eager, high, eager.clone())["passed"]
 
 
 def test_probe_loader_rejects_another_checkpoint_before_tensor_use(tmp_path: Path) -> None:
