@@ -534,6 +534,76 @@ def test_prefetched_ids_survive_asynchronous_consumer_and_allocator_reuse() -> N
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@torch.no_grad()
+def test_prefetched_commit_and_frame_acceptance_keep_disjoint_queue_lengths() -> None:
+    import numpy as np
+    from test_065_loop import exp
+
+    from hal.inference.cuda_graph import prepared_shape_compilation
+
+    matches, repetitions = 4096, 8
+    device = torch.device("cuda", torch.cuda.current_device())
+    ring = exp.ActionRing(matches, 24, device)
+    store = exp.FrameStore(repetitions + 3, matches, device)
+    table = exp.DenseRollout(64, store)
+    lanes = torch.arange(matches // 2, matches, device=device)
+    metadata = torch.zeros(matches // 2, 18, dtype=torch.long, device=device)
+    metadata[:, exp.LANE] = torch.arange(matches // 2, device=device)
+    metadata[:, exp.REPLAN] = 2
+    due = torch.ones(matches // 2, dtype=torch.bool, device=device)
+    actions = torch.zeros(matches // 2, 2, 4, dtype=torch.long, device=device)
+    controllers = torch.zeros(matches // 2, 2, exp.ACTION_DIM, device=device)
+    columns = np.zeros((len(lanes), len(exp.native.OBSERVATION_FIELDS)), dtype=np.uint32)
+    columns.flags.writeable = False
+    frames = exp.ShardFrames(
+        torch.zeros(len(lanes), exp.native.FRAME_DTYPE.itemsize, dtype=torch.uint8, device=device),
+        torch.zeros(len(lanes), 2, exp.ACTION_DIM, device=device),
+        columns,
+        np.zeros((len(lanes), 2), dtype=np.float32),
+        np.zeros(len(lanes), dtype=np.bool_),
+        np.zeros(len(lanes), dtype=np.bool_),
+        np.zeros((len(lanes), 2, exp.ACTION_DIM), dtype=np.float32),
+        np.zeros(len(lanes), dtype=np.int32),
+    )
+    pending = torch.full((table.players,), -1, dtype=torch.long, device=device)
+    active = torch.ones(matches, dtype=torch.bool, device=device)
+    stops = torch.zeros(matches, dtype=torch.long, device=device)
+    observed = torch.zeros_like(stops)
+    returns = torch.zeros(matches, 2, device=device)
+    options = {"triton.cudagraphs": False}
+    commit = torch.compile(ring.commit, fullgraph=True, dynamic=False, options=options)
+    accept = torch.compile(exp.accept_frame_tensors, fullgraph=True, dynamic=False, options=options)
+    default = torch.cuda.current_stream(device)
+    streams = [torch.cuda.Stream(device=device) for _ in range(2)]
+    graphs = [torch.cuda.CUDAGraph() for _ in streams]
+    with prepared_shape_compilation(64):
+        commit(metadata, due, actions, controllers, count=2)
+        accept(frames, lanes, pending, table, ring, active, stops, observed, returns)
+        torch.cuda.synchronize(device)
+        with torch.cuda.graph(graphs[0], stream=streams[0]):
+            for _ in range(repetitions):
+                commit(metadata, due, actions, controllers, count=2)
+        with torch.cuda.graph(graphs[1], stream=streams[1]):
+            for _ in range(repetitions):
+                accept(frames, lanes, pending, table, ring, active, stops, observed, returns)
+    for _ in range(16):
+        ring.length_storage.fill_(repetitions)
+        stops.zero_()
+        observed.zero_()
+        for stream, graph in zip(streams, graphs, strict=True):
+            stream.wait_stream(default)
+            with torch.cuda.stream(stream):
+                graph.replay()
+        for stream in streams:
+            default.wait_stream(stream)
+        expected = torch.full_like(ring.length_device, repetitions)
+        expected[: matches // 2, 0] += 2 * repetitions
+        expected[matches // 2 :] -= repetitions
+        torch.testing.assert_close(ring.length_device, expected, atol=0, rtol=0)
+        torch.testing.assert_close(stops[lanes], torch.full_like(lanes, repetitions), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_unsealed_tick_staging_prepares_groups_above_the_default_compiler_budget() -> None:
     from test_065_loop import exp
     from test_065_loop import trainer
