@@ -49,6 +49,7 @@ class Args:
     capture_training_inputs: bool = False
     # Use local sandbox disk if the shared cache volume reaches its inode limit.
     cache_root: Path = CACHE
+    compile_threads: int = 16
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -143,11 +144,14 @@ def bench(
     actor_microbatches: int | None = None,
     capture_training_inputs: bool = False,
     cache_root: Path = CACHE,
+    compile_threads: int = 16,
 ) -> int:
     if capture_training_inputs and not full:
         raise ValueError("training input capture requires --full")
     if not cache_root.is_absolute():
         raise ValueError("sandbox cache root must be absolute")
+    if compile_threads < 1:
+        raise ValueError("compiler threads must be positive")
     trainer_sha = hashlib.sha256(Path("experiments/065_selfplay_ppo.py").read_bytes()).hexdigest()
     if _run(sandbox, f"test \"$(sha256sum experiments/065_selfplay_ppo.py | cut -d ' ' -f1)\" = {trainer_sha}"):
         raise ValueError("remote trainer source differs from the worktree; restore the sandbox source and sync again")
@@ -160,7 +164,7 @@ def bench(
         "TMPDIR": str(cache_root / "tmp"),
         "TORCHINDUCTOR_CACHE_DIR": str(cache_root / "inductor"),
         "TRITON_CACHE_DIR": str(cache_root / "triton"),
-        "TORCHINDUCTOR_COMPILE_THREADS": "16",
+        "TORCHINDUCTOR_COMPILE_THREADS": str(compile_threads),
         "TORCHINDUCTOR_ENABLE_PDL": "1",
         "OMP_NUM_THREADS": "2",
         "MKL_NUM_THREADS": "2",
@@ -215,13 +219,15 @@ def bench(
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
     command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {' '.join(argv)}"
     code = _run(sandbox, command)
-    if _run(sandbox, f"test -d {output}"):
+    if _run(sandbox, f"test -d {shlex.quote(str(output))}"):
         print("no report written", flush=True)
         return code
     # Traces and reports go to one local directory per run for offline analysis.
     local = LOCAL_RESULTS / "runs" / name
     local.mkdir(parents=True)
-    for path in _capture(sandbox, f"find {output} -type f").split():
+    for path in _capture(sandbox, f"find {shlex.quote(str(output))} -type f -print0").split("\0"):
+        if not path:
+            continue
         target = local / Path(path).relative_to(output)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(sandbox.filesystem.read_bytes(path))
@@ -252,6 +258,7 @@ def main(args: Args) -> None:
                 actor_microbatches=args.actor_microbatches,
                 capture_training_inputs=args.capture_training_inputs,
                 cache_root=args.cache_root,
+                compile_threads=args.compile_threads,
             )
             for matches in args.matches_per_shard
         ]
