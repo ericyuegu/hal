@@ -70,30 +70,41 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
         for name in BASE_ITEMS_PROJECTION.columns
         if feature_kind(name, ITEM_COLUMNS) == "float" and not name.startswith("ego_button_")
     }
-    policy = exp.TransformerPolicy(model, exp.production_config(cfg.head_offsets), stats)
-    store = exp.FrameStore(140, 6, torch.device(device))
+
+    class RecordingPolicy(exp.TransformerPolicy):
+        def __init__(self, model: SelfPlayTransformer, schedule: Any, statistics: dict[str, FeatureStats]) -> None:
+            super().__init__(model, schedule, statistics)
+            self.sampled_streams: list[int] = []
+
+        def _tensor_action_uniforms(self, meta: torch.Tensor, rng: Any) -> torch.Tensor:
+            if meta.device.type == "cpu":
+                self.sampled_streams.extend(meta[:, exp.STREAM].tolist())
+            return super()._tensor_action_uniforms(meta, rng)
+
+    policy = RecordingPolicy(model, exp.production_config(cfg.head_offsets), stats)
+    store = exp.FrameStore(140, 10, torch.device(device))
     store.actions.uniform_()
     table = exp.DenseRollout(64, store)
     table.allocate_evaluation(model)
-    ids = torch.tensor([3, 1, 5, 0, 4, 2], device=device)
-    streams = (7, 2, 9, 0, 5, 10)
-    lanes = (3, 1, 4, 0, 2, 5)
+    ids = torch.tensor([3, 1, 5, 0, 4, 2, 9, 6, 8, 7], device=device)
+    streams = (7, 2, 9, 0, 5, 10, 13, 14, 17, 18)
+    lanes = (3, 1, 4, 0, 2, 5, 6, 7, 8, 9)
     layout = exp.TickLayout(streams, lanes)
-    meta = torch.zeros(6, 18, dtype=torch.long, device=device)
+    meta = torch.zeros(10, 18, dtype=torch.long, device=device)
     meta[:, exp.STREAM] = torch.tensor(streams, device=device)
     meta[:, exp.LANE] = torch.tensor(lanes, device=device)
     meta[:, exp.SIDE] = torch.tensor(streams, device=device) % 2
-    meta[:, exp.LENGTH] = torch.tensor([129, 1, 2, 65, 80, 129], device=device)
-    meta[:, exp.DELAY] = torch.tensor([16, 17, 18, 19, 20, 21], device=device)
-    meta[:, exp.REPLAN] = torch.tensor([4, 2, 4, 2, 4, 2], device=device)
+    meta[:, exp.LENGTH] = torch.tensor([129, 1, 2, 65, 80, 129, 7, 100, 63, 127], device=device)
+    meta[:, exp.DELAY] = torch.tensor([16, 17, 18, 19, 20, 21, 16, 17, 18, 19], device=device)
+    meta[:, exp.REPLAN] = torch.tensor([4, 2, 4, 2, 4, 2, 4, 2, 4, 2], device=device)
     meta[:, exp.OPP_DELAY] = meta[:, exp.DELAY].flip(0)
     meta[:, exp.OPP_REPLAN] = meta[:, exp.REPLAN].flip(0)
     meta[:, exp.OPP_LENGTH] = meta[:, exp.OPP_DELAY]
     table.conditions[ids] = torch.tensor([-5.0, -6.0, 0.3, 0.7], device=device)
-    table.prefix[ids] = model.codec.quantize(torch.rand(6, 24, exp.ACTION_DIM, device=device))
-    table.opponent[ids] = model.codec.quantize(torch.rand(6, 24, exp.ACTION_DIM, device=device))
-    table.active[ids] = torch.tensor([True, False, True, True, False, True], device=device)
-    ring = exp.ActionRing(6, 32, torch.device(device))
+    table.prefix[ids] = model.codec.quantize(torch.rand(10, 24, exp.ACTION_DIM, device=device))
+    table.opponent[ids] = model.codec.quantize(torch.rand(10, 24, exp.ACTION_DIM, device=device))
+    table.active[ids] = torch.tensor([True, False, True, True, False, True, False, True, False, False], device=device)
+    ring = exp.ActionRing(10, 32, torch.device(device))
     ring.length_device[meta[:, exp.LANE], meta[:, exp.SIDE]] = meta[:, exp.DELAY]
     states = exp.TickInputs(table, ids)
 
@@ -112,12 +123,21 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
     inputs = [value.clone() for value in model.parameters()]
     inputs.extend([store.actions.clone(), table.prefix[ids], table.opponent[ids], meta.clone()])
     outputs = []
-    for clock in (128, 130, 132, 134):
+    for clock in (128, 130, 132, 134, 136):
+        if clock == 136:
+            table.active[ids] = False
         meta[:, exp.CLOCK] = clock
         table.integers[ids] = meta
+        if device == "cuda" and "decoder_rows" in exp.TickInputs.__dataclass_fields__:
+            due = table.active[ids] & (clock % meta[:, exp.REPLAN] == 0)
+            decoder_rows = tuple(torch.nonzero(due).flatten().cpu().tolist())
+            states = exp.TickInputs(table, ids, decoder_rows=decoder_rows)
         uniforms = policy._tensor_action_uniforms(meta, rng)
+        policy.sampled_streams.clear()
         policy.sample_tick(states, rng, layout, ring, clock=clock)
         due = table.active[ids] & (clock % meta[:, exp.REPLAN] == 0)
+        if device == "cpu" and "decoder_rows" in exp.TickInputs.__dataclass_fields__:
+            assert policy.sampled_streams == meta[due, exp.STREAM].tolist()
         rows = ids[due]
         cache = policy.tick_caches[ring, (layout.buffer, len(ids))]
         outputs.append(
@@ -165,11 +185,58 @@ def test_tick_matches_control_actions_log_probs_values_and_ring(tmp_path: Path, 
         for name in ("log_probs", "values", "decoder"):
             torch.testing.assert_close(tick[name], control_tick[name], atol=1.6e-2, rtol=1.6e-2)
         for value, reference in zip(tick["distributions"], control_tick["distributions"], strict=True):
-            torch.testing.assert_close(value, reference, atol=2e-4, rtol=1.6e-2)
+            # Compare every categorical log-probability under the same BF16
+            # contract as the sampled factors, including exact zero support.
+            positive = reference > 0
+            assert torch.equal(value > 0, positive)
+            torch.testing.assert_close(value[positive].log(), reference[positive].log(), atol=1.6e-2, rtol=1.6e-2)
         for value, reference in zip(tick["cache"], control_tick["cache"], strict=True):
             torch.testing.assert_close(
                 value, reference, atol=1.6e-2 if device == "cuda" else 2e-6, rtol=1.6e-2 if device == "cuda" else 2e-5
             )
+
+
+@pytest.mark.parametrize(
+    "clock,decoder_rows,message",
+    [(0, (0,), "omit a due row"), (2, (0,), "not due"), (0, (0, 0), "distinct"), (0, (2,), "row indices")],
+)
+def test_tick_rejects_incorrect_decoder_rows(clock: int, decoder_rows: tuple[int, ...], message: str) -> None:
+    from test_065_loop import exp
+    from test_065_loop import transformer_trainer
+
+    run = transformer_trainer(development=True)
+    engine = run.engine
+    table = exp.DenseRollout(64, engine.stores[0])
+    table.allocate_evaluation(run.policy.model)
+    ids = engine._stage_tick(clock, 0, table, torch.full((2,), -1, dtype=torch.long))
+    table.integers[ids, exp.REPLAN] = 4
+    meta = table.integers[ids]
+    layout = exp.TickLayout(tuple(meta[:, exp.STREAM].tolist()), tuple(meta[:, exp.LANE].tolist()))
+    states = exp.TickInputs(table, ids, decoder_rows=decoder_rows)
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        run.policy.sample_tick(states, engine.sampler.rng, layout, engine.rings[0], clock=clock)
+
+
+def test_staged_decoder_rows_match_device_metadata_and_ownership() -> None:
+    from test_065_loop import exp
+    from test_o65_fixed_layout import fixed_trainer
+
+    engine = fixed_trainer().engine
+    table = exp.DenseRollout(64, engine.stores[0])
+    pending = torch.full((table.players,), -1, dtype=torch.long)
+    for clock in (0, 2):
+        if clock == 2:
+            engine.active[0][0] = False
+            engine.live_host[0][0] = False
+        ids = engine._stage_tick(clock, 0, table, pending)
+        for key in engine.tick_layouts:
+            slots = engine.group_slots[0][key]
+            selected = ids[slots]
+            owner = -1 if key[1] is None else key[1]
+            metadata = table.integers[selected]
+            due = table.active[selected] & (engine.owners[0][slots] == owner)
+            due &= metadata[:, exp.CLOCK] % metadata[:, exp.REPLAN] == 0
+            assert engine.tick_decoder_rows[key] == tuple(torch.nonzero(due).flatten().tolist())
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ class Args:
 def main(args: Args) -> None:
     root = Path(__file__).resolve().parents[1]
     git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    git_dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip())
     source_sha256 = {
         path: hashlib.sha256((root / path).read_bytes()).hexdigest()
         for path in (
@@ -55,6 +56,8 @@ def main(args: Args) -> None:
             "hal/models/action_sequence.py",
             "hal/models/attention.py",
             "hal/inference/kv_cache.py",
+            "hal/inference/decision_decoder.py",
+            "hal/inference/cuda_graph.py",
         )
     }
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -97,7 +100,12 @@ def main(args: Args) -> None:
     for value in (*cache.cache.layers, cache.cache.history):
         value.normal_(std=0.1)
     cache.cache.positions.copy_(torch.arange(cache.cache.capacity, device=device)[None])
-    states = o65.TickInputs(table, ids)
+    count = 4 if args.clock % 4 == 0 else 2
+    decoder_rows = tuple(
+        row for row in range(args.rows) if args.clock % configurations[row % len(configurations)].replan == 0
+    )
+    bucket = next(size for size in o65.tick_decoder_buckets(args.rows, count) if size >= len(decoder_rows))
+    states = o65.TickInputs(table, ids, decoder_rows=decoder_rows)
     rng = o65.CounterRng(args.seed)
 
     def reset() -> None:
@@ -110,7 +118,7 @@ def main(args: Args) -> None:
     policy.sample_tick(states, rng, layout, ring, clock=args.clock)
     torch.cuda.synchronize()
     capture_seconds = time.perf_counter() - started
-    captured = policy.tick_graphs[key, 2, 4 if args.clock % 4 == 0 else 2]
+    captured = policy.tick_graphs[key, 2, count, bucket]
     events = [
         (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(args.repeats)
     ]
@@ -138,6 +146,7 @@ def main(args: Args) -> None:
     flops = policy.work_flops["rollout"]
     report = {
         "git_sha": git_sha,
+        "git_dirty": git_dirty,
         "checkpoint_sha256": checkpoint.checkpoint_sha256,
         "checkpoint_provenance": checkpoint.provenance,
         "source_sha256": source_sha256,
@@ -147,7 +156,10 @@ def main(args: Args) -> None:
         "deterministic": torch.are_deterministic_algorithms_enabled(),
         "inference_mode": torch.is_inference_mode_enabled(),
         "capture_seconds": capture_seconds,
+        "captured_tick_graphs": len(policy.tick_graphs),
         "timing_scope": "captured_graph_only",
+        "decoder_rows": len(decoder_rows),
+        "decoder_bucket": bucket,
         "tick_ms": tick_ms,
         "min_ms": min(timings),
         "max_ms": max(timings),
