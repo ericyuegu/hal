@@ -572,7 +572,7 @@ def test_prefetched_commit_and_frame_acceptance_keep_disjoint_queue_lengths() ->
     returns = torch.zeros(matches, 2, device=device)
     options = {"triton.cudagraphs": False}
     commit = torch.compile(ring.commit, fullgraph=True, dynamic=False, options=options)
-    accept = torch.compile(exp.accept_frame_tensors, fullgraph=True, dynamic=False, options=options)
+    accept = torch.compile(exp.accept_frame_tensors, fullgraph=True, dynamic=True, options=options)
     default = torch.cuda.current_stream(device)
     streams = [torch.cuda.Stream(device=device) for _ in range(2)]
     graphs = [torch.cuda.CUDAGraph() for _ in streams]

@@ -2716,7 +2716,7 @@ class RolloutEngine:
             not isinstance(self.policy, TransformerPolicy) or not self.policy.startup_finished
         )
         # Resume controls can create more engine variants than Torch's default
-        # budget. Sealed production engines use only their prepared variants.
+        # budget. Keep the normal budget after production startup.
         with (
             prepared_shape_compilation(64, instance_count=4 * len(self.groups))
             if preparing
