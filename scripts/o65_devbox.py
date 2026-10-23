@@ -10,6 +10,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import shlex
 import subprocess
 import tarfile
 import time
@@ -46,6 +47,8 @@ class Args:
     windows_per_step: int = 64
     actor_microbatches: int | None = None
     capture_training_inputs: bool = False
+    # Use local sandbox disk if the shared cache volume reaches its inode limit.
+    cache_root: Path = CACHE
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -139,21 +142,24 @@ def bench(
     windows_per_step: int | None = None,
     actor_microbatches: int | None = None,
     capture_training_inputs: bool = False,
+    cache_root: Path = CACHE,
 ) -> int:
     if capture_training_inputs and not full:
         raise ValueError("training input capture requires --full")
+    if not cache_root.is_absolute():
+        raise ValueError("sandbox cache root must be absolute")
     trainer_sha = hashlib.sha256(Path("experiments/065_selfplay_ppo.py").read_bytes()).hexdigest()
     if _run(sandbox, f"test \"$(sha256sum experiments/065_selfplay_ppo.py | cut -d ' ' -f1)\" = {trainer_sha}"):
         raise ValueError("remote trainer source differs from the worktree; restore the sandbox source and sync again")
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
-    output = CACHE / "runs" / name
+    output = cache_root / "runs" / name
     root = launch.REMOTE_ROOT
     env = {
         "WANDB_MODE": "disabled",
         "HAL_NATIVE_LIBRARY": f"{root}/delivery/libhal_native.so",
-        "TMPDIR": str(CACHE / "tmp"),
-        "TORCHINDUCTOR_CACHE_DIR": str(CACHE / "inductor"),
-        "TRITON_CACHE_DIR": str(CACHE / "triton"),
+        "TMPDIR": str(cache_root / "tmp"),
+        "TORCHINDUCTOR_CACHE_DIR": str(cache_root / "inductor"),
+        "TRITON_CACHE_DIR": str(cache_root / "triton"),
         "TORCHINDUCTOR_COMPILE_THREADS": "16",
         "TORCHINDUCTOR_ENABLE_PDL": "1",
         "OMP_NUM_THREADS": "2",
@@ -171,7 +177,7 @@ def bench(
         "--data-dir",
         f"{root}/delivery/inputs/msl/data",
         "--output",
-        str(output),
+        shlex.quote(str(output)),
         "--cpus",
         "$CPUS",
         "--matches-per-shard",
@@ -204,10 +210,10 @@ def bench(
         *(() if full else ("--profiling.rollout-only",)),
         *(("--profiling.capture-training-inputs",) if capture_training_inputs else ()),
     ]
-    exports = " ".join(f"{key}={value}" for key, value in env.items())
+    exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     # Sandbox CPU numbering varies; take the first available cores for simulator shards.
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
-    command = f"mkdir -p {CACHE / 'tmp'} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {' '.join(argv)}"
+    command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {' '.join(argv)}"
     code = _run(sandbox, command)
     if _run(sandbox, f"test -d {output}"):
         print("no report written", flush=True)
@@ -245,6 +251,7 @@ def main(args: Args) -> None:
                 windows_per_step=args.windows_per_step,
                 actor_microbatches=args.actor_microbatches,
                 capture_training_inputs=args.capture_training_inputs,
+                cache_root=args.cache_root,
             )
             for matches in args.matches_per_shard
         ]

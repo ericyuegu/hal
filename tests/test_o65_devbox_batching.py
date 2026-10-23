@@ -80,3 +80,16 @@ def test_bench_rejects_stale_trainer_source_before_launch() -> None:
         bench(cast(modal.Sandbox, sandbox), 64, 512, full=True)
     assert len(sandbox.commands) == 1
     assert "sha256sum experiments/065_selfplay_ppo.py" in sandbox.commands[0][2]
+
+
+def test_bench_can_keep_compiler_files_and_reports_off_a_full_shared_volume() -> None:
+    sandbox = Sandbox()
+    assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, cache_root=Path("/tmp/train-cache")) == 0
+    command = sandbox.commands[1][2]
+    for path in (
+        "TMPDIR=/tmp/train-cache/tmp",
+        "TORCHINDUCTOR_CACHE_DIR=/tmp/train-cache/inductor",
+        "TRITON_CACHE_DIR=/tmp/train-cache/triton",
+        "--output /tmp/train-cache/runs/",
+    ):
+        assert path in command
