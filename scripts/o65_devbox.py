@@ -31,12 +31,14 @@ SHARD_CPUS = 16
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    action: Literal["up", "sync", "bench", "exec", "down"]
+    action: tyro.conf.Positional[Literal["up", "sync", "bench", "exec", "down"]]
     # up: the commit the image is built from; defaults to HEAD, which must be pushed to origin.
     sha: str | None = None
     # bench: matches per simulator shard; 16 shards run per GPU.
     matches_per_shard: tuple[int, ...] = (64,)
+    # bench: frames per rollout, in whole 128-frame blocks.
     rollout_frames: int = 128
+    # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
     hours: float = 6.0
