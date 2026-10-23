@@ -10,8 +10,8 @@
  from hal.models.replay_actor import ActorLoss
 @@ -1288,6 +1289,11 @@
              target[rows] = source.to(target.dtype)
- 
- 
+
+
 +def replay_history(trunk: Trunk, tokens: Tensor) -> Tensor:
 +    """Keep the observation encoder's eager BF16 rounding at the replay boundary."""
 +    return trunk(tokens, torch.zeros(len(tokens), dtype=torch.long, device=tokens.device))
@@ -19,7 +19,7 @@
 +
  class TransformerPolicy:
      """Append fixed rollout slots and replay one history per training window."""
- 
+
 @@ -1339,6 +1345,18 @@
          )
          self.actor_graph: GraphedActorStep | None = None
@@ -48,7 +48,7 @@
 +            tokens = self.model.context_tokens(context, observed)
 +            hidden = self.window_history(self.model.trunk, tokens)
          return self.window_replay(self.model, hidden, observed, ReplaySlots(*inputs[5:]), grad=grad)
- 
+
      def reference_forward(self, inputs: tuple[Tensor, ...], windows_per_step: int, count: int) -> ReplayOutput:
 @@ -1731,7 +1749,8 @@
                  ),

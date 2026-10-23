@@ -794,6 +794,6 @@
       }
     ]
   },
-  "rejected_patch_sha256": "1d15baf8fe880089d8bafd8a480f56838f70d1dff2b3fe0f405bad90617a9e0f",
+  "rejected_patch_sha256": "3f4eb271bed3b9f7a529484a12054eda4a00f82b72a54d353c29d69580a1dbcd",
   "qualification_commit": "87e61831"
 }
