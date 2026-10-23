@@ -182,6 +182,10 @@ class DecisionDecoder:
     ) -> DecisionOutput:
         if torch.is_grad_enabled():
             raise ValueError("CUDA graph sampling requires no_grad or inference_mode")
+        if history is not None and history.row_indices is not None:
+            history = dataclasses.replace(
+                history, kv=history.kv.index_select(1, history.row_indices), row_indices=None
+            )
         batch = hidden.shape[0]
         bucket = 1 << (batch - 1).bit_length()
         capacity = self.model.cfg.L_ctx + 3

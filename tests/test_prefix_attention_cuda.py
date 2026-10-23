@@ -9,9 +9,46 @@ from hal.inference.kv_cache import forward_tokens_with_kv_cache
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.action_sequence import short_causal_attention
+from hal.models.attention import indexed_prefix_attention
 from hal.models.attention import prefix_attention
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FlexAttention and varlen restart require CUDA")
+
+
+@pytest.mark.parametrize("queries,capacity", [(1, 65), (21, 259), (127, 259)])
+@torch.no_grad()
+def test_indexed_history_matches_gather_with_empty_duplicate_and_changing_rows(queries: int, capacity: int) -> None:
+    from hal.inference.cuda_graph import CapturedCall
+
+    torch.manual_seed(83)
+    rows = torch.tensor([4, 1, 4, 0, 3, 3], device="cuda")
+    lengths = torch.tensor([0, 1, queries - 1, queries, capacity - 1, capacity], device="cuda")
+    query = torch.randn(6, 2, queries, 32, device="cuda", dtype=torch.bfloat16)
+    key, value = torch.randn(2, 2, 5, capacity, 32, device="cuda", dtype=torch.bfloat16).transpose(1, 2).unbind(0)
+    compiled = torch.compile(
+        indexed_prefix_attention, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False}
+    )
+    graph = CapturedCall(
+        lambda: compiled(query, key, value, lengths, rows),
+        (query, key, value, lengths, rows),
+        device=torch.device("cuda"),
+    )
+    for _ in range(2):
+        mask = torch.arange(capacity, device="cuda")[None] < lengths[:, None]
+        expected = F.scaled_dot_product_attention(
+            query, key.index_select(0, rows), value.index_select(0, rows), attn_mask=mask[:, None, None]
+        )
+        actual = graph((query, key, value, lengths, rows))
+        torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1.6e-2)
+        lengths.copy_(lengths.flip(0))
+        rows.copy_(rows.flip(0))
+
+
+def test_indexed_history_rejects_unsupported_128_query_path() -> None:
+    query = torch.zeros(1, 2, 128, 32, device="cuda")
+    key = torch.zeros(1, 2, 259, 32, device="cuda")
+    with pytest.raises(ValueError, match="fewer than 128 queries"):
+        indexed_prefix_attention(query, key, key, torch.tensor([259], device="cuda"), torch.tensor([0], device="cuda"))
 
 
 @pytest.mark.parametrize(

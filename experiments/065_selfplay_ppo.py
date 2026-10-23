@@ -1747,11 +1747,12 @@ class TransformerPolicy:
                             rows = static[5].index_select(0, indices)
                             memory = cache.memory()
                             history = KVMemory(
-                                memory.kv.index_select(1, indices),
+                                memory.kv,
                                 memory.positions.index_select(0, indices),
                                 memory.query_position.index_select(0, indices),
                                 memory.window,
                                 memory.prefix,
+                                indices,
                             )
                             result = self._decode_tensors(
                                 rows,

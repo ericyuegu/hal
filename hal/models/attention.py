@@ -164,6 +164,7 @@ class KVMemory:
     query_position: Tensor
     window: int
     prefix: bool = False
+    row_indices: Tensor | None = None
 
 
 def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor, *, causal: bool) -> Tensor:
@@ -205,6 +206,57 @@ def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor,
     valid = slots[None, None] < (limits if causal else lengths[:, None].expand(batch, queries))[..., None]
     attended = F.scaled_dot_product_attention(query, key, value, attn_mask=valid[:, None])
     return torch.where(valid.any(-1)[:, None, :, None], attended, 0)
+
+
+def indexed_prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor, rows: Tensor) -> Tensor:
+    """Read selected history rows without copying their full key/value storage.
+
+    Key/value storage is contiguous in [head, row, slot, dimension] order.
+    Sparse block lists select each row's prefix from one shared key sequence.
+    """
+    batch, heads, queries, dimension = query.shape
+    total, _, capacity, _ = key.shape
+    if (
+        lengths.shape != (batch,)
+        or rows.shape != (batch,)
+        or rows.dtype not in (torch.int32, torch.int64)
+        or lengths.dtype not in (torch.int32, torch.int64)
+        or key.shape != value.shape
+        or key.shape[1:] != (heads, capacity, dimension)
+    ):
+        raise ValueError("indexed prefix rows and lengths must be integer [B]")
+    # Torch 2.11.0's non-decode FlexAttention path fails prefix parity at 128.
+    # Extend this limit only after that path passes the CUDA regression tests.
+    if not 1 <= queries < 128:
+        raise ValueError("indexed prefix attention requires fewer than 128 queries")
+    if query.device.type != "cuda" or not torch.compiler.is_compiling() or torch.is_grad_enabled() or dimension < 16:
+        return prefix_attention(query, key.index_select(0, rows), value.index_select(0, rows), lengths, causal=False)
+    torch._assert_async(((rows >= 0) & (rows < total)).all(), "indexed prefix row is out of range")
+    torch._assert_async(((lengths >= 0) & (lengths <= capacity)).all(), "indexed prefix length is out of range")
+    keys = key.transpose(0, 1).view(1, heads, total * capacity, dimension)
+    values = value.transpose(0, 1).view(1, heads, total * capacity, dimension)
+    block_size = 64
+    starts = rows * capacity
+    counts = torch.where(lengths > 0, (lengths + starts % block_size + block_size - 1) // block_size, 0)
+    blocks = (
+        starts.div(block_size, rounding_mode="floor")[:, None, None, None]
+        + torch.arange((capacity + 2 * block_size - 2) // block_size, device=query.device, dtype=torch.int32)[
+            None, None, None
+        ]
+    )
+
+    def keep(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
+        return (kv >= starts[b]) & (kv < starts[b] + lengths[b])
+
+    block_mask = BlockMask.from_kv_blocks(
+        counts.to(torch.int32)[:, None, None],
+        blocks.to(torch.int32),
+        BLOCK_SIZE=(128, block_size),
+        mask_mod=keep,
+        seq_lengths=(queries, total * capacity),
+        compute_q_blocks=False,
+    )
+    return cast(Tensor, flex_attention(query, keys, values, block_mask=block_mask))
 
 
 def rmsnorm(x0: Float[Tensor, "... d"], eps: float = 1e-6) -> Float[Tensor, "... d"]:

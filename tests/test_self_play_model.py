@@ -446,6 +446,42 @@ def test_cuda_compiled_two_and_four_offset_variants_match_eager() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("selected", [(4, 1, 4), (4, 1, 0, 3, 2)])
+@torch.no_grad()
+def test_cuda_graph_decoder_preserves_indexed_history_selection(selected: tuple[int, ...]) -> None:
+    from hal.models.attention import KVMemory
+
+    torch.manual_seed(89)
+    policy = model().cuda()
+    compiled = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=True)
+    eager = DecisionDecoder(policy, ((8, 4), (10, 2)), compiled=False)
+    hidden = torch.randn(5, 13, 32, device="cuda")
+    key, value = policy.temporal.history_attention.project_memory(hidden)
+    rows = torch.tensor(selected, device="cuda")
+    batch = len(selected)
+    observed = policy.codec.quantize(torch.rand(batch, ACTION_DIM, device="cuda"))
+    queue = policy.codec.quantize(torch.rand(batch, 10, ACTION_DIM, device="cuda"))
+    delay = torch.full((batch,), 10, device="cuda")
+    replan = torch.full_like(delay, 2)
+    draws = torch.rand(2, 4, batch, device="cuda")
+    for _ in range(2):
+        history = KVMemory(
+            torch.stack((key, value)),
+            torch.arange(13, device="cuda")[None].expand(batch, -1),
+            torch.full_like(delay, 12),
+            256,
+            True,
+            rows,
+        )
+        args = hidden[rows, -1:], observed, queue, torch.zeros(batch, device="cuda"), delay, replan, draws
+        actual = compiled(*args, sampled_offsets=2, history=history)
+        expected = eager(*args, sampled_offsets=2, history=history, sampled_actions=actual.actions)
+        torch.testing.assert_close(actual.log_probs, expected.log_probs, atol=2e-6, rtol=2e-5)
+        torch.testing.assert_close(actual.decoder_state, expected.decoder_state, atol=2e-6, rtol=2e-5)
+        rows.copy_(rows.flip(0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("precision", ["bf16", "fp32"])
 @torch.no_grad()
 def test_cuda_graph_buckets_keep_outputs_and_read_updated_weights(precision: DecoderPrecision) -> None:

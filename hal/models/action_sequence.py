@@ -21,6 +21,7 @@ from hal.models.attention import Rotary
 from hal.models.attention import Trunk
 from hal.models.attention import TrunkConfig
 from hal.models.attention import apply_rotary_emb
+from hal.models.attention import indexed_prefix_attention
 from hal.models.attention import prefix_attention
 from hal.models.attention import rotate_positions
 from hal.models.conditioning import ConditioningRanges
@@ -531,13 +532,25 @@ class HistoryCrossAttention(nn.Module):
         batch, queries, _ = x.shape
         positions = memory.positions.unsqueeze(0) if memory.positions.ndim == 1 else memory.positions
         query_position = memory.query_position.reshape(-1)
-        if positions.shape[0] != batch or query_position.shape != (batch,) or memory.kv.shape[1] != batch:
+        if (
+            positions.shape[0] != batch
+            or query_position.shape != (batch,)
+            or (memory.kv.shape[1] != batch if memory.row_indices is None else memory.row_indices.shape != (batch,))
+        ):
             raise ValueError("KV history rows must match query rows")
+        if memory.row_indices is not None and not memory.prefix:
+            raise ValueError("indexed KV history requires prefix storage")
         query = self.query(decoder_rmsnorm(x)).view(batch, queries, self.n_heads, self.head_dim)
         query_positions = query_position[:, None].expand(batch, queries)
         query = rotate_positions(query, query_positions, self.rotary).transpose(1, 2)
         if memory.prefix:
-            attended = prefix_attention(query, memory.kv[0], memory.kv[1], query_position + 1, causal=False)
+            attended = (
+                prefix_attention(query, memory.kv[0], memory.kv[1], query_position + 1, causal=False)
+                if memory.row_indices is None
+                else indexed_prefix_attention(
+                    query, memory.kv[0], memory.kv[1], query_position + 1, memory.row_indices
+                )
+            )
             return x + self.scale * self.output(attended.transpose(1, 2).reshape_as(x))
         valid = (
             (positions >= 0)
