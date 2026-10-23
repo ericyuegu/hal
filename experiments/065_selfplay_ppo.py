@@ -2399,18 +2399,21 @@ class RolloutEngine:
         end = math.ceil(maximum / count) * count
         offsets = []
         for group, shards in enumerate(self.groups):
-            store = FrameStore(2, len(self.group_matches[group]), self.policy.device)
-            previous = self.stores[group]
-            if previous is None:
+            store = self.stores[group]
+            if store is None:
                 raise ValueError("pool has no initial frame storage")
-            for target, source in (
-                (store.records, previous.records),
-                (store.actions, previous.actions),
-                (store.rewards, previous.rewards),
-                (store.flags, previous.flags),
-            ):
-                target[0].copy_(source[0])
-            self.stores[group] = store
+            # Startup graphs retain the full store's addresses through head start.
+            if len(store.records) < 2:
+                previous = store
+                store = FrameStore(2, len(self.group_matches[group]), self.policy.device)
+                for target, source in (
+                    (store.records, previous.records),
+                    (store.actions, previous.actions),
+                    (store.rewards, previous.rewards),
+                    (store.flags, previous.flags),
+                ):
+                    target[0].copy_(source[0])
+                self.stores[group] = store
             ring = self.rings[group]
             for shard in shards:
                 odd = np.zeros(len(shard.match_ids), dtype=np.bool_)

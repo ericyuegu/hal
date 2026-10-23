@@ -263,5 +263,37 @@ def test_staged_decoder_rows_match_device_metadata_and_ownership() -> None:
             assert engine.tick_decoder_rows[key] == tuple(torch.nonzero(due).flatten().tolist())
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_head_start_preserves_captured_store_addresses(device: str) -> None:
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    from hal.inference.cuda_graph import CapturedCall
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    engine = trainer(device, groups=1).engine
+    count = engine.sampler.schedule.rollout_frames
+    previous = engine.stores[0]
+    store = exp.FrameStore(129 + count + count // 128 + 1, len(engine.group_matches[0]), engine.policy.device)
+    for name in ("records", "actions", "rewards", "flags"):
+        getattr(store, name)[: len(previous.records)].copy_(getattr(previous, name))
+    engine.stores[0] = store
+    table = exp.DenseRollout(count // 2, store)
+    engine.tables[0] = table
+    captured = (
+        CapturedCall(lambda: store.records.clone(), (store.records,), device=engine.policy.device)
+        if device == "cuda"
+        else None
+    )
+    engine.stagger_starts(64)
+    assert engine.stores[0] is store
+    engine.collect(-1)
+    assert engine.stores[0] is table.store is store
+    assert torch.count_nonzero(store.records[1:])
+    if captured:
+        torch.testing.assert_close(captured((store.records,)), table.store.records, atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     torch.save(tick_outputs(Path.cwd(), sys.argv[2]), sys.argv[1])
