@@ -14,7 +14,11 @@ finally:
 
 
 def write_profile(path: Path) -> None:
-    (path / "resolved.json").write_text(json.dumps({"format": "hal.o65.gpu-profile-inputs.v1", "gpu": "NVIDIA B200"}))
+    (path / "resolved.json").write_text(
+        json.dumps(
+            {"format": "hal.o65.gpu-profile-inputs.v1", "gpu": "NVIDIA B200", "environment": {"world_size": "1"}}
+        )
+    )
     metrics = {}
     for name in ("preparation", "actor", "critic"):
         metrics[f"systems/{name}_seconds"] = 4.0
@@ -39,6 +43,15 @@ def test_floors_reject_missing_architecture_flops(tmp_path: Path) -> None:
     del timed["metrics"]["flops/actor_total"]
     (tmp_path / "timed.json").write_text(json.dumps(timed))
     with pytest.raises(KeyError, match="flops/actor_total"):
+        phase_floors(tmp_path)
+
+
+def test_floors_reject_distributed_work_with_a_single_gpu_peak(tmp_path: Path) -> None:
+    write_profile(tmp_path)
+    resolved = json.loads((tmp_path / "resolved.json").read_text())
+    resolved["environment"]["world_size"] = "8"
+    (tmp_path / "resolved.json").write_text(json.dumps(resolved))
+    with pytest.raises(ValueError, match="single-GPU profile"):
         phase_floors(tmp_path)
 
 

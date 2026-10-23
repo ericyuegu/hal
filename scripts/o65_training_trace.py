@@ -41,6 +41,8 @@ def phase_floors(profile: Path) -> tuple[PhaseFloor, ...]:
         raise ValueError("unsupported O65 profile format")
     if timed["mode"] != "timed":
         raise ValueError("MFU requires the untraced update")
+    if resolved["environment"]["world_size"] != "1":
+        raise ValueError("training compute floors require a single-GPU profile")
     peak = bf16_dense_peak_flops(resolved["gpu"])
     if peak is None:
         raise ValueError(f"unknown BF16 peak for {resolved['gpu']}")
