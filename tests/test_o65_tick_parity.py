@@ -380,9 +380,18 @@ def test_prefetched_ticks_match_serial_rollouts(length: int, timeout: bool, stag
             return super().device_wire_actions(indices, validate=False)
 
         def sample_tick(self, *args: Any, **kwargs: Any) -> None:
-            if not self.model.logits.requires_grad:
-                torch.cuda._sleep(20_000_000)
             super().sample_tick(*args, **kwargs)
+            if self.model.logits.requires_grad or kwargs["clock"] != 2:
+                return
+            states, ring = args[0], args[3]
+            metadata = states.tensor(states.table.integers)[states.enabled]
+            lanes, sides = metadata[:, exp.LANE], metadata[:, exp.SIDE]
+            saved = ring.controller_storage[lanes, sides].clone()
+            # The toy policy's tensor constructors synchronize. Delay a final
+            # write after those constructors to expose a missing controller join.
+            ring.controller_storage[lanes, sides] = 0
+            torch.cuda._sleep(200_000_000)
+            ring.controller_storage[lanes, sides] = saved
 
     class AsyncEngine(exp.RolloutEngine):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
