@@ -7,6 +7,7 @@ on a volume, so a rerun compiles only graphs whose code or shapes changed.
 """
 
 import dataclasses
+import hashlib
 import io
 import json
 import subprocess
@@ -141,6 +142,9 @@ def bench(
 ) -> int:
     if capture_training_inputs and not full:
         raise ValueError("training input capture requires --full")
+    trainer_sha = hashlib.sha256(Path("experiments/065_selfplay_ppo.py").read_bytes()).hexdigest()
+    if _run(sandbox, f"test \"$(sha256sum experiments/065_selfplay_ppo.py | cut -d ' ' -f1)\" = {trainer_sha}"):
+        raise ValueError("remote trainer source differs from the worktree; restore the sandbox source and sync again")
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
     output = CACHE / "runs" / name
     root = launch.REMOTE_ROOT

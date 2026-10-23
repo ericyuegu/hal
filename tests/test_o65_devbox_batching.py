@@ -31,7 +31,7 @@ class Sandbox:
     def exec(self, *command: str, workdir: str) -> Process:
         self.commands.append(command)
         # Stop before download; this test only examines the benchmark command.
-        return Process(0 if len(self.commands) == 1 else 1)
+        return Process(0 if len(self.commands) <= 2 else 1)
 
 
 @pytest.mark.parametrize("windows,microbatches", [(None, None), (64, 1), (512, 8)])
@@ -48,7 +48,7 @@ def test_bench_preserves_training_batch_choices(windows: int | None, microbatche
         )
         == 0
     )
-    command = sandbox.commands[0][2]
+    command = sandbox.commands[1][2]
     if windows is None:
         assert "--training.windows-per-step" not in command
     else:
@@ -66,4 +66,17 @@ def test_bench_input_capture_is_explicit_and_requires_training() -> None:
         bench(cast(modal.Sandbox, sandbox), 64, 512, full=False, capture_training_inputs=True)
     assert not sandbox.commands
     assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, capture_training_inputs=True) == 0
-    assert "--profiling.capture-training-inputs" in sandbox.commands[0][2]
+    assert "--profiling.capture-training-inputs" in sandbox.commands[1][2]
+
+
+def test_bench_rejects_stale_trainer_source_before_launch() -> None:
+    class StaleSandbox(Sandbox):
+        def exec(self, *command: str, workdir: str) -> Process:
+            self.commands.append(command)
+            return Process(1)
+
+    sandbox = StaleSandbox()
+    with pytest.raises(ValueError, match="remote trainer source differs"):
+        bench(cast(modal.Sandbox, sandbox), 64, 512, full=True)
+    assert len(sandbox.commands) == 1
+    assert "sha256sum experiments/065_selfplay_ppo.py" in sandbox.commands[0][2]
