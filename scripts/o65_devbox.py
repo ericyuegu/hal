@@ -41,6 +41,8 @@ class Args:
     rollout_frames: int = 128
     # bench: profile whole updates (rollout, preparation, actor, critic) instead of rollout ticks.
     full: bool = False
+    # bench: training windows per optimizer step; the default of 512 runs out of memory at 1024 matches.
+    windows_per_step: int = 64
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -125,7 +127,9 @@ def sync(sandbox: modal.Sandbox, sha: str) -> None:
     print(f"synced {len(paths)} files over {sha[:12]}", flush=True)
 
 
-def bench(sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int, *, full: bool) -> int:
+def bench(
+    sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int, *, full: bool, windows_per_step: int
+) -> int:
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
     output = CACHE / "runs" / name
     root = launch.REMOTE_ROOT
@@ -165,6 +169,8 @@ def bench(sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int, *
         "1",
         "--updates",
         "3",
+        "--training.windows-per-step",
+        str(windows_per_step),
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",
@@ -214,7 +220,10 @@ def main(args: Args) -> None:
     if args.action == "exec":
         raise SystemExit(_run(sandbox, args.command))
     if args.action == "bench":
-        codes = [bench(sandbox, matches, args.rollout_frames, full=args.full) for matches in args.matches_per_shard]
+        codes = [
+            bench(sandbox, matches, args.rollout_frames, full=args.full, windows_per_step=args.windows_per_step)
+            for matches in args.matches_per_shard
+        ]
         raise SystemExit(max(codes))
 
 
