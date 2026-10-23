@@ -315,3 +315,12 @@ remains unmet. No production batch-size, precision or optimizer change was made.
 The first cleanup's large reference trace transfer stalled in the Modal client.
 A compressed read recovered the complete trace; every expected report and trace
 is present locally. The completed benchmark was not rerun for this transfer.
+The repeat benchmark also completed remotely, but its helper exited with
+`FileExistsError` during local download: I had created its destination early
+to read the timing reports. Its files were recovered directly from the sandbox.
+This affected artifact transfer after measurement, not the timed update.
+An initial local type check lacked `cairosvg`; installing it in the local
+virtual environment resolved the error without a dependency-file change.
+An early failed benchmark start also encountered an invalid prototype
+`enable_fma` compiler option. That option was removed before the verified
+control and all reported measurements.
