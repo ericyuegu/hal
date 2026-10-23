@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @torch.no_grad()
-def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
+def tick_outputs(root: Path = ROOT, device: str = "cpu", frozen: bool = False) -> dict[str, Any]:
     spec = importlib.util.spec_from_file_location("o65_tick_parity_runtime", root / "experiments/065_selfplay_ppo.py")
     assert spec is not None and spec.loader is not None
     exp = importlib.util.module_from_spec(spec)
@@ -65,6 +65,7 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
     )
     # Exercise the decoder contribution to values, which starts at zero in O64.
     model.critic_residual.residual.down.weight.normal_(std=0.02)
+    model.requires_grad_(not frozen)
     stats = {
         consolidate_key(name): FeatureStats(0, 1, -1, 1)
         for name in BASE_ITEMS_PROJECTION.columns
@@ -183,7 +184,8 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_tick_matches_control_actions_log_probs_values_and_ring(tmp_path: Path, device: str) -> None:
+@pytest.mark.parametrize("frozen", [False, True])
+def test_tick_matches_control_actions_log_probs_values_and_ring(tmp_path: Path, device: str, frozen: bool) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     control = tmp_path / "control"
@@ -193,14 +195,14 @@ def test_tick_matches_control_actions_log_probs_values_and_ring(tmp_path: Path, 
         files.extractall(control, filter="data")
     output = tmp_path / "control.pt"
     subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), str(output), device],
+        [sys.executable, str(Path(__file__).resolve()), str(output), device, str(int(frozen))],
         cwd=control,
         env={**os.environ, "PYTHONPATH": str(control)},
         check=True,
         timeout=300,
     )
     expected = torch.load(output, weights_only=False)
-    actual = tick_outputs(device=device)
+    actual = tick_outputs(device=device, frozen=frozen)
     for value, reference in zip(actual["inputs"], expected["inputs"], strict=True):
         torch.testing.assert_close(value, reference, atol=0, rtol=0)
     for tick, control_tick in zip(actual["ticks"], expected["ticks"], strict=True):
@@ -295,5 +297,49 @@ def test_head_start_preserves_captured_store_addresses(device: str) -> None:
         torch.testing.assert_close(captured((store.records,)), table.store.records, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_tick_linear_casts_refresh_without_changing_master_weights_or_gradients(device: str) -> None:
+    from test_065_loop import exp
+
+    from hal.inference.cuda_graph import CapturedCall
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    torch.manual_seed(91)
+    source = torch.nn.Linear(64, 96, device=device)
+    layer = exp.TickLinear(source)
+    assert layer.weight is source.weight and layer.bias is source.bias
+    assert layer.state_dict().keys() == source.state_dict().keys()
+    inputs = torch.randn(8, 64, device=device, requires_grad=True)
+    parameters = inputs, source.weight, source.bias
+    expected = source(inputs)
+    actual = layer(inputs)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    for gradient, reference in zip(
+        torch.autograd.grad(actual.sum(), parameters), torch.autograd.grad(expected.sum(), parameters), strict=True
+    ):
+        torch.testing.assert_close(gradient, reference, atol=0, rtol=0)
+    layer.tick = True
+    # The critic explicitly disables autocast and must keep its FP32 path.
+    torch.testing.assert_close(layer(inputs), source(inputs), atol=0, rtol=0)
+    with torch.no_grad(), torch.autocast(device, dtype=torch.bfloat16, cache_enabled=False):
+        static = inputs.detach().clone()
+        captured = (
+            CapturedCall(
+                torch.compile(lambda: layer(static), fullgraph=True, options={"triton.cudagraphs": False}),
+                (static,),
+                device=torch.device(device),
+            )
+            if device == "cuda"
+            else None
+        )
+        for _ in range(2):
+            source.weight.add_(0.125)
+            source.bias.mul_(0.75)
+            layer.refresh()
+            actual = layer(static) if captured is None else captured((inputs.detach(),))
+            torch.testing.assert_close(actual, source(inputs), atol=0, rtol=0)
+
+
 if __name__ == "__main__":
-    torch.save(tick_outputs(Path.cwd(), sys.argv[2]), sys.argv[1])
+    torch.save(tick_outputs(Path.cwd(), sys.argv[2], bool(int(sys.argv[3]))), sys.argv[1])

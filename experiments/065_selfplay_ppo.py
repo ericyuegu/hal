@@ -1298,6 +1298,36 @@ class DenseRollout:
             target[rows] = source.to(target.dtype)
 
 
+class TickLinear(torch.nn.Linear):
+    """Retain the exact autocast weight conversion outside captured tick replays."""
+
+    tick_weight: Tensor
+    tick_bias: Tensor | None
+
+    def __init__(self, source: torch.nn.Linear) -> None:
+        super().__init__(source.in_features, source.out_features, source.bias is not None, device="meta")
+        self.weight = source.weight
+        self.bias = source.bias
+        self.register_buffer("tick_weight", source.weight.detach().to(torch.bfloat16), persistent=False)
+        self.register_buffer(
+            "tick_bias", None if source.bias is None else source.bias.detach().to(torch.bfloat16), persistent=False
+        )
+        self.tick = False
+        self.train(source.training)
+
+    @torch.no_grad()
+    def refresh(self) -> None:
+        self.tick_weight.copy_(self.weight)
+        if self.bias is not None:
+            assert self.tick_bias is not None
+            self.tick_bias.copy_(self.bias)
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        if self.tick and torch.is_autocast_enabled(inputs.device.type):
+            return torch.nn.functional.linear(inputs, self.tick_weight, self.tick_bias)
+        return torch.nn.functional.linear(inputs, self.weight, self.bias)
+
+
 class TransformerPolicy:
     """Append fixed rollout slots and replay one history per training window."""
 
@@ -1325,6 +1355,14 @@ class TransformerPolicy:
             ):
                 raise ValueError("invalid observation statistics")
         self.device = next(model.parameters()).device
+        linears = []
+        if self.device.type == "cuda" and not any(parameter.requires_grad for parameter in model.parameters()):
+            for name, module in tuple(model.named_modules()):
+                if isinstance(module, torch.nn.Linear):
+                    linear = module if isinstance(module, TickLinear) else TickLinear(module)
+                    model.set_submodule(name, linear)
+                    linears.append(linear)
+        self.tick_linears = tuple(linears)
         if schedule.supervised_offsets != model.head_offsets:
             raise ValueError("schedule supervised offsets must match the model checkpoint")
         configurations = tuple((c.delay, c.replan) for c in schedule.configurations)
@@ -1414,6 +1452,23 @@ class TransformerPolicy:
         self.reference_graphs.clear()
         self.reference_forward_model = None
         self.actor_graph = None
+        self.prepare_tick_weights()
+
+    @torch.no_grad()
+    def prepare_tick_weights(self) -> None:
+        """Refresh captured BF16 weights after any master-weight load or update."""
+        for module in self.tick_linears:
+            module.refresh()
+
+    @contextlib.contextmanager
+    def _tick_weight_casts(self) -> Iterator[None]:
+        for module in self.tick_linears:
+            module.tick = True
+        try:
+            yield
+        finally:
+            for module in self.tick_linears:
+                module.tick = False
 
     def frozen_copy(self) -> LoopPolicy:
         model = copy.deepcopy(self.model).requires_grad_(False)
@@ -1591,7 +1646,7 @@ class TransformerPolicy:
                             dynamic=False,
                             options={"triton.cudagraphs": False},
                         )
-                        with prepared_shape_compilation(64):
+                        with prepared_shape_compilation(64), self._tick_weight_casts():
                             captured_restart = CapturedCall(
                                 operation,
                                 static_restart,
@@ -1728,7 +1783,10 @@ class TransformerPolicy:
                         )
                         # Cover four groups and the startup plus three resume
                         # controls without exhausting Dynamo's lifetime counter.
-                        with prepared_shape_compilation(64, instance_count=self.tick_compile_instances):
+                        with (
+                            prepared_shape_compilation(64, instance_count=self.tick_compile_instances),
+                            self._tick_weight_casts(),
+                        ):
                             self.tick_graphs[capture_key] = CapturedCall(
                                 operation,
                                 static,
@@ -3047,6 +3105,9 @@ class RolloutEngine:
         if not self._initialized:
             raise ValueError("initialize or restore the pool before rollout")
         started = time.perf_counter()
+        for policy in (self.policy, *self.anchors.values()):
+            if isinstance(policy, TransformerPolicy):
+                policy.prepare_tick_weights()
         self.results = []
         self.behavior_totals = {
             role: np.zeros(len(COUNT_NAMES), dtype=np.int64) for role in ("student", "student_pi_ref", "pi_ref")
@@ -3911,6 +3972,9 @@ class Trainer:
             raise ValueError("startup capture requires unsealed transformer policies")
         started = time.perf_counter()
         engine = self.engine
+        for policy in policies:
+            assert isinstance(policy, TransformerPolicy)
+            policy.prepare_tick_weights()
         cursor = engine.cursor
         frames = engine.sampler.schedule.rollout_frames
         if distributed.rank() == 0:
