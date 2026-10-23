@@ -18,18 +18,21 @@ def _require_tested_compiler_version(version: str) -> None:
 
 
 @contextmanager
-def prepared_shape_compilation(shape_count: int) -> Iterator[None]:
+def prepared_shape_compilation(shape_count: int, *, instance_count: int = 1) -> Iterator[None]:
     """Allow Torch 2.11 to specialize declared batch/update shapes before admission."""
     _require_tested_compiler_version(str(torch.__version__))
-    if shape_count < 1:
-        raise ValueError("at least one compiler shape must be prepared")
+    if shape_count < 1 or instance_count < 1:
+        raise ValueError("at least one compiler shape and instance must be prepared")
     # Torch 2.11.0+cu130 defaults to eight variants per code object, which
     # raises FailOnRecompileLimitHit for prepared 1/2/4 updates and buckets.
     # Remove this private-API patch once another Torch version qualifies its
-    # per-call specialization budget or dynamic-shape capture for these profiles.
-    # The budget stays scoped to preparation and below Torch's accumulated cap.
-    limit = min(dynamo_config.accumulated_recompile_limit, max(dynamo_config.recompile_limit, shape_count * 4))
-    with dynamo_config.patch(recompile_limit=limit):
+    # per-instance and lifetime specialization budgets for these profiles.
+    # Plain stateful objects share the same per-code cache limit; Torch also
+    # counts lifetime compiles after guarded instances are freed. Both limits
+    # must cover every declared instance and stay scoped to preparation.
+    limit = max(dynamo_config.recompile_limit, shape_count * 4 * instance_count)
+    accumulated = max(dynamo_config.accumulated_recompile_limit, limit)
+    with dynamo_config.patch(recompile_limit=limit, accumulated_recompile_limit=accumulated):
         yield
 
 
