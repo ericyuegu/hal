@@ -1011,7 +1011,11 @@ def tick_decoder_buckets(rows: int, count: int) -> tuple[int, ...]:
     if count == 4:
         return (0, rows)
     step = max(1, (rows + 7) // 8)
-    return (0, *range(step, rows, step), rows)
+    # Keep finer padding near the usual mixed R2/R4 cohort sizes. Every extra
+    # decoder shape needs a separate compilation, even on synthetic rows.
+    buckets = {0, rows}
+    buckets.update(min(rows, step * factor) for factor in (2, 4, 5, 6))
+    return tuple(sorted(buckets))
 
 
 # Anchor layouts span every buffer: one graph per anchor and tick, sampled with the first buffer.

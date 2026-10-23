@@ -138,8 +138,8 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu", frozen: bool = False) -
             store.actions[129:] *= 0.5
             ownership[2] = False
         if clock == 134:
-            # R2 grows from bucket 4 to bucket 6. Bucket 6 was captured with
-            # inactive synthetic rows; production must replay it on live rows.
+            # R2 grows from three due rows to five, entering a larger bucket
+            # captured with inactive synthetic rows.
             table.active[ids[[1, 9]]] = True
         if clock == 136:
             table.active[ids] = False
@@ -156,7 +156,10 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu", frozen: bool = False) -
             graphs = len(policy.tick_graphs)
             cache_key = ring, (layout.buffer, len(ids))
             if "decoder_rows" in exp.TickInputs.__dataclass_fields__:
-                assert (cache_key, 2, 2, 6) in policy.tick_graphs
+                buckets = exp.tick_decoder_buckets(len(ids), 2)
+                bucket = next(size for size in buckets if size >= len(decoder_rows))
+                assert bucket > next(size for size in buckets if size >= 3) > 0
+                assert not policy.tick_graphs[cache_key, 2, 2, bucket].inputs[3].any()
         policy.sample_tick(states, rng, layout, ring, clock=clock)
         if device == "cuda" and clock == 134 and hasattr(policy, "tick_graphs"):
             assert len(policy.tick_graphs) == graphs
