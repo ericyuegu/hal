@@ -1332,6 +1332,10 @@ class TransformerPolicy:
         self.restart_graphs: dict[tuple[ActionRing, tuple[int, ...]], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
         self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
+        # Reference chunks are serial and scatter outputs before another replay.
+        # One capture stream lets their temporary allocations share a graph pool.
+        self.reference_pool: torch.cuda.CUDAGraph | None = None
+        self.reference_capture_stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
         self.reference_forward_model: SelfPlayTransformer | None = None
         self.value_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[Tensor]] = {}
         self.queue_replay = (
@@ -1420,6 +1424,7 @@ class TransformerPolicy:
         self.current_layouts.clear()
         self.value_graphs.clear()
         self.reference_graphs.clear()
+        self.reference_pool = None
         self.reference_forward_model = None
         self.actor_graph = None
 
@@ -1859,9 +1864,15 @@ class TransformerPolicy:
                 static = tuple(value.clone() for value in inputs)
                 with prepared_shape_compilation(64):
                     captured = CapturedCall(
-                        lambda: self.reference_forward(static, windows, count), static, device=self.device
+                        lambda: self.reference_forward(static, windows, count),
+                        static,
+                        device=self.device,
+                        share_pool_with=self.reference_pool,
+                        capture_stream=self.reference_capture_stream,
                     )
                 self.reference_graphs[key] = captured
+                if self.reference_pool is None:
+                    self.reference_pool = captured.graph
             output = captured(inputs)
         offsets = batch.slots.forced_queue_WKD4.shape[2] + 4
         self.work_flops["reference"] += self.flops.replay(windows, slots, offsets, 4)

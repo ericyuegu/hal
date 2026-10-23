@@ -87,6 +87,11 @@ def test_failed_graph_capture_counts_attempt_without_completion(monkeypatch: pyt
     assert counter.snapshot() == CaptureCounts(attempts=1, completed=0)
 
 
+def test_shared_pool_requires_an_explicit_capture_stream() -> None:
+    with pytest.raises(ValueError, match="explicit capture stream"):
+        CapturedCall(lambda: torch.ones(1), (), device=torch.device("cuda:0"), share_pool_with=Mock())
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_graph_capture_binds_the_declared_device() -> None:
     device = torch.device("cuda", torch.cuda.current_device())
@@ -105,3 +110,21 @@ def test_graph_capture_binds_the_declared_device() -> None:
         CapturedCall(partial(_increment_state, torch.zeros(1)), (), (torch.zeros(1),), device=device)
     with pytest.raises(ValueError, match="needs a CUDA device"):
         CapturedCall(partial(_increment_state, state), (), (state,), device=torch.device("cpu"))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_serial_graph_shapes_share_a_pool_and_preserve_consumed_outputs() -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    stream = torch.cuda.Stream(device=device)
+    values = (torch.arange(1024, device=device).float(), torch.arange(2048, device=device).float())
+    first = CapturedCall(partial(torch.sin, values[0]), (values[0],), device=device, capture_stream=stream)
+    second = CapturedCall(
+        partial(torch.sin, values[1]), (values[1],), device=device, share_pool_with=first.graph, capture_stream=stream
+    )
+    calls = (first, second)
+    saved = []
+    for index in (1, 0, 1, 1, 0):
+        value = values[index] + len(saved)
+        saved.append((calls[index]((value,)).clone(), value.sin()))
+    for actual, expected in saved:
+        torch.testing.assert_close(actual, expected)
