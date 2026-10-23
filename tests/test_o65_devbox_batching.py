@@ -58,3 +58,12 @@ def test_bench_preserves_training_batch_choices(windows: int | None, microbatche
     else:
         assert f"--training.actor-microbatches {microbatches} " in command
     assert "--profiling.rollout-only" not in command
+
+
+def test_bench_input_capture_is_explicit_and_requires_training() -> None:
+    sandbox = Sandbox()
+    with pytest.raises(ValueError, match="requires --full"):
+        bench(cast(modal.Sandbox, sandbox), 64, 512, full=False, capture_training_inputs=True)
+    assert not sandbox.commands
+    assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, capture_training_inputs=True) == 0
+    assert "--profiling.capture-training-inputs" in sandbox.commands[0][2]

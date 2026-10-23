@@ -44,6 +44,7 @@ class Args:
     # bench: 512 windows exhaust memory at 1,024 matches on a B200.
     windows_per_step: int = 64
     actor_microbatches: int | None = None
+    capture_training_inputs: bool = False
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -136,7 +137,10 @@ def bench(
     full: bool,
     windows_per_step: int | None = None,
     actor_microbatches: int | None = None,
+    capture_training_inputs: bool = False,
 ) -> int:
+    if capture_training_inputs and not full:
+        raise ValueError("training input capture requires --full")
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
     output = CACHE / "runs" / name
     root = launch.REMOTE_ROOT
@@ -194,6 +198,7 @@ def bench(
         "--profiling.warm-updates",
         "1",
         *(() if full else ("--profiling.rollout-only",)),
+        *(("--profiling.capture-training-inputs",) if capture_training_inputs else ()),
     ]
     exports = " ".join(f"{key}={value}" for key, value in env.items())
     # Sandbox CPU numbering varies; take the first available cores for simulator shards.
@@ -235,6 +240,7 @@ def main(args: Args) -> None:
                 full=args.full,
                 windows_per_step=args.windows_per_step,
                 actor_microbatches=args.actor_microbatches,
+                capture_training_inputs=args.capture_training_inputs,
             )
             for matches in args.matches_per_shard
         ]

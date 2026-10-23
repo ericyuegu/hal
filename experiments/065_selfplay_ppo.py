@@ -5897,12 +5897,16 @@ class ProfileConfig:
     nsys: bool = False
     # Capture only the rollout graphs and time rollouts without PPO updates.
     rollout_only: bool = False
+    # Save three real first-update actor cohorts instead of timing/tracing updates.
+    capture_training_inputs: bool = False
 
     def __post_init__(self) -> None:
         if self.warm_updates < 1:
             raise ValueError("profiling requires at least one warm update")
         if self.rollout_only and self.nsys:
             raise ValueError("rollout-only profiling uses torch.profiler traces")
+        if self.capture_training_inputs and (self.warm_updates != 1 or self.rollout_only or self.nsys):
+            raise ValueError("training input capture requires one warm update and no other profiling mode")
 
 
 def interval_union(intervals: list[tuple[float, float]]) -> float:
@@ -6462,6 +6466,60 @@ def compilation_report(engine: RolloutEngine) -> dict[str, object]:
     }
 
 
+class TrainingProbeCohort(TypedDict):
+    inputs: tuple[Tensor, ...]
+    context: dict[str, Tensor]
+    observed: Tensor
+    behavior: Tensor
+    advantages: Tensor
+    selected: Tensor
+    coefficients: Tensor
+
+
+def save_training_probe(trainer: Trainer, batch: PreparedUpdate, output: Path, provenance: dict[str, str]) -> None:
+    if (
+        trainer.update != 1
+        or batch.rollout.update != 0
+        or trainer.warming
+        or batch.reference is None
+        or not isinstance(trainer.policy, TransformerPolicy)
+    ):
+        raise ValueError("training probe requires the first transformer update")
+    table = batch.rollout.table
+    inverse = torch.zeros(len(table.values), dtype=torch.long, device=trainer.policy.device)
+    inverse[batch.rollout.ids] = torch.arange(len(batch.rollout.ids), device=inverse.device)
+    cohorts: list[TrainingProbeCohort] = []
+    for ids in batch.steps[:3]:
+        live = ids >= 0
+        windows = batch.windows.take(ids, batch.placement.positions, live)
+        selected = batch.placement.selected[ids.clamp_min(0)].gather(1, batch.placement.positions[ids.clamp_min(0)])
+        selected = selected & live[:, None]
+        context, observed = trainer.policy._packed_context(windows.inputs()[:5])
+        cohorts.append(
+            {
+                "inputs": tuple(value.cpu() for value in windows.inputs()),
+                "context": {name: value.cpu() for name, value in context.items()},
+                "observed": observed.cpu(),
+                "behavior": table.behavior[windows.rows].cpu(),
+                "advantages": torch.where(selected, batch.advantages[inverse[windows.rows]], 0).cpu(),
+                "selected": selected.cpu(),
+                "coefficients": table.coefficients[windows.rows].cpu(),
+            }
+        )
+    if not cohorts:
+        raise ValueError("training probe requires occupied actor steps")
+    torch.save(
+        {
+            "format": "hal.o65.training-probe.v1",
+            "provenance": provenance,
+            "source_sha256": sha256(Path(__file__)),
+            "training": dataclasses.asdict(trainer.config),
+            "cohorts": cohorts,
+        },
+        output,
+    )
+
+
 def profile_native(
     trainer: Trainer,
     config: NativeCli,
@@ -6470,6 +6528,10 @@ def profile_native(
 ) -> None:
     if config.profiling is None:
         raise ValueError("missing profile configuration")
+    if config.profiling.capture_training_inputs and (
+        trainer.update or config.resume is not None or config.resume_learner is not None
+    ):
+        raise ValueError("training input capture requires a fresh checkpoint actor")
     config.output.mkdir(parents=True, exist_ok=False)
     if config.profiling.rollout_only:
         profile_rollout(trainer, config, native_config)
@@ -6508,6 +6570,10 @@ def profile_native(
     with (config.output / "warm.jsonl").open("x") as log:
         for _ in range(config.profiling.warm_updates):
             batch, metrics = trainer.run_update()
+            if config.profiling.capture_training_inputs:
+                save_training_probe(trainer, batch, config.output / "training-inputs.pt", provenance)
+                log.write(json.dumps(metrics) + "\n")
+                return
             del batch
             log.write(json.dumps(metrics) + "\n")
             log.flush()
