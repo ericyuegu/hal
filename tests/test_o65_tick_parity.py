@@ -534,6 +534,24 @@ def test_prefetched_ids_survive_asynchronous_consumer_and_allocator_reuse() -> N
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_unsealed_tick_staging_prepares_groups_above_the_default_compiler_budget() -> None:
+    from test_065_loop import exp
+    from test_065_loop import trainer
+    from torch._dynamo import config as dynamo_config
+
+    engine = trainer("cuda", groups=2).engine
+    with dynamo_config.patch(recompile_limit=1):
+        for group in range(2):
+            engine.cursor = group
+            engine.tick_layouts = engine.group_layouts[group]
+            table = exp.DenseRollout(64, engine.stores[group])
+            pending = torch.full((table.players,), -1, dtype=torch.long, device="cuda")
+            ids = engine._stage_tick(0, 0, table, pending)
+            torch.testing.assert_close(table.integers[ids, exp.STREAM], engine.dense_meta[group][:, exp.STREAM])
+            assert dynamo_config.recompile_limit == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_tick_tensor_preparation_covers_groups_layouts_and_future_clocks() -> None:
     from test_065_loop import exp
     from test_065_loop import trainer

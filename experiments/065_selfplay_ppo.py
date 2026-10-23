@@ -2712,7 +2712,17 @@ class RolloutEngine:
             dtype=torch.long,
             pin_memory=self.policy.device.type == "cuda",
         ).to(self.policy.device, non_blocking=True)
-        all_at = self.stage_tick_tensors(control, table, pending, slots)
+        preparing = self.policy.device.type == "cuda" and (
+            not isinstance(self.policy, TransformerPolicy) or not self.policy.startup_finished
+        )
+        # Resume controls can create more engine variants than Torch's default
+        # budget. Sealed production engines use only their prepared variants.
+        with (
+            prepared_shape_compilation(64, instance_count=4 * len(self.groups))
+            if preparing
+            else contextlib.nullcontext()
+        ):
+            all_at = self.stage_tick_tensors(control, table, pending, slots)
         if clock % 128 == 0:
             # Opponents change only at resets on block boundaries.
             table.opponent_anchor[tick * players : (tick + 64) * players].view(64, players).copy_(
