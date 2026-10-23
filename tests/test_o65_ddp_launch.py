@@ -101,6 +101,7 @@ def test_o64_commands_parse_the_native_cli(tmp_path: Path, measurement: bool) ->
     assert parsed.training.reward_weights == exp.native.RewardWeights(0.1, 120, 120)
     assert parsed.groups == 1 and parsed.training.snapshot_interval == 64
     assert parsed.training.windows_per_step == 1 and parsed.training.actor_microbatches == 1
+    assert parsed.training.decisions_per_window == "all"
     assert parsed.matches_per_shard == 16
     assert parsed.measurement == measurement
     assert parsed.training.critic_warmup_updates == (0 if measurement else 32)

@@ -121,6 +121,7 @@ def test_serial_graph_shapes_share_a_pool_and_preserve_consumed_outputs() -> Non
     second = CapturedCall(
         partial(torch.sin, values[1]), (values[1],), device=device, share_pool_with=first.graph, capture_stream=stream
     )
+    assert first.graph.pool() == second.graph.pool()
     calls = (first, second)
     saved = []
     for index in (1, 0, 1, 1, 0):

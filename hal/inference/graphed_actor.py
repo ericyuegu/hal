@@ -39,8 +39,7 @@ class GraphedActorStep:
     """Capture replay and backward with persistent inputs and gradient buffers.
 
     Compile the decoder with triton.cudagraphs=False and
-    emulate_precision_casts=True. Keep the trunk eager to meet Torch 2.11 proxy
-    precision limits. Release earlier eager autograd graphs before capture,
+    emulate_precision_casts=True. Release earlier eager autograd graphs before capture,
     because their leaf gradient nodes retain the original CUDA stream.
     Validate new inputs before backward, then clip and step the optimizer.
     """
@@ -53,6 +52,9 @@ class GraphedActorStep:
         parameters: tuple[nn.Parameter, ...],
         *,
         clip_epsilon: float = 0.2,
+        share_pool_with: torch.cuda.CUDAGraph | None = None,
+        capture_stream: torch.cuda.Stream | None = None,
+        gradients: tuple[Tensor, ...] | None = None,
     ) -> None:
         if not 0 < clip_epsilon < 1:
             raise ValueError("clip epsilon must be finite and between zero and one")
@@ -65,6 +67,17 @@ class GraphedActorStep:
         device = inputs[0].device
         if any(not p.requires_grad or p.device != device for p in parameters):
             raise ValueError("actor parameters must require gradients on the input device")
+        if gradients is not None and (
+            len(gradients) != len(parameters)
+            or any(
+                gradient.shape != parameter.shape
+                or gradient.dtype != parameter.dtype
+                or gradient.device != parameter.device
+                or gradient.requires_grad
+                for gradient, parameter in zip(gradients, parameters, strict=True)
+            )
+        ):
+            raise ValueError("shared actor gradients must match parameter shapes, dtypes and devices")
         self.parameters = parameters
         self.input_count = len(inputs)
         static = tuple(t.detach().clone() for t in (*inputs, *_target_tensors(targets)))
@@ -73,7 +86,7 @@ class GraphedActorStep:
             validate_actor_targets(forward(static[: self.input_count]), _targets(static[self.input_count :]))
         # Graph replay writes into these gradient buffers at fixed addresses.
         original_gradients = tuple(p.grad for p in parameters)
-        self.gradients = tuple(torch.zeros_like(p) for p in parameters)
+        self.gradients = tuple(torch.zeros_like(p) for p in parameters) if gradients is None else gradients
         for parameter, gradient in zip(parameters, self.gradients, strict=True):
             parameter.grad = gradient
 
@@ -94,7 +107,9 @@ class GraphedActorStep:
 
         ready = False
         try:
-            self.captured = CapturedCall(backward, static, device=device)
+            self.captured = CapturedCall(
+                backward, static, device=device, share_pool_with=share_pool_with, capture_stream=capture_stream
+            )
             ready = True
         finally:
             if not ready:

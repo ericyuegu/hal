@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 import json
+import os
 from pathlib import Path
 from typing import Literal
 from typing import TypedDict
@@ -46,7 +47,7 @@ class Args:
             raise ValueError("shared history gradient requires the total objective and FP32 loss reduction")
 
 
-class CapturedCohort(TypedDict):
+class LegacyCapturedCohort(TypedDict):
     inputs: tuple[Tensor, ...]
     context: dict[str, Tensor]
     observed: Tensor
@@ -56,18 +57,29 @@ class CapturedCohort(TypedDict):
     coefficients: Tensor
 
 
+class CapturedCohort(LegacyCapturedCohort):
+    advantage_mean: Tensor
+    advantage_sigma: Tensor
+    denominator: Tensor
+
+
 def load_cohort(path: Path, checkpoint_sha256: str, index: int) -> CapturedCohort:
     saved = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(saved, dict) or set(saved) != {"format", "provenance", "source_sha256", "training", "cohorts"}:
         raise ValueError("training probe schema mismatch")
-    if saved["format"] != "hal.o65.training-probe.v1" or saved["provenance"]["checkpoint_sha256"] != checkpoint_sha256:
+    legacy = saved["format"] == "hal.o65.training-probe.v1"
+    if (
+        saved["format"] not in ("hal.o65.training-probe.v1", "hal.o65.training-probe.v2")
+        or saved["provenance"]["checkpoint_sha256"] != checkpoint_sha256
+    ):
         raise ValueError("training probe checkpoint or format mismatch")
     if saved["training"].get("clip_epsilon") != 0.2:
         raise ValueError("replay qualification requires clip_epsilon=0.2")
     if not 0 <= index < len(saved["cohorts"]):
         raise ValueError("training probe cohort is out of range")
     cohort = saved["cohorts"][index]
-    if not isinstance(cohort, dict) or set(cohort) != set(CapturedCohort.__annotations__):
+    fields = LegacyCapturedCohort.__annotations__ if legacy else CapturedCohort.__annotations__
+    if not isinstance(cohort, dict) or set(cohort) != set(fields):
         raise ValueError("training probe cohort schema mismatch")
     if not isinstance(cohort["inputs"], tuple) or len(cohort["inputs"]) != 5 + len(dataclasses.fields(ReplaySlots)):
         raise ValueError("training probe replay inputs mismatch")
@@ -80,6 +92,27 @@ def load_cohort(path: Path, checkpoint_sha256: str, index: int) -> CapturedCohor
         for name in ("observed", "behavior", "advantages", "selected", "coefficients")
     ):
         raise ValueError("training probe tensors mismatch")
+    if legacy:
+        # V1 stores complete optimizer cohorts, including the retained round-1 inputs.
+        selected = cohort["advantages"][cohort["selected"]].double()
+        if not len(selected):
+            raise ValueError("legacy training probe needs selected decisions")
+        mean = selected.mean()
+        sigma = (selected.square().mean() - mean.square()).clamp_min(0).sqrt().clamp_min(1e-8)
+        cohort.update(
+            advantage_mean=mean.float(), advantage_sigma=sigma.float(), denominator=cohort["selected"].sum().float()
+        )
+    for name in ("advantage_mean", "advantage_sigma", "denominator"):
+        value = cohort[name]
+        if (
+            not isinstance(value, Tensor)
+            or value.shape != ()
+            or value.dtype != torch.float32
+            or not bool(torch.isfinite(value))
+        ):
+            raise ValueError("training probe advantage statistics mismatch")
+    if not bool((cohort["advantage_sigma"] > 0) & (cohort["denominator"] > 0)):
+        raise ValueError("training probe sigma and denominator must be positive")
     return cast(CapturedCohort, cohort)
 
 
@@ -180,7 +213,9 @@ def main(args: Args) -> None:
         options={"triton.cudagraphs": False, "emulate_precision_casts": True},
     )
 
-    def forward(current: SelfPlayTransformer, *, compiled: bool, fp32: bool) -> tuple[ReplayOutput, Tensor, Tensor]:
+    def forward(
+        current: SelfPlayTransformer, *, compiled: bool, fp32: bool, replay_slots: ReplaySlots = slots
+    ) -> tuple[ReplayOutput, Tensor, Tensor]:
         with torch.enable_grad():
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=not fp32, cache_enabled=False):
                 tokens = current.context_tokens(context, observed)
@@ -193,8 +228,8 @@ def main(args: Args) -> None:
                 hidden = history(current.trunk, tokens, padding)
         operation = replay_windows if fp32 else compiled_replay
         if current is model and not compiled and not fp32:
-            validate_replay_inputs(current, hidden, observed, slots)
-        return operation(current, hidden, observed, slots, grad=True), hidden, tokens
+            validate_replay_inputs(current, hidden, observed, replay_slots)
+        return operation(current, hidden, observed, replay_slots, grad=True), hidden, tokens
 
     references = []
     for name, current, compiled, fp32 in (
@@ -203,18 +238,29 @@ def main(args: Args) -> None:
         ("FP32 reference", high_reference, False, True),
     ):
         print(name, flush=True)
-        output, _, _ = forward(current, compiled=compiled, fp32=fp32)
-        references.append(tuple(p.detach() for p in output.distributions))
-        del output
+        parts = []
+        for start in range(0, shape[1], min(16, shape[1])):
+            chunk = ReplaySlots(
+                *(
+                    getattr(slots, field.name).contiguous()
+                    if field.name == "history_starts_WL"
+                    else getattr(slots, field.name)[:, start : start + 16].contiguous()
+                    for field in dataclasses.fields(slots)
+                )
+            )
+            output, _, _ = forward(current, compiled=compiled, fp32=fp32, replay_slots=chunk)
+            parts.append(tuple(p.detach() for p in output.distributions))
+            del output
+        references.append(tuple(torch.cat([part[group] for part in parts], 1) for group in range(4)))
     quantities = []
     gradient_groups: list[dict[str, Tensor]] = []
     ratios_by_mode: list[dict[str, float]] = []
     behavior = cohort["behavior"].to(device)
     advantages = cohort["advantages"].to(device)
     # Match the trainer's float64 moments and minimum sigma before the FP32 loss.
-    selected_advantages = advantages[valid].double()
-    mean = selected_advantages.mean()
-    sigma = (selected_advantages.square().mean() - mean.square()).clamp_min(0).sqrt().clamp_min(1e-8)
+    mean = cohort["advantage_mean"].to(device)
+    sigma = cohort["advantage_sigma"].to(device)
+    denominator = cohort["denominator"].to(device)
     if args.advantages == "unit":
         advantages = torch.ones_like(advantages)
         mean, sigma = mean.new_zeros(()), sigma.new_ones(())
@@ -231,7 +277,7 @@ def main(args: Args) -> None:
             references[2],
             mean.float(),
             sigma.float(),
-            valid.sum().float(),
+            denominator,
         )
         loss = actor_loss(output, targets)
         shared_upstream = torch.autograd.grad(loss.loss, hidden)[0].detach()
@@ -255,7 +301,7 @@ def main(args: Args) -> None:
             references[(0, 0, 1, 2)[index]],
             mean.float(),
             sigma.float(),
-            valid.sum().float(),
+            denominator,
         )
         validate_actor_targets(output, targets)
         loss = actor_loss(output, targets)
@@ -285,9 +331,9 @@ def main(args: Args) -> None:
             normalized = (advantages - mean.float()) / sigma.float()
             ratio = loss.joint_ratio_WK
             surrogate = torch.minimum(ratio * normalized, ratio.clamp(0.8, 1.2) * normalized)
-            policy = torch.where(valid, -surrogate, 0).double().sum() / valid.sum().double()
+            policy = torch.where(valid, -surrogate, 0).double().sum() / denominator.double()
             kl_terms = loss.factor_kl_WKF.sum(-1) * torch.where(valid, coefficient / sigma.float(), 0)
-            kl = kl_terms.double().sum() / valid.sum().double()
+            kl = kl_terms.double().sum() / denominator.double()
             objective = {"total": policy + kl, "policy": policy, "kl": kl}[args.objective]
         if shared_upstream is not None:
             objective = (hidden.float() * shared_upstream).sum()
@@ -323,6 +369,9 @@ def main(args: Args) -> None:
         "inputs_sha256": sha256(args.inputs),
         "probe_sha256": sha256(Path(__file__)),
         "windows": windows,
+        "slots": shape[1],
+        "decoder_offsets": slots.forced_queue_WKD4.shape[2] + 4,
+        "reference_decoder_chunk": min(16, shape[1]),
         "cohort": args.cohort,
         "reference_bias_shift": args.reference_bias_shift,
         "objective": args.objective,
@@ -332,8 +381,17 @@ def main(args: Args) -> None:
         "shared_hidden_gradient": args.shared_hidden_gradient,
         "advantage_mean": float(mean),
         "advantage_sigma": float(sigma),
+        "denominator": float(denominator),
+        "selected_decisions": int(valid.sum()),
         "losses": dict(zip(("eager", "repeat", "compiled", "fp32"), loss_summaries, strict=True)),
+        "seed": 65,
         "torch": str(torch.__version__),
+        "cuda": torch.version.cuda,
+        "matmul_precision": torch.get_float32_matmul_precision(),
+        "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
+        "deterministic": torch.are_deterministic_algorithms_enabled(),
+        "inductor_pdl": os.environ.get("TORCHINDUCTOR_ENABLE_PDL"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "gpu": torch.cuda.get_device_name(device),
         "step_zero_ratios": dict(zip(("eager", "repeat", "compiled", "fp32"), ratios_by_mode, strict=True)),
     }

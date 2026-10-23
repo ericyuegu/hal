@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -82,9 +83,8 @@ def main(args: Args) -> None:
     context = {name: value.to(device)[ids] for name, value in saved["context"].items()}
     observed = saved["observed"].to(device)[ids]
     selected = saved["selected"].to(device)[ids, :capacity] & slots.valid_WK
-    original_advantages = saved["advantages"][saved["selected"]].double()
-    mean = original_advantages.mean()
-    sigma = (original_advantages.square().mean() - mean.square()).clamp_min(0).sqrt().clamp_min(1e-8)
+    mean = saved["advantage_mean"]
+    sigma = saved["advantage_sigma"]
     trunk = (
         torch.compile(
             history,
@@ -114,7 +114,7 @@ def main(args: Args) -> None:
         tuple(p.detach().clone() for p in reference.distributions),
         mean.to(device).float(),
         sigma.to(device).float(),
-        selected.sum().float(),
+        saved["denominator"].to(device),
     )
     del reference, hidden, tokens
 
@@ -163,7 +163,14 @@ def main(args: Args) -> None:
         "delay": delay,
         "replan": replan,
         "compiled_trunk": args.compiled_trunk,
+        "seed": 65,
         "torch": str(torch.__version__),
+        "cuda": torch.version.cuda,
+        "matmul_precision": torch.get_float32_matmul_precision(),
+        "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
+        "deterministic": torch.are_deterministic_algorithms_enabled(),
+        "inductor_pdl": os.environ.get("TORCHINDUCTOR_ENABLE_PDL"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "gpu": torch.cuda.get_device_name(device),
         "kernel_seconds": seconds,
         "trace": str(trace),

@@ -482,6 +482,7 @@ def test_learner_resume_command_and_metric_history(tmp_path: Path) -> None:
         resume_learner=tmp_path / "source/checkpoints/update-00000256.json",
         reward_weights=_MODULE.RewardWeights(0.1, 120, 120),
     )
+    assert command[command.index("--training.decisions-per-window") + 1] == "16"
     assert command[command.index("--resume-learner") + 1] == str(tmp_path / "source/checkpoints/update-00000256.json")
     for flag, expected in (("damage", "0.1"), ("stock", "120"), ("game-win", "120")):
         assert command[command.index(f"--training.reward-weights.{flag}") + 1] == expected

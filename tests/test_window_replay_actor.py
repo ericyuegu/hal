@@ -303,7 +303,24 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
         parameters = policy.actor_parameters()
         with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
             GraphedActorStep(forward, values, targets, parameters)
-        graph = GraphedActorStep(forward, values, targets, parameters, clip_epsilon=0.07)
+        buffers = tuple(torch.zeros_like(p) for p in parameters)
+        stream = torch.cuda.Stream()
+        with pytest.raises(ValueError, match="shared actor gradients"):
+            GraphedActorStep(forward, values, targets, parameters, gradients=tuple(g.double() for g in buffers))
+        graph = GraphedActorStep(
+            forward, values, targets, parameters, clip_epsilon=0.07, gradients=buffers, capture_stream=stream
+        )
+        other = GraphedActorStep(
+            forward,
+            values,
+            targets,
+            parameters,
+            clip_epsilon=0.07,
+            gradients=buffers,
+            capture_stream=stream,
+            share_pool_with=graph.captured.graph,
+        )
+        assert graph.gradients is other.gradients is buffers
         saved: tuple[Tensor, Tensor] | None = None
         saved_evaluation: tuple[Tensor, Tensor] | None = None
         for step in range(3):
@@ -312,8 +329,9 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
             expected = actor_loss(forward(current), targets, clip_epsilon=0.07)
             expected.loss.backward()
             gradients = tuple(p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in parameters)
-            actual = graph.backward(current, targets)
-            evaluated = graph.evaluation()
+            replay = other if step == 1 else graph
+            actual = replay.backward(current, targets)
+            evaluated = replay.evaluation()
             torch.testing.assert_close(
                 evaluated.log_probs_WKF, forward(current).log_probs_WKF.detach(), atol=2e-6, rtol=2e-5
             )

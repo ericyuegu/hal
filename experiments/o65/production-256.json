@@ -21,7 +21,7 @@
     "snapshot_interval": 64,
     "windows_per_step": null,
     "actor_microbatches": null,
-    "decisions_per_window": 16,
+    "decisions_per_window": "all",
     "head_start_frames": 1200
   },
   "capacity_status": "MEASURE ON B200: set active_matches_per_gpu, windows_per_step and actor_microbatches before launch; O64 full PPO memory is unresolved in o65-memory/performance.md. Proxy estimates do not qualify O64.",
