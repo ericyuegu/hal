@@ -107,59 +107,32 @@ separate first-update metric from the timed-update peak above. First-update rese
 188,970,172,416 bytes (176.0 GiB), versus 188,974,366,720 in the control.
 The 40% actor/preparation MFU target is not met.
 
-## Rejected variants
+## Round 2: compact replay and compiled trunks
 
-Whole-trunk compilation after eager observation encoding reduced preparation
-from 6.302 to 5.623 s (20.6% to 23.1% MFU) and actor from 10.919 to 8.813 s
-(13.3% to 16.4% MFU). Critic remained 0.949 s / 2.5% MFU. The complete update
-was 29.724 s. This variant is **rejected**, not a qualified speedup.
-Its run is `~/data/scratch/o65-devbox/runs/bench-20261022-233947-m64-full/`;
-trainer source SHA256 is
-`1b59469a88ca5f124cdb1436d1c4852b21dd4b2a23589ada2646cb83bb521b44`.
-`trunk-compile-rejected.patch` freezes that source relative to the control.
-It is evidence only and must not be applied to a training run.
+The user approved compiling the BF16 trunk in the reference and actor paths.
+The earlier precision rejection is superseded: errors against FP32 remain
+reported diagnostics, not an acceptance threshold. The frozen reference keeps
+its read-only autograd copy. Observation encoding remains eager and the critic
+remains FP32.
 
-The first synthetic gate compared each BF16 path's error against FP32. Large
-baseline gradient error made that gate too weak. It is superseded by recorded
-real first-update PPO inputs, a repeated eager control and direct gradient
-checks: cosine at least 0.999 and relative L2 at most 0.05, in addition to the
-FP32-relative error gate. A focused regression test rejects the case that the
-old gate accepted.
+The reference groups windows by their fixed (delay, replan) configuration.
+A replan-4 window replays 32 decision slots, a replan-2 window replays 64,
+and each group stores only its real delay queue. Partial groups pad windows.
+Every valid decision still supplies the KL used in regularized reward,
+including decisions outside the actor sample.
 
-Three real 64-window cohorts fail the new gate:
+The round-1 compiled-trunk measurement was preparation 5.623 s and actor
+8.813 s, against 6.302 s and 10.919 s. It is historical evidence, before
+compact reference replay; run `bench-20261022-233947-m64-full`.
+The patch file has been removed because compilation is now part of the
+maintained path. Round-1 real-input gradient cosines of 0.58–0.82 against
+FP32 remain evidence to diagnose. They do not establish their cause.
 
-| Cohort | Compiled/eager gradient cosine | Relative L2 vs eager | Eager/FP32 cosine | Compiled/FP32 cosine | Repeat eager relative L2 |
-|---|---:|---:|---:|---:|---:|
-| 0 | 0.7386 | 0.7415 | 0.8184 | 0.7743 | 1.50e-07 |
-| 1 | 0.7862 | 0.6762 | 0.5791 | 0.5884 | 1.23e-07 |
-| 2 | 0.7054 | 0.8064 | 0.6195 | 0.6639 | 1.72e-07 |
+The control and treatment retain the O64 checkpoint, seed, sampler, reward,
+rollout length and optimizer batch size unless a change is stated below.
+Full round-2 timings and the gradient diagnosis follow after measurement.
 
-Both BF16 paths also differ substantially from FP32. These diagnostics do not
-establish the cause. The retained runtime keeps the eager BF16 computation.
-
-These final qualification runs put autocast inside the compiled function and
-call it outside autocast; that boundary change did not fix the gradient
-failure. The root cause remains unresolved. The reports include step-zero
-ratios, per-group gradients and input/probe/checkpoint hashes. The reference
-is the initial O64 policy, so KL is zero here; a future accepted variant also
-needs nonzero-KL coverage and the actual captured actor graph after an update.
-All compiled-trunk production changes have been removed.
-
-Inputs: `~/data/scratch/o65-devbox/runs/bench-20261022-235147-m64-full/training-inputs.pt`,
-SHA256 `b52e7dd1ba8f6d5257f07c2971d1b24bb6a3e07a2f0974db7753d76a2cdc62e4`.
-Reproduce the diagnostic on the devbox with:
-
-```sh
-TORCHINDUCTOR_CACHE_DIR=/cache/inductor TRITON_CACHE_DIR=/cache/triton \
-  /opt/venv/bin/python -m scripts.o65_replay_probe \
-  --inputs /cache/runs/bench-20261022-235147-m64-full/training-inputs.pt \
-  --cohort 0 --output /cache/train-rejected-final-c0.json
-```
-
-Failure of this command is expected: it writes its report before rejecting the
-compiled variant. `scripts/o65_devbox.py bench --full --capture-training-inputs`
-provides a separate, unmeasured input-capture mode. It requires a fresh initial
-actor and one warm update; it does not add file I/O to measured training phases.
+## Other diagnostic variants
 
 A second probe replaced shared history FlexAttention with repeated memory and
 variable-length FlashAttention at 64 windows, 16 slots, 25 offsets, 16 heads,
@@ -178,11 +151,9 @@ its 34.94 to 19.95 ms result is also unqualified because gradient parity fails.
 
 ## Remaining work
 
-Resolve the compiled backward discrepancy before attempting further trunk
-fusion. The reference graph still has eager trunk pointwise work. A reference
-batching change needs a fresh memory check; an actor batch-size change belongs
-to the orchestrator because it changes the optimizer schedule. The critic's
-FP32 precision remains unchanged. No long training run was launched.
+Measure compact reference replay, then implement the approved all-decision
+actor treatment with the same configuration grouping. Diagnose BF16 gradient
+errors before considering any precision change. The critic stays FP32.
 
 ## Validation
 

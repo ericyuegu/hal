@@ -59,6 +59,7 @@ from hal.inference.graphed_actor import GraphedActorStep
 from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
 from hal.models.attention import KVMemory
+from hal.models.attention import Trunk
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
 from hal.models.replay_actor import ActorLoss
@@ -1288,6 +1289,12 @@ class DenseRollout:
             target[rows] = source.to(target.dtype)
 
 
+def replay_history(trunk: Trunk, tokens: Tensor) -> Tensor:
+    """Keep observation encoding outside the compiled BF16 trunk."""
+    with torch.autocast(tokens.device.type, dtype=torch.bfloat16, enabled=tokens.is_cuda, cache_enabled=False):
+        return trunk(tokens, torch.zeros(len(tokens), dtype=torch.long, device=tokens.device))
+
+
 class TransformerPolicy:
     """Append fixed rollout slots and replay one history per training window."""
 
@@ -1339,6 +1346,18 @@ class TransformerPolicy:
         )
         self.actor_graph: GraphedActorStep | None = None
         self.actor_clip_epsilon: float | None = None
+        if self.device.type == "cuda":
+            self.model.trunk.resolve_attention(self.device.type)
+        self.window_history = (
+            torch.compile(
+                replay_history,
+                fullgraph=True,
+                dynamic=False,
+                options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+            )
+            if self.device.type == "cuda"
+            else replay_history
+        )
         self.window_replay = (
             torch.compile(
                 replay_windows,
@@ -1713,8 +1732,9 @@ class TransformerPolicy:
             ),
         ):
             context, observed = self._packed_context(inputs[:5])
-            hidden = self.model(context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed)
-        # Keep the trunk eager to meet the Torch 2.11 proxy precision limits.
+            tokens = self.model.context_tokens(context, observed)
+        with torch.set_grad_enabled(grad):
+            hidden = self.window_history(self.model.trunk, tokens)
         return self.window_replay(self.model, hidden, observed, ReplaySlots(*inputs[5:]), grad=grad)
 
     def reference_forward(self, inputs: tuple[Tensor, ...], windows_per_step: int, count: int) -> ReplayOutput:
@@ -1731,7 +1751,9 @@ class TransformerPolicy:
                 ),
             ):
                 context, observed = self._packed_context(tuple(value[start:end] for value in inputs[:5]))
-                hidden = model(context, torch.zeros(len(observed), dtype=torch.long, device=self.device), observed)
+                tokens = model.context_tokens(context, observed)
+            with torch.enable_grad():
+                hidden = self.window_history(model.trunk, tokens)
             parts = []
             for slot in range(0, inputs[5].shape[1], count):
                 fields = tuple(
@@ -1788,71 +1810,66 @@ class TransformerPolicy:
         tail = torch.nn.functional.pad(rest, (0, (-len(rest)) % windows_per_step), value=-1)
         order = torch.cat((order, tail))
         live = order >= 0
-        window_inverse = torch.empty(windows, device=self.device, dtype=torch.long)
-        window_inverse[order[live]] = torch.arange(len(order), device=self.device)[live]
         priority = (torch.arange(slots, device=self.device)[None] + count).expand(windows, -1).clone()
         priority.scatter_(1, positions, torch.arange(count, device=self.device)[None].expand_as(positions))
+        # Put valid slots first even when sampled actor positions include padding.
+        priority = torch.where(batch.slots.valid_WK, priority, priority + 2 * slots)
         permutation = priority.argsort(-1)
-        inverse = permutation.argsort(-1)
-        padded_slots = math.ceil(slots / count) * count
-        permutation = torch.nn.functional.pad(permutation, (0, padded_slots - slots))
-        padded_windows = len(order)
-        packed = batch.take(order, permutation, live)
-        packed = dataclasses.replace(
-            packed,
-            slots=dataclasses.replace(
-                packed.slots,
-                valid_WK=packed.slots.valid_WK & (torch.arange(padded_slots, device=self.device) < slots),
-            ),
-        )
-        inputs = packed.inputs()
+        configurations = window_configurations(batch, self.schedule.configurations)
+        result: ReplayOutput | None = None
+        for configuration, members in configurations:
+            group = order[live & members[order.clamp_min(0)]]
+            real_slots = min(slots, 128 // configuration.replan)
+            group_positions = permutation[:, :real_slots]
+            for start in range(0, len(group), windows_per_step):
+                ids = group[start : start + windows_per_step]
+                n = len(ids)
+                padded = torch.nn.functional.pad(ids, (0, windows_per_step - n), value=-1)
+                part = compact_replay(batch, padded, group_positions, configuration.delay)
+                output = self.reference_chunk(part, min(count, real_slots))
+                if result is None:
+                    result = empty_replay(output, windows, slots)
+                scatter_replay(result, output, ids, group_positions[ids], n)
+        if result is None:
+            configuration = self.schedule.configurations[0]
+            ids = torch.full((windows_per_step,), -1, dtype=torch.long, device=self.device)
+            part = compact_replay(
+                batch, ids, permutation[:, : min(slots, 128 // configuration.replan)], configuration.delay
+            )
+            result = empty_replay(self.reference_chunk(part, min(count, part.rows.shape[1])), windows, slots)
+        return result
+
+    @torch.no_grad()
+    def reference_chunk(self, batch: ReplayBatch, count: int) -> ReplayOutput:
+        inputs = batch.inputs()
+        windows, slots = batch.rows.shape
         if self.reference_forward_model is None:
             # Torch 2.11.0 BF16 forwards with frozen parameter metadata fail
-            # the proxy KL gate. A read-only copy matches the actor's autograd
-            # arithmetic. It has no optimizer or backward; the stored reference
-            # stays frozen and every score is detached. Remove this boundary
-            # when frozen forwards pass the complete gate.
+            # BF16 actor arithmetic diagnostics. A read-only copy retains autograd
+            # metadata. Remove when frozen forwards match those diagnostics.
             self.reference_forward_model = copy.deepcopy(self.model).requires_grad_(True)
             self.reference_forward_model.percentile_head.requires_grad_(False)
         if self.device.type == "cpu":
-            output = self.reference_forward(inputs, windows_per_step, count)
+            output = self.reference_forward(inputs, windows, count)
         else:
-            chunks = []
-            for start in range(0, padded_windows, windows_per_step):
-                part = tuple(value[start : start + windows_per_step] for value in inputs)
-                key = ((windows_per_step, count), *(tuple(value.shape) for value in part))
-                captured = self.reference_graphs.get(key)
-                if captured is None:
-                    self.admit_capture(("reference", key))
-                    static = tuple(value.clone() for value in part)
-                    with prepared_shape_compilation(64):
-                        captured = CapturedCall(
-                            lambda static=static: self.reference_forward(static, windows_per_step, count),
-                            static,
-                            device=self.device,
-                        )
-                    self.reference_graphs[key] = captured
-                # Each replay reuses output storage; retain this chunk before the next.
-                chunks.append(concatenate_replays((captured(part),), 0))
-            output = concatenate_replays(chunks, 0)
-        self.work_flops["reference"] += self.flops.replay(padded_windows, padded_slots, self.max_delay + 4, 4)
+            key = ((windows, count), *(tuple(value.shape) for value in inputs))
+            captured = self.reference_graphs.get(key)
+            if captured is None:
+                self.admit_capture(("reference", key))
+                static = tuple(value.clone() for value in inputs)
+                with prepared_shape_compilation(64):
+                    captured = CapturedCall(
+                        lambda: self.reference_forward(static, windows, count), static, device=self.device
+                    )
+                self.reference_graphs[key] = captured
+            output = captured(inputs)
+        offsets = batch.slots.forced_queue_WKD4.shape[2] + 4
+        self.work_flops["reference"] += self.flops.replay(windows, slots, offsets, 4)
         if self.profile is not None:
             phase_name = self.profile.phase_name
-            self.profile.work[f"{phase_name}/trunk_tokens"] += padded_windows * 256
-            self.profile.work[f"{phase_name}/decoder_tokens"] += padded_windows * padded_slots * (self.max_delay + 4)
-
-        def reorder(value: Tensor) -> Tensor:
-            index = inverse.reshape(windows, slots, *([1] * (value.ndim - 2)))
-            return value[window_inverse].gather(1, index.expand(windows, slots, *value.shape[2:]))
-
-        return ReplayOutput(
-            reorder(output.log_probs_WKF),
-            tuple(reorder(p) for p in output.distributions),
-            reorder(output.factor_mask_WKF),
-            ReplayCriticFeatures(
-                *(reorder(getattr(output.features, field.name)) for field in dataclasses.fields(output.features))
-            ),
-        )
+            self.profile.work[f"{phase_name}/trunk_tokens"] += windows * 256
+            self.profile.work[f"{phase_name}/decoder_tokens"] += windows * slots * offsets
+        return output
 
     def value_forward(self, inputs: tuple[Tensor, ...]) -> Tensor:
         slots = ReplaySlots(*inputs[5:])
@@ -3354,6 +3371,68 @@ class ReplayBatch:
         )
 
 
+def window_configurations(
+    batch: ReplayBatch, configurations: tuple[DelayReplan, ...]
+) -> tuple[tuple[DelayReplan, Tensor], ...]:
+    valid = batch.slots.valid_WK
+    first = valid.long().argmax(-1, keepdim=True)
+    delay = batch.slots.delay_WK.gather(1, first)
+    replan = batch.slots.replan_WK.gather(1, first)
+    if bool((valid & ((batch.slots.delay_WK != delay) | (batch.slots.replan_WK != replan))).any()):
+        raise ValueError("each replay window must have one delay and replan configuration")
+    groups = tuple(
+        (configuration, valid.any(-1) & (delay[:, 0] == configuration.delay) & (replan[:, 0] == configuration.replan))
+        for configuration in configurations
+    )
+    covered = torch.stack([members for _, members in groups]).any(0)
+    if bool((valid.any(-1) & ~covered).any()):
+        raise ValueError("replay window configuration is outside the schedule")
+    for configuration, members in groups:
+        if bool((members & (valid.sum(-1) > 128 // configuration.replan)).any()):
+            raise ValueError("replay window exceeds its replan decision capacity")
+    return groups
+
+
+def compact_replay(batch: ReplayBatch, ids: Tensor, positions: Tensor, delay: int) -> ReplayBatch:
+    if not 0 <= delay <= batch.slots.forced_queue_WKD4.shape[2]:
+        raise ValueError("compact replay delay exceeds the stored queue capacity")
+    part = batch.take(ids, positions, ids >= 0)
+    return dataclasses.replace(
+        part,
+        slots=dataclasses.replace(
+            part.slots, forced_queue_WKD4=part.slots.forced_queue_WKD4[:, :, :delay].contiguous()
+        ),
+    )
+
+
+def empty_replay(output: ReplayOutput, windows: int, slots: int) -> ReplayOutput:
+    def empty(value: Tensor) -> Tensor:
+        return value.new_zeros(windows, slots, *value.shape[2:])
+
+    return ReplayOutput(
+        empty(output.log_probs_WKF),
+        tuple(empty(p) for p in output.distributions),
+        empty(output.factor_mask_WKF),
+        ReplayCriticFeatures(
+            *(empty(getattr(output.features, field.name)) for field in dataclasses.fields(output.features))
+        ),
+    )
+
+
+def scatter_replay(target: ReplayOutput, source: ReplayOutput, ids: Tensor, positions: Tensor, count: int) -> None:
+    pairs = [
+        (target.log_probs_WKF, source.log_probs_WKF),
+        (target.factor_mask_WKF, source.factor_mask_WKF),
+        *zip(target.distributions, source.distributions, strict=True),
+        *(
+            (getattr(target.features, f.name), getattr(source.features, f.name))
+            for f in dataclasses.fields(target.features)
+        ),
+    ]
+    for destination, value in pairs:
+        destination[ids[:, None], positions] = value[:count]
+
+
 def concatenate_replays(outputs: Sequence[ReplayOutput], dimension: int) -> ReplayOutput:
     return ReplayOutput(
         torch.cat([output.log_probs_WKF for output in outputs], dimension),
@@ -3846,7 +3925,15 @@ class Trainer:
                 chunk, -1
             )
             order = torch.arange(chunk, device=self.policy.device)[None]
-            self.reference.evaluate_reference(batch, positions, order)
+            assert isinstance(self.reference, TransformerPolicy)
+            for configuration in self.policy.schedule.configurations:
+                ref_positions = torch.arange(min(64, 128 // configuration.replan), device=self.policy.device)[
+                    None
+                ].expand(chunk, -1)
+                self.reference.reference_chunk(
+                    compact_replay(batch, order.flatten(), ref_positions, configuration.delay),
+                    min(self.config.decisions_per_window, ref_positions.shape[1]),
+                )
             part = batch.take(
                 order.flatten(), positions, torch.ones(chunk, dtype=torch.bool, device=self.policy.device)
             )
