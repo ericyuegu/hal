@@ -107,6 +107,7 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
     ring = exp.ActionRing(10, 32, torch.device(device))
     ring.length_device[meta[:, exp.LANE], meta[:, exp.SIDE]] = meta[:, exp.DELAY]
     states = exp.TickInputs(table, ids)
+    ownership = torch.ones(10, dtype=torch.bool, device=device)
 
     class EndpointRng(exp.CounterRng):
         def tensor_uniform(
@@ -124,6 +125,17 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
     inputs.extend([store.actions.clone(), table.prefix[ids], table.opponent[ids], meta.clone()])
     outputs = []
     for clock in (128, 130, 132, 134, 136):
+        if clock == 132:
+            # Replays read current table rows and observations, including a
+            # different row assignment for the same stream layout.
+            active = table.active[ids].clone()
+            ids = ids.roll(1)
+            table.active[ids] = active
+            table.conditions[ids, 0] += 0.125
+            table.prefix[ids] = table.prefix[ids].flip(1)
+            table.opponent[ids] = table.opponent[ids].flip(1)
+            store.actions[129:] *= 0.5
+            ownership[2] = False
         if clock == 134:
             # R2 grows from bucket 4 to bucket 6. Bucket 6 was captured with
             # inactive synthetic rows; production must replay it on live rows.
@@ -132,10 +144,11 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
             table.active[ids] = False
         meta[:, exp.CLOCK] = clock
         table.integers[ids] = meta
+        states = exp.TickInputs(table, ids, enabled=ownership)
         if device == "cuda" and "decoder_rows" in exp.TickInputs.__dataclass_fields__:
-            due = table.active[ids] & (clock % meta[:, exp.REPLAN] == 0)
+            due = table.active[ids] & ownership & (clock % meta[:, exp.REPLAN] == 0)
             decoder_rows = tuple(torch.nonzero(due).flatten().cpu().tolist())
-            states = exp.TickInputs(table, ids, decoder_rows=decoder_rows)
+            states = exp.TickInputs(table, ids, enabled=ownership, decoder_rows=decoder_rows)
         uniforms = policy._tensor_action_uniforms(meta, rng)
         policy.sampled_streams.clear()
         if device == "cuda" and clock == 134 and hasattr(policy, "tick_graphs"):
@@ -146,7 +159,7 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
         policy.sample_tick(states, rng, layout, ring, clock=clock)
         if device == "cuda" and clock == 134 and hasattr(policy, "tick_graphs"):
             assert len(policy.tick_graphs) == graphs
-        due = table.active[ids] & (clock % meta[:, exp.REPLAN] == 0)
+        due = table.active[ids] & ownership & (clock % meta[:, exp.REPLAN] == 0)
         if device == "cpu" and "decoder_rows" in exp.TickInputs.__dataclass_fields__:
             assert policy.sampled_streams == meta[due, exp.STREAM].tolist()
         rows = ids[due]

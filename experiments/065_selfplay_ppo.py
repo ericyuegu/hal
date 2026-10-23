@@ -1569,12 +1569,11 @@ class TransformerPolicy:
                 dtype=torch.bfloat16 if self.device.type == "cuda" else torch.float32,
             )
             self.tick_caches[key] = cache
-        meta = states.tensor(states.table.integers)
         restart = clock % 128 == 0
         enabled = self.device.type == "cuda"
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False):
             if restart:
-                restart_inputs = (*states.packed(129), meta)
+                restart_inputs = (*states.packed(129), states.tensor(states.table.integers))
                 if not enabled:
                     self._restart_block(cache, restart_inputs, validate=True)
                 else:
@@ -1602,19 +1601,11 @@ class TransformerPolicy:
                         self.restart_graphs[key] = captured_restart
                     captured_restart(restart_inputs)
             appended = 1 if restart else 2
-            inputs = (
-                *states.packed(appended, tail=appended),
-                meta,
-                states.tensor(states.table.conditions),
-                states.tensor(states.table.prefix),
-                states.tensor(states.table.opponent),
-                states.tensor(states.table.active),
-                states.ids,
-            )
             count = 4 if clock % 4 == 0 else 2
             decoder_rows = states.decoder_rows
             if decoder_rows is None:
-                due = inputs[9] & (meta[:, CLOCK] % meta[:, REPLAN] == 0)
+                meta = states.tensor(states.table.integers)
+                due = states.tensor(states.table.active) & (meta[:, CLOCK] % meta[:, REPLAN] == 0)
                 decoder_rows = tuple(torch.nonzero(due).flatten().tolist())
             buckets = tick_decoder_buckets(len(states), count)
             bucket = next(size for size in buckets if size >= len(decoder_rows)) if enabled else len(decoder_rows)
@@ -1624,8 +1615,18 @@ class TransformerPolicy:
             selected = torch.tensor(padded_rows, dtype=torch.long, pin_memory=enabled).to(
                 self.device, non_blocking=True
             )
-            base_inputs = inputs
-            inputs = (*inputs, selected, torch.arange(bucket, device=self.device) < len(decoder_rows))
+            inputs = (
+                states.ids,
+                torch.ones(len(states), dtype=torch.bool, device=self.device)
+                if states.enabled is None
+                else states.enabled,
+                selected,
+                torch.tensor(
+                    [True] * len(decoder_rows) + [False] * (bucket - len(decoder_rows)),
+                    dtype=torch.bool,
+                    pin_memory=enabled,
+                ).to(self.device, non_blocking=True),
+            )
             graph_key = key, appended, count, bucket
             captured = self.tick_graphs.get(graph_key)
             if captured is None:
@@ -1640,18 +1641,29 @@ class TransformerPolicy:
                         # Prepare every bucket on synthetic inactive rows before
                         # startup seals graph capture. Resets can change the count.
                         capture_inputs = (
-                            *base_inputs[:9],
-                            torch.zeros_like(base_inputs[9]),
-                            base_inputs[10],
+                            inputs[0],
+                            torch.zeros_like(inputs[1]),
                             torch.zeros(capture_bucket, dtype=torch.long, device=self.device),
                             torch.zeros(capture_bucket, dtype=torch.bool, device=self.device),
                         )
                     static = tuple(value.clone() for value in capture_inputs)
 
-                    def tick(static: tuple[Tensor, ...] = static, decoder_bucket: int = capture_bucket) -> None:
+                    def tick(graph_inputs: tuple[Tensor, ...] = static, decoder_bucket: int = capture_bucket) -> None:
                         with torch.autocast(
                             self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False
                         ):
+                            staged = TickInputs(states.table, graph_inputs[0], graph_inputs[1])
+                            static = (
+                                *staged.packed(appended, tail=appended),
+                                staged.tensor(states.table.integers),
+                                staged.tensor(states.table.conditions),
+                                staged.tensor(states.table.prefix),
+                                staged.tensor(states.table.opponent),
+                                staged.tensor(states.table.active),
+                                staged.ids,
+                                graph_inputs[2],
+                                graph_inputs[3],
+                            )
                             packed = static[:5]
                             if not restart:
                                 # A staggered first episode can begin between block boundaries.
@@ -1743,7 +1755,7 @@ class TransformerPolicy:
                 self.profile.work["rollout/trunk_tokens"] += len(states) * (appended + (128 if restart else 0))
                 self.profile.work["rollout/decoder_tokens"] += bucket * (self.tick_decoder.max_delay + count)
             if captured is None:
-                tick()
+                tick(inputs)
             else:
                 with (
                     torch.cuda.nvtx.range(
