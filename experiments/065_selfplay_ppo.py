@@ -5897,7 +5897,7 @@ class ProfileConfig:
     nsys: bool = False
     # Capture only the rollout graphs and time rollouts without PPO updates.
     rollout_only: bool = False
-    # Save three real first-update actor cohorts instead of timing/tracing updates.
+    # Save up to three real first-update actor cohorts instead of timing/tracing updates.
     capture_training_inputs: bool = False
 
     def __post_init__(self) -> None:
