@@ -205,6 +205,75 @@
       "update_seconds": 32.47912384199935,
       "first_optimization_peak_allocated_bytes": 90736531968.0,
       "first_optimization_peak_reserved_bytes": 188970172416.0
+    },
+    "retained_cleanup_repeat": {
+      "run": "bench-20261023-004052-m64-full",
+      "commit": "030234fe",
+      "trainer_source_sha256": "58dc64391d32cffee086b0cbacba1665ee1485e132208be9059bb95e593ba2b6",
+      "provenance": {
+        "adapter_sha256": "4d5a4711c14303206006d85a046cabcdf2dc48e55d81735afaed5478ba322668",
+        "checkpoint_sha256": "e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf",
+        "data_manifest_sha256": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8",
+        "git_sha": "a0ae12dfe5db4d72b2cbd612e42b215c0302fa17",
+        "simulator_sha256": "e74a8657186957a1ccfcacd11f044c97ea4033258ab93cae3b5cd42b8e282654"
+      },
+      "environment": {
+        "cuda": "13.0",
+        "device": "NVIDIA B200",
+        "numpy": "2.1.3",
+        "python": "3.14.3",
+        "tf32_cudnn": "True",
+        "tf32_matmul": "False",
+        "torch": "2.11.0+cu130",
+        "world_size": "1"
+      },
+      "gpu": "NVIDIA B200",
+      "training": {
+        "actor_lr": 1e-05,
+        "actor_microbatches": 1,
+        "actor_optimizer": "muon",
+        "checkpoint_interval": 32,
+        "clip_epsilon": 0.2,
+        "critic_epochs": 4,
+        "critic_lr": 0.0003,
+        "critic_warmup_updates": 0,
+        "decisions_per_window": 16,
+        "deterministic": false,
+        "gradient_clip": 1.0,
+        "head_start_frames": 0,
+        "lambda_spread_multiplier": 3.0,
+        "reward_weights": {
+          "damage": 0.1,
+          "game_win": 120.0,
+          "stock": 120.0
+        },
+        "seed": 65,
+        "snapshot_capacity": 3,
+        "snapshot_interval": 256,
+        "value_scale": 150.0,
+        "warmup_steps": 32,
+        "windows_per_step": 64
+      },
+      "phases": {
+        "preparation": {
+          "seconds": 6.312194078000175,
+          "mfu": 0.20542543596427296,
+          "flops": 2917541745819648.0
+        },
+        "actor": {
+          "seconds": 10.739732537999771,
+          "mfu": 0.13493450766874224,
+          "flops": 3260611175645184.0
+        },
+        "critic": {
+          "seconds": 0.9472368380002081,
+          "mfu": 0.025282706623964094,
+          "flops": 53884599926784.0
+        }
+      },
+      "update_seconds": 32.20424995099984,
+      "first_optimization_peak_allocated_bytes": 90736531968.0,
+      "first_optimization_peak_reserved_bytes": 188970172416.0
     }
   },
   "rejected_compile_qualification": [

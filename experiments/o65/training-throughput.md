@@ -266,3 +266,52 @@ three passed with a short `--basetemp`; the final full suite confirms that fix.
 The fourth was the same missing-R2-credentials failure. A separate fixture
 check, `tests/test_policy_schema.py tests/test_policy_world_schema.py`, had
 18 passes and the same 11 MDS/v7 skips listed above.
+
+## Review
+
+The complete diff from `a0ae12df` was reviewed for numerical changes, input
+aliasing, graph ownership, stream ordering, frame/offset masks, unsupported
+configuration and artifact identity. The retained runtime adds no graph writes
+or streams. Actor capture clones inputs into private persistent buffers;
+reused gathered windows stay read-only. The multiple-microbatch path keeps its
+original guarded accumulation. CPU update parity and B200 actor graph parity
+cover the retained change.
+
+Opus reviews ran at the measurement, implementation and final-review milestones.
+The substantive fixes were a real-input gradient gate, repeated eager controls,
+actual trainer-target tests, weights-only artifact loading, unsupported-clipping
+and distributed-capture rejection, consistent timing/memory labels, and stale
+trainer-source rejection before benchmark launch. The final follow-up found no
+remaining correctness defect in the retained changes. Reviewer reports are
+`~/data/scratch/o65-train-{milestone1-review,runtime-review,final-review,review-followup,review-resolution}.txt`.
+The rejected patch was applied to a temporary control source and reproduced
+its recorded SHA256 exactly. Blank context lines were normalized so the final
+Git whitespace check also passes.
+
+Cross-stream changes are the profiling-only input-capture switch and writer in
+`065_selfplay_ppo.py`, and the shared devbox CLI's batching/capture options,
+64-window benchmark default and trainer-source check. No `hal/` changes remain.
+The source check covers the trainer; general synchronization of reverted or
+deleted files remains an existing helper limitation.
+
+## Final-commit repeat
+
+`~/data/scratch/o65-devbox/runs/bench-20261023-004052-m64-full/` repeats the
+cleanup on committed trainer source `030234fe`; the remote source hash matches
+that commit exactly. The resolved training configuration and FLOP counts match
+the control and first cleanup run.
+
+| Phase | Control s / MFU | Cleanup repeat s / MFU |
+|---|---:|---:|
+| Preparation | 6.302 / 20.6% | 6.312 / 20.5% |
+| Actor | 10.919 / 13.3% | 10.740 / 13.5% |
+| Critic | 0.948 / 2.5% | 0.947 / 2.5% |
+
+The repeat update takes 32.204 s. Across the two cleanup samples, actor time
+is 1.6–2.6% below the one control sample. This is a small observed gain; more
+samples would be needed to quantify run-to-run variation. The 40% MFU target
+remains unmet. No production batch-size, precision or optimizer change was made.
+
+The first cleanup's large reference trace transfer stalled in the Modal client.
+A compressed read recovered the complete trace; every expected report and trace
+is present locally. The completed benchmark was not rerun for this transfer.
