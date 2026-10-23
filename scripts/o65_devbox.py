@@ -23,7 +23,6 @@ from scripts import launch_o65_modal as launch
 APP = "o65-devbox"
 CACHE_VOLUME = "hal-o65-devbox"
 CACHE = Path("/cache")
-STATE = Path.home() / "data/scratch/o65-devbox/state.json"
 LOCAL_RESULTS = Path.home() / "data/scratch/o65-devbox"
 SYNCED = ("hal", "experiments", "scripts", "tests")
 SHARD_CPUS = 16
@@ -32,12 +31,16 @@ SHARD_CPUS = 16
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
     action: tyro.conf.Positional[Literal["up", "sync", "bench", "exec", "down"]]
+    # Each name keeps its own sandbox, so parallel workstreams measure on separate GPUs.
+    name: str = "main"
     # up: the commit the image is built from; defaults to HEAD, which must be pushed to origin.
     sha: str | None = None
     # bench: matches per simulator shard; 16 shards run per GPU.
     matches_per_shard: tuple[int, ...] = (64,)
     # bench: frames per rollout, in whole 128-frame blocks.
     rollout_frames: int = 128
+    # bench: profile whole updates (rollout, preparation, actor, critic) instead of rollout ticks.
+    full: bool = False
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -49,8 +52,12 @@ def _git(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
-def _sandbox() -> tuple[modal.Sandbox, str]:
-    state = json.loads(STATE.read_text())
+def _state(name: str) -> Path:
+    return LOCAL_RESULTS / "state" / f"{name}.json"
+
+
+def _sandbox(name: str) -> tuple[modal.Sandbox, str]:
+    state = json.loads(_state(name).read_text())
     return modal.Sandbox.from_id(state["sandbox"]), state["sha"]
 
 
@@ -62,7 +69,16 @@ def _run(sandbox: modal.Sandbox, command: str) -> int:
     return process.returncode
 
 
-def up(sha: str | None, hours: float, idle_minutes: int) -> None:
+def _capture(sandbox: modal.Sandbox, command: str) -> str:
+    process = sandbox.exec("bash", "-c", command, workdir=str(launch.REMOTE_ROOT))
+    output = process.stdout.read()
+    process.wait()
+    if process.returncode:
+        raise RuntimeError(f"{command} failed: {process.stderr.read()}")
+    return output
+
+
+def up(name: str, sha: str | None, hours: float, idle_minutes: int) -> None:
     # A shallow fetch of an abbreviated SHA fails, so the image gets the full SHA.
     sha = _git("rev-parse", sha or "HEAD")
     if _git("branch", "-r", "--contains", sha) == "":
@@ -85,9 +101,10 @@ def up(sha: str | None, hours: float, idle_minutes: int) -> None:
         timeout=int(hours * 3600),
         idle_timeout=idle_minutes * 60,
     )
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps({"sandbox": sandbox.object_id, "sha": sha}))
-    print(f"sandbox {sandbox.object_id} at {sha}", flush=True)
+    state = _state(name)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"sandbox": sandbox.object_id, "sha": sha}))
+    print(f"sandbox {name} {sandbox.object_id} at {sha}", flush=True)
 
 
 def sync(sandbox: modal.Sandbox, sha: str) -> None:
@@ -108,8 +125,8 @@ def sync(sandbox: modal.Sandbox, sha: str) -> None:
     print(f"synced {len(paths)} files over {sha[:12]}", flush=True)
 
 
-def bench(sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int) -> int:
-    name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}"
+def bench(sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int, *, full: bool) -> int:
+    name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
     output = CACHE / "runs" / name
     root = launch.REMOTE_ROOT
     env = {
@@ -163,37 +180,41 @@ def bench(sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int) -
         "profiling:profile-config",
         "--profiling.warm-updates",
         "1",
-        "--profiling.rollout-only",
+        *(() if full else ("--profiling.rollout-only",)),
     ]
     exports = " ".join(f"{key}={value}" for key, value in env.items())
     # Sandbox CPU numbering varies; take the first available cores for simulator shards.
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
     command = f"mkdir -p {CACHE / 'tmp'} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {' '.join(argv)}"
     code = _run(sandbox, command)
-    report = output / "rollout-profile.json"
-    local = LOCAL_RESULTS / f"{name}.json"
-    if _run(sandbox, f"test -f {report}"):
+    if _run(sandbox, f"test -d {output}"):
         print("no report written", flush=True)
         return code
-    local.write_bytes(sandbox.filesystem.read_bytes(str(report)))
+    # Traces and reports go to one local directory per run for offline analysis.
+    local = LOCAL_RESULTS / "runs" / name
+    local.mkdir(parents=True)
+    for path in _capture(sandbox, f"find {output} -type f").split():
+        target = local / Path(path).relative_to(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(sandbox.filesystem.read_bytes(path))
     print(f"report: {local}", flush=True)
     return code
 
 
 def main(args: Args) -> None:
     if args.action == "up":
-        up(args.sha, args.hours, args.idle_minutes)
+        up(args.name, args.sha, args.hours, args.idle_minutes)
         return
-    sandbox, sha = _sandbox()
+    sandbox, sha = _sandbox(args.name)
     if args.action == "down":
         sandbox.terminate()
-        STATE.unlink()
+        _state(args.name).unlink()
         return
     sync(sandbox, sha)
     if args.action == "exec":
         raise SystemExit(_run(sandbox, args.command))
     if args.action == "bench":
-        codes = [bench(sandbox, matches, args.rollout_frames) for matches in args.matches_per_shard]
+        codes = [bench(sandbox, matches, args.rollout_frames, full=args.full) for matches in args.matches_per_shard]
         raise SystemExit(max(codes))
 
 
