@@ -1199,6 +1199,11 @@ class DenseRollout:
         capacity = (ticks + ticks // 64 + 2) * self.players
         self.store = store
         self.device = store.records.device
+        # Evaluation tensors view the first rows of storage with one spare row. Tick graphs
+        # send rows they do not own to the spare row, so concurrent graphs never rewrite
+        # each other's rows.
+        self.spare = capacity
+        self.evaluation_storage: list[Tensor] = []
         self.integers = torch.zeros(capacity, 18, dtype=torch.long, device=self.device)
         self.conditions = torch.zeros(capacity, 4, device=self.device)
         self.coefficients = torch.zeros(capacity, device=self.device)
@@ -1206,37 +1211,42 @@ class DenseRollout:
         self.opponent_anchor = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.prefix = torch.zeros(capacity, 24, 4, dtype=torch.long, device=self.device)
         self.opponent = torch.zeros_like(self.prefix)
-        self.actions = torch.zeros(capacity, 4, 4, dtype=torch.long, device=self.device)
-        self.behavior = torch.zeros(capacity, 16, device=self.device)
+        self.actions = self._evaluation_rows(torch.zeros(capacity + 1, 4, 4, dtype=torch.long, device=self.device))
+        self.behavior = self._evaluation_rows(torch.zeros(capacity + 1, 16, device=self.device))
         self.rewards = torch.zeros(capacity, 4, device=self.device)
         self.duration = torch.zeros(capacity, dtype=torch.long, device=self.device)
         self.remaining = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.terminal = torch.zeros(capacity, dtype=torch.bool, device=self.device)
         self.boundary = torch.zeros(capacity, dtype=torch.bool, device=self.device)
         self.following = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
-        self.values = torch.zeros(capacity, device=self.device)
+        self.values = self._evaluation_rows(torch.zeros(capacity + 1, device=self.device))
         self.active = torch.zeros(capacity, device=self.device, dtype=torch.bool)
         self.valid = torch.zeros(capacity, device=self.device, dtype=torch.bool)
         self.bootstrap = torch.zeros(capacity, device=self.device, dtype=torch.bool)
         self.queue_error = torch.zeros((), device=self.device, dtype=torch.bool)
         self.evaluation: PolicyEvaluation | None = None
 
+    def _evaluation_rows(self, storage: Tensor) -> Tensor:
+        self.evaluation_storage.append(storage)
+        return storage[: self.spare]
+
     def allocate_evaluation(self, model: SelfPlayTransformer) -> None:
-        capacity = len(self.values)
+        rows = self.spare + 1
+
+        def zeros(*shape: int, dtype: torch.dtype = torch.float32) -> Tensor:
+            return self._evaluation_rows(torch.zeros(rows, *shape, dtype=dtype, device=self.device))
+
         self.evaluation = PolicyEvaluation(
             self.actions,
             self.behavior,
-            tuple(
-                torch.zeros(capacity, 4, model.codec.group_vocabs[group], device=self.device)
-                for group in DECODE_GROUP_INDICES
-            ),
+            tuple(zeros(4, model.codec.group_vocabs[group]) for group in DECODE_GROUP_INDICES),
             CriticFeatures(
-                torch.zeros(capacity, model.cfg.d_model, device=self.device),
-                torch.zeros(capacity, model.cfg.temporal_d_model, device=self.device),
-                torch.zeros(capacity, 4, device=self.device),
-                torch.zeros(capacity, 4, device=self.device),
-                torch.zeros(capacity, model.critic_residual.max_queue, 4, dtype=torch.long, device=self.device),
-                torch.zeros(capacity, dtype=torch.long, device=self.device),
+                zeros(model.cfg.d_model),
+                zeros(model.cfg.temporal_d_model),
+                zeros(4),
+                zeros(4),
+                zeros(model.critic_residual.max_queue, 4, dtype=torch.long),
+                zeros(dtype=torch.long),
             ),
         )
 
@@ -1258,7 +1268,7 @@ class DenseRollout:
         if self.evaluation is None:
 
             def storage(value: Tensor) -> Tensor:
-                return value.new_zeros((len(self.values), *value.shape[1:]))
+                return self._evaluation_rows(value.new_zeros((self.spare + 1, *value.shape[1:])))
 
             self.evaluation = PolicyEvaluation(
                 self.actions,
@@ -1266,20 +1276,16 @@ class DenseRollout:
                 tuple(storage(p) for p in output.distributions),
                 CriticFeatures(*(storage(getattr(output.features, name)) for name in CRITIC_FEATURE_NAMES)),
             )
-
-        def write(target: Tensor, source: Tensor) -> None:
-            mask = None if enabled is None else enabled.reshape(-1, *([1] * (source.ndim - 1)))
-            target[ids] = (
-                source.to(target.dtype) if mask is None else torch.where(mask, source.to(target.dtype), target[ids])
-            )
-
-        write(self.actions, output.actions)
-        write(self.behavior, output.log_probs)
-        write(self.values, values)
-        for target, source in zip(self.evaluation.distributions, output.distributions, strict=True):
-            write(target, source)
-        for name in CRITIC_FEATURE_NAMES:
-            write(getattr(self.evaluation.features, name), getattr(output.features, name))
+        sources = (
+            output.actions,
+            output.log_probs,
+            values,
+            *output.distributions,
+            *(getattr(output.features, name) for name in CRITIC_FEATURE_NAMES),
+        )
+        rows = ids if enabled is None else torch.where(enabled, ids, self.spare)
+        for target, source in zip(self.evaluation_storage, sources, strict=True):
+            target[rows] = source.to(target.dtype)
 
 
 class TransformerPolicy:
@@ -1980,10 +1986,16 @@ class EpisodeResult:
 
 class ActionRing:
     def __init__(self, matches: int, capacity: int, device: torch.device) -> None:
-        self.values = torch.zeros(matches, 2, capacity, 4, dtype=torch.long, device=device)
-        self.controllers = torch.zeros(matches, 2, capacity, ACTION_DIM, device=device)
+        # Queues view the first lanes of storage with one spare lane. Tick graphs send rows
+        # they do not own to the spare lane, so concurrent graphs never rewrite each other's lanes.
+        self.spare = matches
+        self.value_storage = torch.zeros(matches + 1, 2, capacity, 4, dtype=torch.long, device=device)
+        self.controller_storage = torch.zeros(matches + 1, 2, capacity, ACTION_DIM, device=device)
+        self.length_storage = torch.zeros(matches + 1, 2, dtype=torch.long, device=device)
+        self.values = self.value_storage[:matches]
+        self.controllers = self.controller_storage[:matches]
+        self.length_device = self.length_storage[:matches]
         self.head = torch.zeros(matches, 2, dtype=torch.long, device=device)
-        self.length_device = torch.zeros(matches, 2, dtype=torch.long, device=device)
         self.capacity = capacity
         self.offsets = torch.arange(capacity, device=device)
 
@@ -2000,17 +2012,15 @@ class ActionRing:
         lanes, sides = metadata[:, LANE], metadata[:, SIDE]
         written = min(count, self.capacity)
         offsets = self.offsets[None, :written]
-        positions = (self.head[lanes, sides, None] + self.length_device[lanes, sides, None] + offsets) % self.capacity
+        # Reading the view beside a write to its base makes Inductor copy the whole base back,
+        # which would overwrite lengths a concurrent graph commits.
+        positions = (self.head[lanes, sides, None] + self.length_storage[lanes, sides, None] + offsets) % self.capacity
         valid = due[:, None] & (offsets < metadata[:, REPLAN, None])
-        previous = self.values[lanes[:, None], sides[:, None], positions]
-        self.values[lanes[:, None], sides[:, None], positions] = torch.where(
-            valid[..., None], actions[:, :written], previous
-        )
-        previous_controls = self.controllers[lanes[:, None], sides[:, None], positions]
-        self.controllers[lanes[:, None], sides[:, None], positions] = torch.where(
-            valid[..., None], controllers[:, :written], previous_controls
-        )
-        self.length_device[lanes, sides] += torch.where(due, metadata[:, REPLAN], 0)
+        targets = torch.where(valid, lanes[:, None], self.spare)
+        self.value_storage[targets, sides[:, None], positions] = actions[:, :written]
+        self.controller_storage[targets, sides[:, None], positions] = controllers[:, :written]
+        owned = torch.where(due, lanes, self.spare)
+        self.length_storage[owned, sides] += metadata[:, REPLAN]
 
 
 # Device metadata columns for fixed player slots.
@@ -2542,27 +2552,29 @@ class RolloutEngine:
     ) -> None:
         first = buffer.index == self.buffers[self.cursor][0].index
         anchors = [key for key in self.tick_layouts if first and key[0] == ALL_BUFFERS]
-        if concurrent and anchors:
-            # Anchor graphs write disjoint rows in place, so they run side by side. A student
-            # graph rewrites its buffer's anchor rows with their old values, so students wait.
-            current = torch.cuda.current_stream(self.policy.device)
-            side = []
-            for key in anchors:
-                stream = self.anchor_streams.get(key)
-                if stream is None:
-                    stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device)
-                stream.wait_stream(current)
-                with torch.cuda.stream(stream):
-                    self._sample_layout(key, clock, table, ids)
-                side.append(stream)
-            for stream in side:
-                current.wait_stream(stream)
-        else:
-            for key in anchors:
+        students = [key for key in self.tick_layouts if key[0] == buffer.index]
+        if not (concurrent and anchors):
+            for key in (*anchors, *students):
                 self._sample_layout(key, clock, table, ids)
-        for key in self.tick_layouts:
-            if key[0] == buffer.index:
+            return
+        # Each graph writes only the rows it owns and sends the rest to spare rows, so the
+        # anchors run beside the student. They fork before the student's launch so they never
+        # wait for it, and they join before this buffer's controller inputs go to the simulator.
+        current = torch.cuda.current_stream(self.policy.device)
+        side = []
+        for key in anchors:
+            stream = self.anchor_streams.get(key)
+            if stream is None:
+                stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device)
+            stream.wait_stream(current)
+            side.append(stream)
+        for key in students:
+            self._sample_layout(key, clock, table, ids)
+        for key, stream in zip(anchors, side, strict=True):
+            with torch.cuda.stream(stream):
                 self._sample_layout(key, clock, table, ids)
+        for stream in side:
+            current.wait_stream(stream)
 
     def _sample_layout(self, key: tuple[int, int | None], clock: int, table: DenseRollout, ids: Tensor) -> None:
         buffer_index, anchor = key
@@ -3012,7 +3024,9 @@ class RolloutEngine:
                             else contextlib.nullcontext()
                         ):
                             with sample(self.profile, "gpu_tick", work=float(len(buffer.lanes)), limit=0):
-                                self._sample_buffer(buffer, clock, table, ids, concurrent=ready)
+                                self._sample_buffer(
+                                    buffer, clock, table, ids, concurrent=ready and buffer.stream is not None
+                                )
                             if ready:
                                 futures.extend(self._submit_buffer(workers, buffer))
                     if not ready:

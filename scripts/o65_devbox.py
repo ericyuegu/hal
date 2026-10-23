@@ -63,7 +63,8 @@ def _run(sandbox: modal.Sandbox, command: str) -> int:
 
 
 def up(sha: str | None, hours: float, idle_minutes: int) -> None:
-    sha = sha or _git("rev-parse", "HEAD")
+    # A shallow fetch of an abbreviated SHA fails, so the image gets the full SHA.
+    sha = _git("rev-parse", sha or "HEAD")
     if _git("branch", "-r", "--contains", sha) == "":
         raise ValueError(f"{sha} is not on origin; push it before building the image")
     secret = modal.Secret.from_name("hal", required_keys=list(launch.AWS_KEYS))

@@ -157,6 +157,22 @@ def test_masked_evaluations_preserve_the_other_policy_rows() -> None:
     torch.testing.assert_close(table.behavior[rows], behavior, rtol=0, atol=0)
 
 
+def test_ring_commit_writes_only_due_rows() -> None:
+    ring = exp.ActionRing(2, 8, torch.device("cpu"))
+    ring.length_device.fill_(3)
+    metadata = torch.zeros(2, 18, dtype=torch.long)
+    metadata[:, exp.LANE] = torch.tensor([0, 1])
+    metadata[:, exp.REPLAN] = 2
+    actions = torch.full((2, 2, 4), 7)
+    controllers = torch.ones(2, 2, exp.ACTION_DIM)
+    # Another graph owns lane 1 this tick; its queue must come through untouched.
+    ring.values[1] = 5
+    ring.commit(metadata, torch.tensor([True, False]), actions, controllers, count=2)
+    assert ring.values[0, 0, 3:5].eq(7).all() and ring.values[0, 0, :3].eq(0).all()
+    assert ring.values[1].eq(5).all() and ring.controllers[1].eq(0).all()
+    assert ring.length_device.tolist() == [[5, 3], [3, 3]]
+
+
 def legacy_checkpoint(run: Any, directory: Path) -> Path:
     run.config = dataclasses.replace(run.config, snapshot_interval=256)
     run.update = 256
