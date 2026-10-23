@@ -38,7 +38,12 @@ class Args:
     advantages: Literal["recorded", "unit", "uncentered"] = "recorded"
     ratio: Literal["recorded", "one"] = "recorded"
     loss_reduction: Literal["fp32", "fp64"] = "fp32"
+    shared_hidden_gradient: bool = False
     output: Path = Path("/cache/train-replay-probe.json")
+
+    def __post_init__(self) -> None:
+        if self.shared_hidden_gradient and (self.objective != "total" or self.loss_reduction != "fp32"):
+            raise ValueError("shared history gradient requires the total objective and FP32 loss reduction")
 
 
 class CapturedCohort(TypedDict):
@@ -215,6 +220,22 @@ def main(args: Args) -> None:
         mean, sigma = mean.new_zeros(()), sigma.new_ones(())
     elif args.advantages == "uncentered":
         mean = mean.new_zeros(())
+    shared_upstream: Tensor | None = None
+    if args.shared_hidden_gradient:
+        output, hidden, _ = forward(high, compiled=False, fp32=True)
+        targets = ActorTargets(
+            output.log_probs_WKF.detach() if args.ratio == "one" else behavior,
+            advantages,
+            valid,
+            coefficient,
+            references[2],
+            mean.float(),
+            sigma.float(),
+            valid.sum().float(),
+        )
+        loss = actor_loss(output, targets)
+        shared_upstream = torch.autograd.grad(loss.loss, hidden)[0].detach()
+        del output, hidden, loss
     loss_summaries = []
     for index, (name, current, compiled, fp32) in enumerate(
         (
@@ -268,6 +289,8 @@ def main(args: Args) -> None:
             kl_terms = loss.factor_kl_WKF.sum(-1) * torch.where(valid, coefficient / sigma.float(), 0)
             kl = kl_terms.double().sum() / valid.sum().double()
             objective = {"total": policy + kl, "policy": policy, "kl": kl}[args.objective]
+        if shared_upstream is not None:
+            objective = (hidden.float() * shared_upstream).sum()
         derivatives = torch.autograd.grad(objective, (*parameters, hidden, tokens), allow_unused=True)
         gradient = derivatives[:-2]
         names = {id(parameter): name for name, parameter in current.named_parameters()}
@@ -306,6 +329,7 @@ def main(args: Args) -> None:
         "advantages": args.advantages,
         "ratio": args.ratio,
         "loss_reduction": args.loss_reduction,
+        "shared_hidden_gradient": args.shared_hidden_gradient,
         "advantage_mean": float(mean),
         "advantage_sigma": float(sigma),
         "losses": dict(zip(("eager", "repeat", "compiled", "fp32"), loss_summaries, strict=True)),
