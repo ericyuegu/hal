@@ -414,6 +414,10 @@ def test_prefetched_ticks_match_serial_rollouts(length: int, timeout: bool, stag
             self.accept_frame = exp.accept_frame_tensors
             self.stage_tick_tensors = self._stage_tick_tensors
 
+        def _accept(self, *args: Any, **kwargs: Any) -> tuple[int, int]:
+            kwargs["behavior"] = None
+            return super()._accept(*args, **kwargs)
+
         def _prefetch_tick(self, *args: Any, **kwargs: Any) -> None:
             return None
 
@@ -457,6 +461,9 @@ def test_prefetched_ticks_match_serial_rollouts(length: int, timeout: bool, stag
         for name in ("records", "actions", "rewards", "flags", "lengths"):
             assert torch.equal(getattr(actual.table.store, name), getattr(expected.table.store, name)), name
         assert exp._state_hash(engines[1].snapshot()) == exp._state_hash(engines[0].snapshot())
+        for (role, counts), (expected_role, reference) in zip(actual.behavior, expected.behavior, strict=True):
+            assert role == expected_role
+            assert (counts.counts == reference.counts).all()
     if stagger:
         assert not engines[1].prefetched_clocks
         return

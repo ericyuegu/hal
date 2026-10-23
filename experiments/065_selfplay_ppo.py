@@ -3086,6 +3086,8 @@ class RolloutEngine:
         update: int,
         table: DenseRollout,
         pending: Tensor,
+        *,
+        behavior: list[tuple[NDArray[np.uint32], NDArray[np.int64], NDArray[np.int32]]] | None = None,
     ) -> tuple[int, int]:
         for shard, frames in zip(shards, batches, strict=True):
             if len(frames) != len(shard.match_ids):
@@ -3117,7 +3119,11 @@ class RolloutEngine:
         for shard in shards:
             if isinstance(shard, NativeSimulatorShard):
                 shard.stepped_frames += int(self._active(shard).sum())
-        self.observe_behavior(frames.columns[active_host], host_lanes[active_host], frames.frame_ids[active_host])
+        observed = frames.columns[active_host], host_lanes[active_host], frames.frame_ids[active_host]
+        if behavior is None:
+            self.observe_behavior(*observed)
+        else:
+            behavior.append(observed)
         ends = active_host & (terminals | truncations)
         for source in np.flatnonzero(ends):
             lane = int(host_lanes[source])
@@ -3390,6 +3396,7 @@ class RolloutEngine:
                     # disjoint buffer rows.
                     completion_stream = buffers[-1].stream
                     for buffer in buffers:
+                        behavior: list[tuple[NDArray[np.uint32], NDArray[np.int64], NDArray[np.int32]]] = []
                         staging = self.staging.get(id(buffer))
                         if staging is not None:
                             staging.release_inputs()
@@ -3439,6 +3446,7 @@ class RolloutEngine:
                                     update,
                                     table,
                                     pending,
+                                    behavior=behavior,
                                 )
                                 frames_stepped += stepped
                                 timeouts += ended_timeouts
@@ -3446,6 +3454,8 @@ class RolloutEngine:
                             prefetched = self._prefetch_tick(
                                 clock + 2, start + count, update, table, pending, ready=ready
                             )
+                        for observed in behavior:
+                            self.observe_behavior(*observed)
                     if default_stream is not None:
                         for buffer in buffers:
                             if not (prefetched and buffer is buffers[0]):
