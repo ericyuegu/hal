@@ -30,16 +30,21 @@ not replacements for the untraced timings above.
 | Sample | Kernels | GEMM ms | Attention ms | Triton pointwise ms | Triton reductions ms | Other/index ms |
 |---|---:|---:|---:|---:|---:|---:|
 | Reference windows | 280108 | 2162.4 | 695.4 | 1209.8 | 662.6 | 1252.7 |
-| Actor step 0 | 5767 | 26.8 | 4.3 | 4.8 | 4.7 | 42.4 |
+| Actor step 0 | 5767 | 25.1 | 6.0 | 4.8 | 4.7 | 42.4 |
 | Bootstrap | 1386 | 102.0 | 35.5 | 4.0 | 2.0 | 275.1 |
 | Critic fit | 727 | 717.8 | 0 | 0 | 0 | 233.0 |
 
-The actor graph itself takes about 65.2 ms of summed kernel time. Eager trunk
-pointwise operations dominate its non-GEMM work. The reference trace includes
+The actor sample includes the actor graph, optimizer and diagnostics. The
+actor graph itself accounts for about 65.2 ms of the sample's 83.0 ms summed
+kernel time. Eager ATen pointwise kernels appear under Other/index, while
+the pointwise column counts Triton kernels only. Eager trunk pointwise
+operations dominate the graph's non-GEMM work. The reference trace includes
 128 graph replays; each encodes a trunk and four groups of decoder slots.
-The critic's largest kernels are FP32 SIMT GEMMs.
+The critic's largest kernels are FP32 SIMT GEMMs. Its low BF16-normalized MFU
+does not imply the same gap against its FP32 compute ceiling. This work
+preserves the critic's FP32 arithmetic.
 
-Reproduce both tables with:
+Print the phase table and kernel totals used for the sample table with:
 
 ```sh
 uv run python -m scripts.o65_training_trace ~/data/scratch/o65-o64-profile4/profile

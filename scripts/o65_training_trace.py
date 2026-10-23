@@ -1,4 +1,4 @@
-"""Report O65 training MFU and sampled kernel costs without tracing overhead."""
+"""Compare untraced O65 training MFU with diagnostic kernel samples."""
 
 import dataclasses
 import json
