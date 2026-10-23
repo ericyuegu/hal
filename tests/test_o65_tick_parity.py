@@ -341,5 +341,173 @@ def test_tick_linear_casts_refresh_without_changing_master_weights_or_gradients(
             torch.testing.assert_close(actual, source(inputs), atol=0, rtol=0)
 
 
+def test_split_staging_matches_whole_tick() -> None:
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    engines = [trainer(groups=1, delay=8).engine for _ in range(2)]
+    tables = [exp.DenseRollout(256, engine.stores[0]) for engine in engines]
+    pending = [torch.full((table.players,), -1, dtype=torch.long) for table in tables]
+    for engine, table, previous in zip(engines, tables, pending, strict=True):
+        engine._stage_tick(0, 0, table, previous)
+    expected = engines[0]._stage_tick(2, 0, tables[0], pending[0])
+    for buffer in engines[1].buffers[0]:
+        actual = engines[1]._stage_tick(2, 0, tables[1], pending[1], buffer=buffer)
+        assert torch.equal(actual, expected)
+    for name, reference in vars(tables[0]).items():
+        if isinstance(reference, torch.Tensor):
+            assert torch.equal(getattr(tables[1], name), reference), name
+    assert torch.equal(pending[1], pending[0])
+    assert engines[1].tick_decoder_rows == engines[0].tick_decoder_rows
+    with pytest.raises(ValueError, match="block boundary"):
+        engines[1]._stage_tick(128, 0, tables[1], pending[1], buffer=engines[1].buffers[0][0])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize(
+    "length,timeout,stagger", [(67, True, False), (1, False, False), (67, True, True), (1000, False, True)]
+)
+def test_prefetched_ticks_match_serial_rollouts(length: int, timeout: bool, stagger: bool) -> None:
+    import dataclasses
+
+    from test_065_loop import FakeShard
+    from test_065_loop import ToyPolicy
+    from test_065_loop import exp
+    from test_065_loop import sampler
+
+    class AsyncPolicy(ToyPolicy):
+        def device_wire_actions(self, indices: torch.Tensor, *, validate: bool = True) -> torch.Tensor:
+            return super().device_wire_actions(indices, validate=False)
+
+        def sample_tick(self, *args: Any, **kwargs: Any) -> None:
+            if not self.model.logits.requires_grad:
+                torch.cuda._sleep(20_000_000)
+            super().sample_tick(*args, **kwargs)
+
+    class AsyncEngine(exp.RolloutEngine):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.copied_inputs: dict[int, tuple[torch.Tensor, torch.cuda.Event]] = {}
+
+        def _submit_buffer(self, workers: Any, buffer: Any) -> list[Any]:
+            inputs = self._controller_inputs(self.buffer_device_lanes[id(buffer)], 2).clone()
+            ready = torch.cuda.Event()
+            ready.record()
+            self.copied_inputs[id(buffer)] = inputs, ready
+            return []
+
+        def _complete_buffer(self, buffer: Any, pending: Any) -> list[Any]:
+            inputs, ready = self.copied_inputs[id(buffer)]
+            ready.synchronize()
+            completed = []
+            start = 0
+            for shard in buffer.shards:
+                stop = start + len(shard.match_ids)
+                if self._active(shard).any():
+                    completed.append((shard, shard.step(inputs[:, start:stop], self._active(shard))))
+                start = stop
+            return completed
+
+    class SerialEngine(AsyncEngine):
+        def _prefetch_tick(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    class PrefetchEngine(AsyncEngine):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.prefetched_clocks: list[int] = []
+
+        def _prefetch_tick(self, clock: int, *args: Any, **kwargs: Any) -> torch.cuda.Event | None:
+            prefetched = super()._prefetch_tick(clock, *args, **kwargs)
+            if prefetched:
+                self.prefetched_clocks.append(clock)
+            return prefetched
+
+    engines = []
+    for cls in (SerialEngine, PrefetchEngine):
+        torch.manual_seed(19)
+        policy = AsyncPolicy("cuda")
+        shards = tuple(
+            FakeShard(tuple(range(start, start + 8)), length=length, timeout=timeout, device="cuda")
+            for start in (0, 8)
+        )
+        sampling = sampler()
+        sampling.schedule = dataclasses.replace(sampling.schedule, rollout_frames=128)
+        engine = cls((shards,), policy, sampling, {0: policy.frozen_copy()})
+        exp.Trainer(engine, exp.TrainConfig(actor_optimizer="adam", windows_per_step=32))
+        engine.initialize()
+        if stagger:
+            engine.stagger_starts(64)
+        engines.append(engine)
+    for update in range(2):
+        expected, actual = [engine.collect(update) for engine in engines]
+        assert (actual.frames, actual.resets, actual.timeouts) == (expected.frames, expected.resets, expected.timeouts)
+        assert torch.equal(actual.ids, expected.ids)
+        for name, reference in vars(expected.table).items():
+            if isinstance(reference, torch.Tensor):
+                if name == "coefficients":
+                    torch.testing.assert_close(getattr(actual.table, name), reference, atol=0, rtol=1e-6)
+                else:
+                    assert torch.equal(getattr(actual.table, name), reference), name
+        for name in ("records", "actions", "rewards", "flags", "lengths"):
+            assert torch.equal(getattr(actual.table.store, name), getattr(expected.table.store, name)), name
+        assert exp._state_hash(engines[1].snapshot()) == exp._state_hash(engines[0].snapshot())
+    if stagger:
+        assert not engines[1].prefetched_clocks
+        return
+    assert engines[1].prefetched_clocks
+    assert all(clock % 128 and clock % 512 for clock in engines[1].prefetched_clocks)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_prefetched_ids_survive_asynchronous_consumer_and_allocator_reuse() -> None:
+    import numpy as np
+    from test_065_loop import ToyPolicy
+    from test_065_loop import exp
+
+    size = 1 << 20
+
+    class PrefetchProbe(exp.RolloutEngine):
+        def __init__(self) -> None:
+            self.policy = ToyPolicy("cuda")
+            self.cursor = 0
+            self.staggering = False
+            self.profile = None
+            self.buffers = (
+                tuple(
+                    exp.RolloutBuffer(index, (), np.empty(0, dtype=np.int64), torch.cuda.Stream())
+                    for index in range(2)
+                ),
+            )
+            self.indices = torch.arange(size, device="cuda")
+            torch.cuda.synchronize()
+            # Avoid a first allocation's cudaMalloc synchronization draining
+            # the delayed consumer before the producer can reuse its storage.
+            for buffer in self.buffers[0]:
+                with torch.cuda.stream(buffer.stream):
+                    warm = self.indices.index_select(0, self.indices)
+                    warm.fill_(-1)
+                    torch.cuda._sleep(1)
+                buffer.stream.synchronize()
+                del warm
+
+        def _stage_tick(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+            return torch.arange(size, device="cuda")
+
+        def _sample_layout(self, key: Any, clock: int, table: Any, ids: torch.Tensor) -> None:
+            torch.cuda._sleep(20_000_000)
+            self.observed = ids.index_select(0, self.indices)
+
+    probe = PrefetchProbe()
+    assert probe._prefetch_tick(2, 128, 0, None, None, ready=True)
+    with torch.cuda.stream(probe.buffers[0][1].stream):
+        for _ in range(16):
+            replacement = torch.empty(size, dtype=torch.long, device="cuda")
+            replacement.fill_(-1)
+    for buffer in probe.buffers[0]:
+        buffer.stream.synchronize()
+    assert torch.equal(probe.observed, torch.arange(size, device="cuda"))
+
+
 if __name__ == "__main__":
     torch.save(tick_outputs(Path.cwd(), sys.argv[2], bool(int(sys.argv[3]))), sys.argv[1])
