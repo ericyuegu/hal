@@ -12,6 +12,7 @@ import tyro
 from torch import Tensor
 
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
+from hal.eval.self_play_checkpoint import sha256
 from hal.models.action_sequence import NonlinearActionHead
 from hal.models.attention import Trunk
 from hal.models.replay_actor import ActorTargets
@@ -192,6 +193,7 @@ def main(args: Args) -> None:
         del output
     quantities = []
     gradient_groups: list[dict[str, Tensor]] = []
+    ratios_by_mode: list[dict[str, float]] = []
     behavior = cohort["behavior"].to(device)
     advantages = cohort["advantages"].to(device)
     mean, sigma = advantages[valid].mean(), advantages[valid].std(unbiased=False)
@@ -217,6 +219,14 @@ def main(args: Args) -> None:
         )
         validate_actor_targets(output, targets)
         loss = actor_loss(output, targets)
+        ratios = loss.joint_ratio_WK[valid].detach()
+        ratios_by_mode.append(
+            {
+                "mean": float(ratios.mean()),
+                "max_abs_gap_from_one": float((ratios - 1).abs().max()),
+                "clip_fraction": float(((ratios - 1).abs() > 0.2).float().mean()),
+            }
+        )
         parameters = current.actor_parameters()
         gradient = torch.autograd.grad(loss.loss, parameters, allow_unused=True)
         names = {id(parameter): name for name, parameter in current.named_parameters()}
@@ -239,12 +249,16 @@ def main(args: Args) -> None:
         )
         del output, loss, gradient
     report: dict[str, object] = {
+        "format": "hal.o65.replay-qualification.v1",
         "checkpoint_sha256": checkpoint.checkpoint_sha256,
+        "inputs_sha256": sha256(args.inputs),
+        "probe_sha256": sha256(Path(__file__)),
         "windows": windows,
         "cohort": args.cohort,
         "reference_bias_shift": args.reference_bias_shift,
         "torch": str(torch.__version__),
         "gpu": torch.cuda.get_device_name(device),
+        "step_zero_ratios": dict(zip(("eager", "repeat", "compiled", "fp32"), ratios_by_mode, strict=True)),
     }
     passed = True
     report["gradient_groups"] = {
