@@ -4,6 +4,8 @@ The control is `a0ae12df`, with the O64 checkpoint
 `e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf`,
 seed 65, 1,024 matches on one B200 and 512 rollout frames. Changes preserve
 the policy, rewards, window placement, optimizer steps and precision contract.
+Round 2 adds the approved all-decision training treatment. See
+[the round-2 report](training-throughput-round2.md) for its current status.
 
 ## Existing profile
 
@@ -130,7 +132,9 @@ FP32 remain evidence to diagnose. They do not establish their cause.
 
 The control and treatment retain the O64 checkpoint, seed, sampler, reward,
 rollout length and optimizer batch size unless a change is stated below.
-Full round-2 timings and the gradient diagnosis follow after measurement.
+The implementation now includes the all-decision actor. New B200 measurements
+are blocked by the terminated sandbox; none of the round-1 measurements below
+qualifies the new grouping. See [round 2](training-throughput-round2.md).
 
 ## Other diagnostic variants
 
@@ -151,11 +155,11 @@ its 34.94 to 19.95 ms result is also unqualified because gradient parity fails.
 
 ## Remaining work
 
-Measure compact reference replay, then implement the approved all-decision
-actor treatment with the same configuration grouping. Diagnose BF16 gradient
-errors before considering any precision change. The critic stays FP32.
+Complete B200 measurements of both round-2 milestones and the model-gradient
+diagnosis after restoring the train sandbox. The actor now implements all
+decisions and compact cadence groups. The critic stays FP32.
 
-## Validation
+## Round-1 validation
 
 Final required checks pass:
 
@@ -238,7 +242,7 @@ The fourth was the same missing-R2-credentials failure. A separate fixture
 check, `tests/test_policy_schema.py tests/test_policy_world_schema.py`, had
 18 passes and the same 11 MDS/v7 skips listed above.
 
-## Review
+## Round-1 review
 
 The complete diff from `a0ae12df` was reviewed for numerical changes, input
 aliasing, graph ownership, stream ordering, frame/offset masks, unsupported
@@ -265,7 +269,7 @@ Cross-stream changes are the profiling-only input-capture switch and writer in
 The source check covers the trainer; general synchronization of reverted or
 deleted files remains an existing helper limitation.
 
-## Final-commit repeat
+## Round-1 final-commit repeat
 
 `~/data/scratch/o65-devbox/runs/bench-20261023-004052-m64-full/` repeats the
 cleanup on committed trainer source `030234fe`; the remote source hash matches
