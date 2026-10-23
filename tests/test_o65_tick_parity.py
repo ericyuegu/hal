@@ -124,6 +124,10 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
     inputs.extend([store.actions.clone(), table.prefix[ids], table.opponent[ids], meta.clone()])
     outputs = []
     for clock in (128, 130, 132, 134, 136):
+        if clock == 134:
+            # R2 grows from bucket 4 to bucket 6. Bucket 6 was captured with
+            # inactive synthetic rows; production must replay it on live rows.
+            table.active[ids[[1, 9]]] = True
         if clock == 136:
             table.active[ids] = False
         meta[:, exp.CLOCK] = clock
@@ -134,7 +138,14 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu") -> dict[str, Any]:
             states = exp.TickInputs(table, ids, decoder_rows=decoder_rows)
         uniforms = policy._tensor_action_uniforms(meta, rng)
         policy.sampled_streams.clear()
+        if device == "cuda" and clock == 134 and hasattr(policy, "tick_graphs"):
+            graphs = len(policy.tick_graphs)
+            cache_key = ring, (layout.buffer, len(ids))
+            if "decoder_rows" in exp.TickInputs.__dataclass_fields__:
+                assert (cache_key, 2, 2, 6) in policy.tick_graphs
         policy.sample_tick(states, rng, layout, ring, clock=clock)
+        if device == "cuda" and clock == 134 and hasattr(policy, "tick_graphs"):
+            assert len(policy.tick_graphs) == graphs
         due = table.active[ids] & (clock % meta[:, exp.REPLAN] == 0)
         if device == "cpu" and "decoder_rows" in exp.TickInputs.__dataclass_fields__:
             assert policy.sampled_streams == meta[due, exp.STREAM].tolist()
