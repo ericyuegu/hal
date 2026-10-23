@@ -113,6 +113,35 @@ def test_trace_counts_device_work_once_and_merges_overlap(tmp_path: Path) -> Non
     assert result["synchronizations"] == {"cudaEventSynchronize": 1}
 
 
+def test_graph_breakdown_assigns_kernels_to_annotated_graph_launches(tmp_path: Path) -> None:
+    path = tmp_path / "trace.json"
+    path.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "user_annotation", "name": "o65_profile/rollout/tick", "ts": 0, "dur": 100},
+                    {"cat": "user_annotation", "name": "o65_graph/buffer0/policy-1/rows8", "ts": 1, "dur": 2},
+                    {"cat": "user_annotation", "name": "o65_graph/buffer0/policy0/rows2", "ts": 4, "dur": 2},
+                    {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "ts": 2, "dur": 1, "args": {"correlation": 1}},
+                    {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "ts": 5, "dur": 1, "args": {"correlation": 2}},
+                    {"cat": "kernel", "name": "a", "ts": 10, "dur": 10, "args": {"correlation": 1}},
+                    {"cat": "kernel", "name": "b", "ts": 15, "dur": 10, "args": {"correlation": 1}},
+                    {"cat": "kernel", "name": "c", "ts": 30, "dur": 5, "args": {"correlation": 2}},
+                    {"cat": "kernel", "name": "d", "ts": 50, "dur": 4, "args": {"correlation": 9}},
+                ]
+            }
+        )
+    )
+    result = gpu_profile.graph_breakdown(path)
+    assert result["device_busy_ms"] == pytest.approx(0.024)
+    assert result["device_idle_ms"] == pytest.approx(0.076)
+    assert result["graphs"] == {
+        "buffer0/policy-1/rows8": {"kernels": 2, "busy_ms": pytest.approx(0.015), "kernel_ms": pytest.approx(0.02)},
+        "buffer0/policy0/rows2": {"kernels": 1, "busy_ms": pytest.approx(0.005), "kernel_ms": pytest.approx(0.005)},
+        "outside graphs": {"kernels": 1, "busy_ms": pytest.approx(0.004), "kernel_ms": pytest.approx(0.004)},
+    }
+
+
 def test_copy_without_bytes_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "trace.json"
     path.write_text(

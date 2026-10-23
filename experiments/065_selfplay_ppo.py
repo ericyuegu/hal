@@ -2538,7 +2538,14 @@ class RolloutEngine:
             owner = -1 if anchor is None else anchor
             enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == owner
             rows = TickInputs(table, selected, enabled)
-            policy.sample_tick(rows, self.sampler.rng, layout, ring, clock=clock)
+            with (
+                torch.profiler.record_function(
+                    f"o65_graph/buffer{buffer_index}/policy{owner}/rows{len(layout.streams)}"
+                )
+                if self.profile is not None and self.profile.active_trace
+                else contextlib.nullcontext()
+            ):
+                policy.sample_tick(rows, self.sampler.rng, layout, ring, clock=clock)
 
     def _tick_ready(self, buffer: RolloutBuffer, clock: int) -> bool:
         ring = self.rings[self.cursor]
@@ -3737,7 +3744,7 @@ class Trainer:
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
 
     @torch.no_grad()
-    def capture_startup(self) -> None:
+    def capture_startup(self, *, rollout_only: bool = False) -> None:
         if not isinstance(self.policy, TransformerPolicy) or self.policy.device.type != "cuda":
             return
         policies = (self.policy, *self.engine.anchors.values())
@@ -3777,6 +3784,9 @@ class Trainer:
                 table.active[ids] = False
                 for buffer in engine.buffers[group]:
                     engine._sample_buffer(buffer, clock, table, ids)
+            if rollout_only:
+                table.reset()
+                continue
             # Bootstrap and context-gap graphs have fixed player/diagnostic row counts.
             for count in {2 * len(matches), min(32, 2 * len(matches))}:
                 rows = torch.zeros(count, 1, dtype=torch.long, device=self.policy.device)
@@ -5748,7 +5758,7 @@ def train_native_rank(config: NativeCli) -> None:
             head_start = restore_pilot_learner(trainer, config.resume_learner, provenance)
         elif config.resume is None:
             engine.initialize()
-            trainer.capture_startup()
+            trainer.capture_startup(rollout_only=config.profiling is not None and config.profiling.rollout_only)
             if config.training.head_start_frames:
                 head_start = trainer.head_start()
         else:
@@ -5830,10 +5840,14 @@ class TraceEvent(TypedDict, total=False):
 class ProfileConfig:
     warm_updates: int = 4
     nsys: bool = False
+    # Capture only the rollout graphs and time rollouts without PPO updates.
+    rollout_only: bool = False
 
     def __post_init__(self) -> None:
         if self.warm_updates < 1:
             raise ValueError("profiling requires at least one warm update")
+        if self.rollout_only and self.nsys:
+            raise ValueError("rollout-only profiling uses torch.profiler traces")
 
 
 def interval_union(intervals: list[tuple[float, float]]) -> float:
@@ -5922,6 +5936,109 @@ def summarize_trace(path: Path) -> dict[str, object]:
         "synchronizations": dict(syncs),
         "measurement_synchronizations_excluded": dict(measurement_syncs),
     }
+
+
+def graph_breakdown(path: Path) -> dict[str, object]:
+    """Split a traced tick's device time by policy graph through annotated graph launches."""
+    events = cast(list[TraceEvent], json.loads(path.read_text())["traceEvents"])
+    root = next(
+        event
+        for event in events
+        if event.get("cat") == "user_annotation" and event.get("name", "").startswith("o65_profile/")
+    )
+    graphs = [
+        event
+        for event in events
+        if event.get("cat") == "user_annotation" and event.get("name", "").startswith("o65_graph/")
+    ]
+    owner: dict[object, str] = {}
+    for event in events:
+        if event.get("cat") == "cuda_runtime" and event.get("name") == "cudaGraphLaunch":
+            for graph in graphs:
+                if graph["ts"] <= event["ts"] <= graph["ts"] + graph["dur"]:
+                    owner[event.get("args", {}).get("correlation")] = graph["name"].removeprefix("o65_graph/")
+    work: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for event in events:
+        if event.get("cat") in ("kernel", "gpu_memcpy", "gpu_memset"):
+            name = owner.get(event.get("args", {}).get("correlation"), "outside graphs")
+            work[name].append((event["ts"], event["ts"] + event["dur"]))
+    busy = interval_union([interval for intervals in work.values() for interval in intervals])
+    return {
+        "wall_ms": root["dur"] / 1e3,
+        "device_busy_ms": busy / 1e3,
+        "device_idle_ms": (root["dur"] - busy) / 1e3,
+        "graphs": {
+            name: {
+                "kernels": len(intervals),
+                "busy_ms": interval_union(intervals) / 1e3,
+                "kernel_ms": sum(stop - start for start, stop in intervals) / 1e3,
+            }
+            for name, intervals in work.items()
+        },
+    }
+
+
+def profile_rollout(trainer: Trainer, config: NativeCli, native_config: dict[str, object]) -> None:
+    """Time rollouts without PPO updates, then trace sampled ticks and split them by policy graph."""
+    profiling = cast(ProfileConfig, config.profiling)
+    engine = trainer.engine
+    policies = (trainer.policy, *engine.anchors.values())
+    warm_started = time.perf_counter()
+    for _ in range(profiling.warm_updates):
+        engine.collect(trainer.update)
+    report: dict[str, object] = {
+        "configuration": native_config,
+        "startup_capture_seconds": trainer.startup_seconds,
+        "warm_seconds": time.perf_counter() - warm_started,
+        "post_startup_captures": sum(cast(TransformerPolicy, policy).post_startup_captures for policy in policies),
+    }
+    try:
+        for traces in (False, True):
+            recorder = UpdateProfile(config.output, trainer.policy.device, traces=traces)
+            engine.profile = recorder
+            for policy in policies:
+                cast(TransformerPolicy, policy).profile = recorder
+            with recorder.phase("rollout"):
+                rollout = engine.collect(trainer.update)
+            ticks = recorder.host_seconds.get("rollout/tick", 0.0)
+            boundaries = recorder.host_seconds.get("rollout/boundary_tick", 0.0)
+            report["traced" if traces else "timed"] = {
+                "rollout_seconds": recorder.phases["rollout"]["wall_seconds"],
+                "frames": rollout.frames,
+                "tick_ms": 1e3 * ticks / max(1, recorder.calls.get("rollout/tick", 0)),
+                "boundary_tick_ms": 1e3 * boundaries / max(1, recorder.calls.get("rollout/boundary_tick", 0)),
+                "transfer_timings": recorder.transfer_timings,
+            }
+            if traces:
+                report["ticks"] = {
+                    path.name: graph_breakdown(path) for path in sorted(config.output.glob("rollout-*tick-*.json"))
+                }
+    finally:
+        engine.profile = None
+        for policy in policies:
+            cast(TransformerPolicy, policy).profile = None
+    (config.output / "rollout-profile.json").write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
+    timed = cast(dict[str, object], report["timed"])
+    print(
+        json.dumps(
+            {
+                "rollout_profile": {key: value for key, value in timed.items() if key != "transfer_timings"},
+                "post_startup_captures": report["post_startup_captures"],
+                "startup_capture_seconds": trainer.startup_seconds,
+            }
+        ),
+        flush=True,
+    )
+    for name, tick in cast(dict[str, dict[str, object]], report.get("ticks", {})).items():
+        print(
+            f"{name}: wall {tick['wall_ms']:.1f} ms busy {tick['device_busy_ms']:.1f} idle {tick['device_idle_ms']:.1f}",
+            flush=True,
+        )
+        for graph, stats in sorted(cast(dict[str, dict[str, float]], tick["graphs"]).items()):
+            print(
+                f"   {graph:40s} {stats['kernels']:6.0f} kernels {stats['busy_ms']:7.2f} ms busy",
+                flush=True,
+            )
 
 
 class UpdateProfile:
@@ -6299,6 +6416,9 @@ def profile_native(
     if config.profiling is None:
         raise ValueError("missing profile configuration")
     config.output.mkdir(parents=True, exist_ok=False)
+    if config.profiling.rollout_only:
+        profile_rollout(trainer, config, native_config)
+        return
     (config.output / "resolved.json").write_text(
         json.dumps(
             {
