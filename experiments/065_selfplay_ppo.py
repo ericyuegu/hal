@@ -1356,7 +1356,7 @@ class TransformerPolicy:
                 raise ValueError("invalid observation statistics")
         self.device = next(model.parameters()).device
         linears = []
-        if self.device.type == "cuda" and not any(parameter.requires_grad for parameter in model.parameters()):
+        if self.device.type == "cuda":
             for name, module in tuple(model.named_modules()):
                 if isinstance(module, torch.nn.Linear):
                     linear = module if isinstance(module, TickLinear) else TickLinear(module)
