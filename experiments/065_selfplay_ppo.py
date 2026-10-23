@@ -4409,10 +4409,18 @@ class Trainer:
                     # gradients sum to the gradient of the whole step.
                     chunk = cfg.windows_per_step // cfg.actor_microbatches
                     parts: list[tuple[ActorLoss, ReplayOutput]] = []
-                    total = tuple(torch.zeros_like(p) for p in self.policy.actor_parameters())
+                    total = (
+                        tuple(torch.zeros_like(p) for p in self.policy.actor_parameters())
+                        if cfg.actor_microbatches > 1
+                        else ()
+                    )
                     for start in range(0, cfg.windows_per_step, chunk):
                         ids = window_ids[start : start + chunk]
-                        part = batch.windows.take(ids, batch.placement.positions, ids >= 0)
+                        part = (
+                            batch.windows.take(ids, batch.placement.positions, ids >= 0)
+                            if cfg.actor_microbatches > 1
+                            else windows
+                        )
                         targets = ActorTargets(
                             table.behavior[part.rows],
                             advantages[start : start + chunk],
