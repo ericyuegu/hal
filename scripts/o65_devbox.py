@@ -9,6 +9,7 @@ on a volume, so a rerun compiles only graphs whose code or shapes changed.
 import dataclasses
 import io
 import json
+import shlex
 import subprocess
 import tarfile
 import time
@@ -43,6 +44,8 @@ class Args:
     full: bool = False
     # bench: training windows per optimizer step; the default of 512 runs out of memory at 1024 matches.
     windows_per_step: int = 64
+    # bench: use another sandbox directory if the shared volume exhausts its file limit.
+    cache_root: Path = CACHE
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -128,17 +131,23 @@ def sync(sandbox: modal.Sandbox, sha: str) -> None:
 
 
 def bench(
-    sandbox: modal.Sandbox, matches_per_shard: int, rollout_frames: int, *, full: bool, windows_per_step: int
+    sandbox: modal.Sandbox,
+    matches_per_shard: int,
+    rollout_frames: int,
+    *,
+    full: bool,
+    windows_per_step: int,
+    cache_root: Path,
 ) -> int:
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
-    output = CACHE / "runs" / name
+    output = cache_root / "runs" / name
     root = launch.REMOTE_ROOT
     env = {
         "WANDB_MODE": "disabled",
         "HAL_NATIVE_LIBRARY": f"{root}/delivery/libhal_native.so",
-        "TMPDIR": str(CACHE / "tmp"),
-        "TORCHINDUCTOR_CACHE_DIR": str(CACHE / "inductor"),
-        "TRITON_CACHE_DIR": str(CACHE / "triton"),
+        "TMPDIR": str(cache_root / "tmp"),
+        "TORCHINDUCTOR_CACHE_DIR": str(cache_root / "inductor"),
+        "TRITON_CACHE_DIR": str(cache_root / "triton"),
         "TORCHINDUCTOR_COMPILE_THREADS": "16",
         "TORCHINDUCTOR_ENABLE_PDL": "1",
         "OMP_NUM_THREADS": "2",
@@ -188,18 +197,19 @@ def bench(
         "1",
         *(() if full else ("--profiling.rollout-only",)),
     ]
-    exports = " ".join(f"{key}={value}" for key, value in env.items())
+    exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     # Sandbox CPU numbering varies; take the first available cores for simulator shards.
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
-    command = f"mkdir -p {CACHE / 'tmp'} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {' '.join(argv)}"
+    arguments = " ".join(argument if argument == "$CPUS" else shlex.quote(argument) for argument in argv)
+    command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {arguments}"
     code = _run(sandbox, command)
-    if _run(sandbox, f"test -d {output}"):
+    if _run(sandbox, f"test -d {shlex.quote(str(output))}"):
         print("no report written", flush=True)
         return code
     # Traces and reports go to one local directory per run for offline analysis.
     local = LOCAL_RESULTS / "runs" / name
     local.mkdir(parents=True)
-    for path in _capture(sandbox, f"find {output} -type f").split():
+    for path in _capture(sandbox, f"find {shlex.quote(str(output))} -type f").splitlines():
         target = local / Path(path).relative_to(output)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(sandbox.filesystem.read_bytes(path))
@@ -221,7 +231,14 @@ def main(args: Args) -> None:
         raise SystemExit(_run(sandbox, args.command))
     if args.action == "bench":
         codes = [
-            bench(sandbox, matches, args.rollout_frames, full=args.full, windows_per_step=args.windows_per_step)
+            bench(
+                sandbox,
+                matches,
+                args.rollout_frames,
+                full=args.full,
+                windows_per_step=args.windows_per_step,
+                cache_root=args.cache_root,
+            )
             for matches in args.matches_per_shard
         ]
         raise SystemExit(max(codes))
