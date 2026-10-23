@@ -237,11 +237,20 @@ def short_causal_attention(
     cost to materialize 121 scores per head. This implementation reduced the
     full train step by approximately 100 ms.
     """
+    queries, keys = query.shape[-2], key.shape[-2]
+    if query.is_cuda and not torch.is_grad_enabled() and query.dtype == torch.bfloat16 and (queries % 8 or keys % 8):
+        # PyTorch 2.11.0+cu130 selects align-1 WMMA for the 21-token B200 prefix.
+        # Zero padding aligns both GEMMs; the CUDA parity test covers the mask.
+        # Remove when odd-length GEMMs match aligned throughput.
+        query = F.pad(query, (0, 0, 0, -queries % 8))
+        key = F.pad(key, (0, 0, 0, -keys % 8))
+        value = F.pad(value, (0, 0, 0, -keys % 8))
     scores = query @ key.transpose(-2, -1)
     scores = scores.float() * (query.shape[-1] ** -0.5)
     causal = torch.ones(scores.shape[-2:], dtype=torch.bool, device=scores.device).tril()
+    causal = causal & (torch.arange(scores.shape[-1], device=scores.device) < keys)
     weights = F.softmax(scores.masked_fill(~causal, -torch.inf), dim=-1).to(query.dtype)
-    return weights @ value
+    return (weights @ value)[..., :queries, :]
 
 
 TEMPORAL_ATTENTION_BATCH = 16_384

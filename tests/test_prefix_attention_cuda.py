@@ -2,13 +2,71 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
+from hal.models.action_sequence import short_causal_attention
+from hal.models.attention import prefix_attention
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FlexAttention and varlen restart require CUDA")
+
+
+@pytest.mark.parametrize(
+    "causal,queries,capacity",
+    [(True, 2, 259), (False, 21, 259), (False, 1, 25), (False, 127, 259)],
+)
+@torch.no_grad()
+def test_prefix_attention_matches_dense_mask_with_empty_and_changing_lengths(
+    causal: bool, queries: int, capacity: int
+) -> None:
+    torch.manual_seed(71)
+    lengths = torch.tensor([0, 1, queries - 1, queries, capacity - 1, capacity], device="cuda")
+    query = torch.randn(6, 2, queries, 32, dtype=torch.bfloat16, device="cuda")
+    key, value = torch.randn(2, 6, 2, capacity, 32, dtype=torch.bfloat16, device="cuda")
+    compiled = torch.compile(prefix_attention, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})
+    for _ in range(2):
+        limits = lengths[:, None]
+        if causal:
+            limits = limits - queries + torch.arange(1, queries + 1, device="cuda")[None]
+        mask = torch.arange(capacity, device="cuda")[None, None] < limits[..., None]
+        expected = F.scaled_dot_product_attention(query, key, value, attn_mask=mask[:, None])
+        actual = compiled(query, key, value, lengths, causal=causal)
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1.6e-2)
+        lengths.copy_(lengths.flip(0))
+
+
+def test_prefix_attention_preserves_gradients() -> None:
+    torch.manual_seed(73)
+    query = torch.randn(4, 2, 3, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    key, value = torch.randn(2, 4, 2, 65, 32, dtype=torch.bfloat16, device="cuda").requires_grad_().unbind(0)
+    lengths = torch.tensor([0, 1, 64, 65], device="cuda")
+    limits = lengths[:, None] - 3 + torch.arange(1, 4, device="cuda")[None]
+    mask = torch.arange(65, device="cuda")[None, None] < limits[..., None]
+    expected = F.scaled_dot_product_attention(query, key, value, attn_mask=mask[:, None])
+    actual = torch.compile(prefix_attention, fullgraph=True, dynamic=False)(query, key, value, lengths, causal=True)
+    gradient = torch.randn_like(actual)
+    torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1.6e-2)
+    actual_gradients = torch.autograd.grad(actual, (query, key, value), gradient)
+    expected_gradients = torch.autograd.grad(expected, (query, key, value), gradient)
+    for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients, strict=True):
+        torch.testing.assert_close(actual_gradient, expected_gradient, atol=3.2e-2, rtol=3.2e-2)
+
+
+@pytest.mark.parametrize("length", [21, 23, 24])
+@torch.no_grad()
+def test_aligned_short_attention_matches_unpadded_attention(length: int) -> None:
+    torch.manual_seed(79)
+    query, key, value = torch.randn(3, 8, 2, length, 64, device="cuda", dtype=torch.bfloat16)
+    scores = (query @ key.transpose(-1, -2)).float() * (64**-0.5)
+    causal = torch.ones(length, length, dtype=torch.bool, device="cuda").tril()
+    weights = scores.masked_fill(~causal, -torch.inf).softmax(-1).to(query.dtype)
+    expected = weights @ value
+    actual = torch.compile(short_causal_attention, fullgraph=True, dynamic=False)(query, key, value)
+    torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1.6e-2)
 
 
 def _model() -> ActionSequenceTransformer:

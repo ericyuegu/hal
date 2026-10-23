@@ -1593,6 +1593,8 @@ class TransformerPolicy:
             graph_key = key, appended, count
             captured = self.tick_graphs.get(graph_key)
             if captured is None:
+                if enabled:
+                    self.tick_decoder.prepare_rotary()
                 static = tuple(value.clone() for value in inputs)
 
                 def tick() -> None:
