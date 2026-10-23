@@ -52,6 +52,8 @@ def load_cohort(path: Path, checkpoint_sha256: str, index: int) -> CapturedCohor
         raise ValueError("training probe schema mismatch")
     if saved["format"] != "hal.o65.training-probe.v1" or saved["provenance"]["checkpoint_sha256"] != checkpoint_sha256:
         raise ValueError("training probe checkpoint or format mismatch")
+    if saved["training"].get("clip_epsilon") != 0.2:
+        raise ValueError("replay qualification requires clip_epsilon=0.2")
     if not 0 <= index < len(saved["cohorts"]):
         raise ValueError("training probe cohort is out of range")
     cohort = saved["cohorts"][index]
@@ -77,6 +79,8 @@ class Comparison(TypedDict):
     compiled_vs_eager: dict[str, float]
     repeat_vs_eager: dict[str, float]
     cosine: float
+    eager_fp32_cosine: float
+    compiled_fp32_cosine: float
     passed: bool
 
 
@@ -99,6 +103,8 @@ def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor, *, g
         "compiled_vs_eager": direct,
         "repeat_vs_eager": repeated,
         "cosine": cosine,
+        "eager_fp32_cosine": float(torch.nn.functional.cosine_similarity(eager.float(), high.float(), dim=0)),
+        "compiled_fp32_cosine": float(torch.nn.functional.cosine_similarity(candidate.float(), high.float(), dim=0)),
         "passed": passed,
     }
 
@@ -196,7 +202,10 @@ def main(args: Args) -> None:
     ratios_by_mode: list[dict[str, float]] = []
     behavior = cohort["behavior"].to(device)
     advantages = cohort["advantages"].to(device)
-    mean, sigma = advantages[valid].mean(), advantages[valid].std(unbiased=False)
+    # Match the trainer's float64 moments and minimum sigma before the FP32 loss.
+    selected_advantages = advantages[valid].double()
+    mean = selected_advantages.mean()
+    sigma = (selected_advantages.square().mean() - mean.square()).clamp_min(0).sqrt().clamp_min(1e-8)
     for index, (name, current, compiled, fp32) in enumerate(
         (
             ("eager actor", model, False, False),
@@ -213,8 +222,8 @@ def main(args: Args) -> None:
             valid,
             coefficient,
             references[(0, 0, 1, 2)[index]],
-            mean,
-            sigma,
+            mean.float(),
+            sigma.float(),
             valid.sum().float(),
         )
         validate_actor_targets(output, targets)

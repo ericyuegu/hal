@@ -44,3 +44,19 @@ def test_probe_loader_rejects_another_checkpoint_before_tensor_use(tmp_path: Pat
     )
     with pytest.raises(ValueError, match="checkpoint or format mismatch"):
         load_cohort(path, "c" * 64, 0)
+
+
+def test_probe_loader_rejects_unsupported_clipping(tmp_path: Path) -> None:
+    path = tmp_path / "inputs.pt"
+    torch.save(
+        {
+            "format": "hal.o65.training-probe.v1",
+            "provenance": {"checkpoint_sha256": "a" * 64},
+            "source_sha256": "b" * 64,
+            "training": {"clip_epsilon": 0.1},
+            "cohorts": [],
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match="clip_epsilon"):
+        load_cohort(path, "a" * 64, 0)

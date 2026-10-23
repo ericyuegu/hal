@@ -6479,12 +6479,13 @@ class TrainingProbeCohort(TypedDict):
 def save_training_probe(trainer: Trainer, batch: PreparedUpdate, output: Path, provenance: dict[str, str]) -> None:
     if (
         trainer.update != 1
+        or distributed.world_size() != 1
         or batch.rollout.update != 0
         or trainer.warming
         or batch.reference is None
         or not isinstance(trainer.policy, TransformerPolicy)
     ):
-        raise ValueError("training probe requires the first transformer update")
+        raise ValueError("training probe requires the first single-GPU transformer update")
     table = batch.rollout.table
     inverse = torch.zeros(len(table.values), dtype=torch.long, device=trainer.policy.device)
     inverse[batch.rollout.ids] = torch.arange(len(batch.rollout.ids), device=inverse.device)
