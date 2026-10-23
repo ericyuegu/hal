@@ -41,8 +41,8 @@ class Args:
     rollout_frames: int = 128
     # bench: profile whole updates (rollout, preparation, actor, critic) instead of rollout ticks.
     full: bool = False
-    # bench: override the trainer's window count and memory chunking explicitly.
-    windows_per_step: int | None = None
+    # bench: 512 windows exhaust memory at 1,024 matches on a B200.
+    windows_per_step: int = 64
     actor_microbatches: int | None = None
     # exec: a shell command to run in the repository root.
     command: str = ""
