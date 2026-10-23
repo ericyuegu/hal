@@ -409,6 +409,11 @@ def test_prefetched_ticks_match_serial_rollouts(length: int, timeout: bool, stag
             return completed
 
     class SerialEngine(AsyncEngine):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.accept_frame = exp.accept_frame_tensors
+            self.stage_tick_tensors = self._stage_tick_tensors
+
         def _prefetch_tick(self, *args: Any, **kwargs: Any) -> None:
             return None
 
@@ -507,6 +512,43 @@ def test_prefetched_ids_survive_asynchronous_consumer_and_allocator_reuse() -> N
     for buffer in probe.buffers[0]:
         buffer.stream.synchronize()
     assert torch.equal(probe.observed, torch.arange(size, device="cuda"))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_tick_tensor_preparation_covers_groups_layouts_and_future_clocks() -> None:
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    from hal.inference.cuda_graph import count_compilation_starts
+    from hal.inference.cuda_graph import prepared_shape_compilation
+
+    engine = trainer("cuda", groups=2).engine
+    frames = engine.sampler.schedule.rollout_frames
+    with count_compilation_starts() as counter:
+        with prepared_shape_compilation(64, instance_count=2):
+            for group, matches in enumerate(engine.group_matches):
+                engine.cursor = group
+                engine.tick_layouts = engine.group_layouts[group]
+                previous = engine.stores[group]
+                store = exp.FrameStore(129 + frames + frames // 128 + 1, len(matches), engine.policy.device)
+                for name in ("records", "actions", "rewards", "flags"):
+                    getattr(store, name)[: len(previous.records)].copy_(getattr(previous, name))
+                engine.stores[group] = store
+                table = exp.DenseRollout(frames // 2, store)
+                engine.tables[group] = table
+                pending = torch.full((table.players,), -1, device="cuda", dtype=torch.long)
+                for clock in (0, 2, 4):
+                    engine._stage_tick(clock, 0, table, pending)
+                    if clock == 2:
+                        for buffer in engine.buffers[group]:
+                            engine._stage_tick(clock, 0, table, pending, buffer=buffer)
+                engine.prepare_frame_acceptance(table)
+                table.reset()
+        engine.cursor = 0
+        before = counter.snapshot()
+        for update in range(3):
+            engine.collect(update)
+        assert counter.snapshot() == before
 
 
 if __name__ == "__main__":

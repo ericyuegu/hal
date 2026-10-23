@@ -1116,6 +1116,11 @@ class ShardFrames:
 
 class FrameStore:
     def __init__(self, capacity: int, matches: int, device: torch.device) -> None:
+        fields = native.FRAME_DTYPE.fields
+        if fields is None:
+            raise RuntimeError("native records must have a structured dtype")
+        self.reward_offset = fields["reward"][1]
+        self.flag_offset = fields["terminated"][1]
         self.records = torch.zeros(capacity, matches, native.FRAME_DTYPE.itemsize, dtype=torch.uint8, device=device)
         self.actions = torch.zeros(capacity, matches, 2, ACTION_DIM, device=device)
         self.rewards = torch.zeros(capacity, matches, 2, device=device)
@@ -1126,14 +1131,9 @@ class FrameStore:
         selected = batch.records.index_select(0, source)
         self.records[positions, lanes] = selected
         self.actions[positions, lanes] = batch.actions.index_select(0, source)
-        fields = native.FRAME_DTYPE.fields
-        if fields is None:
-            raise RuntimeError("native records must have a structured dtype")
-        reward_offset = fields["reward"][1]
-        flag_offset = fields["terminated"][1]
-        rewards = selected[:, reward_offset : reward_offset + 8].contiguous().view(torch.float32)
+        rewards = selected[:, self.reward_offset : self.reward_offset + 8].contiguous().view(torch.float32)
         self.rewards[positions, lanes] = rewards
-        self.flags[positions, lanes] = selected[:, flag_offset : flag_offset + 2].bool()
+        self.flags[positions, lanes] = selected[:, self.flag_offset : self.flag_offset + 2].bool()
         return rewards
 
 
@@ -2164,6 +2164,33 @@ class ActionRing:
         self.length_storage[owned, sides] += metadata[:, REPLAN]
 
 
+def accept_frame_tensors(
+    frames: ShardFrames,
+    lanes: Tensor,
+    pending: Tensor,
+    table: DenseRollout,
+    ring: ActionRing,
+    active_lanes: Tensor,
+    stops: Tensor,
+    observed_clocks: Tensor,
+    episode_returns: Tensor,
+) -> None:
+    slots = (2 * lanes[:, None] + torch.arange(2, device=lanes.device)[None]).flatten()
+    active = active_lanes[lanes]
+    rewards = table.store.write(stops[lanes], lanes, frames, torch.arange(len(lanes), device=lanes.device))
+    ids = torch.where(pending[slots] >= 0, pending[slots], slots)
+    valid = (pending[slots] >= 0) & active.repeat_interleave(2)
+    duration = table.duration[ids].clamp_max(3)
+    table.rewards[ids, duration] = torch.where(valid, rewards.flatten(), table.rewards[ids, duration])
+    table.duration[ids] += valid.long()
+    episode_returns[lanes] += torch.where(active[:, None], rewards, 0)
+    stops[lanes] += active.long()
+    observed_clocks[lanes] += active.long()
+    ring.head[lanes] = (ring.head[lanes] + active[:, None].long()) % ring.capacity
+    # Read and write the base so Inductor cannot copy another buffer's lengths.
+    ring.length_storage[lanes] -= active[:, None].long()
+
+
 # Device metadata columns for fixed player slots.
 (
     STREAM,
@@ -2295,6 +2322,8 @@ class RolloutEngine:
         }
         self.device_lanes = {key: torch.from_numpy(lanes).to(policy.device) for key, lanes in self.shard_lanes.items()}
         self.buffer_device_lanes: dict[int, Tensor] = {}
+        self.buffer_player_slots: dict[int, Tensor] = {}
+        self.player_slots = tuple(torch.arange(2 * len(ids), device=policy.device) for ids in self.group_matches)
         self.staging: dict[int, BufferStaging] = {}
         self.anchor_streams: dict[tuple[int, int | None], torch.cuda.Stream] = {}
         self.transfer_timings: list[BufferTiming] = []
@@ -2315,6 +2344,8 @@ class RolloutEngine:
                 elif any(isinstance(shard, NativeSimulatorShard) for shard in half):
                     raise ValueError("a rollout buffer cannot mix native and test shards")
                 self.buffer_device_lanes[id(buffer)] = torch.from_numpy(lanes.copy()).to(policy.device)
+                slots = (2 * lanes[:, None] + np.arange(2)[None]).flatten()
+                self.buffer_player_slots[id(buffer)] = torch.from_numpy(slots).to(policy.device)
             buffers.append(tuple(prepared))
         self.buffers = tuple(buffers)
         self.group_slots: list[dict[tuple[int, int | None], Tensor]] = [{} for _ in groups]
@@ -2335,6 +2366,16 @@ class RolloutEngine:
         self.layout_assignments = [np.full_like(values, -2) for values in self.assignments]
         self.tables: list[DenseRollout | None] = [None] * len(groups)
         self.episode_returns = [torch.zeros(len(ids), 2, device=policy.device) for ids in self.group_matches]
+        self.stage_tick_tensors = (
+            torch.compile(self._stage_tick_tensors, fullgraph=True, dynamic=True, options={"triton.cudagraphs": False})
+            if policy.device.type == "cuda"
+            else self._stage_tick_tensors
+        )
+        self.accept_frame = (
+            torch.compile(accept_frame_tensors, fullgraph=True, dynamic=True, options={"triton.cudagraphs": False})
+            if policy.device.type == "cuda"
+            else accept_frame_tensors
+        )
 
     def snapshot(self) -> PoolSnapshot:
         groups = []
@@ -2586,13 +2627,18 @@ class RolloutEngine:
         self.episode_returns[group][lane].zero_()
 
     def _dense_metadata(
-        self, clock: int, update: int, *, bootstrap: bool = False, slots: Tensor | None = None
+        self, clock: int | Tensor, update: int | Tensor, *, bootstrap: bool = False, slots: Tensor | None = None
     ) -> Tensor:
         group = self.cursor
         meta = self.dense_meta[group].clone() if slots is None else self.dense_meta[group].index_select(0, slots)
         lanes = meta[:, LANE]
         observed = self.observed_clocks[group][lanes]
-        clocks = observed if bootstrap else torch.full_like(observed, clock)
+        if bootstrap:
+            clocks = observed
+        elif isinstance(clock, Tensor):
+            clocks = clock.expand_as(observed)
+        else:
+            clocks = torch.full_like(observed, clock)
         block = ((clocks - int(bootstrap)) // 128) * 128
         start = torch.maximum(self.episode_clocks[group][lanes], block - 128)
         start = torch.maximum(start, clocks - 255)
@@ -2606,34 +2652,14 @@ class RolloutEngine:
         meta[:, OPP_LENGTH] = self.rings[group].length_device[lanes, 1 - meta[:, SIDE]]
         return meta
 
-    def _stage_tick(
-        self,
-        clock: int,
-        update: int,
-        table: DenseRollout,
-        pending: Tensor,
-        *,
-        buffer: RolloutBuffer | None = None,
-    ) -> Tensor:
+    def _stage_tick_tensors(self, control: Tensor, table: DenseRollout, pending: Tensor, slots: Tensor) -> Tensor:
+        clock, update, start = control.unbind()
         group = self.cursor
         players = len(self.dense_meta[group])
-        tick = (clock - self.clocks[group]) // 2
-        all_slots = torch.arange(players, device=self.policy.device)
-        all_at = all_slots + tick * players
-        slots = all_slots
-        if buffer is not None:
-            if clock % 128 == 0:
-                raise ValueError("a block boundary must stage every buffer")
-            lanes = self.buffer_device_lanes[id(buffer)]
-            slots = (2 * lanes[:, None] + torch.arange(2, device=self.policy.device)[None]).flatten()
+        all_at = self.player_slots[group] + (clock - start).div(2, rounding_mode="floor") * players
         at = all_at[slots]
         meta = self._dense_metadata(clock, update, slots=slots)
         table.integers[at] = meta
-        if clock % 128 == 0:
-            # Opponents change only at resets on block boundaries.
-            table.opponent_anchor[tick * players : (tick + 64) * players].view(64, players).copy_(
-                self.owners[group].reshape(-1, 2).flip(1).flatten()
-            )
         table.age[at] = meta[:, CLOCK] - self.episode_clocks[group].repeat_interleave(2)[slots]
         table.remaining[at] = -1
         table.conditions[at] = self.dense_logs[group][slots]
@@ -2650,13 +2676,45 @@ class RolloutEngine:
         table.active[at] = active
         due = active & (clock % meta[:, REPLAN] == 0)
         table.queue_error.logical_or_((due & (ring.length_device[lanes, sides] != meta[:, DELAY])).any())
-        assignments = self.assignments[group]
         student = self.owners[group][slots] < 0
         table.valid[at] = due & student
         previous = torch.where(pending[slots] >= 0, pending[slots], slots)
         continuing = due & student & (pending[slots] >= 0)
         table.following[previous] = torch.where(continuing, at, table.following[previous])
         pending[slots] = torch.where(due & student, at, pending[slots])
+        return all_at
+
+    @torch.no_grad()
+    def _stage_tick(
+        self,
+        clock: int,
+        update: int,
+        table: DenseRollout,
+        pending: Tensor,
+        *,
+        buffer: RolloutBuffer | None = None,
+    ) -> Tensor:
+        group = self.cursor
+        players = len(self.dense_meta[group])
+        tick = (clock - self.clocks[group]) // 2
+        slots = self.player_slots[group]
+        if buffer is not None:
+            if clock % 128 == 0:
+                raise ValueError("a block boundary must stage every buffer")
+            slots = self.buffer_player_slots[id(buffer)]
+        control = torch.tensor(
+            (clock, update, self.clocks[group]),
+            dtype=torch.long,
+            pin_memory=self.policy.device.type == "cuda",
+        ).to(self.policy.device, non_blocking=True)
+        all_at = self.stage_tick_tensors(control, table, pending, slots)
+        if clock % 128 == 0:
+            # Opponents change only at resets on block boundaries.
+            table.opponent_anchor[tick * players : (tick + 64) * players].view(64, players).copy_(
+                self.owners[group].reshape(-1, 2).flip(1).flatten()
+            )
+        ring = self.rings[group]
+        assignments = self.assignments[group]
         anchor_ids = tuple(self.anchors)
         if clock % 128 == 0 and (
             not np.array_equal(assignments, self.layout_assignments[group]) or self.layout_anchors[group] != anchor_ids
@@ -2826,6 +2884,48 @@ class RolloutEngine:
             done.record(first_stream)
         return done
 
+    @torch.no_grad()
+    def prepare_frame_acceptance(self, table: DenseRollout) -> None:
+        """Compile both native frame layouts without changing the live rollout."""
+        group = self.cursor
+        trial = copy.copy(table)
+        trial.store = copy.deepcopy(table.store)
+        trial.rewards = table.rewards.clone()
+        trial.duration = table.duration.clone()
+        ring = copy.copy(self.rings[group])
+        ring.head = ring.head.clone()
+        ring.length_storage = ring.length_storage.clone()
+        stops = self.stops[group].clone()
+        observed = self.observed_clocks[group].clone()
+        returns = self.episode_returns[group].clone()
+        pending = torch.full_like(self.player_slots[group], -1)
+        maximum = max(len(buffer.lanes) for buffer in self.buffers[group])
+        for count in sorted({1, min(2, maximum), maximum}):
+            lanes = torch.arange(count, device=self.policy.device)
+            packed = torch.zeros(
+                count, native_shard.STAGING_DTYPE.itemsize, device=self.policy.device, dtype=torch.uint8
+            )
+            records = packed[:, : native.FRAME_DTYPE.itemsize]
+            actions = packed[:, native.FRAME_DTYPE.itemsize :].view(torch.float32).reshape(count, 2, ACTION_DIM)
+            columns = np.zeros((count, len(native.OBSERVATION_FIELDS)), dtype=np.uint32)
+            columns.flags.writeable = False
+            for contiguous in (False, True):
+                frames = ShardFrames(
+                    torch.empty_like(records, memory_format=torch.contiguous_format).copy_(records)
+                    if contiguous
+                    else records,
+                    torch.empty_like(actions, memory_format=torch.contiguous_format).copy_(actions)
+                    if contiguous
+                    else actions,
+                    columns,
+                    np.zeros((count, 2), dtype=np.float32),
+                    np.zeros(count, dtype=np.bool_),
+                    np.zeros(count, dtype=np.bool_),
+                    np.zeros((count, 2, ACTION_DIM), dtype=np.float32),
+                    np.zeros(count, dtype=np.int32),
+                )
+                self.accept_frame(frames, lanes, pending, trial, ring, self.active[group], stops, observed, returns)
+
     @contextlib.contextmanager
     def _host_transfers(self, buffers: tuple[RolloutBuffer, ...]) -> Iterator[None]:
         try:
@@ -2976,6 +3076,7 @@ class RolloutEngine:
         result = ring.controllers[lanes[:, None, None], sides, positions].permute(2, 0, 1, 3)
         return torch.where(self.active[self.cursor][lanes][None, :, None, None], result, 0)
 
+    @torch.no_grad()
     def _accept(
         self,
         buffer: RolloutBuffer,
@@ -2998,25 +3099,20 @@ class RolloutEngine:
             host_lanes = np.concatenate([self.shard_lanes[id(shard)] for shard in shards])
             lanes = torch.cat([self.device_lanes[id(shard)] for shard in shards])
         frames = concatenate_shard_frames(batches)
-        slots = (2 * lanes[:, None] + torch.arange(2, device=self.policy.device)[None]).flatten()
         timeouts = 0
         active_host = self.live_host[group][host_lanes]
-        active = self.active[group][lanes]
-        positions = self.stops[group][lanes]
-        rewards = table.store.write(positions, lanes, frames, torch.arange(len(lanes), device=lanes.device))
         terminals, truncations = frames.terminal, frames.timeout
-        ids = torch.where(pending[slots] >= 0, pending[slots], slots)
-        valid = (pending[slots] >= 0) & active.repeat_interleave(2)
-        duration = table.duration[ids]
-        table.rewards[ids, duration.clamp_max(3)] = torch.where(
-            valid, rewards.flatten(), table.rewards[ids, duration.clamp_max(3)]
+        self.accept_frame(
+            frames,
+            lanes,
+            pending,
+            table,
+            ring,
+            self.active[group],
+            self.stops[group],
+            self.observed_clocks[group],
+            self.episode_returns[group],
         )
-        table.duration[ids] += valid.long()
-        self.episode_returns[group][lanes] += torch.where(active[:, None], rewards, 0)
-        self.stops[group][lanes] += active.long()
-        self.observed_clocks[group][lanes] += active.long()
-        ring.head[lanes] = (ring.head[lanes] + active[:, None].long()) % ring.capacity
-        ring.length_device[lanes] -= active[:, None].long()
         frames_stepped = int(active_host.sum())
         for shard in shards:
             if isinstance(shard, NativeSimulatorShard):
@@ -4090,11 +4186,17 @@ class Trainer:
             pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
             for offset in (0, 2, 4):
                 clock = engine.clocks[group] + offset
-                ids = engine._stage_tick(clock, self.update, table, pending)
+                with prepared_shape_compilation(64, instance_count=len(engine.groups)):
+                    ids = engine._stage_tick(clock, self.update, table, pending)
+                    if offset == 2:
+                        for buffer in engine.buffers[group]:
+                            engine._stage_tick(clock, self.update, table, pending, buffer=buffer)
                 table.active[ids] = False
                 engine.tick_decoder_rows = dict.fromkeys(engine.tick_layouts, ())
                 for buffer in engine.buffers[group]:
                     engine._sample_buffer(buffer, clock, table, ids)
+            with prepared_shape_compilation(64, instance_count=len(engine.groups)):
+                engine.prepare_frame_acceptance(table)
             if rollout_only:
                 table.reset()
                 continue
