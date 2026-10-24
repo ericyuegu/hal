@@ -374,3 +374,32 @@ def test_stacked_engine_layout_and_owned_writes_match_separate_anchors() -> None
     for table in tables:
         assert table.evaluation is not None
     torch.testing.assert_close(tables[0].evaluation.log_probs, tables[1].evaluation.log_probs, atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_anchor_stream_has_priority_over_student_and_is_reused() -> None:
+    import numpy as np
+    from test_065_loop import ToyPolicy
+
+    class StreamProbe(exp.RolloutEngine):
+        def __init__(self) -> None:
+            self.policy = ToyPolicy("cuda")
+            self.cursor = 0
+            buffer = exp.RolloutBuffer(0, (), np.empty(0, dtype=np.int64), torch.cuda.Stream())
+            self.buffers = ((buffer,),)
+            self.anchor_streams = {}
+            self.tick_layouts = dict.fromkeys(((exp.ALL_BUFFERS, exp.STACKED_ANCHORS), (0, None)))
+            self.priorities: dict[tuple[int, int | None], int] = {}
+
+        def _sample_layout(self, key: tuple[int, int | None], clock: int, table: object, ids: torch.Tensor) -> None:
+            self.priorities[key] = torch.cuda.current_stream(self.policy.device).priority
+
+    probe = StreamProbe()
+    buffer = probe.buffers[0][0]
+    key = exp.ALL_BUFFERS, exp.STACKED_ANCHORS
+    ids = torch.empty(0, dtype=torch.long, device="cuda")
+    probe._sample_buffer(buffer, 2, None, ids, concurrent=True)
+    assert probe.priorities[key] < probe.priorities[0, None]
+    first = probe.anchor_streams[key]
+    probe._sample_buffer(buffer, 4, None, ids, concurrent=True)
+    assert probe.anchor_streams[key] is first

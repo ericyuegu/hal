@@ -3123,7 +3123,8 @@ class RolloutEngine:
         for key in anchors:
             stream = self.anchor_streams.get(key)
             if stream is None:
-                stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device)
+                # Start the first simulator buffer while the student still runs.
+                stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device, priority=-1)
             stream.wait_stream(current)
             side.append(stream)
         for key in students:
