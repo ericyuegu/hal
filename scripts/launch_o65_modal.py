@@ -278,6 +278,9 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             str(request.actor_microbatches),
             "--updates",
             str(request.ddp_updates),
+            "--compile-cache",
+            str(RESULTS / "compile-cache"),
+            "--require-compile-cache",
         ]
         if request.resume_source is not None:
             argv.extend(("--resume-source", request.resume_source))
@@ -474,11 +477,11 @@ def run_child(request: Request, output: Path, started: float) -> int:
         CUBLAS_WORKSPACE_CONFIG=":4096:8",
     )
     if request.mode == "ddp":
+        env.pop("HAL_TRITON_CACHE_SOURCE", None)
         env.update(
-            TORCHINDUCTOR_CACHE_DIR=str(COMPILE_CACHE / "inductor"),
+            TORCHINDUCTOR_CACHE_DIR=str(output / "inductor"),
             TRITON_CACHE_DIR=str(output / "triton"),
-            HAL_TRITON_CACHE_SOURCE=str(COMPILE_CACHE / "triton"),
-            TRITON_CACHE_MANAGER="hal.inference.triton_cache:LocalCacheManager",
+            TRITON_CACHE_MANAGER="triton.runtime.cache:FileCacheManager",
         )
     Path(env["TMPDIR"]).mkdir()
     identity = {

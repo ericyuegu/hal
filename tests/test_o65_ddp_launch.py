@@ -170,6 +170,18 @@ def test_o64_commands_parse_the_native_cli(tmp_path: Path, measurement: bool) ->
     assert (parsed.publication is None) == measurement
 
 
+def test_o64_warm_cache_command_and_resume_identity(tmp_path: Path) -> None:
+    from test_065_loop import exp
+
+    args = production_args(tmp_path)
+    warm = dataclasses.replace(args, compile_cache=tmp_path / "packed-cache", require_compile_cache=True)
+    assert o65_production.resume_settings(args) == o65_production.resume_settings(warm)
+    command = o65_production.training_command(warm)
+    parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
+    assert parsed.require_compile_cache
+    assert parsed.compile_cache == tmp_path / "packed-cache"
+
+
 def test_o64_final_evaluation_uses_frozen_384_game_grid(tmp_path: Path) -> None:
     from scripts import eval_o65
 
@@ -212,11 +224,21 @@ def test_o64_launch_requires_capacity_and_measurement_is_explicit(tmp_path: Path
         launcher.main(launcher.Args(mode="ddp", gpus=2, dry_run=True, b200_max_usd=100, output=tmp_path))
 
 
-def test_measurement_sweep_has_fresh_processes_and_no_publication(tmp_path: Path) -> None:
+def test_measurement_sweep_has_fresh_processes_and_no_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import json
 
     from test_o65_modal import launcher
 
+    check_budget = launcher.b200_budget
+    monkeypatch.setattr(
+        launcher,
+        "b200_budget",
+        lambda path, name, dollars, cap, *, reserve: check_budget(
+            tmp_path / "budget.jsonl", name, dollars, cap, reserve=reserve
+        ),
+    )
     launcher.main(
         launcher.Args(
             mode="ddp",
@@ -239,6 +261,7 @@ def test_measurement_sweep_has_fresh_processes_and_no_publication(tmp_path: Path
     assert len(outputs) == 3
     for command in commands:
         assert "--measurement" in command and "--publish-directory" not in command
+        assert "--require-compile-cache" in command
         parsed = tyro.cli(o65_production.Args, args=command[3:])
         assert parsed.measurement and parsed.updates == 2
     assert plan["checkpoint"]["sha256"] == o65_production.O64_SHA256

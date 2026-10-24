@@ -6763,11 +6763,19 @@ class NativeCli:
     profiling: ProfileConfig | None = None
     decoder_precision: DecoderPrecision = "bf16"
     compile_cache: Path | None = None
+    require_compile_cache: bool = False
     publication: self_play_publication.Args | None = None
     measurement: bool = False
+    measurement_rank: int = 0
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.require_compile_cache and self.compile_cache is None:
+            raise ValueError("required compiler artifacts need a compile cache directory")
+        if type(self.measurement_rank) is not int or not 0 <= self.measurement_rank < 8:
+            raise ValueError("measurement rank must be in 0..7")
+        if self.measurement_rank and not self.measurement:
+            raise ValueError("logical ranks are supported only for measurement")
         if self.resume_source is not None and (
             self.resume is None
             or len(self.resume_source) != 40
@@ -6893,10 +6901,17 @@ def train_native(config: NativeCli) -> None:
             train_native_rank(
                 dataclasses.replace(
                     config,
-                    compile_cache=config.compile_cache / "rank0" if config.compile_cache is not None else None,
-                )
+                    compile_cache=config.compile_cache / f"rank{config.measurement_rank}"
+                    if config.compile_cache is not None
+                    else None,
+                ),
+                cache_seed=config.compile_cache / "rank0"
+                if config.compile_cache is not None and config.measurement_rank and config.require_compile_cache
+                else None,
             )
             return
+        if config.measurement_rank:
+            raise ValueError("logical measurement ranks require a single GPU")
         if config.profiling is not None or config.verify_resume or config.resume_learner is not None:
             raise ValueError(
                 "DDP supports fresh training and exact resume; profiling and learner migration require one GPU"
@@ -6919,11 +6934,14 @@ def train_native(config: NativeCli) -> None:
                 compile_cache=config.compile_cache / f"rank{distributed.rank()}"
                 if config.compile_cache is not None
                 else None,
-            )
+            ),
+            cache_seed=config.compile_cache / "rank0"
+            if config.compile_cache is not None and distributed.rank() and config.require_compile_cache
+            else None,
         )
 
 
-def train_native_rank(config: NativeCli) -> None:
+def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> None:
     startup_started = time.perf_counter()
     torch.set_num_threads(2)
     if config.training.deterministic:
@@ -6948,11 +6966,14 @@ def train_native_rank(config: NativeCli) -> None:
             compile_cache.current_identity(
                 compile_cache.source_hash(source_root, cache_sources), torch.device(config.device)
             ),
+            seed_root=cache_seed,
+            require_loaded=config.require_compile_cache,
         )
         if config.compile_cache is not None
         else None
     )
     cache_load_seconds = time.perf_counter() - cache_started
+    cache_statistics_before = compile_cache.compilation_statistics()
     torch.manual_seed(config.training.seed)
     checkpoint = load_evaluation_checkpoint(
         config.checkpoint, device=torch.device(config.device), decoder_precision=config.decoder_precision
@@ -6979,7 +7000,11 @@ def train_native_rank(config: NativeCli) -> None:
         and (config.resume_learner is None or set(config.output.iterdir()) != {config.output / "metrics.jsonl"})
     ):
         raise FileExistsError(config.output)
-    with contextlib.ExitStack() as resources, distributed.fail_fast():
+    with (
+        contextlib.ExitStack() as resources,
+        distributed.fail_fast(),
+        cache.require_hits() if cache is not None and config.require_compile_cache else contextlib.nullcontext(),
+    ):
         if cache is not None:
             resources.callback(cache.save)
         groups = []
@@ -6988,7 +7013,8 @@ def train_native_rank(config: NativeCli) -> None:
             if config.active_matches_per_gpu is None
             else config.active_matches_per_gpu // len(config.cpus)
         )
-        next_match = distributed.rank() * config.groups * len(config.cpus) * matches_per_shard
+        logical_rank = config.measurement_rank if distributed.world_size() == 1 else distributed.rank()
+        next_match = logical_rank * config.groups * len(config.cpus) * matches_per_shard
         for _ in range(config.groups):
             shards: list[NativeSimulatorShard] = []
             for cpu in config.cpus:
@@ -7034,6 +7060,19 @@ def train_native_rank(config: NativeCli) -> None:
         else:
             restore_checkpoint(trainer, config.resume, provenance, source_git_sha=config.resume_source)
             trainer.capture_startup()
+        if cache is not None:
+            saved = cache.save()
+            print(
+                json.dumps(
+                    {
+                        "compiler_cache_saved": saved,
+                        "rank": distributed.rank(),
+                        "logical_rank": logical_rank,
+                        "directory": str(cache.directory),
+                    }
+                ),
+                flush=True,
+            )
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)
             return
@@ -7053,7 +7092,22 @@ def train_native_rank(config: NativeCli) -> None:
             "loaded_artifacts": cache.loaded if cache is not None else False,
             "loaded_counts": cache.loaded_counts if cache is not None else {},
             "load_seconds": cache_load_seconds,
+            "seed_directory": str(cache_seed) if cache_seed is not None else None,
+            "counters": {
+                name: value - cache_statistics_before[name]
+                for name, value in compile_cache.compilation_statistics().items()
+            },
         }
+        print(
+            json.dumps(
+                {
+                    "compiler_cache_status": native_config["compile_cache_status"],
+                    "rank": distributed.rank(),
+                    "logical_rank": logical_rank,
+                }
+            ),
+            flush=True,
+        )
         if config.profiling is not None:
             try:
                 profile_native(trainer, config, provenance, native_config)

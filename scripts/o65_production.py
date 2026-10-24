@@ -80,12 +80,15 @@ class Args:
     actor_microbatches: int = 1
     measurement: bool = False
     compile_cache: Path | None = None
+    require_compile_cache: bool = False
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
     resume_source: str | None = None
 
     def __post_init__(self) -> None:
+        if self.require_compile_cache and self.compile_cache is None:
+            raise ValueError("required compiler artifacts need a compile cache directory")
         if self.resume_source is not None and (
             self.measurement
             or len(self.resume_source) != 40
@@ -168,6 +171,8 @@ def training_command(args: Args) -> list[str]:
     ]
     if args.compile_cache is not None:
         argv.extend(("--compile-cache", str(args.compile_cache)))
+    if args.require_compile_cache:
+        argv.append("--require-compile-cache")
     if args.measurement:
         argv.append("--measurement")
     else:
@@ -222,6 +227,9 @@ def resume_settings(args: Args) -> dict[str, object]:
     settings = json.loads(json.dumps(dataclasses.asdict(args), default=str))
     del settings["cpus"]
     del settings["resume_source"]
+    del settings["require_compile_cache"]
+    # Compiler storage changes startup cost, not the training configuration.
+    settings["compile_cache"] = None
     return settings
 
 

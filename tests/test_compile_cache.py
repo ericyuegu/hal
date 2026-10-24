@@ -2,6 +2,8 @@ import dataclasses
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +15,7 @@ from hal.inference import compile_cache
 
 @pytest.fixture(autouse=True)
 def restore_cache_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
+    for name in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR", "TRITON_CACHE_MANAGER", "HAL_TRITON_CACHE_SOURCE"):
         if name in os.environ:
             monkeypatch.setenv(name, os.environ[name])
         else:
@@ -136,6 +138,91 @@ def test_loose_compiler_files_stay_off_the_cache_root(tmp_path: Path) -> None:
     for name in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
         assert not Path(os.environ[name]).is_relative_to(tmp_path / "volume")
     assert sorted(path.name for path in cache.directory.iterdir()) == ["identity.json"]
+
+
+def test_rank_cache_uses_shared_seed_and_isolated_local_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        torch.compiler, "save_cache_artifacts", lambda: (b"graphs", SimpleNamespace(artifacts={"inductor": ["tick"]}))
+    )
+    loaded: list[bytes] = []
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda data: loaded.append(data) or object())
+    seed_root = tmp_path / "rank0"
+    seed = compile_cache.CompileCache(seed_root, identity())
+    assert seed.save()
+    original = {p.name: p.read_bytes() for p in seed.directory.iterdir()}
+    local_paths: set[str] = set()
+    for rank in range(1, 8):
+        monkeypatch.setenv("HAL_TRITON_CACHE_SOURCE", "/network/loose-cache")
+        cache = compile_cache.CompileCache(
+            tmp_path / f"rank{rank}", identity(), seed_root=seed_root, require_loaded=True
+        )
+        assert cache.loaded_counts == {"inductor": 1}
+        local_paths.add(os.environ["TRITON_CACHE_DIR"])
+        assert os.environ["TRITON_CACHE_MANAGER"] == "triton.runtime.cache:FileCacheManager"
+        assert "HAL_TRITON_CACHE_SOURCE" not in os.environ
+        assert cache.directory != seed.directory
+        assert cache.save()
+        with cache.require_hits():
+            pass
+    assert len(local_paths) == 7
+    assert loaded == [b"graphs"] * 7
+    assert original == {p.name: p.read_bytes() for p in seed.directory.iterdir()}
+
+
+@pytest.mark.parametrize("failure", ["missing", "identity", "manifest", "hash"])
+def test_invalid_seed_fails_before_import_or_environment_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(
+        torch.compiler, "save_cache_artifacts", lambda: (b"graphs", SimpleNamespace(artifacts={"inductor": ["tick"]}))
+    )
+    seed = compile_cache.CompileCache(tmp_path / "rank0", identity())
+    seed.save()
+    if failure == "missing":
+        (seed.directory / "identity.json").unlink()
+    elif failure == "identity":
+        (seed.directory / "identity.json").write_bytes(b"wrong")
+    elif failure == "manifest":
+        (seed.directory / "artifacts.json").unlink()
+    else:
+        next(seed.directory.glob("*.bin")).write_bytes(b"corrupt")
+    monkeypatch.setenv("TRITON_CACHE_DIR", "unchanged")
+    with pytest.raises(ValueError):
+        compile_cache.CompileCache(tmp_path / "rank7", identity(), seed_root=tmp_path / "rank0", require_loaded=True)
+    assert os.environ["TRITON_CACHE_DIR"] == "unchanged"
+
+
+def test_required_cache_rejects_empty_artifacts(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Inductor graphs is required"):
+        compile_cache.CompileCache(tmp_path, identity(), require_loaded=True)
+
+
+@pytest.mark.parametrize("counter", ["fxgraph_cache_miss", "fxgraph_cache_bypass"])
+def test_cache_guard_exits_before_expensive_compilation(tmp_path: Path, counter: str) -> None:
+    script = """
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+import torch
+from torch._dynamo.utils import counters
+from hal.inference.compile_cache import CacheIdentity, CompileCache
+torch.compiler.save_cache_artifacts = lambda: (b"graphs", SimpleNamespace(artifacts={"inductor": ["tick"]}))
+torch.compiler.load_cache_artifacts = lambda payload: object()
+identity = CacheIdentity("2.11.0", "3.6.0", "13.0", "B200", (10, 0), "a" * 64)
+CompileCache(Path(sys.argv[1]), identity).save()
+cache = CompileCache(Path(sys.argv[1]), identity, require_loaded=True)
+with cache.require_hits():
+    counters["inductor"][sys.argv[2]] += 1
+    time.sleep(60)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), counter], capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 1
+    assert "compiler_cache_abort" in result.stdout
 
 
 def test_cache_keeps_artifacts_from_runs_with_different_shapes(

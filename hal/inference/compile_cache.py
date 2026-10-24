@@ -1,16 +1,40 @@
 """Persist compiler artifacts behind a checked source and hardware identity."""
 
+import contextlib
 import dataclasses
 import hashlib
 import importlib.metadata
 import json
 import os
 import tempfile
+import threading
+from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
 import torch
+from torch._dynamo.utils import counters
+
+
+def compilation_statistics() -> dict[str, int]:
+    """Read the cache counters qualified against Torch 2.11.0."""
+    if str(torch.__version__).split("+")[0] != "2.11.0":
+        raise RuntimeError("compiler cache counters require tested Torch 2.11.0")
+    return {
+        name: counters["inductor"][name]
+        for name in ("fxgraph_cache_hit", "fxgraph_cache_miss", "fxgraph_cache_bypass")
+    }
+
+
+def _stop_on_miss(stop: threading.Event, before: dict[str, int], directory: Path) -> None:
+    # Torch 2.11 increments these counters before expensive graph compilation.
+    # Remove this watcher when Torch offers a supported cache-only compile mode.
+    while not stop.wait(0.05):
+        current = compilation_statistics()
+        if any(current[name] > before[name] for name in ("fxgraph_cache_miss", "fxgraph_cache_bypass")):
+            print(json.dumps({"compiler_cache_abort": str(directory), "counters": current}), flush=True)
+            os._exit(1)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -103,7 +127,9 @@ class CompileCache:
     later entry covers, and a load restores their union.
     """
 
-    def __init__(self, root: Path, identity: CacheIdentity) -> None:
+    def __init__(
+        self, root: Path, identity: CacheIdentity, *, seed_root: Path | None = None, require_loaded: bool = False
+    ) -> None:
         self.identity = identity
         self.directory = root.resolve() / identity.key
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -119,25 +145,58 @@ class CompileCache:
         self.loaded_counts: dict[str, int] = {}
         manifest = self.directory / "artifacts.json"
         self.entries = _read_manifest(manifest, identity) if manifest.exists() else []
+        sources = [(self.directory, item) for item in self.entries]
+        if seed_root is not None:
+            seed = seed_root.resolve() / identity.key
+            if seed != self.directory:
+                if not (seed / "identity.json").is_file():
+                    raise ValueError("compiler cache seed identity is missing")
+                if (seed / "identity.json").read_bytes() != identity.encoded():
+                    raise ValueError("compiler cache seed identity mismatch")
+                if not (seed / "artifacts.json").is_file():
+                    raise ValueError("compiler cache seed manifest is missing")
+                sources.extend((seed, item) for item in _read_manifest(seed / "artifacts.json", identity))
         payloads: list[bytes] = []
         loaded_keys: set[tuple[str, str]] = set()
-        for item in self.entries:
-            payload = (self.directory / f"{item['sha256']}.bin").read_bytes()
+        for directory, item in sources:
+            payload = (directory / f"{item['sha256']}.bin").read_bytes()
             if hashlib.sha256(payload).hexdigest() != item["sha256"]:
                 raise ValueError("compiler artifact hash mismatch")
             payloads.append(payload)
             loaded_keys |= _key_set(cast(dict[str, list[str]], item["keys"]))
         for kind, _ in loaded_keys:
             self.loaded_counts[kind] = self.loaded_counts.get(kind, 0) + 1
+        if require_loaded and not self.loaded_counts.get("inductor", 0):
+            raise ValueError("warm compiler cache with Inductor graphs is required")
         # Loose Inductor and Triton files stay on local disk; the packed artifact
         # is the persistent cache, and network volumes cap their file counts.
         scratch = Path(tempfile.mkdtemp(prefix=f"hal-compile-{identity.key[:12]}-"))
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(scratch / "inductor")
         os.environ["TRITON_CACHE_DIR"] = str(scratch / "triton")
+        os.environ["TRITON_CACHE_MANAGER"] = "triton.runtime.cache:FileCacheManager"
+        os.environ.pop("HAL_TRITON_CACHE_SOURCE", None)
         for payload in payloads:
             if torch.compiler.load_cache_artifacts(payload) is None:
                 raise ValueError("Torch rejected compiler cache artifacts")
             self.loaded = True
+
+    @contextlib.contextmanager
+    def require_hits(self) -> Iterator[None]:
+        """Stop this supervised worker on an unexpected cold graph compilation."""
+        if not self.loaded:
+            raise ValueError("cache-only compilation requires loaded artifacts")
+        before = compilation_statistics()
+        stop = threading.Event()
+        worker = threading.Thread(target=_stop_on_miss, args=(stop, before, self.directory), daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            worker.join()
+        current = compilation_statistics()
+        if any(current[name] > before[name] for name in ("fxgraph_cache_miss", "fxgraph_cache_bypass")):
+            raise RuntimeError("warm compiler cache missed during startup")
 
     def save(self) -> bool:
         artifacts = torch.compiler.save_cache_artifacts()
