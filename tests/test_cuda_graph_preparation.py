@@ -26,6 +26,10 @@ def _add_one(value: torch.Tensor) -> torch.Tensor:
     return value + 1
 
 
+def _offset(value: torch.Tensor, offset: int) -> torch.Tensor:
+    return value + offset
+
+
 def test_unqualified_torch_version_rejects_private_compiler_budget() -> None:
     _require_tested_compiler_version("2.11.0+cu130")
     with pytest.raises(RuntimeError, match="requires tested Torch 2.11.0"):
@@ -34,10 +38,21 @@ def test_unqualified_torch_version_rejects_private_compiler_budget() -> None:
 
 def test_preparation_restores_compiler_budget_after_failure() -> None:
     prior = dynamo_config.recompile_limit
+    prior_accumulated = dynamo_config.accumulated_recompile_limit
     with pytest.raises(ZeroDivisionError), prepared_shape_compilation(12):
         assert dynamo_config.recompile_limit >= 48
         raise ZeroDivisionError
     assert dynamo_config.recompile_limit == prior
+    assert dynamo_config.accumulated_recompile_limit == prior_accumulated
+
+
+def test_preparation_supports_more_than_256_lifetime_specializations() -> None:
+    torch._dynamo.reset()
+    compiled = torch.compile(_offset, backend="eager", fullgraph=True, dynamic=False)
+    value = torch.ones(1)
+    with prepared_shape_compilation(64, instance_count=16):
+        for offset in range(260):
+            torch.testing.assert_close(compiled(value, offset), value + offset)
 
 
 def test_compilation_listener_counts_first_compile_but_not_prepared_calls() -> None:
@@ -105,3 +120,19 @@ def test_graph_capture_binds_the_declared_device() -> None:
         CapturedCall(partial(_increment_state, torch.zeros(1)), (), (torch.zeros(1),), device=device)
     with pytest.raises(ValueError, match="needs a CUDA device"):
         CapturedCall(partial(_increment_state, state), (), (state,), device=torch.device("cpu"))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("priority", [0, -1])
+def test_graph_operations_use_the_declared_capture_priority(priority: int) -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    value = torch.ones(1, device=device)
+    seen: list[int] = []
+
+    def operation() -> torch.Tensor:
+        seen.append(torch.cuda.current_stream(device).priority)
+        return value + 1
+
+    captured = CapturedCall(operation, (value,), device=device, priority=priority)
+    assert seen == [priority] * 3
+    torch.testing.assert_close(captured((value,)), value + 1, atol=0, rtol=0)

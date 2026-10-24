@@ -12,6 +12,7 @@ from jaxtyping import Float
 from jaxtyping import Int
 from loguru import logger
 from torch import Tensor
+from torch.nn.attention.flex_attention import BlockMask
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.attention.varlen import varlen_attn
@@ -72,6 +73,14 @@ class Rotary(nn.Module):
         self.cache_key = None
         self.cos_cached = None
         self.sin_cached = None
+        self.prepared: dict[tuple[int, torch.device, torch.dtype], tuple[Tensor, Tensor]] = {}
+
+    def prepare(self, length: int, device: torch.device, dtype: torch.dtype) -> None:
+        """Retain separate, immutable factors for a declared captured shape."""
+        key = length, device, dtype
+        if key not in self.prepared:
+            cosine, sine = self.at(length, device, dtype)
+            self.prepared[key] = cosine.clone(), sine.clone()
 
     def forward(
         self, x: Float[Tensor, "B L n_heads head_dim"]
@@ -93,6 +102,8 @@ class Rotary(nn.Module):
         output_dtype = self.inv_freq.dtype if dtype is None else dtype
         key = (length, device, output_dtype)
         if torch.compiler.is_compiling() or (device.type == "cuda" and torch.cuda.is_current_stream_capturing()):
+            if not torch.is_grad_enabled() and key in self.prepared:
+                return self.prepared[key]
             # Graphs must own these calculations. Another sequence length can
             # replace eager cached storage between replays.
             inv_freq = self.inv_freq
@@ -153,32 +164,120 @@ class KVMemory:
     query_position: Tensor
     window: int
     prefix: bool = False
+    row_indices: Tensor | None = None
 
 
 def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor, *, causal: bool) -> Tensor:
     """Attend each row to its first ``lengths`` key slots.
 
     Causal queries align to the end of the prefix: query i of Q sees slots below
-    lengths - Q + i + 1. A query without keys returns zeros. Compiled CUDA code
-    uses FlexAttention's decode kernel; eager code and heads narrower than 16
-    build the equivalent mask, since FlexAttention in torch 2.11 rejects them.
+    lengths - Q + i + 1. A query without keys returns zeros. Compiled CUDA
+    inference with fewer than 128 queries constructs block indices directly.
+    Eager code and heads narrower than 16 use the equivalent dense SDPA mask.
     """
     batch, _, queries, _ = query.shape
     capacity = key.shape[2]
     if lengths.shape != (batch,):
         raise ValueError("prefix attention lengths must be [B]")
     if query.device.type == "cuda" and torch.compiler.is_compiling() and query.shape[-1] >= 16:
+        direct = causal and queries <= 4 and query.shape[1] > 1 and not torch.is_grad_enabled()
 
         def keep(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
             return kv < (lengths[b] - queries + q + 1 if causal else lengths[b])
 
-        block_mask = create_block_mask(keep, batch, None, queries, capacity, device=query.device)
+        if queries < 128 and not torch.is_grad_enabled():
+            block_size = 64
+            total_blocks = lengths.clamp(0, capacity).add(block_size - 1).div(block_size, rounding_mode="floor")
+            indices = torch.arange((capacity + block_size - 1) // block_size, device=query.device, dtype=torch.int32)
+            # Forward reads only K/V block lists. The transposed Q lists are
+            # needed for gradients; constructing them sorts block indices.
+            # Torch 2.11.0's forward template assumes contiguous batch/head
+            # block lists, including when dynamic shapes disable decode dispatch.
+            # Remove when it respects both strides and the dynamic prefix CUDA
+            # regression passes with broadcast lists.
+            counts = total_blocks.to(torch.int32)[:, None, None].expand(batch, query.shape[1], 1).contiguous()
+            blocks = indices[None, None, None].expand(batch, query.shape[1], 1, -1).contiguous()
+            block_mask = BlockMask.from_kv_blocks(
+                counts,
+                blocks,
+                BLOCK_SIZE=(128, block_size),
+                mask_mod=keep,
+                seq_lengths=(queries, capacity),
+                compute_q_blocks=False,
+            )
+        else:
+            block_mask = create_block_mask(keep, batch, None, queries, capacity, device=query.device)
+        # Torch 2.11's decode lowering writes split accumulators and reduces
+        # them even when batch * heads already fills the GPU with one split.
+        # The direct forward kernel streams the same cache without that chain.
+        if direct:
+            return cast(
+                Tensor,
+                flex_attention(
+                    query,
+                    key,
+                    value,
+                    block_mask=block_mask,
+                    kernel_options={"FORCE_USE_FLEX_ATTENTION": True, "BLOCK_M": 16, "BLOCK_N": 64},
+                ),
+            )
         return cast(Tensor, flex_attention(query, key, value, block_mask=block_mask))
     slots = torch.arange(capacity, device=query.device)
     limits = lengths[:, None] - queries + torch.arange(1, queries + 1, device=query.device)[None]
     valid = slots[None, None] < (limits if causal else lengths[:, None].expand(batch, queries))[..., None]
     attended = F.scaled_dot_product_attention(query, key, value, attn_mask=valid[:, None])
     return torch.where(valid.any(-1)[:, None, :, None], attended, 0)
+
+
+def indexed_prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor, rows: Tensor) -> Tensor:
+    """Read selected history rows without copying their full key/value storage.
+
+    Key/value storage is contiguous in [head, row, slot, dimension] order.
+    Sparse block lists select each row's prefix from one shared key sequence.
+    """
+    batch, heads, queries, dimension = query.shape
+    total, _, capacity, _ = key.shape
+    if (
+        lengths.shape != (batch,)
+        or rows.shape != (batch,)
+        or rows.dtype not in (torch.int32, torch.int64)
+        or lengths.dtype not in (torch.int32, torch.int64)
+        or key.shape != value.shape
+        or key.shape[1:] != (heads, capacity, dimension)
+    ):
+        raise ValueError("indexed prefix rows and lengths must be integer [B]")
+    # Torch 2.11.0's non-decode FlexAttention path fails prefix parity at 128.
+    # Extend this limit only after that path passes the CUDA regression tests.
+    if not 1 <= queries < 128:
+        raise ValueError("indexed prefix attention requires fewer than 128 queries")
+    if query.device.type != "cuda" or not torch.compiler.is_compiling() or torch.is_grad_enabled() or dimension < 16:
+        return prefix_attention(query, key.index_select(0, rows), value.index_select(0, rows), lengths, causal=False)
+    torch._assert_async(((rows >= 0) & (rows < total)).all(), "indexed prefix row is out of range")
+    torch._assert_async(((lengths >= 0) & (lengths <= capacity)).all(), "indexed prefix length is out of range")
+    keys = key.transpose(0, 1).view(1, heads, total * capacity, dimension)
+    values = value.transpose(0, 1).view(1, heads, total * capacity, dimension)
+    block_size = 64
+    starts = rows * capacity
+    counts = torch.where(lengths > 0, (lengths + starts % block_size + block_size - 1) // block_size, 0)
+    blocks = (
+        starts.div(block_size, rounding_mode="floor")[:, None, None, None]
+        + torch.arange((capacity + 2 * block_size - 2) // block_size, device=query.device, dtype=torch.int32)[
+            None, None, None
+        ]
+    )
+
+    def keep(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
+        return (kv >= starts[b]) & (kv < starts[b] + lengths[b])
+
+    block_mask = BlockMask.from_kv_blocks(
+        counts.to(torch.int32)[:, None, None].expand(batch, heads, 1).contiguous(),
+        blocks.to(torch.int32).expand(batch, heads, 1, -1).contiguous(),
+        BLOCK_SIZE=(128, block_size),
+        mask_mod=keep,
+        seq_lengths=(queries, total * capacity),
+        compute_q_blocks=False,
+    )
+    return cast(Tensor, flex_attention(query, keys, values, block_mask=block_mask))
 
 
 def rmsnorm(x0: Float[Tensor, "... d"], eps: float = 1e-6) -> Float[Tensor, "... d"]:

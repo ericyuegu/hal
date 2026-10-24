@@ -77,13 +77,13 @@ class KVCache:
         )
         self.history = torch.zeros(
             2,
-            batch_size,
             config.temporal_heads,
+            batch_size,
             self.capacity,
             config.temporal_d_model // config.temporal_heads,
             device=device,
             dtype=dtype,
-        )
+        ).transpose(1, 2)
         self.positions = torch.full((batch_size, self.capacity), -1, device=device, dtype=torch.long)
         self.next_position = torch.zeros((batch_size,), device=device, dtype=torch.long)
         self.hidden = torch.zeros(batch_size, 1, config.d_model, device=device, dtype=dtype)

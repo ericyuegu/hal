@@ -58,6 +58,8 @@ from hal.inference.decision_decoder import DecisionDecoder
 from hal.inference.graphed_actor import GraphedActorStep
 from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
+from hal.models.action_sequence import CausalTemporalDecoder
+from hal.models.action_sequence import NonlinearActionHead
 from hal.models.attention import KVMemory
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
@@ -1005,8 +1007,22 @@ class TickLayout:
             raise ValueError("tick layout streams must own distinct queues")
 
 
+def tick_decoder_buckets(rows: int, count: int) -> tuple[int, ...]:
+    if rows < 1 or count not in (2, 4):
+        raise ValueError("tick decoder buckets require positive rows and two or four offsets")
+    if count == 4:
+        return (0, rows)
+    step = max(1, (rows + 7) // 8)
+    # Keep finer padding near the usual mixed R2/R4 cohort sizes. Every extra
+    # decoder shape needs a separate compilation, even on synthetic rows.
+    buckets = {0, rows}
+    buckets.update(min(rows, step * factor) for factor in (2, 4, 5, 6))
+    return tuple(sorted(buckets))
+
+
 # Anchor layouts span every buffer: one graph per anchor and tick, sampled with the first buffer.
 ALL_BUFFERS = -1
+STACKED_ANCHORS = -2
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1107,6 +1123,11 @@ class ShardFrames:
 
 class FrameStore:
     def __init__(self, capacity: int, matches: int, device: torch.device) -> None:
+        fields = native.FRAME_DTYPE.fields
+        if fields is None:
+            raise RuntimeError("native records must have a structured dtype")
+        self.reward_offset = fields["reward"][1]
+        self.flag_offset = fields["terminated"][1]
         self.records = torch.zeros(capacity, matches, native.FRAME_DTYPE.itemsize, dtype=torch.uint8, device=device)
         self.actions = torch.zeros(capacity, matches, 2, ACTION_DIM, device=device)
         self.rewards = torch.zeros(capacity, matches, 2, device=device)
@@ -1117,14 +1138,9 @@ class FrameStore:
         selected = batch.records.index_select(0, source)
         self.records[positions, lanes] = selected
         self.actions[positions, lanes] = batch.actions.index_select(0, source)
-        fields = native.FRAME_DTYPE.fields
-        if fields is None:
-            raise RuntimeError("native records must have a structured dtype")
-        reward_offset = fields["reward"][1]
-        flag_offset = fields["terminated"][1]
-        rewards = selected[:, reward_offset : reward_offset + 8].contiguous().view(torch.float32)
+        rewards = selected[:, self.reward_offset : self.reward_offset + 8].contiguous().view(torch.float32)
         self.rewards[positions, lanes] = rewards
-        self.flags[positions, lanes] = selected[:, flag_offset : flag_offset + 2].bool()
+        self.flags[positions, lanes] = selected[:, self.flag_offset : self.flag_offset + 2].bool()
         return rewards
 
 
@@ -1133,6 +1149,7 @@ class TickInputs:
     table: DenseRollout
     ids: Tensor
     enabled: Tensor | None = None
+    decoder_rows: tuple[int, ...] | None = None
 
     def __len__(self) -> int:
         return self.ids.numel()
@@ -1288,6 +1305,140 @@ class DenseRollout:
             target[rows] = source.to(target.dtype)
 
 
+class TickLinear(torch.nn.Linear):
+    """Retain the exact autocast weight conversion outside captured tick replays."""
+
+    tick_weight: Tensor
+    tick_bias: Tensor | None
+
+    def __init__(self, source: torch.nn.Linear) -> None:
+        super().__init__(source.in_features, source.out_features, source.bias is not None, device="meta")
+        self.weight = source.weight
+        self.bias = source.bias
+        self.register_buffer("tick_weight", source.weight.detach().to(torch.bfloat16), persistent=False)
+        self.register_buffer(
+            "tick_bias", None if source.bias is None else source.bias.detach().to(torch.bfloat16), persistent=False
+        )
+        self.tick = False
+        self.train(source.training)
+
+    @torch.no_grad()
+    def refresh(self) -> None:
+        self.tick_weight.copy_(self.weight)
+        if self.bias is not None:
+            assert self.tick_bias is not None
+            self.tick_bias.copy_(self.bias)
+
+    def forward(self, input: Tensor) -> Tensor:
+        if self.tick and torch.is_autocast_enabled(input.device.type):
+            return torch.nn.functional.linear(input, self.tick_weight, self.tick_bias)
+        return torch.nn.functional.linear(input, self.weight, self.bias)
+
+
+class AnchorLinear(TickLinear):
+    """Apply one frozen model per equal-sized, contiguous group of rows."""
+
+    def __init__(self, sources: tuple[torch.nn.Linear, ...]) -> None:
+        super().__init__(sources[0])
+        self.sources = sources
+        self.weight = torch.nn.Parameter(
+            torch.stack([source.weight.detach() for source in sources]), requires_grad=False
+        )
+        self.bias = (
+            None
+            if sources[0].bias is None
+            else torch.nn.Parameter(
+                torch.stack([cast(Tensor, source.bias).detach() for source in sources]), requires_grad=False
+            )
+        )
+        self.tick_weight = self.weight.to(torch.bfloat16)
+        self.tick_bias = None if self.bias is None else self.bias.to(torch.bfloat16)
+
+    @torch.no_grad()
+    def refresh(self) -> None:
+        for index, source in enumerate(self.sources):
+            self.weight[index].copy_(source.weight)
+            if self.bias is not None:
+                self.bias[index].copy_(cast(Tensor, source.bias))
+        super().refresh()
+
+    def project(self, inputs: Tensor, start: int = 0, stop: int | None = None, *, bias: bool = True) -> Tensor:
+        groups = len(self.sources)
+        if inputs.shape[0] % groups:
+            raise ValueError("stacked linear rows must contain equal anchor groups")
+        tick = self.tick and torch.is_autocast_enabled(inputs.device.type)
+        weight = (self.tick_weight if tick else self.weight)[:, :, start:stop]
+        biases = (self.tick_bias if tick else self.bias) if bias else None
+        grouped = inputs.reshape(groups, -1, inputs.shape[-1])
+        result = (
+            torch.bmm(grouped, weight.transpose(1, 2))
+            if biases is None
+            else torch.baddbmm(biases[:, None], grouped, weight.transpose(1, 2))
+        )
+        return result.reshape(*inputs.shape[:-1], self.out_features)
+
+    def add_bias(self, inputs: Tensor) -> Tensor:
+        if self.bias is None:
+            raise ValueError("stacked readout requires a bias")
+        return (inputs.reshape(len(self.sources), -1, self.out_features) + self.bias[:, None]).reshape_as(inputs)
+
+    def forward(self, input: Tensor) -> Tensor:
+        return self.project(input)
+
+
+class AnchorEmbedding(torch.nn.Embedding):
+    def __init__(self, sources: tuple[torch.nn.Embedding, ...]) -> None:
+        source = sources[0]
+        super().__init__(source.num_embeddings, source.embedding_dim, device="meta")
+        self.sources = sources
+        self.weight = torch.nn.Parameter(
+            torch.stack([source.weight.detach() for source in sources]), requires_grad=False
+        )
+
+    @torch.no_grad()
+    def refresh(self) -> None:
+        for index, source in enumerate(self.sources):
+            self.weight[index].copy_(source.weight)
+
+    def forward(self, input: Tensor) -> Tensor:
+        groups = len(self.sources)
+        if input.shape[0] % groups:
+            raise ValueError("stacked embedding rows must contain equal anchor groups")
+        torch._assert_async(
+            ((input >= 0) & (input < self.num_embeddings)).all(), "stacked embedding index is out of range"
+        )
+        indices = input.reshape(groups, -1) + torch.arange(groups, device=input.device)[:, None] * self.num_embeddings
+        result = torch.nn.functional.embedding(indices, self.weight.flatten(0, 1))
+        return result.reshape(*input.shape, self.embedding_dim)
+
+
+class AnchorTemporalDecoder(CausalTemporalDecoder):
+    def _state_bias(self, trunk: Tensor) -> Tensor:
+        return cast(AnchorLinear, self.token_projection).project(trunk, stop=self.trunk_width)
+
+    def _step_features(self, previous: Tensor, offsets: Tensor, embedded: Tensor | None = None) -> Tensor:
+        projection = cast(AnchorLinear, self.token_projection)
+        action = projection.project(
+            self.codec.embed_frame(previous) if embedded is None else embedded,
+            self.trunk_width,
+            self.trunk_width + self.controller_width,
+            bias=False,
+        )
+        offset = projection.project(
+            self.offset_embedding(offsets.expand(previous.shape[:-1])),
+            self.trunk_width + self.controller_width,
+            bias=False,
+        )
+        return action.float() + offset.float() if self.return_conditioner.ranges is not None else action + offset
+
+    def _project_action_head(self, head: NonlinearActionHead, features: Tensor) -> Tensor:
+        if self.return_conditioner.ranges is None or not torch.is_autocast_enabled(features.device.type):
+            return head.project(features)
+        hidden = torch.nn.functional.silu(head.up(features))
+        down = cast(AnchorLinear, head.down)
+        return down.add_bias(down.project(hidden, bias=False).float())
+
+
 class TransformerPolicy:
     """Append fixed rollout slots and replay one history per training window."""
 
@@ -1296,11 +1447,15 @@ class TransformerPolicy:
         model: SelfPlayTransformer,
         schedule: ScheduleConfig,
         statistics: dict[str, FeatureStats],
+        *,
+        capture_priority: int = 0,
     ) -> None:
         self.profile: UpdateProfile | None = None
+        self.capture_priority = capture_priority
         self.startup_finished = False
         self.post_startup_captures = 0
         self.capture_count = 0
+        self.tick_compile_instances = 16
         self.model = model.eval()
         self.flops = SelfPlayFlops.from_model(model)
         self.work_flops: dict[str, int] = defaultdict(int)
@@ -1314,6 +1469,14 @@ class TransformerPolicy:
             ):
                 raise ValueError("invalid observation statistics")
         self.device = next(model.parameters()).device
+        linears = []
+        if self.device.type == "cuda":
+            for name, module in tuple(model.named_modules()):
+                if isinstance(module, torch.nn.Linear):
+                    linear = module if isinstance(module, TickLinear) else TickLinear(module)
+                    model.set_submodule(name, linear)
+                    linears.append(linear)
+        self.tick_linears = tuple(linears)
         if schedule.supervised_offsets != model.head_offsets:
             raise ValueError("schedule supervised offsets must match the model checkpoint")
         configurations = tuple((c.delay, c.replan) for c in schedule.configurations)
@@ -1321,7 +1484,8 @@ class TransformerPolicy:
         self.decode_order = torch.tensor(DECODE_GROUP_INDICES, device=self.device)
         self.tick_decoder = DecisionDecoder(model, configurations, compiled=False)
         self.tick_caches: dict[tuple[ActionRing, tuple[int, ...]], BlockRestartCache] = {}
-        self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int], CapturedCall[None]] = {}
+        self.tick_sources: dict[tuple[ActionRing, tuple[int, ...]], tuple[DenseRollout, FrameStore]] = {}
+        self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int, int], CapturedCall[None]] = {}
         self.restart_graphs: dict[tuple[ActionRing, tuple[int, ...]], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
         self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
@@ -1396,6 +1560,7 @@ class TransformerPolicy:
     def clear_caches(self) -> None:
         self.startup_finished = False
         self.tick_caches.clear()
+        self.tick_sources.clear()
         self.tick_graphs.clear()
         self.restart_graphs.clear()
         self.current_layouts.clear()
@@ -1403,6 +1568,23 @@ class TransformerPolicy:
         self.reference_graphs.clear()
         self.reference_forward_model = None
         self.actor_graph = None
+        self.prepare_tick_weights()
+
+    @torch.no_grad()
+    def prepare_tick_weights(self) -> None:
+        """Refresh captured BF16 weights after any master-weight load or update."""
+        for module in self.tick_linears:
+            module.refresh()
+
+    @contextlib.contextmanager
+    def _tick_weight_casts(self) -> Iterator[None]:
+        for module in self.tick_linears:
+            module.tick = True
+        try:
+            yield
+        finally:
+            for module in self.tick_linears:
+                module.tick = False
 
     def frozen_copy(self) -> LoopPolicy:
         model = copy.deepcopy(self.model).requires_grad_(False)
@@ -1499,6 +1681,9 @@ class TransformerPolicy:
         self.tick_caches = {
             key: cache for key, cache in self.tick_caches.items() if key[0] is not ring or key in current
         }
+        self.tick_sources = {
+            key: source for key, source in self.tick_sources.items() if key[0] is not ring or key in current
+        }
         self.tick_graphs = {
             key: graph for key, graph in self.tick_graphs.items() if key[0][0] is not ring or key[0] in current
         }
@@ -1515,8 +1700,24 @@ class TransformerPolicy:
         if self.device.type != "cuda":
             return True
         key = ring, (layout.buffer, len(layout.streams))
-        graph_key = key, (1 if clock % 128 == 0 else 2), (4 if clock % 4 == 0 else 2)
-        return graph_key in self.tick_graphs and (clock % 128 != 0 or key in self.restart_graphs)
+        appended, count = (1 if clock % 128 == 0 else 2), (4 if clock % 4 == 0 else 2)
+        return all(
+            (key, appended, count, bucket) in self.tick_graphs
+            for bucket in self.decoder_buckets(len(layout.streams), count)
+        ) and (clock % 128 != 0 or key in self.restart_graphs)
+
+    def decoder_buckets(self, rows: int, count: int) -> tuple[int, ...]:
+        return tick_decoder_buckets(rows, count)
+
+    def decoder_layout(
+        self, rows: tuple[int, ...], batch: int, bucket: int
+    ) -> tuple[tuple[int, ...], tuple[bool, ...]]:
+        return rows + rows[:1] * (bucket - len(rows)), (True,) * len(rows) + (False,) * (bucket - len(rows))
+
+    def decoder_bucket(self, rows: tuple[int, ...], batch: int, count: int) -> int:
+        if self.device.type != "cuda":
+            return len(rows)
+        return next(size for size in self.decoder_buckets(batch, count) if size >= len(rows))
 
     @torch.no_grad()
     def sample_tick(
@@ -1524,8 +1725,21 @@ class TransformerPolicy:
     ) -> None:
         if len(layout.streams) != len(states):
             raise ValueError("tick layout contains an unknown stream or row count")
+        if self.device.type == "cuda" and states.decoder_rows is None:
+            raise ValueError("CUDA ticks require host-selected decoder rows")
+        if states.decoder_rows is not None and (
+            not isinstance(states.decoder_rows, tuple)
+            or any(type(row) is not int or not 0 <= row < len(states) for row in states.decoder_rows)
+            or tuple(sorted(set(states.decoder_rows))) != states.decoder_rows
+        ):
+            raise ValueError("tick decoder rows must be sorted, distinct row indices")
         key = ring, (layout.buffer, len(states))
         layout_key = ring, layout.buffer
+        if self.device.type == "cuda":
+            sources = states.table, states.table.store
+            if key in self.tick_sources and self.tick_sources[key] != sources:
+                raise ValueError("tick graph storage changed; clear caches before replacing rollout storage")
+            self.tick_sources[key] = sources
         previous_layout = self.current_layouts.get(layout_key)
         if previous_layout is not layout:
             if previous_layout is not None and clock % 128 and previous_layout.streams != layout.streams:
@@ -1547,12 +1761,11 @@ class TransformerPolicy:
                 dtype=torch.bfloat16 if self.device.type == "cuda" else torch.float32,
             )
             self.tick_caches[key] = cache
-        meta = states.tensor(states.table.integers)
         restart = clock % 128 == 0
         enabled = self.device.type == "cuda"
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False):
             if restart:
-                restart_inputs = (*states.packed(129), meta)
+                restart_inputs = (*states.packed(129), states.tensor(states.table.integers))
                 if not enabled:
                     self._restart_block(cache, restart_inputs, validate=True)
                 else:
@@ -1570,109 +1783,177 @@ class TransformerPolicy:
                             dynamic=False,
                             options={"triton.cudagraphs": False},
                         )
-                        with prepared_shape_compilation(64):
+                        with prepared_shape_compilation(64), self._tick_weight_casts():
                             captured_restart = CapturedCall(
                                 operation,
                                 static_restart,
                                 (*cache.cache.buffers(), cache.frames_in_block),
                                 device=self.device,
+                                priority=self.capture_priority,
                             )
                         self.restart_graphs[key] = captured_restart
                     captured_restart(restart_inputs)
             appended = 1 if restart else 2
-            inputs = (
-                *states.packed(appended, tail=appended),
-                meta,
-                states.tensor(states.table.conditions),
-                states.tensor(states.table.prefix),
-                states.tensor(states.table.opponent),
-                states.tensor(states.table.active),
-                states.ids,
-            )
             count = 4 if clock % 4 == 0 else 2
-            graph_key = key, appended, count
+            decoder_rows = states.decoder_rows
+            if decoder_rows is None:
+                meta = states.tensor(states.table.integers)
+                due = states.tensor(states.table.active) & (meta[:, CLOCK] % meta[:, REPLAN] == 0)
+                decoder_rows = tuple(torch.nonzero(due).flatten().tolist())
+            buckets = self.decoder_buckets(len(states), count)
+            bucket = self.decoder_bucket(decoder_rows, len(states), count)
+            # Padded slots repeat a due row, so no live row that is not due enters
+            # the decoder. Their writes go only to the ring and table spare rows.
+            padded_rows, decoder_valid = self.decoder_layout(decoder_rows, len(states), bucket)
+            selected = torch.tensor(padded_rows, dtype=torch.long, pin_memory=enabled).to(
+                self.device, non_blocking=True
+            )
+            inputs = (
+                states.ids,
+                torch.ones(len(states), dtype=torch.bool, device=self.device)
+                if states.enabled is None
+                else states.enabled,
+                selected,
+                torch.tensor(
+                    decoder_valid,
+                    dtype=torch.bool,
+                    pin_memory=enabled,
+                ).to(self.device, non_blocking=True),
+            )
+            graph_key = key, appended, count, bucket
             captured = self.tick_graphs.get(graph_key)
             if captured is None:
-                static = tuple(value.clone() for value in inputs)
-
-                def tick() -> None:
-                    with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False):
-                        packed = static[:5]
-                        if not restart:
-                            # A staggered first episode can begin between block boundaries.
-                            young = static[5][:, LENGTH] <= 2
-                            cache.cache.positions.masked_fill_(young[:, None], -1)
-                            cache.cache.next_position.copy_(
-                                torch.where(young, static[5][:, LENGTH] - appended, cache.cache.next_position)
-                            )
-                            records, actions, sides, identities, lengths = packed
-                            single = lengths == 1
-                            records = torch.where(single[:, None, None], records.flip(1), records)
-                            actions = torch.where(single[:, None, None, None], actions.flip(1), actions)
-                            packed = (records, actions, sides, identities, torch.full_like(lengths, appended))
-                        context, observed = self._packed_context(packed)
-                        tokens = self.model.context_tokens(context, observed)
-                        hidden = forward_tokens_with_kv_cache(self.model, tokens, cache.cache)
-                        cache.frames_in_block.add_(appended)
-                        result = self._decode_tensors(
-                            static[5],
-                            static[6],
-                            static[7],
-                            static[8],
-                            hidden[:, -1:],
-                            observed[:, -1],
-                            self._tensor_action_uniforms(static[5], rng),
-                            None,
-                            history=cache.memory(),
-                            count=count,
-                            decoder=self.tick_decoder,
-                        )
-                        rows = static[5]
-                        due = static[9] & (rows[:, CLOCK] % rows[:, REPLAN] == 0)
-                        ring.commit(
-                            rows,
-                            due,
-                            result.actions,
-                            self.device_wire_actions(result.actions, validate=False),
-                            count=count,
-                        )
-                        values = self.values(result.features, validate=False)
-                        states.table.record_evaluation(static[10], result, values, static[9])
-
                 if enabled:
-                    self.admit_capture(("tick", graph_key))
-                    operation = torch.compile(
-                        tick, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False}
-                    )
-                    with prepared_shape_compilation(64):
-                        captured = CapturedCall(
-                            operation,
-                            static,
-                            (
-                                *cache.cache.buffers(),
-                                cache.frames_in_block,
-                                ring.values,
-                                ring.controllers,
-                                ring.length_device,
-                            ),
-                            device=self.device,
+                    self.tick_decoder.prepare_rotary()
+                for capture_bucket in buckets if enabled else (bucket,):
+                    capture_key = key, appended, count, capture_bucket
+                    if enabled and capture_key in self.tick_graphs:
+                        continue
+                    capture_inputs = inputs
+                    if capture_bucket != bucket:
+                        # Prepare every bucket on synthetic inactive rows before
+                        # startup seals graph capture. Resets can change the count.
+                        capture_inputs = (
+                            inputs[0],
+                            torch.zeros_like(inputs[1]),
+                            torch.zeros(capture_bucket, dtype=torch.long, device=self.device),
+                            torch.zeros(capture_bucket, dtype=torch.bool, device=self.device),
                         )
-                    self.tick_graphs[graph_key] = captured
-                else:
-                    # CPU tests execute the same fixed-slot operation without capture.
-                    captured = None
+                    static = tuple(value.clone() for value in capture_inputs)
+
+                    def tick(graph_inputs: tuple[Tensor, ...] = static, decoder_bucket: int = capture_bucket) -> None:
+                        with torch.autocast(
+                            self.device.type, dtype=torch.bfloat16, enabled=enabled, cache_enabled=False
+                        ):
+                            staged = TickInputs(states.table, graph_inputs[0], graph_inputs[1])
+                            static = (
+                                *staged.packed(appended, tail=appended),
+                                staged.tensor(states.table.integers),
+                                staged.tensor(states.table.conditions),
+                                staged.tensor(states.table.prefix),
+                                staged.tensor(states.table.opponent),
+                                staged.tensor(states.table.active),
+                                staged.ids,
+                                graph_inputs[2],
+                                graph_inputs[3],
+                            )
+                            packed = static[:5]
+                            if not restart:
+                                # A staggered first episode can begin between block boundaries.
+                                young = static[5][:, LENGTH] <= 2
+                                cache.cache.positions.masked_fill_(young[:, None], -1)
+                                cache.cache.next_position.copy_(
+                                    torch.where(young, static[5][:, LENGTH] - appended, cache.cache.next_position)
+                                )
+                                records, actions, sides, identities, lengths = packed
+                                single = lengths == 1
+                                records = torch.where(single[:, None, None], records.flip(1), records)
+                                actions = torch.where(single[:, None, None, None], actions.flip(1), actions)
+                                packed = (records, actions, sides, identities, torch.full_like(lengths, appended))
+                            context, observed = self._packed_context(packed)
+                            tokens = self.model.context_tokens(context, observed)
+                            hidden = forward_tokens_with_kv_cache(self.model, tokens, cache.cache)
+                            cache.frames_in_block.add_(appended)
+                            due = static[9] & (static[5][:, CLOCK] % static[5][:, REPLAN] == 0)
+                            indices, valid = static[11], static[12]
+                            torch._assert_async(
+                                (~valid | due.index_select(0, indices)).all(), "tick selected a row that is not due"
+                            )
+                            torch._assert_async(valid.sum() == due.sum(), "tick decoder rows omit a due row")
+                            if decoder_bucket == 0:
+                                return
+                            rows = static[5].index_select(0, indices)
+                            memory = cache.memory()
+                            history = KVMemory(
+                                memory.kv,
+                                memory.positions.index_select(0, indices),
+                                memory.query_position.index_select(0, indices),
+                                memory.window,
+                                memory.prefix,
+                                indices,
+                            )
+                            result = self._decode_tensors(
+                                rows,
+                                static[6].index_select(0, indices),
+                                static[7].index_select(0, indices),
+                                static[8].index_select(0, indices),
+                                hidden.index_select(0, indices)[:, -1:],
+                                observed.index_select(0, indices)[:, -1],
+                                self._tensor_action_uniforms(rows, rng),
+                                None,
+                                history=history,
+                                count=count,
+                                decoder=self.tick_decoder,
+                            )
+                            ring.commit(
+                                rows,
+                                valid,
+                                result.actions,
+                                self.device_wire_actions(result.actions, validate=False),
+                                count=count,
+                            )
+                            values = self.values(result.features, validate=False)
+                            states.table.record_evaluation(static[10].index_select(0, indices), result, values, valid)
+
+                    if enabled:
+                        self.admit_capture(("tick", capture_key))
+                        operation = torch.compile(
+                            tick, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False}
+                        )
+                        # Cover four groups and the startup plus three resume
+                        # controls without exhausting Dynamo's lifetime counter.
+                        with (
+                            prepared_shape_compilation(64, instance_count=self.tick_compile_instances),
+                            self._tick_weight_casts(),
+                        ):
+                            self.tick_graphs[capture_key] = CapturedCall(
+                                operation,
+                                static,
+                                (
+                                    *cache.cache.buffers(),
+                                    cache.frames_in_block,
+                                    ring.values,
+                                    ring.controllers,
+                                    ring.length_device,
+                                ),
+                                device=self.device,
+                                priority=self.capture_priority,
+                            )
+                captured = self.tick_graphs.get(graph_key)
             self.work_flops["rollout"] += self.flops.rollout(
                 len(states),
                 appended,
                 self.tick_decoder.max_delay + count,
                 count,
                 restart=restart,
+            ) - (len(states) - bucket) * (
+                self.flops.decode(self.tick_decoder.max_delay + count, count) + self.flops.critic
             )
             if self.profile is not None:
                 self.profile.work["rollout/trunk_tokens"] += len(states) * (appended + (128 if restart else 0))
-                self.profile.work["rollout/decoder_tokens"] += len(states) * (self.tick_decoder.max_delay + count)
+                self.profile.work["rollout/decoder_tokens"] += bucket * (self.tick_decoder.max_delay + count)
             if captured is None:
-                tick()
+                tick(inputs)
             else:
                 with (
                     torch.cuda.nvtx.range(
@@ -1974,6 +2255,113 @@ class TransformerPolicy:
         return result
 
 
+class StackedAnchorPolicy(TransformerPolicy):
+    def __init__(self, sources: tuple[TransformerPolicy, ...]) -> None:
+        if len(sources) < 2:
+            raise ValueError("a stacked anchor policy requires at least two groups")
+        first = sources[0]
+        shapes = tuple((name, tuple(parameter.shape)) for name, parameter in first.model.named_parameters())
+        if any(
+            source.device != first.device
+            or source.model.cfg != first.model.cfg
+            or source.model.ranges != first.model.ranges
+            or source.model.decoder_precision != first.model.decoder_precision
+            or source.schedule != first.schedule
+            or source.statistics != first.statistics
+            or tuple((name, tuple(parameter.shape)) for name, parameter in source.model.named_parameters()) != shapes
+            for source in sources
+        ):
+            raise ValueError("stacked anchors require matching model and representation contracts")
+        for name, _ in shapes:
+            parent, _, local = name.rpartition(".")
+            module = first.model.get_submodule(parent)
+            linear = isinstance(module, torch.nn.Linear) and local in ("weight", "bias")
+            embedding = isinstance(module, torch.nn.Embedding) and local == "weight"
+            if not (linear or embedding):
+                raise ValueError("stacked anchors require linear or embedding parameters")
+        model = copy.deepcopy(first.model).requires_grad_(False)
+        temporal = model.temporal
+        with torch.device("meta"):
+            model.temporal = AnchorTemporalDecoder(
+                model.cfg,
+                model.codec,
+                live_horizons=temporal.live_horizons,
+                training_diagnostics=temporal.training_diagnostics,
+            )
+        model.temporal.return_conditioner = temporal.return_conditioner
+        for name, buffer in tuple(model.named_buffers()):
+            if buffer.device.type == "meta":
+                parent, _, local_name = name.rpartition(".")
+                model.get_submodule(parent).register_buffer(local_name, first.model.get_buffer(name).clone())
+        embeddings = []
+        for name, module in tuple(model.named_modules()):
+            if isinstance(module, torch.nn.Linear):
+                model.set_submodule(
+                    name,
+                    AnchorLinear(tuple(cast(torch.nn.Linear, source.model.get_submodule(name)) for source in sources)),
+                )
+            elif isinstance(module, torch.nn.Embedding):
+                embedding = AnchorEmbedding(
+                    tuple(cast(torch.nn.Embedding, source.model.get_submodule(name)) for source in sources)
+                )
+                model.set_submodule(name, embedding)
+                embeddings.append(embedding)
+        self.anchor_groups = len(sources)
+        self.anchor_sources = sources
+        self.anchor_embeddings = tuple(embeddings)
+        super().__init__(model, first.schedule, first.statistics, capture_priority=-1)
+        # Each row uses one model; counting the stacked parameter storage would
+        # multiply the per-row GEMM work by the number of anchor groups.
+        self.flops = first.flops
+
+    @torch.no_grad()
+    def prepare_tick_weights(self) -> None:
+        super().prepare_tick_weights()
+        # CPU policies do not install the CUDA tick-weight lifecycle.
+        if self.device.type != "cuda":
+            for module in self.model.modules():
+                if isinstance(module, AnchorLinear):
+                    module.refresh()
+        for embedding in self.anchor_embeddings:
+            embedding.refresh()
+
+    def decoder_buckets(self, rows: int, count: int) -> tuple[int, ...]:
+        if rows % self.anchor_groups:
+            raise ValueError("stacked tick rows must contain equal anchor groups")
+        return tuple(size * self.anchor_groups for size in tick_decoder_buckets(rows // self.anchor_groups, count))
+
+    def decoder_bucket(self, rows: tuple[int, ...], batch: int, count: int) -> int:
+        width = batch // self.anchor_groups
+        maximum = max(sum(start <= row < start + width for row in rows) for start in range(0, batch, width))
+        return next(size for size in self.decoder_buckets(batch, count) if size >= maximum * self.anchor_groups)
+
+    def decoder_layout(
+        self, rows: tuple[int, ...], batch: int, bucket: int
+    ) -> tuple[tuple[int, ...], tuple[bool, ...]]:
+        width = batch // self.anchor_groups
+        if bucket == 0:
+            return (), ()
+        per_group = bucket // self.anchor_groups
+        padded: list[int] = []
+        valid: list[bool] = []
+        for start in range(0, batch, width):
+            selected = tuple(row for row in rows if start <= row < start + width)
+            padded.extend(selected + (selected[0] if selected else rows[0],) * (per_group - len(selected)))
+            valid.extend((True,) * len(selected) + (False,) * (per_group - len(selected)))
+        return tuple(padded), tuple(valid)
+
+    def validate_layout(self, policies: tuple[LoopPolicy, ...], counts: tuple[int, ...]) -> None:
+        total = sum(counts)
+        if total % self.anchor_groups:
+            raise ValueError("stacked anchor row groups changed")
+        width = total // self.anchor_groups
+        if width < 1 or any(count % width for count in counts):
+            raise ValueError("stacked anchor row groups changed")
+        expected = tuple(policy for policy, count in zip(policies, counts, strict=True) for _ in range(count // width))
+        if expected != self.anchor_sources:
+            raise ValueError("stacked anchor weights disagree with the row layout")
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class EpisodeResult:
     match: int
@@ -2021,6 +2409,33 @@ class ActionRing:
         self.controller_storage[targets, sides[:, None], positions] = controllers[:, :written]
         owned = torch.where(due, lanes, self.spare)
         self.length_storage[owned, sides] += metadata[:, REPLAN]
+
+
+def accept_frame_tensors(
+    frames: ShardFrames,
+    lanes: Tensor,
+    pending: Tensor,
+    table: DenseRollout,
+    ring: ActionRing,
+    active_lanes: Tensor,
+    stops: Tensor,
+    observed_clocks: Tensor,
+    episode_returns: Tensor,
+) -> None:
+    slots = (2 * lanes[:, None] + torch.arange(2, device=lanes.device)[None]).flatten()
+    active = active_lanes[lanes]
+    rewards = table.store.write(stops[lanes], lanes, frames, torch.arange(len(lanes), device=lanes.device))
+    ids = torch.where(pending[slots] >= 0, pending[slots], slots)
+    valid = (pending[slots] >= 0) & active.repeat_interleave(2)
+    duration = table.duration[ids].clamp_max(3)
+    table.rewards[ids, duration] = torch.where(valid, rewards.flatten(), table.rewards[ids, duration])
+    table.duration[ids] += valid.long()
+    episode_returns[lanes] += torch.where(active[:, None], rewards, 0)
+    stops[lanes] += active.long()
+    observed_clocks[lanes] += active.long()
+    ring.head[lanes] = (ring.head[lanes] + active[:, None].long()) % ring.capacity
+    # Read and write the base so Inductor cannot copy another buffer's lengths.
+    ring.length_storage[lanes] -= active[:, None].long()
 
 
 # Device metadata columns for fixed player slots.
@@ -2117,7 +2532,11 @@ class RolloutEngine:
         self.sampler = sampler
         self.configurations = sampler.schedule.configurations
         self.anchors = anchors
+        self.anchor_stacks: list[StackedAnchorPolicy | None] = [None for _ in groups]
+        self.stacked_owners: dict[int, Tensor] = {}
         self.tick_layouts: dict[tuple[int, int | None], TickLayout] = {}
+        self.tick_decoder_rows: dict[tuple[int, int | None], tuple[int, ...]] = {}
+        self.tick_decoder_candidates: dict[tuple[int, int | None], tuple[NDArray[np.int64], NDArray[np.int64]]] = {}
         self.group_layouts: list[dict[tuple[int, int | None], TickLayout]] = [{} for _ in groups]
         self.layout_anchors: list[tuple[int, ...]] = [() for _ in groups]
         self.clocks = [0] * len(groups)
@@ -2152,6 +2571,8 @@ class RolloutEngine:
         }
         self.device_lanes = {key: torch.from_numpy(lanes).to(policy.device) for key, lanes in self.shard_lanes.items()}
         self.buffer_device_lanes: dict[int, Tensor] = {}
+        self.buffer_player_slots: dict[int, Tensor] = {}
+        self.player_slots = tuple(torch.arange(2 * len(ids), device=policy.device) for ids in self.group_matches)
         self.staging: dict[int, BufferStaging] = {}
         self.anchor_streams: dict[tuple[int, int | None], torch.cuda.Stream] = {}
         self.transfer_timings: list[BufferTiming] = []
@@ -2172,6 +2593,8 @@ class RolloutEngine:
                 elif any(isinstance(shard, NativeSimulatorShard) for shard in half):
                     raise ValueError("a rollout buffer cannot mix native and test shards")
                 self.buffer_device_lanes[id(buffer)] = torch.from_numpy(lanes.copy()).to(policy.device)
+                slots = (2 * lanes[:, None] + np.arange(2)[None]).flatten()
+                self.buffer_player_slots[id(buffer)] = torch.from_numpy(slots).to(policy.device)
             buffers.append(tuple(prepared))
         self.buffers = tuple(buffers)
         self.group_slots: list[dict[tuple[int, int | None], Tensor]] = [{} for _ in groups]
@@ -2192,6 +2615,49 @@ class RolloutEngine:
         self.layout_assignments = [np.full_like(values, -2) for values in self.assignments]
         self.tables: list[DenseRollout | None] = [None] * len(groups)
         self.episode_returns = [torch.zeros(len(ids), 2, device=policy.device) for ids in self.group_matches]
+        self.stage_tick_tensors = (
+            torch.compile(self._stage_tick_tensors, fullgraph=True, dynamic=True, options={"triton.cudagraphs": False})
+            if policy.device.type == "cuda"
+            else self._stage_tick_tensors
+        )
+        self.accept_frame = (
+            torch.compile(accept_frame_tensors, fullgraph=True, dynamic=True, options={"triton.cudagraphs": False})
+            if policy.device.type == "cuda"
+            else accept_frame_tensors
+        )
+
+    def prepare_anchor_stacks(self) -> None:
+        """Build execution copies before capture; restore retains their storage."""
+        if self.policy.device.type != "cuda" or not all(
+            isinstance(policy, TransformerPolicy) for policy in self.anchors.values()
+        ):
+            return
+        # Reference replay also uses these immutable factors. Its canonical
+        # model no longer visits the live tick path that used to prepare them.
+        for policy in self.anchors.values():
+            cast(TransformerPolicy, policy).tick_decoder.prepare_rotary()
+        prepared: dict[tuple[int, ...], StackedAnchorPolicy] = {}
+        for group, matches in enumerate(self.group_matches):
+            owners = tuple(
+                owner for owner in self.anchors if any(self.lane_roles[match] == owner for match in matches)
+            )
+            if len(owners) < 2:
+                self.anchor_stacks[group] = None
+                continue
+            counts = tuple(2 * sum(self.lane_roles[match] == owner for match in matches) for owner in owners)
+            width = math.gcd(*counts)
+            # Split the larger pi_ref cohort into equal groups. This preserves
+            # every real row without padding the other three anchor trunks.
+            groups = tuple(owner for owner, count in zip(owners, counts, strict=True) for _ in range(count // width))
+            if groups not in prepared:
+                prepared[groups] = StackedAnchorPolicy(
+                    tuple(cast(TransformerPolicy, self.anchors[owner]) for owner in groups)
+                )
+            self.anchor_stacks[group] = prepared[groups]
+
+    def execution_policies(self) -> tuple[LoopPolicy, ...]:
+        stacks = tuple(dict.fromkeys(stack for stack in self.anchor_stacks if stack is not None))
+        return self.policy, *self.anchors.values(), *stacks
 
     def snapshot(self) -> PoolSnapshot:
         groups = []
@@ -2286,7 +2752,7 @@ class RolloutEngine:
             self.stores[group_id] = store
         self.matches = restored
         self.tables = [None] * len(self.groups)
-        for policy in (self.policy, *self.anchors.values()):
+        for policy in self.execution_policies():
             policy.clear_caches()
 
     def initialize(self) -> None:
@@ -2314,18 +2780,21 @@ class RolloutEngine:
         end = math.ceil(maximum / count) * count
         offsets = []
         for group, shards in enumerate(self.groups):
-            store = FrameStore(2, len(self.group_matches[group]), self.policy.device)
-            previous = self.stores[group]
-            if previous is None:
+            store = self.stores[group]
+            if store is None:
                 raise ValueError("pool has no initial frame storage")
-            for target, source in (
-                (store.records, previous.records),
-                (store.actions, previous.actions),
-                (store.rewards, previous.rewards),
-                (store.flags, previous.flags),
-            ):
-                target[0].copy_(source[0])
-            self.stores[group] = store
+            # Startup graphs retain the full store's addresses through head start.
+            if len(store.records) < 2:
+                previous = store
+                store = FrameStore(2, len(self.group_matches[group]), self.policy.device)
+                for target, source in (
+                    (store.records, previous.records),
+                    (store.actions, previous.actions),
+                    (store.rewards, previous.rewards),
+                    (store.flags, previous.flags),
+                ):
+                    target[0].copy_(source[0])
+                self.stores[group] = store
             ring = self.rings[group]
             for shard in shards:
                 odd = np.zeros(len(shard.match_ids), dtype=np.bool_)
@@ -2439,46 +2908,44 @@ class RolloutEngine:
         self.live_host[group][lane] = True
         self.episode_returns[group][lane].zero_()
 
-    def _dense_metadata(self, clock: int, update: int, *, bootstrap: bool = False) -> Tensor:
+    def _dense_metadata(
+        self, clock: int | Tensor, update: int | Tensor, *, bootstrap: bool = False, slots: Tensor | None = None
+    ) -> Tensor:
         group = self.cursor
-        meta = self.dense_meta[group].clone()
-        observed = self.observed_clocks[group].repeat_interleave(2)
-        clocks = observed if bootstrap else torch.full_like(observed, clock)
+        meta = self.dense_meta[group].clone() if slots is None else self.dense_meta[group].index_select(0, slots)
+        lanes = meta[:, LANE]
+        observed = self.observed_clocks[group][lanes]
+        if bootstrap:
+            clocks = observed
+        elif isinstance(clock, Tensor):
+            clocks = clock.expand_as(observed)
+        else:
+            clocks = torch.full_like(observed, clock)
         block = ((clocks - int(bootstrap)) // 128) * 128
-        start = torch.maximum(self.episode_clocks[group].repeat_interleave(2), block - 128)
+        start = torch.maximum(self.episode_clocks[group][lanes], block - 128)
         start = torch.maximum(start, clocks - 255)
         # Inactive rows still occupy slots. Their observations stop at the end.
         length = (observed - start + 1).clamp(1, 256)
         meta[:, CLOCK] = clocks
         meta[:, UPDATE] = update
         meta[:, BLOCK] = block
-        meta[:, START] = self.stops[group].repeat_interleave(2) - length
+        meta[:, START] = self.stops[group][lanes] - length
         meta[:, LENGTH] = length
-        meta[:, OPP_LENGTH] = self.rings[group].length_device.flip(1).flatten()
+        meta[:, OPP_LENGTH] = self.rings[group].length_device[lanes, 1 - meta[:, SIDE]]
         return meta
 
-    def _stage_tick(
-        self,
-        clock: int,
-        update: int,
-        table: DenseRollout,
-        pending: Tensor,
-    ) -> Tensor:
+    def _stage_tick_tensors(self, control: Tensor, table: DenseRollout, pending: Tensor, slots: Tensor) -> Tensor:
+        clock, update, start = control.unbind()
         group = self.cursor
         players = len(self.dense_meta[group])
-        tick = (clock - self.clocks[group]) // 2
-        at = torch.arange(players, device=self.policy.device) + tick * players
-        meta = self._dense_metadata(clock, update)
+        all_at = self.player_slots[group] + (clock - start).div(2, rounding_mode="floor") * players
+        at = all_at[slots]
+        meta = self._dense_metadata(clock, update, slots=slots)
         table.integers[at] = meta
-        if clock % 128 == 0:
-            # Opponents change only at resets on block boundaries.
-            table.opponent_anchor[tick * players : (tick + 64) * players].view(64, players).copy_(
-                self.owners[group].reshape(-1, 2).flip(1).flatten()
-            )
-        table.age[at] = meta[:, CLOCK] - self.episode_clocks[group].repeat_interleave(2)
+        table.age[at] = meta[:, CLOCK] - self.episode_clocks[group].repeat_interleave(2)[slots]
         table.remaining[at] = -1
-        table.conditions[at] = self.dense_logs[group]
-        table.coefficients[at] = self.dense_logs[group][:, 0].exp()
+        table.conditions[at] = self.dense_logs[group][slots]
+        table.coefficients[at] = self.dense_logs[group][slots, 0].exp()
         ring = self.rings[group]
         lanes, sides = meta[:, LANE], meta[:, SIDE]
         offsets = torch.arange(24, device=self.policy.device)[None]
@@ -2487,17 +2954,59 @@ class RolloutEngine:
         table.prefix[at] = torch.where((offsets < meta[:, DELAY, None])[..., None], queue, 0)
         opponent = queue.reshape(-1, 2, 24, 4).flip(1).flatten(0, 1)
         table.opponent[at] = torch.where((offsets < meta[:, OPP_LENGTH, None])[..., None], opponent, 0)
-        active = self.active[group].repeat_interleave(2)
+        active = self.active[group].repeat_interleave(2)[slots]
         table.active[at] = active
         due = active & (clock % meta[:, REPLAN] == 0)
-        table.queue_error.logical_or_((due & (ring.length_device.flatten() != meta[:, DELAY])).any())
-        assignments = self.assignments[group]
-        student = self.owners[group] < 0
+        table.queue_error.logical_or_((due & (ring.length_device[lanes, sides] != meta[:, DELAY])).any())
+        student = self.owners[group][slots] < 0
         table.valid[at] = due & student
-        previous = torch.where(pending >= 0, pending, torch.arange(players, device=self.policy.device))
-        continuing = due & student & (pending >= 0)
+        previous = torch.where(pending[slots] >= 0, pending[slots], slots)
+        continuing = due & student & (pending[slots] >= 0)
         table.following[previous] = torch.where(continuing, at, table.following[previous])
-        pending.copy_(torch.where(due & student, at, pending))
+        pending[slots] = torch.where(due & student, at, pending[slots])
+        return all_at
+
+    @torch.no_grad()
+    def _stage_tick(
+        self,
+        clock: int,
+        update: int,
+        table: DenseRollout,
+        pending: Tensor,
+        *,
+        buffer: RolloutBuffer | None = None,
+    ) -> Tensor:
+        group = self.cursor
+        players = len(self.dense_meta[group])
+        tick = (clock - self.clocks[group]) // 2
+        slots = self.player_slots[group]
+        if buffer is not None:
+            if clock % 128 == 0:
+                raise ValueError("a block boundary must stage every buffer")
+            slots = self.buffer_player_slots[id(buffer)]
+        control = torch.tensor(
+            (clock, update, self.clocks[group]),
+            dtype=torch.long,
+            pin_memory=self.policy.device.type == "cuda",
+        ).to(self.policy.device, non_blocking=True)
+        preparing = self.policy.device.type == "cuda" and (
+            not isinstance(self.policy, TransformerPolicy) or not self.policy.startup_finished
+        )
+        # Resume controls can create more engine variants than Torch's default
+        # budget. Keep the normal budget after production startup.
+        with (
+            prepared_shape_compilation(64, instance_count=4 * len(self.groups))
+            if preparing
+            else contextlib.nullcontext()
+        ):
+            all_at = self.stage_tick_tensors(control, table, pending, slots)
+        if clock % 128 == 0:
+            # Opponents change only at resets on block boundaries.
+            table.opponent_anchor[tick * players : (tick + 64) * players].view(64, players).copy_(
+                self.owners[group].reshape(-1, 2).flip(1).flatten()
+            )
+        ring = self.rings[group]
+        assignments = self.assignments[group]
         anchor_ids = tuple(self.anchors)
         if clock % 128 == 0 and (
             not np.array_equal(assignments, self.layout_assignments[group]) or self.layout_anchors[group] != anchor_ids
@@ -2532,14 +3041,67 @@ class RolloutEngine:
                     tuple((selected // 2).tolist()),
                     buffer_index,
                 )
+            stack = self.anchor_stacks[group]
+            if stack is not None:
+                keys = tuple((ALL_BUFFERS, owner) for owner in anchor_ids if (ALL_BUFFERS, owner) in self.tick_layouts)
+                layouts = tuple(self.tick_layouts.pop(key) for key in keys)
+                slots = tuple(self.group_slots[group].pop(key) for key in keys)
+                stack.validate_layout(
+                    tuple(self.anchors[owner] for _, owner in keys),
+                    tuple(len(layout.streams) for layout in layouts),
+                )
+                key = ALL_BUFFERS, STACKED_ANCHORS
+                self.group_slots[group][key] = torch.cat(slots)
+                self.tick_layouts[key] = TickLayout(
+                    tuple(stream for layout in layouts for stream in layout.streams),
+                    tuple(lane for layout in layouts for lane in layout.lanes),
+                    ALL_BUFFERS,
+                )
+                self.stacked_owners[group] = torch.tensor(
+                    [owner for (_, owner), layout in zip(keys, layouts, strict=True) for _ in layout.streams],
+                    device=self.policy.device,
+                )
             if self.policy.device.type == "cuda":
                 layout_ready = torch.cuda.Event()
                 layout_ready.record()
                 layout_ready.synchronize()
-            for owner, policy in ((None, self.policy), *self.anchors.items()):
+            for owner, policy in (
+                (None, self.policy),
+                *self.anchors.items(),
+                *(() if stack is None else ((STACKED_ANCHORS, stack),)),
+            ):
                 layouts = tuple(layout for (_, anchor), layout in self.tick_layouts.items() if anchor == owner)
+                if isinstance(policy, TransformerPolicy):
+                    policy.tick_compile_instances = max(policy.tick_compile_instances, 4 * len(self.groups))
                 policy.retain_tick_layouts(ring, layouts)
-        return at
+        if clock % 128 == 0:
+            # Ownership and cadence change only at block-boundary episode resets.
+            self.tick_decoder_candidates.clear()
+            for key, layout in self.tick_layouts.items():
+                coordinates = np.asarray(
+                    [
+                        (row, lane, self.matches[stream // 2].episode.players[stream % 2].timing.replan)
+                        for row, (stream, lane) in enumerate(zip(layout.streams, layout.lanes, strict=True))
+                        if self.assignments[group][2 * lane + stream % 2]
+                        == (
+                            self.lane_roles[stream // 2]
+                            if key[1] == STACKED_ANCHORS
+                            else (-1 if key[1] is None else key[1])
+                        )
+                    ],
+                    dtype=np.int64,
+                ).reshape(-1, 3)
+                every_tick = coordinates[coordinates[:, 2] == 2, :2]
+                both_cadences = coordinates[:, :2]
+                every_tick.flags.writeable = both_cadences.flags.writeable = False
+                self.tick_decoder_candidates[key] = both_cadences, every_tick
+        phase = int(clock % 4 != 0)
+        self.tick_decoder_rows = {}
+        for key, candidates in self.tick_decoder_candidates.items():
+            coordinates = candidates[phase]
+            live = self.live_host[group][coordinates[:, 1]]
+            self.tick_decoder_rows[key] = tuple(coordinates[live, 0].tolist())
+        return all_at
 
     def _sample_buffer(
         self,
@@ -2549,10 +3111,11 @@ class RolloutEngine:
         ids: Tensor,
         *,
         concurrent: bool = False,
+        sample_student: bool = True,
     ) -> None:
         first = buffer.index == self.buffers[self.cursor][0].index
         anchors = [key for key in self.tick_layouts if first and key[0] == ALL_BUFFERS]
-        students = [key for key in self.tick_layouts if key[0] == buffer.index]
+        students = [key for key in self.tick_layouts if sample_student and key[0] == buffer.index]
         if not (concurrent and anchors):
             for key in (*anchors, *students):
                 self._sample_layout(key, clock, table, ids)
@@ -2565,7 +3128,8 @@ class RolloutEngine:
         for key in anchors:
             stream = self.anchor_streams.get(key)
             if stream is None:
-                stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device)
+                # Start the first simulator buffer while the student still runs.
+                stream = self.anchor_streams[key] = torch.cuda.Stream(device=self.policy.device, priority=-1)
             stream.wait_stream(current)
             side.append(stream)
         for key in students:
@@ -2579,11 +3143,19 @@ class RolloutEngine:
     def _sample_layout(self, key: tuple[int, int | None], clock: int, table: DenseRollout, ids: Tensor) -> None:
         buffer_index, anchor = key
         layout = self.tick_layouts[key]
-        policy = self.policy if anchor is None else self.anchors[anchor]
+        policy = (
+            self.policy
+            if anchor is None
+            else cast(StackedAnchorPolicy, self.anchor_stacks[self.cursor])
+            if anchor == STACKED_ANCHORS
+            else self.anchors[anchor]
+        )
         selected = ids[self.group_slots[self.cursor][key]]
         owner = -1 if anchor is None else anchor
-        enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == owner
-        rows = TickInputs(table, selected, enabled)
+        enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == (
+            self.stacked_owners[self.cursor] if anchor == STACKED_ANCHORS else owner
+        )
+        rows = TickInputs(table, selected, enabled, self.tick_decoder_rows[key])
         with (
             torch.profiler.record_function(f"o65_graph/buffer{buffer_index}/policy{owner}/rows{len(layout.streams)}")
             if self.profile is not None and self.profile.active_trace
@@ -2597,10 +3169,100 @@ class RolloutEngine:
         for (buffer_index, anchor), layout in self.tick_layouts.items():
             if buffer_index != buffer.index and not (first and buffer_index == ALL_BUFFERS):
                 continue
-            policy = self.policy if anchor is None else self.anchors[anchor]
+            policy = (
+                self.policy
+                if anchor is None
+                else cast(StackedAnchorPolicy, self.anchor_stacks[self.cursor])
+                if anchor == STACKED_ANCHORS
+                else self.anchors[anchor]
+            )
             if not policy.tick_ready(layout, ring, clock=clock):
                 return False
         return True
+
+    def _prefetch_tick(
+        self,
+        clock: int,
+        end_clock: int,
+        update: int,
+        table: DenseRollout,
+        pending: Tensor,
+        *,
+        ready: bool,
+    ) -> torch.cuda.Event | None:
+        buffers = self.buffers[self.cursor]
+        if (
+            not ready
+            or self.policy.device.type != "cuda"
+            or self.staggering
+            or len(buffers) != 2
+            or clock >= end_clock
+            or clock % 128 == 0
+        ):
+            return None
+        first, last = buffers
+        if not self._tick_ready(first, clock):
+            return None
+        first_stream = cast(torch.cuda.Stream, first.stream)
+        completion_stream = cast(torch.cuda.Stream, last.stream)
+        # The first buffer is complete. Its next student graph can cover the
+        # second simulator's tail, before that buffer's observations are ready.
+        with torch.cuda.stream(completion_stream):
+            ids = self._stage_tick(clock, update, table, pending, buffer=first)
+        ids.record_stream(first_stream)
+        first_stream.wait_stream(completion_stream)
+        with (
+            torch.cuda.stream(first_stream),
+            torch.profiler.record_function(f"o65_prefetch/clock{clock}")
+            if self.profile is not None and self.profile.active_trace
+            else contextlib.nullcontext(),
+        ):
+            self._sample_layout((first.index, None), clock, table, ids)
+            done = torch.cuda.Event()
+            done.record(first_stream)
+        return done
+
+    @torch.no_grad()
+    def prepare_frame_acceptance(self, table: DenseRollout) -> None:
+        """Compile both native frame layouts without changing the live rollout."""
+        group = self.cursor
+        trial = copy.copy(table)
+        trial.store = copy.deepcopy(table.store)
+        trial.rewards = table.rewards.clone()
+        trial.duration = table.duration.clone()
+        ring = copy.copy(self.rings[group])
+        ring.head = ring.head.clone()
+        ring.length_storage = ring.length_storage.clone()
+        stops = self.stops[group].clone()
+        observed = self.observed_clocks[group].clone()
+        returns = self.episode_returns[group].clone()
+        pending = torch.full_like(self.player_slots[group], -1)
+        maximum = max(len(buffer.lanes) for buffer in self.buffers[group])
+        for count in sorted({1, min(2, maximum), maximum}):
+            lanes = torch.arange(count, device=self.policy.device)
+            packed = torch.zeros(
+                count, native_shard.STAGING_DTYPE.itemsize, device=self.policy.device, dtype=torch.uint8
+            )
+            records = packed[:, : native.FRAME_DTYPE.itemsize]
+            actions = packed[:, native.FRAME_DTYPE.itemsize :].view(torch.float32).reshape(count, 2, ACTION_DIM)
+            columns = np.zeros((count, len(native.OBSERVATION_FIELDS)), dtype=np.uint32)
+            columns.flags.writeable = False
+            for contiguous in (False, True):
+                frames = ShardFrames(
+                    torch.empty_like(records, memory_format=torch.contiguous_format).copy_(records)
+                    if contiguous
+                    else records,
+                    torch.empty_like(actions, memory_format=torch.contiguous_format).copy_(actions)
+                    if contiguous
+                    else actions,
+                    columns,
+                    np.zeros((count, 2), dtype=np.float32),
+                    np.zeros(count, dtype=np.bool_),
+                    np.zeros(count, dtype=np.bool_),
+                    np.zeros((count, 2, ACTION_DIM), dtype=np.float32),
+                    np.zeros(count, dtype=np.int32),
+                )
+                self.accept_frame(frames, lanes, pending, trial, ring, self.active[group], stops, observed, returns)
 
     @contextlib.contextmanager
     def _host_transfers(self, buffers: tuple[RolloutBuffer, ...]) -> Iterator[None]:
@@ -2752,6 +3414,7 @@ class RolloutEngine:
         result = ring.controllers[lanes[:, None, None], sides, positions].permute(2, 0, 1, 3)
         return torch.where(self.active[self.cursor][lanes][None, :, None, None], result, 0)
 
+    @torch.no_grad()
     def _accept(
         self,
         buffer: RolloutBuffer,
@@ -2761,6 +3424,8 @@ class RolloutEngine:
         update: int,
         table: DenseRollout,
         pending: Tensor,
+        *,
+        behavior: list[tuple[NDArray[np.uint32], NDArray[np.int64], NDArray[np.int32]]] | None = None,
     ) -> tuple[int, int]:
         for shard, frames in zip(shards, batches, strict=True):
             if len(frames) != len(shard.match_ids):
@@ -2774,30 +3439,29 @@ class RolloutEngine:
             host_lanes = np.concatenate([self.shard_lanes[id(shard)] for shard in shards])
             lanes = torch.cat([self.device_lanes[id(shard)] for shard in shards])
         frames = concatenate_shard_frames(batches)
-        slots = (2 * lanes[:, None] + torch.arange(2, device=self.policy.device)[None]).flatten()
         timeouts = 0
         active_host = self.live_host[group][host_lanes]
-        active = self.active[group][lanes]
-        positions = self.stops[group][lanes]
-        rewards = table.store.write(positions, lanes, frames, torch.arange(len(lanes), device=lanes.device))
         terminals, truncations = frames.terminal, frames.timeout
-        ids = torch.where(pending[slots] >= 0, pending[slots], slots)
-        valid = (pending[slots] >= 0) & active.repeat_interleave(2)
-        duration = table.duration[ids]
-        table.rewards[ids, duration.clamp_max(3)] = torch.where(
-            valid, rewards.flatten(), table.rewards[ids, duration.clamp_max(3)]
+        self.accept_frame(
+            frames,
+            lanes,
+            pending,
+            table,
+            ring,
+            self.active[group],
+            self.stops[group],
+            self.observed_clocks[group],
+            self.episode_returns[group],
         )
-        table.duration[ids] += valid.long()
-        self.episode_returns[group][lanes] += torch.where(active[:, None], rewards, 0)
-        self.stops[group][lanes] += active.long()
-        self.observed_clocks[group][lanes] += active.long()
-        ring.head[lanes] = (ring.head[lanes] + active[:, None].long()) % ring.capacity
-        ring.length_device[lanes] -= active[:, None].long()
         frames_stepped = int(active_host.sum())
         for shard in shards:
             if isinstance(shard, NativeSimulatorShard):
                 shard.stepped_frames += int(self._active(shard).sum())
-        self.observe_behavior(frames.columns[active_host], host_lanes[active_host], frames.frame_ids[active_host])
+        observed = frames.columns[active_host], host_lanes[active_host], frames.frame_ids[active_host]
+        if behavior is None:
+            self.observe_behavior(*observed)
+        else:
+            behavior.append(observed)
         ends = active_host & (terminals | truncations)
         for source in np.flatnonzero(ends):
             lane = int(host_lanes[source])
@@ -2845,7 +3509,7 @@ class RolloutEngine:
         return frames_stepped, timeouts
 
     def _write_bootstrap(self, table: DenseRollout, ids: Tensor, slots: Tensor, clock: int, update: int) -> None:
-        meta = self._dense_metadata(clock, update, bootstrap=True)[slots]
+        meta = self._dense_metadata(clock, update, bootstrap=True, slots=slots)
         table.bootstrap[ids] = True
         table.integers[ids] = meta
         table.conditions[ids] = self.dense_logs[self.cursor][slots]
@@ -2935,6 +3599,9 @@ class RolloutEngine:
         if not self._initialized:
             raise ValueError("initialize or restore the pool before rollout")
         started = time.perf_counter()
+        for policy in self.execution_policies():
+            if isinstance(policy, TransformerPolicy):
+                policy.prepare_tick_weights()
         self.results = []
         self.behavior_totals = {
             role: np.zeros(len(COUNT_NAMES), dtype=np.int64) for role in ("student", "student_pi_ref", "pi_ref")
@@ -2987,8 +3654,11 @@ class RolloutEngine:
         resets = timeouts = frames_stepped = 0
         buffers = self.buffers[group_id]
         default_stream = torch.cuda.current_stream(self.policy.device) if self.policy.device.type == "cuda" else None
+        prefetched: torch.cuda.Event | None = None
         with ThreadPoolExecutor(max_workers=len(shards)) as workers:
             for clock in range(start, start + count, 2):
+                had_prefetch = prefetched
+                prefetched = None
                 boundary = clock % 128 == 0
                 with (
                     self._host_transfers(buffers),
@@ -3002,10 +3672,13 @@ class RolloutEngine:
                 ):
                     if default_stream is not None:
                         for buffer in buffers:
-                            default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
+                            if not (had_prefetch and buffer is buffers[0]):
+                                default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
                     resets += self._reset_waiting(shards, clock)
                     with sample(self.profile, "tick_state", work=float(len(matches)), limit=0):
-                        ids = self._stage_tick(clock, update, table, pending)
+                        ids = self._stage_tick(
+                            clock, update, table, pending, buffer=buffers[1] if had_prefetch else None
+                        )
                     ready = all(self._tick_ready(buffer, clock) for buffer in buffers)
                     futures: list[PendingStep] = []
                     previous_stream: torch.cuda.Stream | None = None
@@ -3016,7 +3689,12 @@ class RolloutEngine:
                             # Each buffer's graphs follow the previous buffer's, so its inputs
                             # reach the simulator while the GPU runs the next buffer.
                             if previous_stream is not None:
-                                buffer.stream.wait_stream(previous_stream)
+                                if had_prefetch is not None:
+                                    # The first student already ran. Its anchors now run
+                                    # beside this student, before either simulator starts.
+                                    buffer.stream.wait_event(had_prefetch)
+                                else:
+                                    buffer.stream.wait_stream(previous_stream)
                             previous_stream = buffer.stream
                         with (
                             torch.cuda.stream(inference_stream)
@@ -3025,9 +3703,20 @@ class RolloutEngine:
                         ):
                             with sample(self.profile, "gpu_tick", work=float(len(buffer.lanes)), limit=0):
                                 self._sample_buffer(
-                                    buffer, clock, table, ids, concurrent=ready and buffer.stream is not None
+                                    buffer,
+                                    clock,
+                                    table,
+                                    ids,
+                                    concurrent=ready and buffer.stream is not None,
+                                    sample_student=not (had_prefetch and buffer is buffers[0]),
                                 )
                             if ready:
+                                if had_prefetch is not None and buffer is buffers[1]:
+                                    # Sampling can overlap the anchors, but both ports'
+                                    # committed actions must precede the controller copy.
+                                    cast(torch.cuda.Stream, buffer.stream).wait_stream(
+                                        cast(torch.cuda.Stream, buffers[0].stream)
+                                    )
                                 futures.extend(self._submit_buffer(workers, buffer))
                     if not ready:
                         # Cold captures restore the shared ring; serialize them before staging controller inputs.
@@ -3040,18 +3729,22 @@ class RolloutEngine:
                                 else contextlib.nullcontext()
                             ):
                                 futures.extend(self._submit_buffer(workers, buffer))
-                    # Completions run on the last buffer's stream, behind every tick graph, so their
-                    # eager writes never run beside a graph. The host completes a buffer while the
-                    # GPU still runs later buffers.
+                    # Completions follow every current-tick graph on the last buffer's stream.
+                    # Only the next first-buffer graph can overlap them; it reads and writes
+                    # disjoint buffer rows.
                     completion_stream = buffers[-1].stream
                     for buffer in buffers:
+                        behavior: list[tuple[NDArray[np.uint32], NDArray[np.int64], NDArray[np.int32]]] = []
                         staging = self.staging.get(id(buffer))
                         if staging is not None:
                             staging.release_inputs()
                         with (
                             torch.cuda.stream(completion_stream)
                             if completion_stream is not None
-                            else contextlib.nullcontext()
+                            else contextlib.nullcontext(),
+                            torch.profiler.record_function(f"o65_host/complete/buffer{buffer.index}")
+                            if self.profile is not None and self.profile.active_trace
+                            else contextlib.nullcontext(),
                         ):
                             completed = self._complete_buffer(buffer, futures)
                         for shard, rows in completed:
@@ -3066,7 +3759,10 @@ class RolloutEngine:
                         with (
                             torch.cuda.stream(completion_stream)
                             if completion_stream is not None
-                            else contextlib.nullcontext()
+                            else contextlib.nullcontext(),
+                            torch.profiler.record_function(f"o65_host/accept/buffer{buffer.index}")
+                            if self.profile is not None and self.profile.active_trace
+                            else contextlib.nullcontext(),
                         ):
                             for offset in range(2):
                                 accepted: list[tuple[SimulatorShard, ShardFrames]] = []
@@ -3088,12 +3784,20 @@ class RolloutEngine:
                                     update,
                                     table,
                                     pending,
+                                    behavior=behavior,
                                 )
                                 frames_stepped += stepped
                                 timeouts += ended_timeouts
+                        if buffer is buffers[0]:
+                            prefetched = self._prefetch_tick(
+                                clock + 2, start + count, update, table, pending, ready=ready
+                            )
+                        for observed in behavior:
+                            self.observe_behavior(*observed)
                     if default_stream is not None:
                         for buffer in buffers:
-                            default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
+                            if not (prefetched and buffer is buffers[0]):
+                                default_stream.wait_stream(cast(torch.cuda.Stream, buffer.stream))
         end = start + count
         live_slots = torch.nonzero(pending >= 0).flatten()
         pending_ids = pending[live_slots]
@@ -3781,6 +4485,7 @@ class Trainer:
             raise ValueError("fresh trainer requires only pi_ref")
         self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
+        engine.prepare_anchor_stacks()
         self.slot_updates = {1: 0, 2: 0, 3: 0}
         self.compilation_counter: CompilationStartCounter | None = None
         self.startup_seconds = 0.0
@@ -3794,11 +4499,14 @@ class Trainer:
     def capture_startup(self, *, rollout_only: bool = False) -> None:
         if not isinstance(self.policy, TransformerPolicy) or self.policy.device.type != "cuda":
             return
-        policies = (self.policy, *self.engine.anchors.values())
+        policies = self.engine.execution_policies()
         if any(not isinstance(policy, TransformerPolicy) or policy.startup_finished for policy in policies):
             raise ValueError("startup capture requires unsealed transformer policies")
         started = time.perf_counter()
         engine = self.engine
+        for policy in policies:
+            assert isinstance(policy, TransformerPolicy)
+            policy.prepare_tick_weights()
         cursor = engine.cursor
         frames = engine.sampler.schedule.rollout_frames
         if distributed.rank() == 0:
@@ -3827,10 +4535,17 @@ class Trainer:
             pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
             for offset in (0, 2, 4):
                 clock = engine.clocks[group] + offset
-                ids = engine._stage_tick(clock, self.update, table, pending)
+                with prepared_shape_compilation(64, instance_count=len(engine.groups)):
+                    ids = engine._stage_tick(clock, self.update, table, pending)
+                    if offset == 2:
+                        for buffer in engine.buffers[group]:
+                            engine._stage_tick(clock, self.update, table, pending, buffer=buffer)
                 table.active[ids] = False
+                engine.tick_decoder_rows = dict.fromkeys(engine.tick_layouts, ())
                 for buffer in engine.buffers[group]:
                     engine._sample_buffer(buffer, clock, table, ids)
+            with prepared_shape_compilation(64, instance_count=len(engine.groups)):
+                engine.prepare_frame_acceptance(table)
             if rollout_only:
                 table.reset()
                 continue
@@ -4540,7 +5255,7 @@ class Trainer:
     def flops_metrics(self, batch: PreparedUpdate, metrics: dict[str, float]) -> dict[str, float]:
         if not isinstance(self.policy, TransformerPolicy):
             return {}
-        policies = (self.policy, *self.engine.anchors.values())
+        policies = self.engine.execution_policies()
         rollout = sum(
             policy.work_flops.get("rollout", 0) for policy in policies if isinstance(policy, TransformerPolicy)
         )
@@ -4567,7 +5282,7 @@ class Trainer:
         if self.updating:
             raise ValueError("previous update did not finish; restore an update-boundary checkpoint")
         self.updating = True
-        for policy in (self.policy, *self.engine.anchors.values()):
+        for policy in self.engine.execution_policies():
             if isinstance(policy, TransformerPolicy):
                 policy.work_flops.clear()
         self.metric_totals = distributed.MetricTotals(self.policy.device)
@@ -4686,7 +5401,7 @@ class Trainer:
         metrics["systems/post_startup_captures"] = float(
             sum(
                 policy.post_startup_captures
-                for policy in (self.policy, *self.engine.anchors.values())
+                for policy in self.engine.execution_policies()
                 if isinstance(policy, TransformerPolicy)
             )
         )
@@ -6029,18 +6744,20 @@ def profile_rollout(trainer: Trainer, config: NativeCli, native_config: dict[str
     """Time rollouts without PPO updates, then trace sampled ticks and split them by policy graph."""
     profiling = cast(ProfileConfig, config.profiling)
     engine = trainer.engine
-    policies = (trainer.policy, *engine.anchors.values())
+    policies = engine.execution_policies()
     warm_started = time.perf_counter()
     for _ in range(profiling.warm_updates):
         engine.collect(trainer.update)
     report: dict[str, object] = {
         "configuration": native_config,
+        "compilation": compilation_report(engine),
         "startup_capture_seconds": trainer.startup_seconds,
         "warm_seconds": time.perf_counter() - warm_started,
         "post_startup_captures": sum(cast(TransformerPolicy, policy).post_startup_captures for policy in policies),
     }
     try:
         for traces in (False, True):
+            before_flops = sum(cast(TransformerPolicy, policy).work_flops.get("rollout", 0) for policy in policies)
             recorder = UpdateProfile(config.output, trainer.policy.device, traces=traces)
             engine.profile = recorder
             for policy in policies:
@@ -6049,8 +6766,14 @@ def profile_rollout(trainer: Trainer, config: NativeCli, native_config: dict[str
                 rollout = engine.collect(trainer.update)
             ticks = recorder.host_seconds.get("rollout/tick", 0.0)
             boundaries = recorder.host_seconds.get("rollout/boundary_tick", 0.0)
+            flops = (
+                sum(cast(TransformerPolicy, policy).work_flops.get("rollout", 0) for policy in policies) - before_flops
+            )
+            peak = mfu.bf16_dense_peak_flops(torch.cuda.get_device_name(trainer.policy.device))
             report["traced" if traces else "timed"] = {
                 "rollout_seconds": recorder.phases["rollout"]["wall_seconds"],
+                "flops": flops,
+                "mfu": None if peak is None else flops / (recorder.phases["rollout"]["wall_seconds"] * peak),
                 "frames": rollout.frames,
                 "tick_ms": 1e3 * ticks / max(1, recorder.calls.get("rollout/tick", 0)),
                 "boundary_tick_ms": 1e3 * boundaries / max(1, recorder.calls.get("rollout/boundary_tick", 0)),
@@ -6064,6 +6787,13 @@ def profile_rollout(trainer: Trainer, config: NativeCli, native_config: dict[str
         engine.profile = None
         for policy in policies:
             cast(TransformerPolicy, policy).profile = None
+    device = trainer.policy.device
+    report["memory"] = {
+        "allocated_bytes": torch.cuda.memory_allocated(device),
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+        "device_total_bytes": torch.cuda.get_device_properties(device).total_memory,
+    }
     (config.output / "rollout-profile.json").write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
     timed = cast(dict[str, object], report["timed"])
     print(
@@ -6368,7 +7098,7 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
         recorder = UpdateProfile(output, trainer.policy.device, traces=False)
         trainer.profile = trainer.engine.profile = recorder
         try:
-            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            for policy in trainer.engine.execution_policies():
                 if not isinstance(policy, TransformerPolicy):
                     raise TypeError("profiling requires TransformerPolicy")
                 policy.profile = recorder
@@ -6398,7 +7128,7 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
             del batch
         finally:
             trainer.profile = trainer.engine.profile = None
-            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            for policy in trainer.engine.execution_policies():
                 if isinstance(policy, TransformerPolicy):
                     policy.profile = None
 
@@ -6406,21 +7136,26 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
 def compilation_report(engine: RolloutEngine) -> dict[str, object]:
     ticks: list[dict[str, object]] = []
     captures: list[dict[str, object]] = []
-    variants: set[tuple[int, int, int]] = set()
+    variants: set[tuple[int, int, int, int]] = set()
     for name, policy in (
         ("student", engine.policy),
         *((f"anchor{key}", value) for key, value in engine.anchors.items()),
+        *(
+            (f"anchor_stack{index}", policy)
+            for index, policy in enumerate(dict.fromkeys(stack for stack in engine.anchor_stacks if stack is not None))
+        ),
     ):
         if not isinstance(policy, TransformerPolicy):
             raise TypeError("compilation report requires TransformerPolicy")
-        for ((_, (buffer, batch)), append, replan), graph in policy.tick_graphs.items():
-            variants.add((batch, replan, append))
+        for ((_, (buffer, batch)), append, replan, decoder_batch), graph in policy.tick_graphs.items():
+            variants.add((batch, replan, append, decoder_batch))
             ticks.append(
                 {
                     "policy": name,
                     "buffer": buffer,
                     "batch": batch,
                     "R": replan,
+                    "decoder_batch": decoder_batch,
                     "append": append,
                     "compile_and_warmup_seconds": graph.preparation_seconds,
                     "capture_seconds": graph.capture_seconds,
@@ -6428,9 +7163,14 @@ def compilation_report(engine: RolloutEngine) -> dict[str, object]:
             )
         graphs: list[
             tuple[
-                str, CapturedCall[ReplayOutput] | CapturedCall[Tensor] | CapturedCall[tuple[ActorLoss, ReplayOutput]]
+                str,
+                CapturedCall[ReplayOutput]
+                | CapturedCall[Tensor]
+                | CapturedCall[tuple[ActorLoss, ReplayOutput]]
+                | CapturedCall[None],
             ]
         ] = [
+            *(("restart", graph) for graph in policy.restart_graphs.values()),
             *(("reference", graph) for graph in policy.reference_graphs.values()),
             *(("value", graph) for graph in policy.value_graphs.values()),
         ]
@@ -6446,7 +7186,7 @@ def compilation_report(engine: RolloutEngine) -> dict[str, object]:
                 }
             )
     return {
-        "format": "hal.o65.compilation-report.v1",
+        "format": "hal.o65.compilation-report.v2",
         "tick_variants": ticks,
         "distinct_tick_variants": len(variants),
         "other_captures": captures,
@@ -6515,7 +7255,7 @@ def profile_native(
             recorder = UpdateProfile(config.output, trainer.policy.device, traces=traces)
             recorders.append(recorder)
             trainer.profile = trainer.engine.profile = recorder
-            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            for policy in trainer.engine.execution_policies():
                 if not isinstance(policy, TransformerPolicy):
                     raise TypeError("profiling requires TransformerPolicy")
                 policy.profile = recorder
@@ -6542,7 +7282,7 @@ def profile_native(
         (config.output / "estimates.json").write_text(json.dumps(estimates, indent=2, sort_keys=True))
     finally:
         trainer.profile = trainer.engine.profile = None
-        for policy in (trainer.policy, *trainer.engine.anchors.values()):
+        for policy in trainer.engine.execution_policies():
             if isinstance(policy, TransformerPolicy):
                 policy.profile = None
 
@@ -6874,7 +7614,7 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
 
 
 def _clear_execution_caches(trainer: Trainer) -> None:
-    for policy in (trainer.policy, *trainer.engine.anchors.values(), *trainer.snapshot_slots):
+    for policy in (*trainer.engine.execution_policies(), *trainer.snapshot_slots):
         policy.clear_caches()
 
 

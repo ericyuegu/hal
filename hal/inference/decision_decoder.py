@@ -3,6 +3,7 @@
 import dataclasses
 from collections.abc import Callable
 from functools import partial
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from torch import Tensor
 
 from hal.inference.cuda_graph import CapturedCall
 from hal.models.action_sequence import DecisionOutput
+from hal.models.action_sequence import TemporalBlock
 from hal.models.attention import KVMemory
 from hal.models.controller_codec import BUTTONS_GROUP
 from hal.models.controller_codec import TRIGGERS_GROUP
@@ -57,6 +59,16 @@ class DecisionDecoder:
             )
             replay = partial(model.temporal.replay_decisions, max_delay=self.max_delay, sampled_offsets=count)
             self.replay_variants[count] = replay
+
+    def prepare_rotary(self) -> None:
+        """Retain factors used by the declared inference variants before capture."""
+        device = self.group_sizes.device
+        dtype = torch.bfloat16 if self.model.decoder_precision == "bf16" else torch.float32
+        for module in self.model.temporal.blocks:
+            rotary = cast(TemporalBlock, module).rotary
+            rotary.prepare(self.max_delay, device, dtype)
+            for count in self.variants:
+                rotary.prepare(self.max_delay + count, device, dtype)
 
     def __call__(
         self,
@@ -170,6 +182,10 @@ class DecisionDecoder:
     ) -> DecisionOutput:
         if torch.is_grad_enabled():
             raise ValueError("CUDA graph sampling requires no_grad or inference_mode")
+        if history is not None and history.row_indices is not None:
+            history = dataclasses.replace(
+                history, kv=history.kv.index_select(1, history.row_indices), row_indices=None
+            )
         batch = hidden.shape[0]
         bucket = 1 << (batch - 1).bit_length()
         capacity = self.model.cfg.L_ctx + 3

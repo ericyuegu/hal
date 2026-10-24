@@ -21,14 +21,17 @@ def test_wire_tables_keep_the_addresses_used_by_tick_graphs(device: str) -> None
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("prepared", [False, True])
 @torch.no_grad()
-def test_rotary_graph_owns_factors_after_the_eager_cache_changes(dtype: torch.dtype) -> None:
+def test_rotary_graph_owns_factors_after_the_eager_cache_changes(dtype: torch.dtype, prepared: bool) -> None:
     from hal.inference.cuda_graph import CapturedCall
     from hal.models.attention import Rotary
     from hal.models.attention import apply_rotary_emb
 
     device = torch.device("cuda", torch.cuda.current_device())
     rotary = Rotary(32).to(device)
+    if prepared:
+        rotary.prepare(14, device, dtype)
     inputs = torch.randn(2, 14, 2, 32, dtype=dtype, device=device)
     old_cos, old_sin = rotary.at(14, device, dtype)
 

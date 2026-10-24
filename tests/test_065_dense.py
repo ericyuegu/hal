@@ -455,11 +455,22 @@ def test_buffer_acceptance_matches_serial_shards_with_staggered_ends(device: str
 
     class SerialEngine(exp.RolloutEngine):
         def _accept(
-            self, buffer: Any, shards: Any, batches: Any, end_clock: int, update: int, table: Any, pending: Any
+            self,
+            buffer: Any,
+            shards: Any,
+            batches: Any,
+            end_clock: int,
+            update: int,
+            table: Any,
+            pending: Any,
+            *,
+            behavior: Any = None,
         ) -> tuple[int, int]:
             count = timeouts = 0
             for shard, frames in zip(shards, batches, strict=True):
-                stepped, ended = super()._accept(buffer, (shard,), (frames,), end_clock, update, table, pending)
+                stepped, ended = super()._accept(
+                    buffer, (shard,), (frames,), end_clock, update, table, pending, behavior=behavior
+                )
                 count += stepped
                 timeouts += ended
             return count, timeouts
