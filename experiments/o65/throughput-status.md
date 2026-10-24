@@ -9,17 +9,22 @@ come from one B200 devbox with 1024 active matches, 512-frame rollouts and the O
 
 | Phase | Control (`a0ae12df`) | Latest branch result |
 |---|---:|---:|
-| Rollout | 14.6 s, 43.6 ms per tick | 7.9 s, 27.7 ms per tick (`o65-tick` `364eaeb3`) |
-| Preparation | 6.3 s | 4.1 s (`o65-train` `a3d080e3`) |
-| Actor | 10.9 s, 16 decisions per window, 118 steps | 12.9 s, every decision, 15 steps |
-| Critic | 1.0 s | about 1.0 s |
-| Update | 32.8 s | about 26 s estimated, not yet measured merged |
+| Rollout | 14.6 s, 43.6 ms per tick | 8.155 s, 28.730 ms per ordinary tick, merged four-group run |
+| Preparation | 6.3 s | 4.438 s, including 3.663 s reference |
+| Actor | 10.9 s, 16 decisions per window, 118 steps | 13.388 s, every decision, 15 steps |
+| Critic | 1.0 s | 0.949 s |
+| Update | 32.8 s | 26.980 s measured; memory headroom unqualified |
 
-The merged branch `o65-rollout-speed` (merge commits `e00a990c`, `c5a17bd3`) is being benchmarked
-with four match groups. Until that report lands, the 26 s figure is an estimate.
+The merged branch completed six four-group updates (groups 0, 1, 2, 3, 0, 1). This is the
+production 512-window/eight-microbatch/all-decision workload; the original control used sampled
+actor decisions, so the table is not an isolated throughput comparison. The previous matched
+four-group memory control failed before an update. See
+[memory-headroom-report.md](memory-headroom-report.md) and its measurement JSON.
 
-At 26 s per update, 8 GPUs give about 161k match-frames per second and about 114k trained
-decisions per second. 256 updates take about 1.9 hours plus startup.
+The measured run reserved 163.801 GiB at peak, above the requested ceiling of about 160 GiB.
+The lower 110–120 GiB target is unmet. A cache-release follow-up failed support validation in
+the fourth group's preparation and was reverted. Capacity fields remain unset. The single
+B200 sandbox flushed `/cache` and is down. No 8-GPU throughput claim or launch follows from this run.
 
 ## How the trainer uses data
 
@@ -51,7 +56,8 @@ decisions per second. 256 updates take about 1.9 hours plus startup.
 - B200 sandboxes either profile or shut down. Batch changes into one bench. Keep compile caches on
   the Modal Volume `hal-o65-devbox-v2`. Sandboxes stop after 10 idle minutes.
 - Production may request more than 64 GiB host RAM per GPU if a measurement shows the need. The
-  last measured host peak was 18 to 32 GiB, so 64 GiB suffices.
+  latest sampled host peak was 28.98 GiB in the full profile (23.14 GiB in the gradient probe),
+  so this evidence does not require more than 64 GiB.
 
 ## Measured and dropped
 
@@ -69,29 +75,33 @@ decisions per second. 256 updates take about 1.9 hours plus startup.
 
 ## Open questions
 
-- BF16 actor gradients have cosine 0.66 to 0.83 against FP32, eager or compiled. The merged bench
-  compares this with the cosine between FP32 gradients of disjoint 512-window batches. If minibatch
-  noise is much larger, BF16 error does not matter.
-- Mean game length is unmeasured. Games stop at 28,800 frames. Each match plays about 32k frames
-  over 256 updates, which is one to three games.
+- Fixed-weight gradient comparison: FP32 disjoint batches have cosine -0.011. Eager BF16 vs
+  FP32 is 0.727/0.657; compiled BF16 is 0.698/0.676. FP32 batch 0 vs the full update is 0.255.
+  These two minibatches vary more than the precision comparisons; this does not establish
+  convergence or unbiased precision error. The full report records the inputs and scope.
+- No finished games occurred in six profile updates, so mean game length remains unavailable.
+  Games stop at 28,800 frames. A longer gameplay measurement is needed.
 - The policy may move too far per update under Muon's fixed step size. Watch
   `policy/old_kl_step{step}` and the clip fraction in the first updates. If KL per update is far
   above 0.01 to 0.02, add a target-KL stop or lower the lr.
 
 ## Before the 8xB200 run
 
-0. The groups now share captured rollout storage. The next four-group bench completed startup
-   capture (48 graphs, 833.3 s), then ran out of memory in the first PPO preparation's KL calculation
-   (172.91 GiB allocated, 91.50 GiB in graph pools). No update completed. The sandbox is down.
-   Capacity remains unqualified; see `rotating-groups-report.md` and `rotating-groups-measurement.json`.
-1. Read the merged four-group bench: update time, memory per phase, host RAM, group switch cost,
-   game length, gradient-noise comparison.
+0. Shared serial graph pools, chunked KL and reference activation release removed the first
+   preparation OOM: six full updates completed at 1024 active matches. The graph pools reserve
+   35.766 GiB; the full run peaks at 96.013 GiB allocated and 163.801 GiB reserved. The latter
+   misses the headroom criterion. The rejected boundary-cache-release repeat completed three
+   updates, then failed support validation; cause remains unresolved and diagnostics were added.
+1. Diagnose that support failure from actual offending probabilities, then reduce or reuse eager
+   workspace and repeat all six updates below about 160 GiB reserved. Do not qualify the rejected
+   repeat from its lower memory peaks. Reports: `memory-headroom-report.md`,
+   `memory-headroom-measurement.json`, `memory-headroom-validation.json`.
 2. Fill `active_matches_per_gpu`, `windows_per_step` and `actor_microbatches` in
    `production-256.json`.
 3. Make the production launcher start from the warm compile cache so 8 GPUs do not spend about
    30 minutes compiling.
-4. Run the required integration tests. Agent worktrees lacked `.env`, so the tests could not find
-   the ISO; `hal-o65-247m` now has a copy.
+4. Complete the required roundtrip integration tests once the correct dev MDS fixture is present.
+   The six fixture-dependent cases remain blocked; `.env` is present in this worktree.
 5. Ask the user to approve the launch with the measured cost. Launch the 256-update run directly
    and watch the first updates for DDP errors, memory and policy KL, instead of a separate
    multi-GPU check. Evaluate head-to-head against O64 every 32 updates and extend toward about

@@ -1,0 +1,268 @@
+{
+  "format": "hal.o65.memory-headroom-validation.v1",
+  "code_head": "e7099609",
+  "environment": {
+    "python": "3.14.4",
+    "torch": "2.11.0+cu130",
+    "cuda": "13.0",
+    "TMPDIR": "/home/ericgu/data/scratch/o65-tmp-main",
+    "PYTHONPATH": ".:tests",
+    "OMP_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2",
+    "TORCHINDUCTOR_COMPILE_THREADS": "2",
+    "MALLOC_ARENA_MAX": "2",
+    "nice": true,
+    "integration_env_file": ".env (values omitted)"
+  },
+  "static_checks": [
+    {
+      "command": "uv run ruff format --check .",
+      "status": "passed"
+    },
+    {
+      "command": "uv run ruff check .",
+      "status": "passed"
+    },
+    {
+      "command": "uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "full_suite": {
+    "command": "nice uv run pytest -q -m \"not integration\"",
+    "source_at_start": "ff2eae4d",
+    "exit_code": 139,
+    "status": "segmentation_fault_before_final_summary",
+    "log": "/home/ericgu/data/scratch/o65-main-headroom-full.log",
+    "log_sha256": "687518724da985c657f5d16d663e3848dce09fb2122fa41469d75661a71122db",
+    "observed_progress": {
+      "passed": 2190,
+      "failed": 4,
+      "skipped": 27
+    },
+    "partial_skip_names": "unavailable: fatal exit prevented XML flush",
+    "failure": "Torch2.11 filtered allocator snapshot borrows/decrefs large pool IDs; corruption surfaced at graph-key repr",
+    "fix_commit": "e7099609",
+    "revalidation": "large-pool regression, isolated startup and affected module plus remaining 52 test files in a fresh process",
+    "full_command_repeated_after_fix": false
+  },
+  "pytest": [
+    {
+      "name": "o65-main-memory-focused",
+      "command": "nice uv run pytest -q tests/test_o65_memory.py tests/test_o65_training_batching.py tests/test_o65_group_storage.py tests/test_o65_training_probe.py",
+      "xml": "/home/ericgu/data/scratch/o65-main-memory-focused.xml",
+      "sha256": "9f0603ae0abf8641a25759aed479fa02d3246b5333e3253f8933d51345dd6ce9",
+      "tests": 51,
+      "passed": 49,
+      "failures": [
+        {
+          "test": "tests.test_o65_training_batching::test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks",
+          "message": "assert False\n +  where False = all(<generator object test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks.<locals>.<genexpr> at 0x7b08c36c50e0>)"
+        },
+        {
+          "test": "tests.test_o65_group_storage::test_four_groups_match_independent_caches_and_reuse_storage[cuda]",
+          "message": "assert (0 == 4)\n +  where 0 = len(())"
+        }
+      ],
+      "skipped": {},
+      "seconds": 885.013
+    },
+    {
+      "name": "o65-main-memory-final-focused",
+      "command": "nice uv run pytest -vv tests/test_o65_memory.py tests/test_o65_group_storage.py::test_four_groups_match_independent_caches_and_reuse_storage tests/test_o65_training_batching.py::test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks tests/test_o65_training_probe.py::test_full_profile_preserves_memory_when_the_first_preparation_fails",
+      "xml": "/home/ericgu/data/scratch/o65-main-memory-final-focused.xml",
+      "sha256": "540fe718e69bf0c0a67ed9322c0a0914649e079143009de39f57d9762910b409",
+      "tests": 13,
+      "passed": 13,
+      "failures": [],
+      "skipped": {},
+      "seconds": 606.397
+    },
+    {
+      "name": "o65-main-kl-validation",
+      "command": "nice uv run pytest -q tests/test_o65_memory.py -k \"not reference_releases\"",
+      "xml": "/home/ericgu/data/scratch/o65-main-kl-validation.xml",
+      "sha256": "3eb45e81d7207bb60e3bb8130ac59735d2d1a61017a3d081bc2978616946cf2b",
+      "tests": 9,
+      "passed": 9,
+      "failures": [],
+      "skipped": {},
+      "seconds": 8.197
+    },
+    {
+      "name": "o65-main-allocator-boundary-final",
+      "command": "nice uv run pytest -q tests/test_o65_memory.py::test_update_reclaims_unused_blocks_and_preserves_live_graph_state (rejected treatment)",
+      "xml": "/home/ericgu/data/scratch/o65-main-allocator-boundary-final.xml",
+      "sha256": "5b7f7401a49f56bb8bfae61ca66d03a07b3bad744036c8dda6e37ee33108852c",
+      "tests": 1,
+      "passed": 1,
+      "failures": [],
+      "skipped": {},
+      "seconds": 2.132
+    },
+    {
+      "name": "o65-main-kl-diagnostic",
+      "command": "nice uv run pytest -q tests/test_o65_memory.py -k \"not reference_releases\"",
+      "xml": "/home/ericgu/data/scratch/o65-main-kl-diagnostic.xml",
+      "sha256": "4a59271e25fe2536c96e5630d241acdc0bba1a475d7375601e7f39a73736b954",
+      "tests": 10,
+      "passed": 10,
+      "failures": [],
+      "skipped": {},
+      "seconds": 9.781
+    },
+    {
+      "name": "o65-main-inventory-crash-retry",
+      "command": "nice uv run pytest -vv tests/test_o65_training_batching.py::test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks",
+      "xml": "/home/ericgu/data/scratch/o65-main-inventory-crash-retry.xml",
+      "sha256": "947eb9073736c28c659ff1bc3b47db661a6461dc2316eff5a535e76a738f9737",
+      "tests": 1,
+      "passed": 1,
+      "failures": [],
+      "skipped": {},
+      "seconds": 64.655
+    },
+    {
+      "name": "o65-main-inventory-large-pool",
+      "command": "nice uv run pytest -vv tests/test_o65_memory.py::test_inventory_preserves_large_graph_pool_ids",
+      "xml": "/home/ericgu/data/scratch/o65-main-inventory-large-pool.xml",
+      "sha256": "adca14bfeafecdcb22974a5c8ce0c94e72ff89571810c6d216cd53baa0522c61",
+      "tests": 1,
+      "passed": 1,
+      "failures": [],
+      "skipped": {},
+      "seconds": 2.603
+    },
+    {
+      "name": "o65-main-headroom-session-cleanup",
+      "command": "HAL_REQUIRE_INTEGRATION=1 nice uv run pytest -q tests/test_session_cleanup.py -m integration",
+      "xml": "/home/ericgu/data/scratch/o65-main-headroom-session-cleanup.xml",
+      "sha256": "39c354df8373f03cb3816b8c9306b56d844f78f62d893da3c859cfc9b47d251d",
+      "tests": 2,
+      "passed": 2,
+      "failures": [],
+      "skipped": {},
+      "seconds": 9.32
+    },
+    {
+      "name": "o65-main-headroom-remainder",
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "-q",
+        "tests/test_control_timing_recovery.py::test_repeated_recovery_keeps_original_wave_seed_matchups_and_slots",
+        "tests/test_netplay_overlay_service.py::test_overlay_can_restart_without_replacing_game_state_or_stream_lease",
+        "tests/test_netplay_stream.py::test_stream_supervisor_starts_once_and_stops_on_lease_loss",
+        "tests/test_netplay_stream.py::test_stream_supervisor_caps_restart_backoff_at_thirty_seconds",
+        "tests/test_o65_training_batching.py",
+        "tests/test_o65_training_probe.py",
+        "tests/test_o65_training_trace.py",
+        "tests/test_observation_history.py",
+        "tests/test_package_boundaries.py",
+        "tests/test_packed_context.py",
+        "tests/test_paired.py",
+        "tests/test_play_observations.py",
+        "tests/test_player_identity.py",
+        "tests/test_policy_adapter.py",
+        "tests/test_policy_api.py",
+        "tests/test_policy_bundle.py",
+        "tests/test_policy_cli.py",
+        "tests/test_policy_fault_replay.py",
+        "tests/test_policy_schema.py",
+        "tests/test_policy_world_schema.py",
+        "tests/test_prefix_attention_cuda.py",
+        "tests/test_prepare_professional.py",
+        "tests/test_process_vec.py",
+        "tests/test_process_worker.py",
+        "tests/test_pruned81_action_sequence.py",
+        "tests/test_qualify_netplay_059.py",
+        "tests/test_ranked_menu.py",
+        "tests/test_ranked_replays.py",
+        "tests/test_ranked_runner.py",
+        "tests/test_rematerialize_policy_world_v8.py",
+        "tests/test_replay_selection.py",
+        "tests/test_replay_stats.py",
+        "tests/test_replay_windows.py",
+        "tests/test_replays.py",
+        "tests/test_resume_capture_tools.py",
+        "tests/test_returns.py",
+        "tests/test_roundtrip.py",
+        "tests/test_run_identity.py",
+        "tests/test_self_play_model.py",
+        "tests/test_session.py",
+        "tests/test_session_cleanup.py",
+        "tests/test_sim_ipc.py",
+        "tests/test_slippi_ai_h2h.py",
+        "tests/test_slp_finalize.py",
+        "tests/test_slp_link.py",
+        "tests/test_stream_monitor.py",
+        "tests/test_streaming_compat.py",
+        "tests/test_streams.py",
+        "tests/test_system_metrics.py",
+        "tests/test_trajectory.py",
+        "tests/test_validation_replay_loader.py",
+        "tests/test_value_meter.py",
+        "tests/test_window_policy_preparation.py",
+        "tests/test_window_replay_actor.py",
+        "tests/test_window_replay_model.py",
+        "tests/test_wire_bridges.py",
+        "-m",
+        "not integration",
+        "--junitxml=/home/ericgu/data/scratch/o65-main-headroom-remainder.xml"
+      ],
+      "xml": "/home/ericgu/data/scratch/o65-main-headroom-remainder.xml",
+      "sha256": "ac266c7125b7db94649459c4796d37bbd7f86cc6248f1feef1c2b3429e372eb5",
+      "tests": 756,
+      "passed": 740,
+      "failures": [
+        {
+          "test": "tests.test_control_timing_recovery::test_repeated_recovery_keeps_original_wave_seed_matchups_and_slots",
+          "message": "hal.r2.R2Error: missing env vars for R2: ['AWS_ENDPOINT_URL', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']. See .env.example."
+        },
+        {
+          "test": "tests.test_netplay_overlay_service::test_overlay_can_restart_without_replacing_game_state_or_stream_lease",
+          "message": "assert 823306.227338241 < 823306.227247165\n +  where 823306.227338241 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_netplay_stream::test_stream_supervisor_starts_once_and_stops_on_lease_loss",
+          "message": "assert 823308.2389671 < 823308.233959414\n +  where 823308.2389671 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_netplay_stream::test_stream_supervisor_caps_restart_backoff_at_thirty_seconds",
+          "message": "assert 823310.250126932 < 823310.247647269\n +  where 823310.250126932 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        }
+      ],
+      "skipped": {
+        "local dev MDS is not available": 5,
+        "local v7 subset is not available": 6,
+        "dev archive missing at /home/ericgu/src/hal-o65-247m/data/raw/dev.7z; run `python -m hal.scripts.fetch --name dev.7z`": 1
+      },
+      "seconds": 333.214
+    }
+  ],
+  "blocked": [
+    {
+      "command": "HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py -m integration",
+      "cases": 6,
+      "status": "blocked_not_rerun_per_user_instruction",
+      "reason": "data/processed/dev/mds fixture missing; see prior rotating-groups-validation.json for six case names"
+    }
+  ],
+  "remaining_failures": [
+    "R2 credentials missing in control timing recovery (known).",
+    "Three netplay timeout assertions, reproduced as in the previous report."
+  ],
+  "self_review": [
+    "entire diff a0ae12df...HEAD reviewed",
+    "unmatched KL/mask tail rows now rejected",
+    "rejected and reverted boundary allocator release after B200 support failure",
+    "large-pool snapshot bug fixed at the public API call boundary with targeted GPU regression",
+    "Codex independent review substituted for unavailable Opus; no remaining confirmed stream/gradient finding",
+    "support mismatch remains unresolved; no probability floor or support tolerance added"
+  ]
+}
