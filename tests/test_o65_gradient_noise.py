@@ -33,6 +33,7 @@ def test_capture_covers_every_batch_and_preserves_loss_and_gradient(
     before = exp._state_hash(run.policy.model.state_dict())
     exp.save_update_gradient_inputs(run, batch, output, PROVENANCE)
     manifest = load_manifest(output, PROVENANCE["checkpoint_sha256"])
+    assert manifest["decoder_precision"] == "fp32"
     windows = [window for step in manifest["steps"] for window in step]
     assert len(windows) == len(set(windows)) == int((batch.placement.selected.any(1)).sum())
     assert all(len(step) == 4 for step in manifest["steps"][:-1])
@@ -85,6 +86,15 @@ def test_capture_covers_every_batch_and_preserves_loss_and_gradient(
             torch.testing.assert_close(saved_value, current_value, atol=0, rtol=0)
     with pytest.raises(ValueError, match="checkpoint mismatch"):
         load_manifest(output, "different")
+    for precision in ("fp32", "bf16"):
+        manifest["decoder_precision"] = precision
+        (output / "manifest.json").write_text(json.dumps(manifest))
+        assert load_manifest(output, PROVENANCE["checkpoint_sha256"])["decoder_precision"] == precision
+    manifest["decoder_precision"] = "invalid"
+    (output / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="schema or checkpoint mismatch"):
+        load_manifest(output, PROVENANCE["checkpoint_sha256"])
+    manifest["decoder_precision"] = "fp32"
     manifest["steps"][1][0] = manifest["steps"][0][0]
     (output / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="disjoint"):

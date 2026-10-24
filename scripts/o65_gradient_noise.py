@@ -47,6 +47,7 @@ class GradientManifest(TypedDict):
     format: str
     provenance: dict[str, str]
     trainer_source_sha256: str
+    decoder_precision: Literal["bf16", "fp32"]
     training: dict[str, object]
     steps: list[list[int]]
     chunks: dict[str, str]
@@ -60,8 +61,9 @@ def load_manifest(directory: Path, checkpoint_sha256: str) -> GradientManifest:
     if (
         not isinstance(saved, dict)
         or set(saved) != set(GradientManifest.__annotations__)
-        or saved["format"] != "hal.o65.update-gradient-inputs.v1"
+        or saved["format"] != "hal.o65.update-gradient-inputs.v2"
         or saved["provenance"]["checkpoint_sha256"] != checkpoint_sha256
+        or saved["decoder_precision"] not in ("bf16", "fp32")
     ):
         raise ValueError("update gradient input schema or checkpoint mismatch")
     steps = saved["steps"]
@@ -125,8 +127,10 @@ def main(args: Args) -> None:
     torch.set_num_threads(2)
     torch.manual_seed(65)
     device = torch.device("cuda", torch.cuda.current_device())
-    checkpoint = load_evaluation_checkpoint(args.checkpoint, device=device)
-    manifest = load_manifest(args.inputs, checkpoint.checkpoint_sha256)
+    manifest = load_manifest(args.inputs, sha256(args.checkpoint))
+    checkpoint = load_evaluation_checkpoint(
+        args.checkpoint, device=device, decoder_precision=manifest["decoder_precision"]
+    )
     model = checkpoint.model.eval().requires_grad_(True)
     model.percentile_head.requires_grad_(False)
     model.trunk.resolve_attention("cuda")
@@ -216,10 +220,14 @@ def main(args: Args) -> None:
         "checkpoint_sha256": checkpoint.checkpoint_sha256,
         "manifest_sha256": sha256(args.inputs / "manifest.json"),
         "probe_sha256": sha256(Path(__file__)),
+        "seed": 65,
+        "decoder_precision": manifest["decoder_precision"],
         "environment": {
             "torch": str(torch.__version__),
             "cuda": torch.version.cuda,
             "tf32": torch.backends.cuda.matmul.allow_tf32,
+            "deterministic": torch.are_deterministic_algorithms_enabled(),
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
             "gpu": torch.cuda.get_device_name(),
             "inductor_cache": os.environ.get("TORCHINDUCTOR_CACHE_DIR"),
         },

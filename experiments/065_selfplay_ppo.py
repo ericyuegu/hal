@@ -7647,9 +7647,10 @@ def save_update_gradient_inputs(
     (output / "manifest.json").write_text(
         json.dumps(
             {
-                "format": "hal.o65.update-gradient-inputs.v1",
+                "format": "hal.o65.update-gradient-inputs.v2",
                 "provenance": provenance,
                 "trainer_source_sha256": sha256(Path(__file__)),
+                "decoder_precision": trainer.policy.model.decoder_precision,
                 "training": dataclasses.asdict(trainer.config),
                 "steps": step_windows,
                 "chunks": {name: sha256(output / name) for name in files},
