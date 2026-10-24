@@ -98,6 +98,8 @@ def training_command(
         str(matches),
         "--updates",
         str(updates),
+        "--training.decisions-per-window",
+        "16",
         "--training.windows-per-step",
         "512",
         "--training.actor-microbatches",

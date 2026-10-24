@@ -383,7 +383,8 @@ def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> N
     torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=3e-5, atol=5e-6)
     torch.testing.assert_close(actual.factor_mask_WKF, expected.factor_mask_WKF, rtol=0, atol=0)
     for first, second in zip(actual.distributions, expected.distributions, strict=True):
-        torch.testing.assert_close(first, second, rtol=3e-5, atol=5e-6)
+        # Compaction omits invalid decisions. Keep all four planned frames for valid slots.
+        torch.testing.assert_close(first[windows.slots.valid_WK], second[windows.slots.valid_WK], rtol=3e-5, atol=5e-6)
         assert not first.requires_grad
     assert all(not p.requires_grad and p.grad is None for p in run.reference.model.parameters())
     scoring = run.reference.reference_forward_model

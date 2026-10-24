@@ -86,7 +86,11 @@ def count_compilation_starts() -> Iterator[CompilationStartCounter]:
 
 
 class CapturedCall[T]:
-    """Replay an operation on fixed input storage without copying its persistent state."""
+    """Replay an operation on fixed input storage without copying persistent state.
+
+    Shared pools require one capture stream and serial replays. Consume or copy
+    each output before another graph uses that pool.
+    """
 
     def __init__(
         self,
@@ -97,9 +101,13 @@ class CapturedCall[T]:
         device: torch.device,
         counter: CaptureCounter | None = None,
         priority: int = 0,
+        share_pool_with: torch.cuda.CUDAGraph | None = None,
+        capture_stream: torch.cuda.Stream | None = None,
     ) -> None:
         if device.type != "cuda":
             raise ValueError("CUDA graph capture needs a CUDA device")
+        if share_pool_with is not None and capture_stream is None:
+            raise ValueError("a shared graph pool requires an explicit capture stream")
         self.device = torch.device("cuda", torch.cuda.current_device()) if device.index is None else device
         if any(value.device != self.device for value in (*inputs, *state)):
             raise ValueError("CUDA graph inputs and persistent state must use the declared device")
@@ -109,7 +117,9 @@ class CapturedCall[T]:
             self.graph = torch.cuda.CUDAGraph()
             current = torch.cuda.current_stream(self.device)
             # Torch 2.11 uses captured per-node priorities when it instantiates graphs.
-            capture = torch.cuda.Stream(device=self.device, priority=priority)
+            capture = (
+                torch.cuda.Stream(device=self.device, priority=priority) if capture_stream is None else capture_stream
+            )
             saved = tuple(value.clone() for value in state)
             capture.wait_stream(current)
             try:
@@ -123,7 +133,9 @@ class CapturedCall[T]:
                     capture_started = time.perf_counter()
                     if counter is not None:
                         counter.attempts += 1
-                    with torch.cuda.graph(self.graph, stream=capture):
+                    with torch.cuda.graph(
+                        self.graph, pool=None if share_pool_with is None else share_pool_with.pool(), stream=capture
+                    ):
                         self.output = operation()
                     self.capture_seconds = time.perf_counter() - capture_started
             finally:

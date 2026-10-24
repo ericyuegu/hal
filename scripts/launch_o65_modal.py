@@ -338,6 +338,8 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         "1",
         "--compile-cache",
         str(RESULTS / "compile-cache"),
+        "--training.decisions-per-window",
+        "16",
     ]
     if request.mode == "profile":
         argv.extend(("--warm-updates", "1"))
@@ -490,7 +492,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
         identity.update(
             treatment=f"O64 outcome PPO; matches per GPU={request.matches}, windows per actor step={request.windows_per_step}",
             control="frozen O64 step-0098304 with matched episode sampling",
-            invariants="seed 65, full-corpus sampler, 11 production cadences, 512 rollout frames, one group, 16 decisions per window, outcome reward (0.1,120,120)",
+            invariants="seed 65, full-corpus sampler, 11 production cadences, 512 rollout frames, one group, all valid decisions per window, outcome reward (0.1,120,120)",
         )
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
     if request.mode == "ddp":

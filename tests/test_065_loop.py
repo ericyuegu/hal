@@ -319,6 +319,7 @@ def trainer(
         critic_warmup_updates=warmup,
         warmup_steps=0,
         windows_per_step=2,
+        decisions_per_window=16,
         snapshot_interval=2,
     )
     return exp.Trainer(engine, config)
@@ -336,6 +337,8 @@ def transformer_trainer(
     development: bool = False,
     deterministic: bool = False,
     decoder_precision: Literal["bf16", "fp32"] = "bf16",
+    matches: tuple[int, ...] = (0,),
+    episode_length: int = 67,
 ) -> Any:
     from hal.data.feature_stats import FeatureStats
     from hal.data.feature_stats import consolidate_key
@@ -388,7 +391,7 @@ def transformer_trainer(
         .eval()
     )
     policy = exp.TransformerPolicy(model, sampling.schedule, stats)
-    shards = (FakeShard((0,), length=67, timeout=True, device=device),)
+    shards = (FakeShard(matches, length=episode_length, timeout=True, device=device),)
     engine = exp.RolloutEngine((shards,), policy, sampling, {0: policy.frozen_copy()})
     engine.initialize()
     config = exp.TrainConfig(
@@ -397,6 +400,7 @@ def transformer_trainer(
         actor_lr=1e-4,
         critic_epochs=1,
         windows_per_step=4,
+        decisions_per_window=16,
         critic_warmup_updates=0,
         warmup_steps=0,
         snapshot_interval=100,
@@ -1318,6 +1322,7 @@ def test_native_background_checkpoint_matches_synchronous_next_update(
                 actor_optimizer="adam",
                 critic_warmup_updates=0,
                 windows_per_step=4,
+                decisions_per_window=16,
                 critic_epochs=1,
                 snapshot_interval=100,
             ),

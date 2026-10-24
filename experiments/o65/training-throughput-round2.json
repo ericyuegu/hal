@@ -1,0 +1,197 @@
+{
+  "format": "hal.o65.training-throughput-round2.v1",
+  "status": "Implementation committed; B200 qualification blocked",
+  "control_commit": "a0ae12dfe5db4d72b2cbd612e42b215c0302fa17",
+  "checkpoint_sha256": "e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf",
+  "sampler_sha256": "1605d4c7be39cf77115a28d9ea559e041cff4f491ca4b9155c08a94c655e7daf",
+  "seed": 65,
+  "matches_per_gpu": 1024,
+  "rollout_frames": 512,
+  "actor_chunk_windows": 64,
+  "attempt_optimizer_windows": 64,
+  "attempt_decisions_per_window": 16,
+  "new_milestone_timings": null,
+  "sandbox": "sb-JJlEtZWm7qGtS5ThWrBDi5",
+  "sandbox_exit_code": 137,
+  "modal_app": "ap-8Mio3cBZiOiQFKUKg0xEzC",
+  "attempts": [
+    {
+      "remote_run": "/cache/runs/bench-20261023-121529-m64-full",
+      "outcome": "No report; cache volume exhausted all 500000 inodes",
+      "log": "/home/ericgu/data/scratch/o65-train-r2-reference-bench.log"
+    },
+    {
+      "remote_run": "/tmp/o65-train-cache/runs/bench-20261023-123611-m64-full",
+      "outcome": "No report; CUDA OOM during reference capture",
+      "allocated_gib_at_error": 177.16,
+      "private_pool_gib_at_error": 113.83,
+      "log": "/home/ericgu/data/scratch/o65-train-r2-reference-retry.log"
+    },
+    {
+      "remote_run": null,
+      "outcome": "No report; shared-pool attempt lost sandbox with exit137. Cause unconfirmed.",
+      "log": "/home/ericgu/data/scratch/o65-train-r2-reference-pool.log"
+    }
+  ],
+  "cpu_advantage_statistics": [
+    {
+      "cohort": 0,
+      "count": 1024,
+      "mean": -0.4155014032294275,
+      "sigma": 9.775806631976533,
+      "min": -47.25053787231445,
+      "max": 29.883848190307617,
+      "zero_fraction": 0.0,
+      "normalized_sum": -1.7763568394002505e-15,
+      "normalized_l1": 770.8080383797133
+    },
+    {
+      "cohort": 1,
+      "count": 1024,
+      "mean": 0.49340922051487723,
+      "sigma": 9.919500015032803,
+      "min": -38.695552825927734,
+      "max": 42.788143157958984,
+      "zero_fraction": 0.0,
+      "normalized_sum": -3.552713678800501e-15,
+      "normalized_l1": 755.6865289265613
+    },
+    {
+      "cohort": 2,
+      "count": 1024,
+      "mean": -1.7986351154686417,
+      "sigma": 12.674175051439436,
+      "min": -74.32437133789062,
+      "max": 36.88833999633789,
+      "zero_fraction": 0.0,
+      "normalized_sum": -7.105427357601002e-15,
+      "normalized_l1": 690.2815636428627
+    }
+  ],
+  "scalar_reduction_experiment": {
+    "format": "hal.o65.scalar-reduction-probe.v1",
+    "scope": "CPU scalar PPO reduction only, not model gradients",
+    "inputs_sha256": "b52e7dd1ba8f6d5257f07c2971d1b24bb6a3e07a2f0974db7753d76a2cdc62e4",
+    "script_sha256": "905b8139bad8c093ea837056cb5687299b1ac4d63582c3c4a6777a8238b3d208",
+    "torch": "2.11.0+cu130",
+    "rows": [
+      {
+        "cohort": 0,
+        "ratio": 1.0,
+        "kl": 0.0,
+        "fp32_loss": 4.6566128730773926e-09,
+        "fp64_reduction_loss": -1.1568488389457343e-09,
+        "gradient_cosine": 1.0,
+        "gradient_relative_l2": 0.0,
+        "gradient_norm": 0.03125
+      },
+      {
+        "cohort": 1,
+        "ratio": 1.0,
+        "kl": 0.0,
+        "fp32_loss": 2.7939677238464355e-09,
+        "fp64_reduction_loss": 2.4510882212780416e-09,
+        "gradient_cosine": 1.0,
+        "gradient_relative_l2": 0.0,
+        "gradient_norm": 0.03124999813735485
+      },
+      {
+        "cohort": 2,
+        "ratio": 1.0,
+        "kl": 0.0,
+        "fp32_loss": -5.587935447692871e-09,
+        "fp64_reduction_loss": -2.3267716642294545e-09,
+        "gradient_cosine": 0.9999999403953552,
+        "gradient_relative_l2": 0.0,
+        "gradient_norm": 0.03125
+      }
+    ],
+    "script": "\"\"\"Isolate scalar reduction with the retained O65 step-zero advantages.\"\"\"\n\nimport hashlib\nimport json\nfrom pathlib import Path\n\nimport torch\n\nsource = Path('/home/ericgu/data/scratch/o65-devbox/runs/bench-20261022-235147-m64-full/training-inputs.pt')\nsaved = torch.load(source, map_location='cpu', weights_only=True)\nrows = []\nfor index, cohort in enumerate(saved['cohorts']):\n    selected = cohort['selected']\n    advantages = cohort['advantages']\n    values = advantages[selected].double()\n    mean = values.mean()\n    sigma = (values.square().mean() - mean.square()).sqrt()\n    normalized = (advantages - mean.float()) / sigma.float()\n    gradients = []\n    losses = []\n    for reduction in (torch.float32, torch.float64):\n        log_ratio = torch.zeros_like(advantages, requires_grad=True)\n        ratio = log_ratio.exp()\n        surrogate = torch.minimum(ratio * normalized, ratio.clamp(0.8, 1.2) * normalized)\n        loss = torch.where(selected, -surrogate, 0).to(reduction).sum() / selected.sum().to(reduction)\n        gradients.append(torch.autograd.grad(loss, log_ratio)[0].flatten())\n        losses.append(float(loss.detach()))\n    rows.append({'cohort': index, 'ratio': 1.0, 'kl': 0.0, 'fp32_loss': losses[0], 'fp64_reduction_loss': losses[1], 'gradient_cosine': float(torch.nn.functional.cosine_similarity(*gradients, dim=0)), 'gradient_relative_l2': float((gradients[0] - gradients[1]).norm() / gradients[0].norm()), 'gradient_norm': float(gradients[0].norm())})\nreport = {'format': 'hal.o65.scalar-reduction-probe.v1', 'scope': 'CPU scalar PPO reduction only, not model gradients', 'inputs_sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'script_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'torch': str(torch.__version__), 'rows': rows}\nPath('/home/ericgu/data/scratch/o65-train-r2-reduction-probe.json').write_text(json.dumps(report, indent=2))\nprint(json.dumps(report, indent=2))\n"
+  },
+  "precision_diagnosis": "Final scalar loss reduction and vanishing advantage variance ruled out; model gradient cause unresolved without B200 controls",
+  "b200_pool_tests": {
+    "passed": 8,
+    "log": "/home/ericgu/data/scratch/o65-train-r2-pool-tests.log"
+  },
+  "local_cuda_tests": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "passed": 11,
+    "deselected": 52,
+    "log": "/home/ericgu/data/scratch/o65-train-r2-gpu-validation2.log"
+  },
+  "integration": {
+    "failed": 8,
+    "deselected": 6,
+    "reason": "Missing data/emulator/ssbm.ciso",
+    "log": "/home/ericgu/data/scratch/o65-train-r2-integration.log"
+  },
+  "full_suite": {
+    "status": "completed with failures",
+    "log": "/home/ericgu/data/scratch/o65-train-r2-full-pytest.log",
+    "passed": 2785,
+    "skipped": 39,
+    "failed": 3,
+    "deselected": 90,
+    "seconds": 650.24,
+    "failures": [
+      {
+        "test": "tests/test_065_dense.py::test_reference_cohorts_preserve_slots_and_frozen_parameters[3]",
+        "status": "fixed in test: compare every planned frame of valid slots"
+      },
+      {
+        "test": "tests/test_065_dense.py::test_reference_cohorts_preserve_slots_and_frozen_parameters[16]",
+        "status": "fixed in test: compare every planned frame of valid slots"
+      },
+      {
+        "test": "tests/test_control_timing_recovery.py::test_repeated_recovery_keeps_original_wave_seed_matchups_and_slots",
+        "status": "known missing R2 credentials"
+      }
+    ],
+    "post_fix_full_rerun": false
+  },
+  "runtime_commit": "4e578dc65ac978a28d23676d095fa6599106d560",
+  "trainer_sha256": "1e7733286ece0d762e44b7f42f937f8fd1fba4402d0db9e36d1c85fec17489be",
+  "commits": [
+    {
+      "sha": "4d595e6a",
+      "subject": "Compact reference replay and compile training trunks"
+    },
+    {
+      "sha": "2b991817",
+      "subject": "Diagnose replay precision and trace actor work"
+    },
+    {
+      "sha": "605ff699",
+      "subject": "Allow a sandbox-local compiler cache"
+    },
+    {
+      "sha": "b7645526",
+      "subject": "Share memory across serial reference graphs"
+    },
+    {
+      "sha": "f15af4d4",
+      "subject": "Isolate the replay trunk backward diagnostic"
+    },
+    {
+      "sha": "7f51c758",
+      "subject": "Bound compiler workers and quote sandbox paths"
+    },
+    {
+      "sha": "4e578dc6",
+      "subject": "Train every decision in compact cadence groups"
+    }
+  ],
+  "post_fix_focused": {
+    "passed": 40,
+    "deselected": 4,
+    "log": "/home/ericgu/data/scratch/o65-train-r2-final-focused.log"
+  },
+  "pool_identity_check": {
+    "passed": 1,
+    "log": "/home/ericgu/data/scratch/o65-train-r2-pool-identity.log"
+  },
+  "final_opus_review": {
+    "findings": 0,
+    "log": "/home/ericgu/data/scratch/o65-train-r2-review-fixes-retry.txt"
+  }
+}

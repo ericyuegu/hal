@@ -137,7 +137,7 @@ def training_command(args: Args) -> list[str]:
         "--training.actor-microbatches",
         str(args.actor_microbatches),
         "--training.decisions-per-window",
-        "16",
+        "all",
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",

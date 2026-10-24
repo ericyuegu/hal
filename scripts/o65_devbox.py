@@ -7,6 +7,7 @@ on a volume, so a rerun compiles only graphs whose code or shapes changed.
 """
 
 import dataclasses
+import hashlib
 import io
 import json
 import shlex
@@ -42,10 +43,14 @@ class Args:
     rollout_frames: int = 128
     # bench: profile whole updates (rollout, preparation, actor, critic) instead of rollout ticks.
     full: bool = False
-    # bench: training windows per optimizer step; the default of 512 runs out of memory at 1024 matches.
+    # bench: 512 windows exhaust memory at 1,024 matches on a B200.
     windows_per_step: int = 64
-    # bench: use another sandbox directory if the shared volume exhausts its file limit.
+    actor_microbatches: int | None = None
+    decisions_per_window: int | Literal["all"] = "all"
+    capture_training_inputs: bool = False
+    # Use local sandbox disk if the shared cache volume reaches its inode limit.
     cache_root: Path = CACHE
+    compile_threads: int = 16
     # exec: a shell command to run in the repository root.
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
@@ -67,7 +72,7 @@ def _sandbox(name: str) -> tuple[modal.Sandbox, str]:
 
 
 def _run(sandbox: modal.Sandbox, command: str) -> int:
-    process = sandbox.exec("bash", "-c", f"{{\n{command}\n}} 2>&1", workdir=str(launch.REMOTE_ROOT))
+    process = sandbox.exec("bash", "-c", f"exec 2>&1\n{command}", workdir=str(launch.REMOTE_ROOT))
     for line in process.stdout:
         print(line, end="", flush=True)
     process.wait()
@@ -136,9 +141,26 @@ def bench(
     rollout_frames: int,
     *,
     full: bool,
-    windows_per_step: int,
-    cache_root: Path,
+    windows_per_step: int | None = None,
+    actor_microbatches: int | None = None,
+    decisions_per_window: int | Literal["all"] = "all",
+    capture_training_inputs: bool = False,
+    cache_root: Path = CACHE,
+    compile_threads: int = 16,
 ) -> int:
+    if capture_training_inputs and not full:
+        raise ValueError("training input capture requires --full")
+    if not cache_root.is_absolute():
+        raise ValueError("sandbox cache root must be absolute")
+    if compile_threads < 1:
+        raise ValueError("compiler threads must be positive")
+    if decisions_per_window != "all" and (
+        type(decisions_per_window) is not int or not 1 <= decisions_per_window <= 16
+    ):
+        raise ValueError("decisions per window must be 'all' or an integer from 1 to 16")
+    trainer_sha = hashlib.sha256(Path("experiments/065_selfplay_ppo.py").read_bytes()).hexdigest()
+    if _run(sandbox, f"test \"$(sha256sum experiments/065_selfplay_ppo.py | cut -d ' ' -f1)\" = {trainer_sha}"):
+        raise ValueError("remote trainer source differs from the worktree; restore the sandbox source and sync again")
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
     output = cache_root / "runs" / name
     root = launch.REMOTE_ROOT
@@ -148,7 +170,7 @@ def bench(
         "TMPDIR": str(cache_root / "tmp"),
         "TORCHINDUCTOR_CACHE_DIR": str(cache_root / "inductor"),
         "TRITON_CACHE_DIR": str(cache_root / "triton"),
-        "TORCHINDUCTOR_COMPILE_THREADS": "16",
+        "TORCHINDUCTOR_COMPILE_THREADS": str(compile_threads),
         "TORCHINDUCTOR_ENABLE_PDL": "1",
         "OMP_NUM_THREADS": "2",
         "MKL_NUM_THREADS": "2",
@@ -178,8 +200,6 @@ def bench(
         "1",
         "--updates",
         "3",
-        "--training.windows-per-step",
-        str(windows_per_step),
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",
@@ -192,10 +212,15 @@ def bench(
         "120",
         "--training.reward-weights.game-win",
         "120",
+        *(() if windows_per_step is None else ("--training.windows-per-step", str(windows_per_step))),
+        *(() if actor_microbatches is None else ("--training.actor-microbatches", str(actor_microbatches))),
+        "--training.decisions-per-window",
+        str(decisions_per_window),
         "profiling:profile-config",
         "--profiling.warm-updates",
         "1",
         *(() if full else ("--profiling.rollout-only",)),
+        *(("--profiling.capture-training-inputs",) if capture_training_inputs else ()),
     ]
     exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     # Sandbox CPU numbering varies; take the first available cores for simulator shards.
@@ -203,16 +228,22 @@ def bench(
     arguments = " ".join(argument if argument == "$CPUS" else shlex.quote(argument) for argument in argv)
     command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {arguments}"
     code = _run(sandbox, command)
-    if _run(sandbox, f"test -d {shlex.quote(str(output))}"):
+    startup = output.with_name(f"{output.name}-startup")
+    directories = [path for path in (output, startup) if not _run(sandbox, f"test -d {shlex.quote(str(path))}")]
+    if not directories:
         print("no report written", flush=True)
         return code
     # Traces and reports go to one local directory per run for offline analysis.
     local = LOCAL_RESULTS / "runs" / name
     local.mkdir(parents=True)
-    for path in _capture(sandbox, f"find {shlex.quote(str(output))} -type f").splitlines():
-        target = local / Path(path).relative_to(output)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(sandbox.filesystem.read_bytes(path))
+    for directory in directories:
+        prefix = local / "startup" if directory == startup else local
+        for path in _capture(sandbox, f"find {shlex.quote(str(directory))} -type f -print0").split("\0"):
+            if not path:
+                continue
+            target = prefix / Path(path).relative_to(directory)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(sandbox.filesystem.read_bytes(path))
     print(f"report: {local}", flush=True)
     return code
 
@@ -237,7 +268,11 @@ def main(args: Args) -> None:
                 args.rollout_frames,
                 full=args.full,
                 windows_per_step=args.windows_per_step,
+                actor_microbatches=args.actor_microbatches,
+                decisions_per_window=args.decisions_per_window,
+                capture_training_inputs=args.capture_training_inputs,
                 cache_root=args.cache_root,
+                compile_threads=args.compile_threads,
             )
             for matches in args.matches_per_shard
         ]

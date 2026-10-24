@@ -4,6 +4,11 @@ Treatment: PPO from O64 `step-0098304.pt` for 256 updates with damage 0.1,
 stock 120 and deciding-stock 120. Control: frozen copies of that checkpoint.
 Keep seed 65, the full-corpus training identity counts, ranked-1 matchup prior,
 stages, optimizer, three snapshot slots and held-out start grid fixed.
+The approved actor treatment trains every valid decision in each 128-frame
+window: 64 at replan 2 and 32 at replan 4. Set
+`decisions_per_window="all"`; integer values 1..16 retain sampled training.
+Cadence groups use at most 64 windows per chunk and accumulate one optimizer
+step over the configured `windows_per_step`.
 
 [production-256.json](production-256.json) records run choices. It is a planning
 manifest, not trainer input. Capacity fields are required placeholders. The

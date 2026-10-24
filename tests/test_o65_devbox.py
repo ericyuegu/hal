@@ -28,7 +28,7 @@ class Sandbox:
     def exec(self, shell: str, flag: str, command: str, *, workdir: str) -> Process:
         assert (shell, flag, workdir) == ("bash", "-c", str(o65_devbox.launch.REMOTE_ROOT))
         self.commands.append(command)
-        return Process(int(command.startswith("{\ntest -d ")))
+        return Process(int(command.startswith("exec 2>&1\ntest -d ")))
 
 
 @pytest.mark.parametrize("cache_root", [Path("/cache"), Path("/tmp/tick cache")])
@@ -38,12 +38,12 @@ def test_benchmark_uses_declared_cache_root(cache_root: Path) -> None:
         o65_devbox.bench(cast(modal.Sandbox, sandbox), 64, 128, full=False, windows_per_step=64, cache_root=cache_root)
         == 0
     )
-    arguments = shlex.split(sandbox.commands[0])
+    arguments = shlex.split(sandbox.commands[1])
     for name, relative in (("TMPDIR", "tmp"), ("TORCHINDUCTOR_CACHE_DIR", "inductor"), ("TRITON_CACHE_DIR", "triton")):
         assert f"{name}={cache_root / relative}" in arguments
     output = Path(arguments[arguments.index("--output") + 1])
     assert output.parent == cache_root / "runs"
-    assert shlex.split(sandbox.commands[1])[1:4] == ["test", "-d", str(output)]
+    assert shlex.split(sandbox.commands[2])[2:5] == ["test", "-d", str(output)]
 
 
 def test_run_captures_stderr_from_every_command() -> None:
