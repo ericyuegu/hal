@@ -1,6 +1,7 @@
 """Attribute asynchronous GPU kernels by CPU launch, not GPU execution time."""
 
 import copy
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -61,6 +62,10 @@ def test_actor_trace_times_one_captured_backward(tmp_path: Path, monkeypatch: py
     ids = torch.tensor([index])
     positions = torch.arange(16)[None].expand(len(windows.rows), -1)
     part = windows.take(ids, positions, ids >= 0)
+    part = dataclasses.replace(
+        part,
+        slots=dataclasses.replace(part.slots, forced_queue_WKD4=torch.zeros(1, 16, 3, 4, dtype=torch.long)),
+    )
     context, observed = run.policy._packed_context(part.inputs()[:5])
     checkpoint = EvaluationCheckpoint(
         copy.deepcopy(run.policy.model).cuda(), run.policy.statistics, "a" * 64, "b" * 64, {}
@@ -94,6 +99,8 @@ def test_actor_trace_times_one_captured_backward(tmp_path: Path, monkeypatch: py
     actor_trace.main(actor_trace.Args(inputs, windows=1, output=output))
     report = json.loads(output.with_suffix(".report.json").read_text())
     seconds = report["graph_replay_seconds"]
+    assert report["queue_capacity"] == 3
+    assert report["decisions"] == 16
     assert len(report["graph_replay_samples"]) == 10
     assert all(value > 0 for value in seconds.values())
     assert seconds["total"] == pytest.approx(sum(value for name, value in seconds.items() if name != "total"))

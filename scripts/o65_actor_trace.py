@@ -12,13 +12,16 @@ from torch.profiler import record_function
 
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import sha256
+from hal.inference.column_context import PackedColumnContextBuilder
 from hal.inference.graphed_actor import GraphedActorStep
+from hal.models.attention import Trunk
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
-from scripts.o65_replay_probe import history
+from hal.sim import native
+from hal.wire import ACTION_DIM
 from scripts.o65_replay_probe import load_cohort
 
 
@@ -30,6 +33,12 @@ class Args:
     windows: int = 64
     compiled_trunk: bool = True
     output: Path = Path("/cache/train-actor-split")
+
+
+def actor_history(trunk: Trunk, tokens: torch.Tensor) -> torch.Tensor:
+    """Match the trainer's compiled history boundary, including zero padding."""
+    with torch.autocast(tokens.device.type, dtype=torch.bfloat16, enabled=tokens.is_cuda, cache_enabled=False):
+        return trunk(tokens, torch.zeros(len(tokens), dtype=torch.long, device=tokens.device))
 
 
 def stage_seconds(path: Path) -> dict[str, float]:
@@ -66,26 +75,21 @@ def main(args: Args) -> None:
     model.trunk.resolve_attention("cuda")
     saved = load_cohort(args.inputs, checkpoint.checkpoint_sha256, args.cohort)
     original = ReplaySlots(*(value.to(device) for value in saved["inputs"][5:]))
-    first = original.valid_WK.long().argmax(-1, keepdim=True)
-    delays = original.delay_WK.gather(1, first)[:, 0]
-    replans = original.replan_WK.gather(1, first)[:, 0]
-    at = int(torch.nonzero(original.valid_WK.any(-1))[0, 0])
-    delay, replan = int(delays[at]), int(replans[at])
-    ids = torch.nonzero(original.valid_WK.any(-1) & (delays == delay) & (replans == replan)).flatten()[: args.windows]
-    count = len(ids)
-    ids = torch.nn.functional.pad(ids, (0, args.windows - count))
-    capacity = min(original.valid_WK.shape[1], 128 // replan)
+    count = min(args.windows, len(original.valid_WK))
+    ids = torch.nn.functional.pad(torch.arange(count, device=device), (0, args.windows - count))
+    capacity = original.valid_WK.shape[1]
     fields = []
     for field in dataclasses.fields(original):
         value = getattr(original, field.name)[ids]
-        if field.name != "history_starts_WL":
-            value = value[:, :capacity]
-        if field.name == "forced_queue_WKD4":
-            value = value[:, :, :delay].contiguous()
         if field.name == "valid_WK":
             value = value & (torch.arange(args.windows, device=device) < count)[:, None]
         fields.append(value)
     slots = ReplaySlots(*fields)
+    if not bool(slots.valid_WK.any()):
+        raise ValueError("actor trace needs valid recorded decisions")
+    configurations = sorted(
+        set(zip(slots.delay_WK[slots.valid_WK].tolist(), slots.replan_WK[slots.valid_WK].tolist(), strict=True))
+    )
     context = {name: value.to(device)[ids] for name, value in saved["context"].items()}
     observed = saved["observed"].to(device)[ids]
     selected = saved["selected"].to(device)[ids, :capacity] & slots.valid_WK
@@ -93,13 +97,13 @@ def main(args: Args) -> None:
     sigma = saved["advantage_sigma"]
     trunk = (
         torch.compile(
-            history,
+            actor_history,
             fullgraph=True,
             dynamic=False,
             options={"triton.cudagraphs": False, "emulate_precision_casts": True},
         )
         if args.compiled_trunk
-        else history
+        else actor_history
     )
     decoder = torch.compile(
         replay_windows,
@@ -110,7 +114,7 @@ def main(args: Args) -> None:
     parameters = model.actor_parameters()
     with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
         tokens = model.context_tokens(context, observed)
-        hidden = trunk(model.trunk, tokens, torch.zeros(args.windows, dtype=torch.long, device=device))
+        hidden = trunk(model.trunk, tokens)
     reference = decoder(model, hidden, observed, slots, grad=True)
     targets = ActorTargets(
         saved["behavior"].to(device)[ids, :capacity],
@@ -131,7 +135,7 @@ def main(args: Args) -> None:
         ):
             tokens = model.context_tokens(context, observed)
         with record_function("o65_actor/trunk_forward"):
-            hidden = trunk(model.trunk, tokens, torch.zeros(args.windows, dtype=torch.long, device=device))
+            hidden = trunk(model.trunk, tokens)
         # Split backward at the history boundary to attribute GPU work. Shared
         # codec parameters receive contributions from both passes in training.
         leaf = hidden.detach().requires_grad_(True)
@@ -169,24 +173,29 @@ def main(args: Args) -> None:
         events[5].record()
         return gradient
 
-    names = tuple(context)
-    inputs = (observed, *(getattr(slots, field.name) for field in dataclasses.fields(slots)), *context.values())
-    slot_count = len(dataclasses.fields(slots))
+    builder = PackedColumnContextBuilder(checkpoint.statistics, native.OBSERVATION_FIELDS, device)
+    inputs = (
+        *(value.to(device)[ids] for value in saved["inputs"][:5]),
+        *(getattr(slots, field.name) for field in dataclasses.fields(slots)),
+    )
 
     def replay_forward(values: tuple[torch.Tensor, ...]) -> ReplayOutput:
-        actions = values[0]
-        current_slots = ReplaySlots(*values[1 : 1 + slot_count])
-        current_context = dict(zip(names, values[1 + slot_count :], strict=True))
         events[0].record()
+        records, actions, sides, identities, lengths = values[:5]
+        current_context = builder(records, actions, sides, identities, lengths)
+        length = records.shape[1]
+        ego = actions.gather(2, sides[:, None, None, None].expand(-1, length, 1, ACTION_DIM)).squeeze(2)
+        valid = torch.arange(length, device=device)[None] < lengths[:, None]
+        current_observed = torch.where(valid[..., None], model.codec.quantize(ego), 0)
         with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
-            tokens = model.context_tokens(current_context, actions)
+            tokens = model.context_tokens(current_context, current_observed)
         events[1].record()
         with torch.enable_grad():
-            hidden = trunk(model.trunk, tokens, torch.zeros(args.windows, dtype=torch.long, device=device))
+            hidden = trunk(model.trunk, tokens)
             hidden.register_hook(decoder_backward_done)
             tokens.register_hook(trunk_backward_done)
             events[2].record()
-            output = decoder(model, hidden, actions, current_slots, grad=True)
+            output = decoder(model, hidden, current_observed, ReplaySlots(*values[5:]), grad=True)
         events[3].record()
         return output
 
@@ -226,10 +235,10 @@ def main(args: Args) -> None:
         "probe_sha256": sha256(Path(__file__)),
         "cohort": args.cohort,
         "windows": args.windows,
-        "live_windows": count,
+        "live_windows": int(slots.valid_WK.any(-1).sum()),
         "decisions": capacity,
-        "delay": delay,
-        "replan": replan,
+        "queue_capacity": slots.forced_queue_WKD4.shape[2],
+        "configurations": configurations,
         "compiled_trunk": args.compiled_trunk,
         "seed": 65,
         "torch": str(torch.__version__),
@@ -247,7 +256,8 @@ def main(args: Args) -> None:
         },
         "graph_replay_samples": replay_samples,
         "graph_replay_trace": str(replay_trace),
-        "graph_replay_boundaries": "CUDA events and history gradient hooks in one actor backward; decoder backward includes loss; other includes gradient zeroing, observation backward and leaf accumulation",
+        "graph_replay_boundaries": "CUDA events and history gradient hooks in one actor backward; observation includes packed context construction; decoder backward includes loss; other includes gradient zeroing and observation backward; leaf accumulation can occur in either backward span or other",
+        "measurement_scope": "one actor graph with private gradients/pool; partial windows repeat the first context with invalid slots; the diagnostic trace includes observation backward in trunk_backward, while graph timing puts it in other",
     }
     args.output.with_suffix(".report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)
