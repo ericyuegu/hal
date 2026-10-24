@@ -1,6 +1,7 @@
 """Local checks for the O65 torchrun launch and explicit B200 budget."""
 
 import dataclasses
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,67 @@ import pytest
 import tyro
 
 from scripts import o65_production
+
+
+def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_065_loop import exp
+    from test_o65_pilot import write_boundary
+
+    args = production_args(tmp_path)
+    source = "a" * 40
+    commands: list[list[str]] = []
+
+    def execute(command: list[str], **kwargs: object) -> None:
+        commands.append(command)
+        result = args.output / "held-out/results.json"
+        result.parent.mkdir(exist_ok=True)
+        result.write_text("{}")
+
+    monkeypatch.setenv("WANDB_API_KEY", "test")
+    monkeypatch.setattr(o65_production, "sha256", lambda path: o65_production.O64_SHA256)
+    monkeypatch.setattr(o65_production.subprocess, "check_output", lambda *args, **kwargs: source + "\n")
+    monkeypatch.setattr(o65_production.subprocess, "run", execute)
+    monkeypatch.setattr(o65_production.self_play_publication, "publish", lambda args: None)
+    o65_production.main(args)
+    checkpoint = write_boundary(args.output / "train/checkpoints", 32)
+    source = "b" * 40
+    with pytest.raises(ValueError, match="identity differs"):
+        o65_production.main(args)
+    resumed = dataclasses.replace(args, resume_source="a" * 40)
+    with pytest.raises(ValueError, match="identity differs"):
+        o65_production.main(dataclasses.replace(resumed, windows_per_step=2))
+    o65_production.main(resumed)
+    command = commands[-1]
+    parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
+    assert parsed.resume == checkpoint and parsed.resume_source == "a" * 40
+    history = [json.loads(line) for line in (args.output / "source-transitions.jsonl").read_text().splitlines()]
+    assert len(history) == 1 and history[0]["update"] == 32
+    assert history[0]["previous"]["git_sha"] == "a" * 40
+    assert history[0]["current"]["git_sha"] == "b" * 40
+    assert o65_production.resume_settings(resumed) == o65_production.resume_settings(args)
+
+
+def test_launcher_passes_explicit_resume_source(tmp_path: Path) -> None:
+    from test_o65_modal import launcher
+
+    request = launcher.Request(
+        "resume",
+        "b" * 40,
+        mode="ddp",
+        gpus=2,
+        matches=16,
+        windows_per_step=1,
+        damage_weight=0.1,
+        game_win_weight=120,
+        resume_source="a" * 40,
+    )
+    command = launcher.command(request, (0, 1))
+    parsed = tyro.cli(o65_production.Args, args=command[3:])
+    assert parsed.resume_source == "a" * 40
+    with pytest.raises(ValueError, match="full Git SHA"):
+        dataclasses.replace(request, resume_source="short")
 
 
 def test_single_gpu_pilot_and_torchrun_commands(tmp_path: Path) -> None:

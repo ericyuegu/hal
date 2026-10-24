@@ -6,11 +6,13 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import modal
+from boto3.s3.transfer import TransferConfig
 
 from hal import r2
 from hal.eval.self_play_checkpoint import read_training_manifest
@@ -146,7 +148,10 @@ class CheckpointPublisher:
     def submit(self, checkpoint: Path, *, metadata: dict[Path, bytes] | None = None) -> None:
         self.check()
         if len(self.pending) >= 2:
-            raise RuntimeError("checkpoint publication queue is full")
+            # Bound retained snapshots if storage cannot keep pace with training.
+            print("checkpoint_publication_backpressure waiting_for_oldest", flush=True)
+            self.pending[0].result()
+            self.check()
         if checkpoint.parent.resolve() != (self.args.source / "train/checkpoints").resolve():
             raise ValueError("publication checkpoint must belong to the pilot training directory")
         update = read_training_manifest(checkpoint)["update"]
@@ -172,6 +177,7 @@ class CheckpointPublisher:
                 elif source.relative_to(self.args.source) in metadata:
                     target.write_bytes(metadata[source.relative_to(self.args.source)])
             self.pending.append(self.executor.submit(publish_snapshot, self.args, snapshot))
+            print(f"checkpoint_publication_queued update={update}", flush=True)
             submitted = True
         finally:
             if not submitted:
@@ -190,8 +196,10 @@ class CheckpointPublisher:
 
 
 def publish_snapshot(args: Args, snapshot: tempfile.TemporaryDirectory[str]) -> None:
+    started = time.perf_counter()
     with snapshot as directory:
         publish(dataclasses.replace(args, source=Path(directory)))
+    print(f"checkpoint_publication_finished seconds={time.perf_counter() - started:.3f}", flush=True)
 
 
 def validate_args(args: Args) -> None:
@@ -214,9 +222,23 @@ def publish(args: Args) -> None:
     volume = modal.Volume.from_name(args.volume)
     volume.commit()
     client, bucket = r2.client(timeout_seconds=60), r2.bucket()
-    for relative, digest in hashes.items():
-        if previous.get(relative) != digest:
-            client.upload_file(str(args.destination / relative), bucket, f"{args.r2_prefix}/state/{relative}")
+    changed = [relative for relative, digest in hashes.items() if previous.get(relative) != digest]
+    manifests = [name for name in changed if Path(name).name.startswith("update-") and name.endswith(".json")]
+
+    def upload(relative: str) -> None:
+        client.upload_file(
+            str(args.destination / relative),
+            bucket,
+            f"{args.r2_prefix}/state/{relative}",
+            Config=TransferConfig(use_threads=False),
+        )
+
+    # Parallelize object latency, but expose manifests only after all shards arrive.
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="checkpoint-upload") as uploads:
+        for _ in uploads.map(upload, [name for name in changed if name not in manifests]):
+            pass
+    for relative in manifests:
+        upload(relative)
     record = {"format": "hal.o65.pilot-publication.v1", "files": hashes}
     temporary = args.destination / ".publication.partial"
     temporary.write_text(json.dumps(record, sort_keys=True))

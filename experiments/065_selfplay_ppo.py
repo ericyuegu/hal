@@ -6258,7 +6258,9 @@ class CheckpointWorker:
             self.executor.shutdown(wait=True)
 
 
-def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
+def restore_checkpoint(
+    trainer: Trainer, manifest_path: Path, provenance: dict[str, str], *, source_git_sha: str | None = None
+) -> None:
     manifest = read_training_manifest(manifest_path)
     distributed.validate_world_size(manifest["environment"]["world_size"])
     expected_version = DISTRIBUTED_TRAINING_VERSION if distributed.world_size() > 1 else CHECKPOINT_VERSION
@@ -6268,7 +6270,8 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         "configuration_sha256"
     ] != _configuration_digest(trainer):
         raise ValueError("resume configuration mismatch")
-    if manifest["environment"] != _environment() or manifest["provenance"] != provenance:
+    expected_provenance = provenance if source_git_sha is None else provenance | {"git_sha": source_git_sha}
+    if manifest["environment"] != _environment() or manifest["provenance"] != expected_provenance:
         raise ValueError("resume environment or checkpoint mismatch")
     paths: dict[str, Path] = {}
     for shard in manifest["shards"]:
@@ -6704,6 +6707,8 @@ def run_distributed_training(
                 (output / "head-start.json").write_text(json.dumps(dataclasses.asdict(head_start), indent=2))
                 wandb.log({"global_step": trainer.update, **head_start.metrics()})
         while trainer.update < updates:
+            if primary and publisher is not None:
+                publisher.check()
             warming = trainer.warming
             batch, metrics = trainer.run_update()
             del batch
@@ -6720,7 +6725,6 @@ def run_distributed_training(
                 checkpoint = save_checkpoint(trainer, output / "checkpoints", provenance)
                 if primary and publisher is not None:
                     publisher.submit(checkpoint)
-                    publisher.wait()
                 distributed.gather_objects(True)
 
 
@@ -6750,6 +6754,7 @@ class NativeCli:
     device: str = "cuda"
     max_frame: int = 28800
     resume: Path | None = None
+    resume_source: str | None = None
     resume_learner: Path | None = None
     training: TrainConfig = TrainConfig()
     verify_resume: bool = False
@@ -6763,6 +6768,12 @@ class NativeCli:
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.resume_source is not None and (
+            self.resume is None
+            or len(self.resume_source) != 40
+            or any(c not in "0123456789abcdef" for c in self.resume_source)
+        ):
+            raise ValueError("resume source requires an exact checkpoint and a full Git SHA")
         if self.measurement and (
             self.training.critic_warmup_updates
             or self.resume is not None
@@ -7021,7 +7032,7 @@ def train_native_rank(config: NativeCli) -> None:
             if config.training.head_start_frames:
                 head_start = trainer.head_start()
         else:
-            restore_checkpoint(trainer, config.resume, provenance)
+            restore_checkpoint(trainer, config.resume, provenance, source_git_sha=config.resume_source)
             trainer.capture_startup()
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)

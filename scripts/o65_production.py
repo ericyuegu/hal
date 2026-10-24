@@ -83,8 +83,15 @@ class Args:
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
+    resume_source: str | None = None
 
     def __post_init__(self) -> None:
+        if self.resume_source is not None and (
+            self.measurement
+            or len(self.resume_source) != 40
+            or any(c not in "0123456789abcdef" for c in self.resume_source)
+        ):
+            raise ValueError("resume source requires training and a full Git SHA")
         shards = shards_per_gpu(self.matches)
         if type(self.gpus) is not int or not 2 <= self.gpus <= 8:
             raise ValueError("O64 torchrun requires 2..8 GPUs")
@@ -214,6 +221,7 @@ def resume_settings(args: Args) -> dict[str, object]:
     # A replacement container may expose different virtual CPU IDs; they do not change the run.
     settings = json.loads(json.dumps(dataclasses.asdict(args), default=str))
     del settings["cpus"]
+    del settings["resume_source"]
     return settings
 
 
@@ -240,9 +248,11 @@ def main(args: Args) -> None:
     path = args.output / "production-identity.json"
     if not path.exists() and any(args.output.iterdir()):
         raise ValueError("existing O64 state has no source/input identity")
-    if path.exists() and json.loads(path.read_text()) != identity:
+    prior_identity = json.loads(path.read_text()) if path.exists() else identity
+    if prior_identity != identity and (
+        args.resume_source is None or prior_identity != identity | {"git_sha": args.resume_source}
+    ):
         raise ValueError("O64 source, settings or input identity differs on resume")
-    path.write_text(json.dumps(identity, indent=2))
     command = training_command(args)
     manifests = sorted((args.output / "train/checkpoints").glob("update-*.json"))
     previous = manifests[-1] if manifests else None
@@ -251,10 +261,31 @@ def main(args: Args) -> None:
         # The union argument must remain last for Tyro's nested CLI parser.
         position = command.index("publication:args")
         command[position:position] = ["--resume", str(previous)]
+        source = read_training_manifest(previous)["provenance"]["git_sha"]
+        if source != identity["git_sha"]:
+            if source != args.resume_source:
+                raise ValueError("checkpoint source differs from the explicit resume source")
+            position = command.index("publication:args")
+            command[position:position] = ["--resume-source", source]
         metrics = args.output / "train/metrics.jsonl"
         if metrics.is_file():
             retained = [line for line in metrics.read_text().splitlines() if json.loads(line)["global_step"] <= update]
             metrics.write_text("".join(line + "\n" for line in retained))
+    elif args.resume_source is not None:
+        raise ValueError("resume source requires an existing checkpoint")
+    if prior_identity != identity:
+        assert previous is not None
+        transition = {
+            "format": "hal.o65.source-transition.v1",
+            "previous": prior_identity,
+            "current": identity,
+            "checkpoint": str(previous),
+            "checkpoint_sha256": sha256(previous),
+            "update": update,
+        }
+        with (args.output / "source-transitions.jsonl").open("a") as history:
+            history.write(json.dumps(transition, sort_keys=True) + "\n")
+    path.write_text(json.dumps(identity, indent=2))
     environment = dict(os.environ)
     if not args.measurement:
         if not environment.get("WANDB_API_KEY"):

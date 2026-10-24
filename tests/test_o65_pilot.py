@@ -282,8 +282,6 @@ def test_publication_leaves_training_free_and_reports_worker_failure(
         assert run.update == 2 and not release.is_set()
         # The first snapshot's shards survive local compaction at update two.
         assert len(publisher.pending) == 2
-        with pytest.raises(RuntimeError, match="queue is full"):
-            publisher.submit(source / "train/checkpoints/update-00000002.json")
     finally:
         release.set()
         if fail:
