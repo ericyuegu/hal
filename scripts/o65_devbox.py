@@ -46,6 +46,7 @@ class Args:
     # bench: 512 windows exhaust memory at 1,024 matches on a B200.
     windows_per_step: int = 64
     actor_microbatches: int | None = None
+    decisions_per_window: int | Literal["all"] = "all"
     capture_training_inputs: bool = False
     # Use local sandbox disk if the shared cache volume reaches its inode limit.
     cache_root: Path = CACHE
@@ -142,6 +143,7 @@ def bench(
     full: bool,
     windows_per_step: int | None = None,
     actor_microbatches: int | None = None,
+    decisions_per_window: int | Literal["all"] = "all",
     capture_training_inputs: bool = False,
     cache_root: Path = CACHE,
     compile_threads: int = 16,
@@ -152,6 +154,10 @@ def bench(
         raise ValueError("sandbox cache root must be absolute")
     if compile_threads < 1:
         raise ValueError("compiler threads must be positive")
+    if decisions_per_window != "all" and (
+        type(decisions_per_window) is not int or not 1 <= decisions_per_window <= 16
+    ):
+        raise ValueError("decisions per window must be 'all' or an integer from 1 to 16")
     trainer_sha = hashlib.sha256(Path("experiments/065_selfplay_ppo.py").read_bytes()).hexdigest()
     if _run(sandbox, f"test \"$(sha256sum experiments/065_selfplay_ppo.py | cut -d ' ' -f1)\" = {trainer_sha}"):
         raise ValueError("remote trainer source differs from the worktree; restore the sandbox source and sync again")
@@ -208,6 +214,8 @@ def bench(
         "120",
         *(() if windows_per_step is None else ("--training.windows-per-step", str(windows_per_step))),
         *(() if actor_microbatches is None else ("--training.actor-microbatches", str(actor_microbatches))),
+        "--training.decisions-per-window",
+        str(decisions_per_window),
         "profiling:profile-config",
         "--profiling.warm-updates",
         "1",
@@ -256,6 +264,7 @@ def main(args: Args) -> None:
                 full=args.full,
                 windows_per_step=args.windows_per_step,
                 actor_microbatches=args.actor_microbatches,
+                decisions_per_window=args.decisions_per_window,
                 capture_training_inputs=args.capture_training_inputs,
                 cache_root=args.cache_root,
                 compile_threads=args.compile_threads,

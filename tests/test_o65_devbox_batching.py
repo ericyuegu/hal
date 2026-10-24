@@ -97,3 +97,18 @@ def test_bench_can_keep_compiler_files_and_reports_off_a_full_shared_volume() ->
         "TORCHINDUCTOR_COMPILE_THREADS=2",
     ):
         assert path in command
+
+
+@pytest.mark.parametrize("decisions", [1, 16, "all"])
+def test_bench_preserves_decision_milestone(decisions: int | str) -> None:
+    sandbox = Sandbox()
+    assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, decisions_per_window=decisions) == 0
+    assert f"--training.decisions-per-window {decisions} " in sandbox.commands[1][2]
+
+
+@pytest.mark.parametrize("decisions", [0, 17, True, "invalid"])
+def test_bench_rejects_invalid_decision_milestone(decisions: int | str) -> None:
+    sandbox = Sandbox()
+    with pytest.raises(ValueError, match="decisions per window"):
+        bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, decisions_per_window=decisions)
+    assert not sandbox.commands
