@@ -96,6 +96,7 @@ def test_prefix_attention_preserves_gradients() -> None:
     limits = lengths[:, None] - 3 + torch.arange(1, 4, device="cuda")[None]
     mask = torch.arange(65, device="cuda")[None, None] < limits[..., None]
     expected = F.scaled_dot_product_attention(query, key, value, attn_mask=mask[:, None])
+    expected = torch.where(mask.any(-1)[:, None, :, None], expected, 0)
     actual = torch.compile(prefix_attention, fullgraph=True, dynamic=False)(query, key, value, lengths, causal=True)
     gradient = torch.randn_like(actual)
     torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1.6e-2)
@@ -180,9 +181,15 @@ def test_prefix_cache_matches_masked_cache_through_restart_and_ticks() -> None:
     with torch.autocast("cuda", dtype=torch.bfloat16):
         for cache in caches:
             cache.restart(previous, lengths)
+        torch.testing.assert_close(caches[0].cache.positions, caches[1].cache.positions, atol=0, rtol=0)
+        valid = caches[0].cache.positions >= 0
         for layer in range(2):
+            # Left padding is outside the episode and has no cached-value contract.
             torch.testing.assert_close(
-                caches[0].cache.layers[layer], caches[1].cache.layers[layer], atol=3e-2, rtol=3e-2
+                caches[0].cache.layers[layer].permute(1, 3, 0, 2, 4)[valid],
+                caches[1].cache.layers[layer].permute(1, 3, 0, 2, 4)[valid],
+                atol=3e-2,
+                rtol=3e-2,
             )
         for step in range(6):
             tokens = torch.randn(batch, 2, 64, device=device)
