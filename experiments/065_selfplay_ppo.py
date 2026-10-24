@@ -1554,6 +1554,7 @@ class TransformerPolicy:
             self.post_startup_captures += 1
             raise RuntimeError(f"CUDA graph capture after startup: {key}")
         self.capture_count += 1
+        print(f"startup_graph rank={distributed.rank()} count={self.capture_count}", flush=True)
 
     @torch.no_grad()
     def _prepare_wire_tables(self) -> None:

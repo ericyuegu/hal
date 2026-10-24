@@ -3,6 +3,7 @@ import importlib.util
 import json
 import shlex
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -212,3 +213,30 @@ def test_learner_migration_uses_read_only_source_volume_and_new_run() -> None:
     for path in ("../" + source, "/" + source, source.replace("256", "255"), "o65-fixed-resume/" + source):
         with pytest.raises(ValueError):
             dataclasses.replace(request, resume_learner=path)
+
+
+def test_startup_deadline_stops_a_live_training_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(launcher, "REMOTE_ROOT", tmp_path)
+    pid_file = tmp_path / "pid"
+    code = f"import os,time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    started = time.monotonic()
+    with (tmp_path / "run.log").open("a") as log, pytest.raises(TimeoutError, match="no training update"):
+        launcher.run_pilot_child([sys.executable, "-c", code], dict(launcher.os.environ), log, 10, startup_timeout=0.5)
+    assert time.monotonic() - started < 5
+    with pytest.raises(ProcessLookupError):
+        launcher.os.kill(int(pid_file.read_text()), 0)
+
+
+@pytest.mark.parametrize("progress", ["update=1 warming=1", "final_evaluation_started"])
+def test_training_or_resumed_evaluation_ends_the_startup_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, progress: str
+) -> None:
+    monkeypatch.setattr(launcher, "REMOTE_ROOT", tmp_path)
+    code = f"import time; print({progress!r}, flush=True); time.sleep(0.8)"
+    with (tmp_path / "run.log").open("a") as log:
+        assert (
+            launcher.run_pilot_child(
+                [sys.executable, "-c", code], dict(launcher.os.environ), log, 5, startup_timeout=0.5
+            )
+            == 0
+        )

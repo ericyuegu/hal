@@ -29,6 +29,7 @@ dependencies = [
     "s3fs>=2025",
     "scipy>=1.17.1",
     "torch==2.11.0",
+    "triton==3.6.0; sys_platform == 'linux'",
     "tqdm",
     "tyro",
     "vastai>=1.0.13",

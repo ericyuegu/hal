@@ -469,7 +469,9 @@ def run_child(request: Request, output: Path, started: float) -> int:
     if request.mode == "ddp":
         env.update(
             TORCHINDUCTOR_CACHE_DIR=str(COMPILE_CACHE / "inductor"),
-            TRITON_CACHE_DIR=str(COMPILE_CACHE / "triton"),
+            TRITON_CACHE_DIR=str(output / "triton"),
+            HAL_TRITON_CACHE_SOURCE=str(COMPILE_CACHE / "triton"),
+            TRITON_CACHE_MANAGER="hal.inference.triton_cache:LocalCacheManager",
         )
     Path(env["TMPDIR"]).mkdir()
     identity = {
@@ -528,7 +530,13 @@ def run_child(request: Request, output: Path, started: float) -> int:
                 (output / "measurement-sweep.json").write_text(json.dumps(results, indent=2))
             return next((row["exit_code"] for row in results if row["exit_code"]), 0)
         if request.mode in ("pilot", "ddp"):
-            return run_pilot_child(argv, env, log, remaining_seconds(request, time.time()) - 90)
+            return run_pilot_child(
+                argv,
+                env,
+                log,
+                remaining_seconds(request, time.time()) - 90,
+                startup_timeout=900 if request.mode == "ddp" else None,
+            )
         result = subprocess.run(
             argv,
             cwd=REMOTE_ROOT,
@@ -540,12 +548,40 @@ def run_child(request: Request, output: Path, started: float) -> int:
     return result.returncode
 
 
-def run_pilot_child(argv: list[str], env: dict[str, str], log: TextIO, timeout: float) -> int:
+def run_pilot_child(
+    argv: list[str],
+    env: dict[str, str],
+    log: TextIO,
+    timeout: float,
+    *,
+    startup_timeout: float | None = None,
+) -> int:
     process = subprocess.Popen(
         argv, cwd=REMOTE_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
     )
     try:
-        return process.wait(timeout=timeout)
+        if startup_timeout is None:
+            return process.wait(timeout=timeout)
+        started = time.monotonic()
+        ready = False
+        with Path(log.name).open() as progress:
+            while True:
+                elapsed = time.monotonic() - started
+                if elapsed >= timeout:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                if not ready and elapsed >= startup_timeout:
+                    raise TimeoutError(
+                        f"O65 produced no training update within {startup_timeout}s; stopping all ranks"
+                    )
+                try:
+                    return process.wait(
+                        timeout=min(5.0, timeout - elapsed, startup_timeout if ready else startup_timeout - elapsed)
+                    )
+                except subprocess.TimeoutExpired:
+                    for line in progress:
+                        print(line, end="", flush=True)
+                        if line.startswith(("update=", "final_evaluation_started")):
+                            ready = True
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)

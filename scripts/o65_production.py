@@ -270,6 +270,7 @@ def main(args: Args) -> None:
         with (args.output / "held-out-consumed.json").open("x") as claim:
             json.dump({"update": args.updates, "cadence": [18, 2], "u": 0.95, "lambda": 1, "games": 384}, claim)
         self_play_publication.publish(publication)
+        print("final_evaluation_started", flush=True)
         subprocess.run(evaluation_command(args), cwd=ROOT, env=environment, check=True)
     self_play_publication.publish(publication)
 
