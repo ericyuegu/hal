@@ -180,6 +180,7 @@ def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor,
     if lengths.shape != (batch,):
         raise ValueError("prefix attention lengths must be [B]")
     if query.device.type == "cuda" and torch.compiler.is_compiling() and query.shape[-1] >= 16:
+        direct = causal and queries <= 4 and query.shape[1] > 1 and not torch.is_grad_enabled()
 
         def keep(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
             return kv < (lengths[b] - queries + q + 1 if causal else lengths[b])
@@ -190,9 +191,18 @@ def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor,
             indices = torch.arange((capacity + block_size - 1) // block_size, device=query.device, dtype=torch.int32)
             # Forward reads only K/V block lists. The transposed Q lists are
             # needed for gradients; constructing them sorts block indices.
+            counts = total_blocks.to(torch.int32)[:, None, None]
+            blocks = indices[None, None, None].expand(batch, 1, 1, -1)
+            if direct:
+                # Torch 2.11's direct forward assumes contiguous batch/head
+                # block lists. Its decode kernel also supports broadcast strides.
+                # Remove expansion when forward respects both strides and the
+                # mixed-length prefix CUDA regression passes with broadcast lists.
+                counts = counts.expand(batch, query.shape[1], 1).contiguous()
+                blocks = blocks.expand(batch, query.shape[1], 1, -1).contiguous()
             block_mask = BlockMask.from_kv_blocks(
-                total_blocks.to(torch.int32)[:, None, None],
-                indices[None, None, None].expand(batch, 1, 1, -1),
+                counts,
+                blocks,
                 BLOCK_SIZE=(128, block_size),
                 mask_mod=keep,
                 seq_lengths=(queries, capacity),
@@ -200,6 +210,20 @@ def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor,
             )
         else:
             block_mask = create_block_mask(keep, batch, None, queries, capacity, device=query.device)
+        # Torch 2.11's decode lowering writes split accumulators and reduces
+        # them even when batch * heads already fills the GPU with one split.
+        # The direct forward kernel streams the same cache without that chain.
+        if direct:
+            return cast(
+                Tensor,
+                flex_attention(
+                    query,
+                    key,
+                    value,
+                    block_mask=block_mask,
+                    kernel_options={"FORCE_USE_FLEX_ATTENTION": True, "BLOCK_M": 16, "BLOCK_N": 64},
+                ),
+            )
         return cast(Tensor, flex_attention(query, key, value, block_mask=block_mask))
     slots = torch.arange(capacity, device=query.device)
     limits = lengths[:, None] - queries + torch.arange(1, queries + 1, device=query.device)[None]
