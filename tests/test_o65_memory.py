@@ -1,5 +1,8 @@
+import copy
 import dataclasses
+import json
 import weakref
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -54,6 +57,49 @@ def test_memory_inventory_counts_views_once() -> None:
     assert exp.tensor_storage_bytes({"base": value, "view": (value[:3],)}, seen) == value.untyped_storage().nbytes()
     assert exp.tensor_storage_bytes(value[3:], seen) == 0
     assert exp.tensor_storage_bytes(value.clone(), seen) == value.untyped_storage().nbytes()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_inventory_preserves_large_graph_pool_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = torch.ones(4, device="cuda")
+    source.square()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(257):
+            graph = torch.cuda.CUDAGraph()
+            graph.capture_begin()
+            output = source.square()
+            graph.capture_end()
+    torch.cuda.current_stream().wait_stream(stream)
+    assert max(graph.pool()) > 256
+    del graph, output
+    run = transformer_trainer("cuda", decoder_precision="bf16")
+    run.reference.prepare_tick_weights()
+    run.reference.reference_forward_model = copy.deepcopy(run.reference.model)
+    call = exp.CapturedCall(lambda: source.square(), (source,), device=source.device)
+    run.policy.tick_graphs[((run.engine.rings[0], (0, 4)), 1, 4, 4)] = call
+    run.startup_memory.output = tmp_path
+    snapshot = torch.cuda.memory_snapshot
+    expected = [
+        segment for segment in snapshot(include_traces=False) if segment["segment_pool_id"] == call.graph.pool()
+    ]
+
+    def safe_snapshot(mempool_id: tuple[int, int] | None = None, include_traces: bool = True) -> list[dict[str, Any]]:
+        # Reject the unsafe binding before it can corrupt this test process.
+        assert mempool_id is None
+        return snapshot(include_traces=include_traces)
+
+    monkeypatch.setattr(torch.cuda, "memory_snapshot", safe_snapshot)
+    run.write_memory_inventory("startup")
+    report = json.loads((tmp_path / "memory-inventory-startup.json").read_text())
+    assert report["pools"][str(call.graph.pool())] == {
+        "allocated_bytes": sum(segment["allocated_size"] for segment in expected),
+        "reserved_bytes": sum(segment["total_size"] for segment in expected),
+    }
+    assert report["unique_storage_bytes"]["policy1_reference_buffers"] > 0
+    call.graph.replay()
+    torch.testing.assert_close(call.output, source.square(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("extra", ["reference", "mask"])

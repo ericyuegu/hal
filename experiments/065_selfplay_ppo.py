@@ -4881,6 +4881,10 @@ class Trainer:
         }
         graphs: list[dict[str, object]] = []
         pools: dict[str, dict[str, int]] = {}
+        # Torch 2.11.0's filtered snapshot binding decrefs borrowed pool IDs.
+        # IDs above 256 can corrupt Python memory. Filter the default snapshot
+        # here; remove this workaround after that binding has a tested fix.
+        segments = torch.cuda.memory_snapshot(include_traces=False)
         for index, policy in enumerate(engine.execution_policies()):
             assert isinstance(policy, TransformerPolicy)
             categories[f"policy{index}_weights"] = tuple(policy.model.parameters())
@@ -4890,7 +4894,11 @@ class Trainer:
             ]
             if policy.reference_forward_model is not None:
                 categories[f"policy{index}_reference_weights"] = tuple(policy.reference_forward_model.parameters())
+                categories[f"policy{index}_reference_buffers"] = tuple(policy.reference_forward_model.buffers())
             categories[f"policy{index}_actor_gradients"] = policy.actor_gradients
+            categories[f"policy{index}_parameter_gradients"] = tuple(
+                parameter.grad for parameter in policy.model.parameters()
+            )
             for kind, calls in (
                 ("tick", policy.tick_graphs),
                 ("restart", policy.restart_graphs),
@@ -4899,12 +4907,13 @@ class Trainer:
                 ("actor", {key: step.captured for key, step in policy.actor_graphs.items()}),
             ):
                 for key, call in calls.items():
-                    pool = str(call.graph.pool())
+                    pool_id = call.graph.pool()
+                    pool = str(pool_id)
                     if pool not in pools:
-                        segments = torch.cuda.memory_snapshot(call.graph.pool(), include_traces=False)
+                        selected = [segment for segment in segments if segment["segment_pool_id"] == pool_id]
                         pools[pool] = {
-                            "reserved_bytes": sum(segment["total_size"] for segment in segments),
-                            "allocated_bytes": sum(segment["allocated_size"] for segment in segments),
+                            "reserved_bytes": sum(segment["total_size"] for segment in selected),
+                            "allocated_bytes": sum(segment["allocated_size"] for segment in selected),
                         }
                     graphs.append({"policy": index, "kind": kind, "key": str(key), "pool": pool})
                     categories[f"policy{index}_{kind}_{key}_inputs"] = call.inputs
