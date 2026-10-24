@@ -341,6 +341,27 @@ def test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks()
         assert reserved >= allocated > 0
     run.run_update()
     assert run.policy.post_startup_captures == run.reference.post_startup_captures == 0
+    references = tuple(run.reference.reference_graphs.values())
+    actors = tuple(run.policy.actor_graphs.values())
+    nonzero = False
+    for actor in actors:
+        actor.captured.graph.replay()
+        expected = actor.evaluation()
+        expected_loss = actor.captured.output[0].loss.clone()
+        gradients = tuple(value.clone() for value in actor.gradients)
+        nonzero |= any(bool(value.any()) for value in gradients)
+        # Production replay order differs from the interleaved capture order.
+        for reference in reversed(references):
+            reference.graph.replay()
+        for other in reversed(actors):
+            other.captured.graph.replay()
+        actor.captured.graph.replay()
+        actual = actor.evaluation()
+        torch.testing.assert_close(actor.captured.output[0].loss, expected_loss, rtol=0, atol=0)
+        torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=0, atol=0)
+        for got, saved in zip(actor.gradients, gradients, strict=True):
+            torch.testing.assert_close(got, saved, rtol=1e-5, atol=1e-7)
+    assert nonzero
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
