@@ -80,6 +80,9 @@ decisions per second. 256 updates take about 1.9 hours plus startup.
 
 ## Before the 8xB200 run
 
+0. The first four-group bench ran out of GPU memory in startup capture (176 GiB allocated, 93.7 GiB
+   in graph pools). The policy keys its trunk KV cache and tick and restart graphs by group, so all
+   four groups hold their own copies. The integration agent is making the groups share them.
 1. Read the merged four-group bench: update time, memory per phase, host RAM, group switch cost,
    game length, gradient-noise comparison.
 2. Fill `active_matches_per_gpu`, `windows_per_step` and `actor_microbatches` in
