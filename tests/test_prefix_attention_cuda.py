@@ -105,6 +105,32 @@ def test_prefix_attention_preserves_gradients() -> None:
         torch.testing.assert_close(actual_gradient, expected_gradient, atol=3.2e-2, rtol=3.2e-2)
 
 
+@pytest.mark.parametrize("indexed", [False, True])
+@torch.no_grad()
+def test_dynamic_prefix_attention_preserves_distinct_row_lengths(indexed: bool) -> None:
+    torch.manual_seed(181)
+    query = torch.randn(6, 2, 21, 32, device="cuda", dtype=torch.bfloat16)
+    key, value = torch.randn(2, 2, 6, 259, 32, device="cuda", dtype=torch.bfloat16).transpose(1, 2).unbind(0)
+    lengths = torch.tensor([0, 1, 20, 21, 258, 259], device="cuda")
+    rows = torch.tensor([4, 1, 4, 0, 3, 3], device="cuda")
+    operation = indexed_prefix_attention if indexed else prefix_attention
+    compiled = torch.compile(operation, fullgraph=True, dynamic=True, options={"triton.cudagraphs": False})
+    for _ in range(2):
+        actual = (
+            compiled(query, key, value, lengths, rows)
+            if indexed
+            else compiled(query, key, value, lengths, causal=False)
+        )
+        expected = (
+            prefix_attention(query, key[rows], value[rows], lengths, causal=False)
+            if indexed
+            else prefix_attention(query, key, value, lengths, causal=False)
+        )
+        torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1.6e-2)
+        lengths.copy_(lengths.flip(0))
+        rows.copy_(rows.flip(0))
+
+
 @pytest.mark.parametrize("length", [21, 23, 24])
 @torch.no_grad()
 def test_aligned_short_attention_matches_unpadded_attention(length: int) -> None:

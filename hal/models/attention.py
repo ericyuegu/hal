@@ -191,15 +191,12 @@ def prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths: Tensor,
             indices = torch.arange((capacity + block_size - 1) // block_size, device=query.device, dtype=torch.int32)
             # Forward reads only K/V block lists. The transposed Q lists are
             # needed for gradients; constructing them sorts block indices.
-            counts = total_blocks.to(torch.int32)[:, None, None]
-            blocks = indices[None, None, None].expand(batch, 1, 1, -1)
-            if direct:
-                # Torch 2.11's direct forward assumes contiguous batch/head
-                # block lists. Its decode kernel also supports broadcast strides.
-                # Remove expansion when forward respects both strides and the
-                # mixed-length prefix CUDA regression passes with broadcast lists.
-                counts = counts.expand(batch, query.shape[1], 1).contiguous()
-                blocks = blocks.expand(batch, query.shape[1], 1, -1).contiguous()
+            # Torch 2.11.0's forward template assumes contiguous batch/head
+            # block lists, including when dynamic shapes disable decode dispatch.
+            # Remove when it respects both strides and the dynamic prefix CUDA
+            # regression passes with broadcast lists.
+            counts = total_blocks.to(torch.int32)[:, None, None].expand(batch, query.shape[1], 1).contiguous()
+            blocks = indices[None, None, None].expand(batch, query.shape[1], 1, -1).contiguous()
             block_mask = BlockMask.from_kv_blocks(
                 counts,
                 blocks,
@@ -273,8 +270,8 @@ def indexed_prefix_attention(query: Tensor, key: Tensor, value: Tensor, lengths:
         return (kv >= starts[b]) & (kv < starts[b] + lengths[b])
 
     block_mask = BlockMask.from_kv_blocks(
-        counts.to(torch.int32)[:, None, None],
-        blocks.to(torch.int32),
+        counts.to(torch.int32)[:, None, None].expand(batch, heads, 1).contiguous(),
+        blocks.to(torch.int32).expand(batch, heads, 1, -1).contiguous(),
         BLOCK_SIZE=(128, block_size),
         mask_mod=keep,
         seq_lengths=(queries, total * capacity),
