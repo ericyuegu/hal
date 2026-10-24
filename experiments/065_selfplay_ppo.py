@@ -4161,8 +4161,12 @@ def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF
     # KL validates and promotes probabilities to loss precision. Bound temporaries,
     # keeping each category reduction identical to the full-rollout operation.
     chunk = 4096
+    if executed_JF.ndim != 2 or executed_JF.shape[1] != 16 or executed_JF.dtype != torch.bool:
+        raise ValueError("KL execution mask must be boolean [decisions, 16]")
     rows = []
     for group, (p, q) in enumerate(zip(policy.distributions, reference.distributions, strict=True)):
+        if p.ndim != 3 or p.shape[1] != 4 or q.shape != p.shape or len(p) != len(executed_JF):
+            raise ValueError("KL distributions and execution mask must have matching decision rows")
         parts = []
         for start in range(0, len(p), chunk):
             stop = start + chunk

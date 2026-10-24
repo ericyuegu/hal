@@ -56,6 +56,19 @@ def test_memory_inventory_counts_views_once() -> None:
     assert exp.tensor_storage_bytes(value.clone(), seen) == value.untyped_storage().nbytes()
 
 
+@pytest.mark.parametrize("extra", ["reference", "mask"])
+def test_chunked_kl_rejects_unmatched_tail_rows(extra: str) -> None:
+    run = trainer("cpu")
+    batch = run.prepare(run.engine.collect(0))
+    p = torch.full((4103, 4, 2), 0.5)
+    q = torch.full((4104 if extra == "reference" else 4103, 4, 2), 0.5)
+    mask = torch.ones(4104 if extra == "mask" else 4103, 16, dtype=torch.bool)
+    old = dataclasses.replace(batch.old, distributions=(p,) * 4)
+    reference = dataclasses.replace(batch.old, distributions=(q,) * 4)
+    with pytest.raises(ValueError, match="matching decision rows"):
+        exp.factor_kl(old, reference, mask)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_reference_releases_unused_backward_graphs_without_changing_arithmetic(
     device: str, monkeypatch: pytest.MonkeyPatch
