@@ -102,7 +102,7 @@ The user approved launching the 8xB200 job for 1024 updates once the four-group 
 update near 26 s and memory with headroom. Keep 1024 active matches per GPU (8192 active, 32,768
 held across four groups). Every schedule constant written for 256 updates (checkpoint, snapshot,
 evaluation, warmup, any lr schedule) needs a deliberate value for 1024. Checkpoints are written by
-a background thread (`CheckpointPublisher`-style executor in `065_selfplay_ppo.py`); the final one
+a background thread (`CheckpointWorker` in `065_selfplay_ppo.py`); the final one
 is synchronous.
 
 Budget: Modal bills about $7.56 per B200-hour with 17 cores and 64 GiB, about $60 per hour for 8.
