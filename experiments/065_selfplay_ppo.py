@@ -5970,7 +5970,7 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
         identity["ranges"] = dataclasses.asdict(trainer.policy.model.ranges)
         identity["statistics"] = {key: dataclasses.asdict(value) for key, value in trainer.policy.statistics.items()}
     if distributed.world_size() > 1:
-        base = min(engine.matches)
+        base = min(engine.lane_roles)
         identity["world_size"] = distributed.world_size()
         identity["execution_device"] = trainer.policy.device.type
         identity["groups"] = [

@@ -65,12 +65,15 @@ def _distributed_worker(rank: int, rendezvous: str, directory: str) -> None:
         exp.restore_checkpoint(run, checkpoint, newer, source_git_sha=PROVENANCE["git_sha"])
         expected, _ = run.run_update()
         expected_weights = {name: value.clone() for name, value in run.policy.model.state_dict().items()}
-        exp.restore_checkpoint(run, checkpoint, newer, source_git_sha=PROVENANCE["git_sha"])
-        resumed, _ = run.run_update()
+        cold_engine = exp.RolloutEngine(run.engine.groups, run.policy, run.engine.sampler, {0: run.reference})
+        cold = exp.Trainer(cold_engine, run.config)
+        assert not cold.engine.matches
+        exp.restore_checkpoint(cold, checkpoint, newer, source_git_sha=PROVENANCE["git_sha"])
+        resumed, _ = cold.run_update()
         from test_065_loop import assert_batch_equal
 
         assert_batch_equal(expected, resumed)
-        for name, value in run.policy.model.state_dict().items():
+        for name, value in cold.policy.model.state_dict().items():
             torch.testing.assert_close(value, expected_weights[name], atol=0, rtol=0)
         dist.barrier()
     finally:
