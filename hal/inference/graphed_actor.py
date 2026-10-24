@@ -22,7 +22,7 @@ def _target_tensors(targets: ActorTargets) -> tuple[Tensor, ...]:
         targets.advantages_WK,
         targets.selected_WK,
         targets.kl_coefficient_WK,
-        *targets.reference_distributions,
+        *targets.reference_log_distributions,
         targets.advantage_mean,
         targets.advantage_sigma,
         targets.denominator,
@@ -62,7 +62,7 @@ class GraphedActorStep:
             raise ValueError("actor capture requires autograd outside inference_mode")
         if not inputs or not inputs[0].is_cuda or not parameters:
             raise ValueError("actor capture requires CUDA inputs and actor parameters")
-        if len(targets.reference_distributions) != 4:
+        if len(targets.reference_log_distributions) != 4:
             raise ValueError("actor capture requires four reference distributions")
         device = inputs[0].device
         if any(not p.requires_grad or p.device != device for p in parameters):
@@ -99,7 +99,7 @@ class GraphedActorStep:
                 result.loss.backward()
             detached = ReplayOutput(
                 output.log_probs_WKF.detach(),
-                tuple(p.detach() for p in output.distributions),
+                tuple(p.detach() for p in output.log_distributions),
                 output.factor_mask_WKF,
                 output.features,
             )
@@ -137,7 +137,7 @@ class GraphedActorStep:
         output = self.captured.output[1]
         return ReplayOutput(
             output.log_probs_WKF.clone(),
-            tuple(p.clone() for p in output.distributions),
+            tuple(p.clone() for p in output.log_distributions),
             output.factor_mask_WKF.clone(),
             ReplayCriticFeatures(*(getattr(output.features, field.name).clone() for field in fields(output.features))),
         )

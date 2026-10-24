@@ -183,7 +183,7 @@ def qualify(output: Path) -> dict[str, Any]:
 
         ref_output = ReplayOutput(
             take(full_reference.log_probs_WKF),
-            tuple(take(p) for p in full_reference.distributions),
+            tuple(take(p) for p in full_reference.log_distributions),
             take(full_reference.factor_mask_WKF),
             ReplayCriticFeatures(
                 *(
@@ -215,7 +215,7 @@ def qualify(output: Path) -> dict[str, Any]:
                 prepared.windows, prepared.placement.positions, prepared.placement.windows
             )
             repeated_target = dataclasses.replace(
-                target, reference_distributions=tuple(take(p) for p in again.distributions)
+                target, reference_log_distributions=tuple(take(p) for p in again.log_distributions)
             )
             _, output_again = policy.actor_step(windows, repeated_target, clip_epsilon=run.config.clip_epsilon)
             mask_again = output_again.factor_mask_WKF
@@ -358,8 +358,8 @@ def qualify(output: Path) -> dict[str, Any]:
                 "window_order": prepared.placement.windows,
                 "actor_features": dataclasses.asdict(actor_output.features),
                 "reference_features": dataclasses.asdict(ref_output.features),
-                "actor_distributions": tuple(p.detach() for p in actor_output.distributions),
-                "reference_distributions": tuple(p.detach() for p in ref_output.distributions),
+                "actor_distributions": tuple(p.detach() for p in actor_output.log_distributions),
+                "reference_log_distributions": tuple(p.detach() for p in ref_output.log_distributions),
                 "student": model.state_dict(),
                 "reference": reference.model.state_dict(),
                 "behavior": behavior,

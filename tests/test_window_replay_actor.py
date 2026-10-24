@@ -29,7 +29,7 @@ def targets_for(output: ReplayOutput) -> ActorTargets:
         torch.linspace(-2, 2, shape.numel(), device=device).reshape(shape),
         output.factor_mask_WKF.any(-1),
         torch.ones(shape, device=device) * 0.2,
-        tuple(p.detach().clone() for p in output.distributions),
+        tuple(p.detach().clone() for p in output.log_distributions),
         torch.tensor(0.1, device=device),
         torch.tensor(1.3, device=device),
         output.factor_mask_WKF.any(-1).sum().float(),
@@ -75,13 +75,13 @@ def test_regularized_chain_gradient_matches_enumerated_return(estimator: str, de
         path_kl = sum((log_p[row].exp() * (log_p[row] - log_q[row])).sum() for row in (0, 1 + first))
         objective = objective + probability * (reward - coefficient * sampled_kl)
         advantage = (reward - coefficient * (path_kl if estimator == "exact" else sampled_kl)).detach()
-        output = ReplayOutput(logs.reshape(1, 1, 16), tuple(distributions), mask, features)
+        output = ReplayOutput(logs.reshape(1, 1, 16), tuple(p.log() for p in distributions), mask, features)
         targets = ActorTargets(
             output.log_probs_WKF.detach(),
             advantage.reshape(1, 1),
             mask.any(-1),
             theta.new_full((1, 1), coefficient if estimator == "exact" else 0),
-            tuple(references),
+            tuple(p.log() for p in references),
             theta.new_tensor(0.4),
             theta.new_tensor(sigma),
             theta.new_tensor(1),
@@ -111,7 +111,7 @@ def test_actor_joint_ratio_masks_and_stop_gradients() -> None:
         "denominator",
     ):
         getattr(targets, field).requires_grad_(True)
-    for p in targets.reference_distributions:
+    for p in targets.reference_log_distributions:
         p.requires_grad_(True)
     actual = actor_loss(output, targets)
     count = output.factor_mask_WKF.sum(-1)
@@ -124,7 +124,7 @@ def test_actor_joint_ratio_masks_and_stop_gradients() -> None:
     assert targets.advantage_mean.grad is None
     assert targets.advantage_sigma.grad is None
     assert targets.denominator.grad is None
-    assert all(p.grad is None for p in targets.reference_distributions)
+    assert all(p.grad is None for p in targets.reference_log_distributions)
     for p in policy.critic_parameters():
         assert p.grad is None
     assert any(p.grad is not None and bool(p.grad.any()) for p in policy.actor_parameters())
@@ -142,7 +142,7 @@ def test_actor_ignores_nan_padding_and_matches_enumerated_objective() -> None:
     features = replay_windows(policy, hidden, observed, slots, grad=False).features
     probabilities = p.expand(1, 2, 4, 3)
     logs = p[0].log().expand(1, 2, 16)
-    output = ReplayOutput(logs, (probabilities,) * 4, mask, features)
+    output = ReplayOutput(logs, (probabilities.log(),) * 4, mask, features)
     selected = torch.tensor([[True, False]])
     ref = q.expand_as(probabilities).clone()
     ref[:, 1] = torch.nan
@@ -153,7 +153,7 @@ def test_actor_ignores_nan_padding_and_matches_enumerated_objective() -> None:
         torch.tensor([[0.8, torch.nan]]),
         selected,
         torch.tensor([[0.3, torch.nan]]),
-        (ref,) * 4,
+        (ref.log(),) * 4,
         torch.tensor(0.1),
         torch.tensor(1.4),
         torch.tensor(1.0),
@@ -186,7 +186,7 @@ def test_joint_ppo_clips_both_advantage_signs(clip_epsilon: float) -> None:
         advantages,
         torch.ones(2, 3, dtype=torch.bool),
         torch.zeros(2, 3),
-        output.distributions,
+        output.log_distributions,
         torch.tensor(0.0),
         torch.tensor(1.0),
         torch.tensor(6.0),
@@ -210,7 +210,7 @@ def test_actor_rejects_invalid_targets(case: str) -> None:
     if case == "sigma":
         targets = dataclasses.replace(targets, advantage_sigma=torch.tensor(0.0))
     elif case == "reference":
-        targets.reference_distributions[0][0, 0, 0] = 0
+        targets.reference_log_distributions[0][0, 0, 0] = -torch.inf
     elif case == "empty":
         targets = dataclasses.replace(
             targets, selected_WK=torch.zeros_like(targets.selected_WK), denominator=torch.tensor(0.0)
@@ -238,7 +238,7 @@ def test_empty_local_rank_has_zero_loss_and_gradients_with_positive_global_count
     targets.advantages_WK.fill_(torch.nan)
     targets.behavior_log_probs_WKF.fill_(torch.nan)
     targets.kl_coefficient_WK.fill_(torch.nan)
-    for q in targets.reference_distributions:
+    for q in targets.reference_log_distributions:
         q.fill_(torch.nan)
     validate_actor_targets(output, targets)
     loss = actor_loss(output, targets)
@@ -371,9 +371,9 @@ def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
     hidden, observed, slots = inputs(policy)
     output = replay_windows(policy, hidden, observed, slots, grad=False)
     target = targets_for(output)
-    probabilities = output.distributions[0]
-    positive = torch.nonzero((probabilities > 0) & output.factor_mask_WKF[..., 0::4, None])[0]
-    target.reference_distributions[0][tuple(positive)] = 0
+    probabilities = output.log_distributions[0]
+    positive = torch.nonzero(torch.isfinite(probabilities) & output.factor_mask_WKF[..., 0::4, None])[0]
+    target.reference_log_distributions[0][tuple(positive)] = -torch.inf
     assert bool(torch.isinf(actor_loss(output, target).kl_loss))
 
 

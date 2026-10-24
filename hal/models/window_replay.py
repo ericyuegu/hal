@@ -48,16 +48,20 @@ class ReplayCriticFeatures:
 
 @dataclass(frozen=True, slots=True)
 class ReplayOutput:
-    """Return FP32 logs and probabilities in decode order.
+    """Return FP32 log probabilities in decode order.
 
     Mask reductions with factor_mask_WKF, because distributions include unexecuted
     sampled frames.
     """
 
     log_probs_WKF: Tensor
-    distributions: tuple[Tensor, ...]
+    log_distributions: tuple[Tensor, ...]
     factor_mask_WKF: Tensor
     features: ReplayCriticFeatures
+
+    @property
+    def distributions(self) -> tuple[Tensor, ...]:
+        return tuple(value.exp() for value in self.log_distributions)
 
 
 def _check_shapes(model: SelfPlayTransformer, hidden: Tensor, observed: Tensor, slots: ReplaySlots) -> None:
@@ -227,7 +231,7 @@ def replay_windows(
         )
         return ReplayOutput(
             torch.where(mask, logs, 0),
-            tuple(output.distributions[group] for group in group_order),
+            tuple(output.log_distributions[group] for group in group_order),
             mask,
             ReplayCriticFeatures(
                 torch.where(valid[..., None], hidden_WLd[rows, position], 0).detach(),

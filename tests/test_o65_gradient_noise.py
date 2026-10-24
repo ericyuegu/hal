@@ -41,6 +41,10 @@ def test_capture_covers_every_batch_and_preserves_loss_and_gradient(
     count = 0
     first = next(iter(manifest["chunks"]))
     saved = load_chunk(output / first, len(manifest["steps"]))
+    legacy = tmp_path / "probability-targets.pt"
+    torch.save(dict(saved) | {"format": "hal.o65.update-gradient-chunk.v1"}, legacy)
+    with pytest.raises(ValueError, match="schema mismatch"):
+        load_chunk(legacy, len(manifest["steps"]))
     slots = ReplaySlots(*saved["slots"])
     targets = ActorTargets(*saved["targets"])
     context, observed = saved["context"], saved["observed"]

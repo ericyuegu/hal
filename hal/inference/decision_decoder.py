@@ -236,6 +236,6 @@ class DecisionDecoder:
             output.actions[:batch].clone(),
             output.valid[:batch].clone(),
             output.log_probs[:batch].clone(),
-            tuple(value[:batch].clone() for value in output.distributions),
+            tuple(value[:batch].clone() for value in output.log_distributions),
             output.decoder_state[:batch].clone(),
         )

@@ -151,7 +151,7 @@ def test_masked_evaluations_preserve_the_other_policy_rows() -> None:
     behavior = table.behavior[rows].clone()
     features = exp._take_features(table.evaluation.features, rows)
     output = exp.PolicyEvaluation(
-        table.actions[rows], behavior + 9, tuple(p[rows] for p in table.evaluation.distributions), features
+        table.actions[rows], behavior + 9, tuple(p[rows] for p in table.evaluation.log_distributions), features
     )
     table.record_evaluation(rows, output, table.values[rows] + 9, torch.zeros_like(rows, dtype=torch.bool))
     torch.testing.assert_close(table.behavior[rows], behavior, rtol=0, atol=0)

@@ -3,6 +3,8 @@
 import contextlib
 import math
 import os
+import sys
+import traceback
 from collections.abc import Iterator
 from collections.abc import Sequence
 from datetime import timedelta
@@ -19,6 +21,22 @@ def world_size() -> int:
 
 def rank() -> int:
     return dist.get_rank() if dist.is_initialized() else 0
+
+
+@contextlib.contextmanager
+def fail_fast() -> Iterator[None]:
+    """Let torchrun stop peers before exception cleanup can wait on collectives."""
+    try:
+        yield
+    except BaseException:
+        if world_size() == 1:
+            raise
+        try:
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+        finally:
+            # Graceful NCCL shutdown needs peers which may be waiting for this rank.
+            os._exit(1)
 
 
 def split_cpus(cpus: tuple[int, ...], processes: int, local_rank: int) -> tuple[int, ...]:
@@ -57,13 +75,12 @@ def process_group(device: str) -> Iterator[torch.device]:
     torch.cuda.set_device(0)
     selected = torch.device("cuda", 0)
     dist.init_process_group("nccl", device_id=selected, timeout=timedelta(minutes=30))
-    try:
+    with fail_fast():
         devices: list[object] = [None] * size
         dist.all_gather_object(devices, str(torch.cuda.get_device_properties(selected).uuid))
         if len(set(devices)) != size:
             raise ValueError("ranks share a GPU; CUDA read CUDA_VISIBLE_DEVICES before the rank reordered it")
         yield selected
-    finally:
         dist.destroy_process_group()
 
 

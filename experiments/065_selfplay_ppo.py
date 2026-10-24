@@ -949,8 +949,12 @@ CRITIC_FEATURE_NAMES = ("trunk", "decoder", "condition", "opponent_condition", "
 class PolicyEvaluation:
     actions: Tensor  # [J, 4, 4], codec order
     log_probs: Tensor  # [J, 16], decode order
-    distributions: tuple[Tensor, ...]  # [J, 4, K], decode order; button mask already applied
+    log_distributions: tuple[Tensor, ...]  # [J, 4, K], decode order; button mask already applied
     features: CriticFeatures
+
+    @property
+    def distributions(self) -> tuple[Tensor, ...]:
+        return tuple(value.exp() for value in self.log_distributions)
 
 
 class LoopPolicy(Protocol):
@@ -988,7 +992,7 @@ def _take_evaluation(evaluation: PolicyEvaluation, indices: Tensor) -> PolicyEva
     return PolicyEvaluation(
         evaluation.actions[indices],
         evaluation.log_probs[indices],
-        tuple(value[indices] for value in evaluation.distributions),
+        tuple(value[indices] for value in evaluation.log_distributions),
         _take_features(evaluation.features, indices),
     )
 
@@ -1297,14 +1301,14 @@ class DenseRollout:
             self.evaluation = PolicyEvaluation(
                 self.actions,
                 self.behavior,
-                tuple(storage(p) for p in output.distributions),
+                tuple(storage(p) for p in output.log_distributions),
                 CriticFeatures(*(storage(getattr(output.features, name)) for name in CRITIC_FEATURE_NAMES)),
             )
         sources = (
             output.actions,
             output.log_probs,
             values,
-            *output.distributions,
+            *output.log_distributions,
             *(getattr(output.features, name) for name in CRITIC_FEATURE_NAMES),
         )
         rows = ids if enabled is None else torch.where(enabled, ids, self.spare)
@@ -1698,10 +1702,10 @@ class TransformerPolicy:
         )
         distributions = []
         for group in DECODE_GROUP_INDICES:
-            probabilities = output.distributions[group]
-            padding = probabilities.new_zeros(hidden.shape[0], 4 - count, probabilities.shape[-1])
-            padding[..., 0] = 1
-            distributions.append(torch.cat((probabilities, padding), dim=1))
+            logs = output.log_distributions[group]
+            padding = logs.new_full((hidden.shape[0], 4 - count, logs.shape[-1]), -torch.inf)
+            padding[..., 0] = 0
+            distributions.append(torch.cat((logs, padding), dim=1))
         return PolicyEvaluation(
             torch.nn.functional.pad(output.actions, (0, 0, 0, 4 - count)),
             torch.nn.functional.pad(
@@ -2076,7 +2080,7 @@ class TransformerPolicy:
                 parts.append(
                     ReplayOutput(
                         output.log_probs_WKF.detach(),
-                        tuple(p.detach() for p in output.distributions),
+                        tuple(p.detach() for p in output.log_distributions),
                         output.factor_mask_WKF,
                         output.features,
                     )
@@ -2276,7 +2280,7 @@ class TransformerPolicy:
             result.loss.backward()
             detached = ReplayOutput(
                 output.log_probs_WKF.detach(),
-                tuple(value.detach() for value in output.distributions),
+                tuple(value.detach() for value in output.log_distributions),
                 output.factor_mask_WKF,
                 output.features,
             )
@@ -4159,19 +4163,14 @@ def _take_features(features: CriticFeatures, indices: Tensor) -> CriticFeatures:
     )
 
 
-def _log_distribution(probabilities: Tensor) -> Tensor:
-    positive = probabilities > 0
-    return torch.where(positive, probabilities, 1).log().masked_fill(~positive, -torch.inf)
-
-
 def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF: Tensor) -> Tensor:
-    # KL validates and promotes probabilities to loss precision. Bound temporaries,
+    # KL validates and promotes logs to loss precision. Bound temporaries,
     # keeping each category reduction identical to the full-rollout operation.
     chunk = 4096
     if executed_JF.ndim != 2 or executed_JF.shape[1] != 16 or executed_JF.dtype != torch.bool:
         raise ValueError("KL execution mask must be boolean [decisions, 16]")
     rows = []
-    for group, (p, q) in enumerate(zip(policy.distributions, reference.distributions, strict=True)):
+    for group, (p, q) in enumerate(zip(policy.log_distributions, reference.log_distributions, strict=True)):
         if p.ndim != 3 or p.shape[1] != 4 or q.shape != p.shape or len(p) != len(executed_JF):
             raise ValueError("KL distributions and execution mask must have matching decision rows")
         parts = []
@@ -4186,15 +4185,15 @@ def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF
 
 
 def _distribution_kl(p: Tensor, q: Tensor, valid: Tensor) -> Tensor:
-    for probabilities in (p, q):
-        active = probabilities[valid.expand_as(probabilities)]
-        _check_finite("executed KL probabilities", active)
-        if bool((active < 0).any()):
-            raise ValueError("executed KL probabilities must be nonnegative")
-    neutral = torch.nn.functional.one_hot(torch.zeros_like(p[..., 0], dtype=torch.long), p.shape[-1]).to(p.dtype)
+    for logs in (p, q):
+        active = logs[valid.expand_as(logs)]
+        if bool((torch.isnan(active) | torch.isposinf(active)).any()):
+            raise ValueError("executed KL log-probabilities must be finite or negative infinity")
+    neutral = torch.full_like(p, -torch.inf)
+    neutral[..., 0] = 0
     p = torch.where(valid, p, neutral)
     q = torch.where(valid, q, neutral)
-    return categorical_kl(_log_distribution(p), _log_distribution(q))
+    return categorical_kl(p, q)
 
 
 def explained_variance(values: Tensor, targets: Tensor) -> float:
@@ -4355,7 +4354,7 @@ def take_actor_targets(targets: ActorTargets, windows: Tensor, positions: Tensor
         gather(targets.advantages_WK),
         gather(targets.selected_WK) & (windows >= 0)[:, None],
         gather(targets.kl_coefficient_WK),
-        tuple(gather(value) for value in targets.reference_distributions),
+        tuple(gather(value) for value in targets.reference_log_distributions),
         targets.advantage_mean,
         targets.advantage_sigma,
         targets.denominator,
@@ -4368,7 +4367,7 @@ def empty_replay(output: ReplayOutput, windows: int, slots: int) -> ReplayOutput
 
     return ReplayOutput(
         empty(output.log_probs_WKF),
-        tuple(empty(p) for p in output.distributions),
+        tuple(empty(p) for p in output.log_distributions),
         empty(output.factor_mask_WKF),
         ReplayCriticFeatures(
             *(empty(getattr(output.features, field.name)) for field in dataclasses.fields(output.features))
@@ -4380,7 +4379,7 @@ def scatter_replay(target: ReplayOutput, source: ReplayOutput, ids: Tensor, posi
     pairs = [
         (target.log_probs_WKF, source.log_probs_WKF),
         (target.factor_mask_WKF, source.factor_mask_WKF),
-        *zip(target.distributions, source.distributions, strict=True),
+        *zip(target.log_distributions, source.log_distributions, strict=True),
         *(
             (getattr(target.features, f.name), getattr(source.features, f.name))
             for f in dataclasses.fields(target.features)
@@ -4393,7 +4392,7 @@ def scatter_replay(target: ReplayOutput, source: ReplayOutput, ids: Tensor, posi
 def concatenate_replays(outputs: Sequence[ReplayOutput], dimension: int) -> ReplayOutput:
     return ReplayOutput(
         torch.cat([output.log_probs_WKF for output in outputs], dimension),
-        tuple(torch.cat([output.distributions[group] for output in outputs], dimension) for group in range(4)),
+        tuple(torch.cat([output.log_distributions[group] for output in outputs], dimension) for group in range(4)),
         torch.cat([output.factor_mask_WKF for output in outputs], dimension),
         ReplayCriticFeatures(
             *(
@@ -4637,10 +4636,10 @@ def action_statistics(
         valid = executed[:, factor::4]
         if not bool(valid.any()):
             continue
-        size = old.distributions[factor].shape[-1]
+        size = old.log_distributions[factor].shape[-1]
         semantics = model.codec.semantic_values(name, torch.arange(size, device=executed.device)).float()
         for label, evaluation in (("student", old), ("reference", reference)):
-            mean = evaluation.distributions[factor][valid].mean(0)
+            mean = evaluation.log_distributions[factor][valid].exp().mean(0)
             if name == "buttons":
                 for index, value in enumerate(mean @ semantics):
                     metrics[f"action/{label}_button{index}_press_rate"] = float(value)
@@ -4762,7 +4761,7 @@ def window_evaluation(output: ReplayOutput, actions: Tensor, indices: Tensor) ->
     return PolicyEvaluation(
         actions,
         flatten(output.log_probs_WKF),
-        tuple(flatten(value) for value in output.distributions),
+        tuple(flatten(value) for value in output.log_distributions),
         CriticFeatures(
             *(
                 flatten(getattr(features, name))
@@ -5007,7 +5006,7 @@ class Trainer:
                     zero,
                     torch.zeros_like(zero, dtype=torch.bool),
                     zero,
-                    tuple(value[:, : shape[1]] for value in output.distributions),
+                    tuple(value[:, : shape[1]] for value in output.log_distributions),
                     zero.new_zeros(()),
                     zero.new_ones(()),
                     zero.new_ones(()),
@@ -5442,7 +5441,8 @@ class Trainer:
             metrics[f"critic/explained_variance_{suffix}"] = self.metric_totals.explained_variance(
                 f"critic/explained_variance_{suffix}", values[mask], targets[mask]
             )
-        for factor, distribution in zip(FACTOR_ORDER, old.distributions, strict=True):
+        for factor, logs in zip(FACTOR_ORDER, old.log_distributions, strict=True):
+            distribution = logs.exp()
             entropy = -(distribution * torch.where(distribution > 0, distribution, 1).log()).sum(-1)
             valid = torch.arange(4, device=device)[None] < decisions.replan_J[:, None]
             metrics[f"policy/entropy_{factor}"] = self.metric_totals.mean(f"policy/entropy_{factor}", entropy[valid])
@@ -5554,9 +5554,9 @@ class Trainer:
         dense_advantage = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
         reference_dense = tuple(
-            value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions
+            value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.log_distributions
         )
-        for target, value in zip(reference_dense, batch.reference.distributions, strict=True):
+        for target, value in zip(reference_dense, batch.reference.log_distributions, strict=True):
             target[batch.rollout.ids] = value
         with self.memory.phase("actor"), phase(self.profile, "actor"):
             for step, window_ids in enumerate(batch.steps):
@@ -6691,7 +6691,7 @@ def run_distributed_training(
     trainer.memory.output = output if primary else output / f"rank{distributed.rank()}"
     if not primary:
         trainer.memory.output.mkdir(exist_ok=True)
-    with contextlib.ExitStack() as resources:
+    with contextlib.ExitStack() as resources, distributed.fail_fast():
         log = None
         if primary:
             resources.enter_context(
@@ -6979,7 +6979,7 @@ def train_native_rank(config: NativeCli) -> None:
         and (config.resume_learner is None or set(config.output.iterdir()) != {config.output / "metrics.jsonl"})
     ):
         raise FileExistsError(config.output)
-    with contextlib.ExitStack() as resources:
+    with contextlib.ExitStack() as resources, distributed.fail_fast():
         if cache is not None:
             resources.callback(cache.save)
         groups = []
@@ -7804,8 +7804,10 @@ def save_update_gradient_inputs(
     table = batch.rollout.table
     advantages = torch.zeros_like(table.values)
     advantages[batch.rollout.ids] = batch.advantages
-    reference = tuple(value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions)
-    for target, value in zip(reference, batch.reference.distributions, strict=True):
+    reference = tuple(
+        value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.log_distributions
+    )
+    for target, value in zip(reference, batch.reference.log_distributions, strict=True):
         target[batch.rollout.ids] = value
     moments = torch.zeros(3, dtype=torch.float64, device=trainer.policy.device)
     files: list[str] = []
@@ -7837,14 +7839,14 @@ def save_update_gradient_inputs(
             name = f"chunk-{len(files):04d}.pt"
             torch.save(
                 {
-                    "format": "hal.o65.update-gradient-chunk.v1",
+                    "format": "hal.o65.update-gradient-chunk.v2",
                     "step": step,
                     "context": {name: value.cpu() for name, value in context.items()},
                     "observed": observed.cpu(),
                     "slots": tuple(getattr(part.slots, field.name).cpu() for field in dataclasses.fields(ReplaySlots)),
                     "targets": tuple(
-                        tuple(value.cpu() for value in chunk_targets.reference_distributions)
-                        if field.name == "reference_distributions"
+                        tuple(value.cpu() for value in chunk_targets.reference_log_distributions)
+                        if field.name == "reference_log_distributions"
                         else cast(Tensor, getattr(chunk_targets, field.name)).cpu()
                         for field in dataclasses.fields(ActorTargets)
                     ),
@@ -7859,7 +7861,7 @@ def save_update_gradient_inputs(
     (output / "manifest.json").write_text(
         json.dumps(
             {
-                "format": "hal.o65.update-gradient-inputs.v2",
+                "format": "hal.o65.update-gradient-inputs.v3",
                 "provenance": provenance,
                 "trainer_source_sha256": sha256(Path(__file__)),
                 "decoder_precision": trainer.policy.model.decoder_precision,

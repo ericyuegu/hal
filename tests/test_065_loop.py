@@ -208,7 +208,9 @@ class ToyPolicy:
             torch.zeros(n, 24, 4, device=self.device, dtype=torch.long),
             torch.zeros(n, device=self.device, dtype=torch.long),
         )
-        return exp.PolicyEvaluation(actions, logs, tuple(p[..., g, :] for g in exp.DECODE_GROUP_INDICES), features)
+        return exp.PolicyEvaluation(
+            actions, logs, tuple(p[..., g, :].log() for g in exp.DECODE_GROUP_INDICES), features
+        )
 
     @torch.no_grad()
     def sample_tick(self, states: Any, rng: Any, layout: Any, ring: Any, *, clock: int) -> None:
@@ -248,7 +250,7 @@ class ToyPolicy:
             slots.opponent_lengths_WK,
         )
         return ReplayOutput(
-            torch.where(mask, logs, 0), tuple(p[..., g, :] for g in exp.DECODE_GROUP_INDICES), mask, features
+            torch.where(mask, logs, 0), tuple(p[..., g, :].log() for g in exp.DECODE_GROUP_INDICES), mask, features
         )
 
     def evaluate_reference(self, batch: Any, positions: Any, window_order: Any) -> Any:
@@ -265,7 +267,7 @@ class ToyPolicy:
         return loss, dataclasses.replace(
             output,
             log_probs_WKF=output.log_probs_WKF.detach(),
-            distributions=tuple(p.detach() for p in output.distributions),
+            log_distributions=tuple(p.detach() for p in output.log_distributions),
         )
 
     def values(self, features: Any) -> torch.Tensor:

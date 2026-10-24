@@ -163,7 +163,7 @@ def test_partial_512_window_step_uses_every_window_once_and_masks_padding() -> N
             advantages,
             selected,
             torch.zeros_like(advantages),
-            tuple(p.detach() for p in old.distributions),
+            tuple(p.detach() for p in old.log_distributions),
             torch.tensor(0.0),
             torch.tensor(1.0),
             selected.sum().float(),

@@ -16,7 +16,7 @@ class ActorTargets:
     advantages_WK: Tensor
     selected_WK: Tensor
     kl_coefficient_WK: Tensor
-    reference_distributions: tuple[Tensor, ...]
+    reference_log_distributions: tuple[Tensor, ...]
     advantage_mean: Tensor
     advantage_sigma: Tensor
     denominator: Tensor
@@ -65,25 +65,25 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
     for logs in (targets.behavior_log_probs_WKF[executed], output.log_probs_WKF[executed]):
         if not bool((torch.isfinite(logs) & (logs <= 0)).all()):
             raise ValueError("executed log-probs must be finite and nonpositive")
-    if len(targets.reference_distributions) != 4:
+    if len(targets.reference_log_distributions) != 4:
         raise ValueError("reference needs four controller distributions")
     frame_mask = executed.reshape(*shape, 4, 4)
-    for group, (p, q) in enumerate(zip(output.distributions, targets.reference_distributions, strict=True)):
+    for group, (p, q) in enumerate(zip(output.log_distributions, targets.reference_log_distributions, strict=True)):
         if q.shape != p.shape or q.dtype != torch.float32 or q.device != device:
             raise ValueError("reference distribution shape, dtype or device mismatch")
         p, q = p[frame_mask[..., group]], q[frame_mask[..., group]]
         if (
-            not bool((torch.isfinite(p) & (p >= 0)).all())
-            or not bool(torch.isclose(p.sum(-1), torch.ones_like(p[..., 0]), atol=1e-5).all())
-            or not bool((torch.isfinite(q) & (q >= 0)).all())
-            or not bool(torch.isclose(q.sum(-1), torch.ones_like(q[..., 0]), atol=1e-5).all())
-            or bool(((p > 0) != (q > 0)).any())
+            bool((torch.isnan(p) | torch.isposinf(p)).any())
+            or not bool(torch.isclose(p.logsumexp(-1), torch.zeros_like(p[..., 0]), atol=1e-5).all())
+            or bool((torch.isnan(q) | torch.isposinf(q)).any())
+            or not bool(torch.isclose(q.logsumexp(-1), torch.zeros_like(q[..., 0]), atol=1e-5).all())
+            or bool((torch.isfinite(p) != torch.isfinite(q)).any())
         ):
             raise ValueError("reference distributions must be normalized on identical support")
 
 
 def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: float = 0.2) -> ActorLoss:
-    """Calculate joint PPO and direct KL from stored behavior and reference probabilities.
+    """Calculate joint PPO and direct KL from stored log probabilities.
 
     Validate targets before capture. Detach all targets so gradients flow only
     through the current policy.
@@ -101,15 +101,14 @@ def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: flo
     policy = torch.where(selected, -surrogate, 0).sum() / targets.denominator.detach()
     kls: list[Tensor] = []
     frame_mask = mask.reshape(*mask.shape[:2], 4, 4)
-    for group, (probabilities, reference) in enumerate(
-        zip(output.distributions, targets.reference_distributions, strict=True)
+    for group, (log_probabilities, reference) in enumerate(
+        zip(output.log_distributions, targets.reference_log_distributions, strict=True)
     ):
         active = frame_mask[..., group, None]
-        p = torch.where(active, probabilities, 0)
-        q = torch.where(active, reference.detach(), 1)
-        positive = p > 0
-        log_p = torch.where(positive, p, 1).log()
-        log_q = torch.where(positive, q, 1).log()
+        legal = active & torch.isfinite(log_probabilities)
+        log_p = torch.where(legal, log_probabilities, 0)
+        log_q = torch.where(legal, reference.detach(), 0)
+        p = torch.where(legal, log_p.exp(), 0)
         kls.append((p * (log_p - log_q)).sum(-1))
     factor_kl = torch.stack(kls, -1).flatten(-2)
     kl_sum = torch.where(mask, factor_kl, 0).sum(-1)

@@ -240,3 +240,16 @@ def test_training_or_resumed_evaluation_ends_the_startup_deadline(
             )
             == 0
         )
+
+
+def test_failed_child_forwards_its_final_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(launcher, "REMOTE_ROOT", tmp_path)
+    code = "import sys; print('original numerical failure', file=sys.stderr, flush=True); sys.exit(7)"
+    with (tmp_path / "run.log").open("a") as log:
+        result = launcher.run_pilot_child(
+            [sys.executable, "-c", code], dict(launcher.os.environ), log, 5, startup_timeout=2
+        )
+    assert result == 7
+    assert "original numerical failure" in capsys.readouterr().out

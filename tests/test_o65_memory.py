@@ -32,11 +32,11 @@ def test_chunked_factor_kl_preserves_full_reduction(dtype: torch.dtype, count: i
     for group, (p, q) in enumerate(zip(probabilities, references, strict=True)):
         p.masked_fill_(~executed[:, group::4, None], torch.nan)
         q.masked_fill_(~executed[:, group::4, None], -1)
-    old = dataclasses.replace(batch.old, distributions=tuple(probabilities))
-    reference = dataclasses.replace(batch.old, distributions=tuple(references))
+    old = dataclasses.replace(batch.old, log_distributions=tuple(p.log() for p in probabilities))
+    reference = dataclasses.replace(batch.old, log_distributions=tuple(p.log() for p in references))
     expected = torch.stack(
         [
-            exp._distribution_kl(p, q, executed[:, group::4, None])
+            exp._distribution_kl(p.log(), q.log(), executed[:, group::4, None])
             for group, (p, q) in enumerate(zip(probabilities, references, strict=True))
         ],
         -1,
@@ -45,7 +45,7 @@ def test_chunked_factor_kl_preserves_full_reduction(dtype: torch.dtype, count: i
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert actual.dtype == dtype
     if count > 4096:
-        probabilities[0][-1, 0, 0] = torch.nan
+        old.log_distributions[0][-1, 0, 0] = torch.nan
         executed[-1, 0] = True
         with pytest.raises(ValueError, match="finite"):
             exp.factor_kl(old, reference, executed)
@@ -109,8 +109,8 @@ def test_chunked_kl_rejects_unmatched_tail_rows(extra: str) -> None:
     p = torch.full((4103, 4, 2), 0.5)
     q = torch.full((4104 if extra == "reference" else 4103, 4, 2), 0.5)
     mask = torch.ones(4104 if extra == "mask" else 4103, 16, dtype=torch.bool)
-    old = dataclasses.replace(batch.old, distributions=(p,) * 4)
-    reference = dataclasses.replace(batch.old, distributions=(q,) * 4)
+    old = dataclasses.replace(batch.old, log_distributions=(p.log(),) * 4)
+    reference = dataclasses.replace(batch.old, log_distributions=(q.log(),) * 4)
     with pytest.raises(ValueError, match="matching decision rows"):
         exp.factor_kl(old, reference, mask)
 
@@ -121,8 +121,8 @@ def test_kl_support_error_locates_factor_chunk_and_probability() -> None:
     p = torch.full((4103, 4, 2), 0.5)
     q = p.clone()
     q[-1, 0] = torch.tensor([0.0, 1.0])
-    old = dataclasses.replace(batch.old, distributions=(p,) * 4)
-    reference = dataclasses.replace(batch.old, distributions=(p, p, q, p))
+    old = dataclasses.replace(batch.old, log_distributions=(p.log(),) * 4)
+    reference = dataclasses.replace(batch.old, log_distributions=(p.log(), p.log(), q.log(), p.log()))
     with pytest.raises(ValueError) as failure:
         exp.factor_kl(old, reference, torch.ones(4103, 16, dtype=torch.bool))
     message = str(failure.value)

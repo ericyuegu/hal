@@ -62,7 +62,7 @@ def load_manifest(directory: Path, checkpoint_sha256: str) -> GradientManifest:
     if (
         not isinstance(saved, dict)
         or set(saved) != set(GradientManifest.__annotations__)
-        or saved["format"] != "hal.o65.update-gradient-inputs.v2"
+        or saved["format"] != "hal.o65.update-gradient-inputs.v3"
         or saved["provenance"]["checkpoint_sha256"] != checkpoint_sha256
         or saved["decoder_precision"] not in ("bf16", "fp32")
     ):
@@ -90,7 +90,7 @@ def load_chunk(path: Path, steps: int) -> GradientChunk:
     if (
         not isinstance(saved, dict)
         or set(saved) != set(GradientChunk.__annotations__)
-        or saved["format"] != "hal.o65.update-gradient-chunk.v1"
+        or saved["format"] != "hal.o65.update-gradient-chunk.v2"
         or type(saved["step"]) is not int
         or not 0 <= saved["step"] < steps
         or len(saved["slots"]) != len(dataclasses.fields(ReplaySlots))

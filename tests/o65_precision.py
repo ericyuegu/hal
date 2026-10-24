@@ -51,7 +51,7 @@ def old_forward(policy: Any, batch: ProxyBatch, *, grad: bool, fp32: bool = Fals
     )
     return ReplayOutput(
         pad(result.log_probs),
-        tuple(pad(p) for p in result.distributions),
+        tuple(pad(p) for p in result.log_distributions),
         slots.executed_WKF & slots.valid_WK[..., None],
         features,
     )
@@ -113,7 +113,7 @@ def targets(output: ReplayOutput, reference: ReplayOutput, behavior: Tensor, bat
         advantages,
         selected,
         batch.kl_coefficient_WK,
-        reference.distributions,
+        reference.log_distributions,
         advantages[selected].mean(),
         advantages[selected].std(unbiased=False),
         selected.sum().float(),

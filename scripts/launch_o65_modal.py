@@ -581,14 +581,17 @@ def run_pilot_child(
                         f"O65 produced no training update within {startup_timeout}s; stopping all ranks"
                     )
                 try:
-                    return process.wait(
+                    code = process.wait(
                         timeout=min(5.0, timeout - elapsed, startup_timeout if ready else startup_timeout - elapsed)
                     )
                 except subprocess.TimeoutExpired:
-                    for line in progress:
-                        print(line, end="", flush=True)
-                        if line.startswith(("update=", "final_evaluation_started")):
-                            ready = True
+                    code = None
+                for line in progress:
+                    print(line, end="", flush=True)
+                    if line.startswith(("update=", "final_evaluation_started")):
+                        ready = True
+                if code is not None:
+                    return code
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)

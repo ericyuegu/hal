@@ -616,8 +616,12 @@ class DecisionOutput:
     actions: Tensor  # [B, sampled_offsets, groups], relative to D+1
     valid: Tensor  # [B, sampled_offsets]
     log_probs: Tensor  # [B, sampled_offsets, groups], zero outside valid
-    distributions: tuple[Tensor, ...]  # canonical group order
+    log_distributions: tuple[Tensor, ...]  # canonical group order
     decoder_state: Tensor  # z at D+1, before its first factor
+
+    @property
+    def distributions(self) -> tuple[Tensor, ...]:
+        return tuple(value.exp() for value in self.log_distributions)
 
 
 class CausalTemporalDecoder(nn.Module):
@@ -1404,7 +1408,7 @@ class CausalTemporalDecoder(nn.Module):
         log_probs: list[Tensor] = []
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
             log_distribution = F.log_softmax(torch.stack(captured[name], dim=1).float(), dim=-1)
-            distributions.append(log_distribution.exp())
+            distributions.append(log_distribution)
             log_probs.append(log_distribution.gather(-1, actions[..., group, None]).squeeze(-1))
         valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
         return DecisionOutput(
@@ -1485,7 +1489,7 @@ class CausalTemporalDecoder(nn.Module):
             if name == "buttons":
                 logits = logits.masked_fill(self.codec.button_mask(actions[..., TRIGGERS_GROUP]), -torch.inf)
             logs = F.log_softmax(logits.float(), dim=-1)
-            distributions.append(logs.exp())
+            distributions.append(logs)
             log_probs.append(logs.gather(-1, actions[..., group, None]).squeeze(-1))
         valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
         return DecisionOutput(
@@ -1625,7 +1629,7 @@ class CausalTemporalDecoder(nn.Module):
             if name == "buttons":
                 logits = logits.masked_fill(self.codec.button_mask(sampled_actions[..., TRIGGERS_GROUP]), -torch.inf)
             logs = F.log_softmax(logits.float(), dim=-1)
-            distributions.append(logs.exp())
+            distributions.append(logs)
             log_probs.append(logs.gather(-1, sampled_actions[..., group, None]).squeeze(-1))
         valid = torch.arange(4, device=hidden.device) < replan[..., None]
         return DecisionOutput(
