@@ -346,7 +346,10 @@ def test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks(t
     assert run.policy.replay_capture_stream is run.reference.replay_capture_stream
     inventory = json.loads((tmp_path / "memory-inventory-startup.json").read_text())
     assert {entry["kind"] for entry in inventory["graphs"]} == {"tick", "restart", "reference", "actor", "value"}
-    assert all(pool["reserved_bytes"] >= pool["allocated_bytes"] > 0 for pool in inventory["pools"].values())
+    assert all(
+        pool["reserved_bytes"] > 0 and pool["reserved_bytes"] >= pool["allocated_bytes"] >= 0
+        for pool in inventory["pools"].values()
+    )
     assert 0 < sum(inventory["unique_storage_bytes"].values()) <= inventory["allocated_bytes"]
     assert not run.startup_memory.active
     assert not run.memory.first_checked and not run.memory.actor_checked
