@@ -1191,7 +1191,7 @@ class MatchState:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Rollout:
-    """Retain group tensors until the next collection from that group."""
+    """Retain tensors until the next collection; training consumes each rollout serially."""
 
     table: DenseRollout
     ids: Tensor
@@ -2496,6 +2496,13 @@ class ActionRing:
         self.length_storage[owned, sides] += metadata[:, REPLAN]
 
 
+@dataclasses.dataclass(slots=True)
+class RolloutWorkspace:
+    ring: ActionRing
+    table: DenseRollout
+    group: int | None = None
+
+
 def accept_frame_tensors(
     frames: ShardFrames,
     lanes: Tensor,
@@ -2633,7 +2640,9 @@ class RolloutEngine:
         self.results: list[EpisodeResult] = []
         self.group_matches = tuple(tuple(match for shard in group for match in shard.match_ids) for group in groups)
         capacity = max(t.delay + t.replan for t in sampler.schedule.configurations)
-        self.rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
+        self.group_rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
+        self.rings = list(self.group_rings)
+        self.rollout_workspaces: dict[tuple[int, ...], RolloutWorkspace] = {}
         for ring in self.rings:
             ring.controllers.copy_(policy.device_wire_actions(ring.values))
         self.lane_roles = {
@@ -2744,6 +2753,61 @@ class RolloutEngine:
         stacks = tuple(dict.fromkeys(stack for stack in self.anchor_stacks if stack is not None))
         return self.policy, *self.anchors.values(), *stacks
 
+    def _copy_rollout_history(self, group: int, target: FrameStore) -> None:
+        source = self.stores[group]
+        if source is None:
+            raise ValueError("pool has no frame storage")
+        lengths = (self.observed_clocks[group] - self.episode_clocks[group] + 1).clamp_max(129)
+        time = torch.arange(129, device=self.policy.device)[:, None]
+        valid = time < lengths[None]
+        positions = torch.where(valid, self.stops[group][None] - lengths[None] + time, 0)
+        lanes = torch.arange(len(self.group_matches[group]), device=self.policy.device)[None]
+        for destination, origin in (
+            (target.records, source.records),
+            (target.actions, source.actions),
+            (target.rewards, source.rewards),
+            (target.flags, source.flags),
+        ):
+            mask = valid.reshape(*valid.shape, *([1] * (destination.ndim - 2)))
+            destination[:129].copy_(torch.where(mask, origin[positions, lanes], 0))
+        self.stops[group].copy_(lengths)
+        target.lengths.copy_(lengths)
+        self.stores[group] = target
+
+    @torch.no_grad()
+    def activate_rollout_storage(self) -> DenseRollout:
+        """Keep captured addresses fixed; inactive groups retain only history and queues."""
+        group = self.cursor
+        if any(clock % 128 for clock in self.clocks):
+            raise ValueError("every group rollout must start on a 128-frame block boundary")
+        count = len(self.group_matches[group])
+        topology = tuple(len(shard.match_ids) for shard in self.groups[group])
+        workspace = self.rollout_workspaces.get(topology)
+        if workspace is None:
+            frames = self.sampler.schedule.rollout_frames
+            store = FrameStore(129 + frames + frames // 128 + 1, count, self.policy.device)
+            table = DenseRollout(frames // 2, store)
+            if isinstance(self.policy, TransformerPolicy):
+                table.allocate_evaluation(self.policy.model)
+            workspace = RolloutWorkspace(ActionRing(count, self.rings[group].capacity, self.policy.device), table)
+            self.rollout_workspaces[topology] = workspace
+        previous = workspace.group
+        if previous is not None and previous != group:
+            self._copy_rollout_history(previous, FrameStore(129, count, self.policy.device))
+            saved = self.group_rings[previous]
+            for name in ("value_storage", "controller_storage", "length_storage", "head"):
+                getattr(saved, name).copy_(getattr(workspace.ring, name))
+            self.rings[previous] = saved
+            self.tables[previous] = None
+        if previous != group:
+            for name in ("value_storage", "controller_storage", "length_storage", "head"):
+                getattr(workspace.ring, name).copy_(getattr(self.rings[group], name))
+        self._copy_rollout_history(group, workspace.table.store)
+        self.rings[group] = workspace.ring
+        self.tables[group] = workspace.table
+        workspace.group = group
+        return workspace.table
+
     def snapshot(self) -> PoolSnapshot:
         groups = []
         for group_id, matches in enumerate(self.group_matches):
@@ -2795,6 +2859,8 @@ class RolloutEngine:
             raise ValueError("unsupported rollout pool snapshot identity")
         if len(snapshot.groups) != len(self.groups):
             raise ValueError("rollout pool topology mismatch")
+        self.rings = list(self.group_rings)
+        self.rollout_workspaces.clear()
         restored: dict[int, MatchState] = {}
         for group_id, (saved, ids) in enumerate(zip(snapshot.groups, self.group_matches, strict=True)):
             if tuple(match.match for match in saved.matches) != ids or saved.fields != native.OBSERVATION_FIELDS:
@@ -3700,43 +3766,30 @@ class RolloutEngine:
                     shard.timings.clear()
             start = self.clocks[group_id]
             count = self.sampler.schedule.rollout_frames
-            if count % 128:
-                raise ValueError("rollouts must end on a 128-frame block boundary")
+            if count % 128 or any(clock % 128 for clock in self.clocks):
+                raise ValueError("every group rollout must start and end on a 128-frame block boundary")
             self.tick_layouts = self.group_layouts[group_id]
-            previous_store = self.stores[group_id]
-            if previous_store is None:
-                raise ValueError("pool has no frame storage")
             matches = self.group_matches[group_id]
-            capacity = 129 + count + count // 128 + 1
-            store = (
-                previous_store
-                if len(previous_store.records) == capacity
-                else FrameStore(capacity, len(matches), self.policy.device)
-            )
-            lengths = (self.observed_clocks[group_id] - self.episode_clocks[group_id] + 1).clamp_max(129)
-            positions = (
-                self.stops[group_id][None] - lengths[None] + torch.arange(129, device=self.policy.device)[:, None]
-            )
-            valid = torch.arange(129, device=self.policy.device)[:, None] < lengths[None]
-            positions = torch.where(valid, positions, 0)
-            lanes = torch.arange(len(matches), device=self.policy.device)[None]
-            for target, source in (
-                (store.records, previous_store.records),
-                (store.actions, previous_store.actions),
-                (store.rewards, previous_store.rewards),
-                (store.flags, previous_store.flags),
-            ):
-                mask = valid.reshape(*valid.shape, *([1] * (target.ndim - 2)))
-                target[:129].copy_(torch.where(mask, source[positions, lanes], 0))
-            self.stops[group_id].copy_(lengths)
-            self.stores[group_id] = store
-            table = self.tables[group_id]
-            if table is None:
-                table = DenseRollout(count // 2, store)
-                self.tables[group_id] = table
-                if isinstance(self.policy, TransformerPolicy):
-                    table.allocate_evaluation(self.policy.model)
-            table.store = store
+            if isinstance(self.policy, TransformerPolicy):
+                with sample(self.profile, "group_switch", work=1.0, limit=1):
+                    table = self.activate_rollout_storage()
+                store = table.store
+            else:
+                previous_store = self.stores[group_id]
+                if previous_store is None:
+                    raise ValueError("pool has no frame storage")
+                capacity = 129 + count + count // 128 + 1
+                store = (
+                    previous_store
+                    if len(previous_store.records) == capacity
+                    else FrameStore(capacity, len(matches), self.policy.device)
+                )
+                self._copy_rollout_history(group_id, store)
+                table = self.tables[group_id]
+                if table is None:
+                    table = DenseRollout(count // 2, store)
+                    self.tables[group_id] = table
+                table.store = store
             table.reset()
             pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
             resets = timeouts = frames_stepped = 0
@@ -4743,7 +4796,6 @@ class Trainer:
             assert isinstance(policy, TransformerPolicy)
             policy.prepare_tick_weights()
         cursor = engine.cursor
-        frames = engine.sampler.schedule.rollout_frames
         if distributed.rank() == 0:
             print(
                 f"startup_capture_started groups={len(engine.groups)} matches_per_group={[len(ids) for ids in engine.group_matches]}",
@@ -4751,21 +4803,7 @@ class Trainer:
             )
         for group, matches in enumerate(engine.group_matches):
             engine.cursor = group
-            previous = engine.stores[group]
-            if previous is None:
-                raise ValueError("startup capture requires an initialized pool")
-            store = FrameStore(129 + frames + frames // 128 + 1, len(matches), self.policy.device)
-            for target, source in (
-                (store.records, previous.records),
-                (store.actions, previous.actions),
-                (store.rewards, previous.rewards),
-                (store.flags, previous.flags),
-            ):
-                target[: len(source)].copy_(source)
-            engine.stores[group] = store
-            table = DenseRollout(frames // 2, store)
-            table.allocate_evaluation(self.policy.model)
-            engine.tables[group] = table
+            table = engine.activate_rollout_storage()
             engine.tick_layouts = engine.group_layouts[group]
             pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
             with self.startup_memory.phase("rollout"):
@@ -4833,6 +4871,7 @@ class Trainer:
                     )
             table.reset()
         engine.cursor = cursor
+        engine.activate_rollout_storage()
         engine.tick_layouts = engine.group_layouts[cursor]
         torch.cuda.synchronize(self.policy.device)
         for policy in policies:
