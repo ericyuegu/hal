@@ -54,12 +54,16 @@ def stage_checkpoint(directory: Path) -> Path:
     return checkpoint
 
 
+# Modal caps a function at 64 CPUs, so eight ranks get eight simulator shards each.
+SHARDS_PER_GPU = 8
+
+
 def shards_per_gpu(matches: int) -> int:
     if type(matches) is not int or matches < 16 or matches % 16:
         raise ValueError("matches per GPU must be a positive multiple of 16")
-    shards = min(16, matches // 16)
+    shards = min(SHARDS_PER_GPU, matches // 16)
     if matches % shards:
-        raise ValueError("matches must divide evenly across at most 16 shards per GPU")
+        raise ValueError(f"matches must divide evenly across at most {SHARDS_PER_GPU} shards per GPU")
     return shards
 
 

@@ -440,7 +440,10 @@ def run_child(request: Request, output: Path, started: float) -> int:
         if request.mode == "ddp"
         else 16
     )
-    cpus = select_cpus(set(os.sched_getaffinity(0)), shard_count + request.gpus)
+    # DDP rank controllers share the shard CPUs; Modal allows at most 64 per function.
+    cpus = select_cpus(
+        set(os.sched_getaffinity(0)), shard_count if request.mode == "ddp" else shard_count + request.gpus
+    )
     os.sched_setaffinity(0, set(cpus))
     first_count = o65_production.shards_per_gpu(request.matches) * request.gpus if request.mode == "ddp" else 16
     argv = command(request, cpus[:first_count])
@@ -717,7 +720,7 @@ def main(args: Args) -> None:
         if args.mode == "ddp"
         else 16
     )
-    cores = (maximum_shards + 1) * request.gpus if args.mode == "ddp" else CPU_CORES
+    cores = maximum_shards * request.gpus if args.mode == "ddp" else CPU_CORES
     memory = MEMORY_MIB * request.gpus
     rate = (
         (B200_USD_SECOND * request.gpus if args.mode == "ddp" else GPU_USD_SECOND)
