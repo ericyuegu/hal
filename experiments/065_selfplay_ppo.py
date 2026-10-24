@@ -285,7 +285,13 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
     reference_log_probs = _loss_precision(reference_log_probs.detach())
     legal = torch.isfinite(log_probs)
     if not torch.equal(legal, torch.isfinite(reference_log_probs)):
-        raise ValueError("policy and reference must have identical support")
+        mismatch = (legal != torch.isfinite(reference_log_probs)).flatten()
+        index = int(mismatch.to(torch.int8).argmax())
+        raise ValueError(
+            "policy and reference must have identical support; "
+            f"flat category {index}, shape {tuple(log_probs.shape)}: "
+            f"policy={float(log_probs.flatten()[index])}, reference={float(reference_log_probs.flatten()[index])}"
+        )
     for value in (log_probs, reference_log_probs):
         if bool((torch.isnan(value) | torch.isposinf(value)).any()) or not bool(
             torch.isclose(value.logsumexp(-1), torch.zeros_like(value[..., 0]), atol=1e-5).all()
@@ -4170,7 +4176,10 @@ def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF
         parts = []
         for start in range(0, len(p), chunk):
             stop = start + chunk
-            parts.append(_distribution_kl(p[start:stop], q[start:stop], executed_JF[start:stop, group::4, None]))
+            try:
+                parts.append(_distribution_kl(p[start:stop], q[start:stop], executed_JF[start:stop, group::4, None]))
+            except ValueError as error:
+                raise ValueError(f"KL factor {group}, decisions [{start}, {min(stop, len(p))}): {error}") from error
         rows.append(torch.cat(parts) if parts else _loss_precision(p).new_empty(p.shape[:-1]))
     return torch.stack(rows, -1).flatten(1)
 

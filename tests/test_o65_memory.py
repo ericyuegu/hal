@@ -69,6 +69,22 @@ def test_chunked_kl_rejects_unmatched_tail_rows(extra: str) -> None:
         exp.factor_kl(old, reference, mask)
 
 
+def test_kl_support_error_locates_factor_chunk_and_probability() -> None:
+    run = trainer("cpu")
+    batch = run.prepare(run.engine.collect(0))
+    p = torch.full((4103, 4, 2), 0.5)
+    q = p.clone()
+    q[-1, 0] = torch.tensor([0.0, 1.0])
+    old = dataclasses.replace(batch.old, distributions=(p,) * 4)
+    reference = dataclasses.replace(batch.old, distributions=(p, p, q, p))
+    with pytest.raises(ValueError) as failure:
+        exp.factor_kl(old, reference, torch.ones(4103, 16, dtype=torch.bool))
+    message = str(failure.value)
+    assert "KL factor 2, decisions [4096, 4103)" in message
+    assert "identical support; flat category 48, shape (7, 4, 2)" in message
+    assert "policy=-0.693" in message and "reference=-inf" in message
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_reference_releases_unused_backward_graphs_without_changing_arithmetic(
     device: str, monkeypatch: pytest.MonkeyPatch
