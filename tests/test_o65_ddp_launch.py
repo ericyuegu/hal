@@ -216,3 +216,13 @@ def test_resume_settings_ignore_virtual_cpu_ids(tmp_path: Path) -> None:
     assert o65_production.resume_settings(dataclasses.replace(args, windows_per_step=2)) != (
         o65_production.resume_settings(args)
     )
+
+
+def test_rank_visible_devices_put_each_rank_gpu_first() -> None:
+    from hal.training.self_play_distributed import rank_visible_devices
+
+    assert rank_visible_devices(None, 0, 3) == "0,1,2"
+    assert rank_visible_devices(None, 2, 3) == "2,0,1"
+    assert rank_visible_devices("GPU-a,GPU-b,GPU-c,GPU-d", 1, 4) == "GPU-b,GPU-a,GPU-c,GPU-d"
+    with pytest.raises(ValueError, match="own visible CUDA device"):
+        rank_visible_devices("0,1", 0, 3)

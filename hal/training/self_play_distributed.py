@@ -30,6 +30,13 @@ def split_cpus(cpus: tuple[int, ...], processes: int, local_rank: int) -> tuple[
     return cpus[local_rank * count : (local_rank + 1) * count]
 
 
+def rank_visible_devices(visible: str | None, local_rank: int, size: int) -> str:
+    devices = visible.split(",") if visible else [str(index) for index in range(size)]
+    if not 0 <= local_rank < size <= len(devices):
+        raise ValueError("each local rank needs its own visible CUDA device")
+    return ",".join((devices[local_rank], *devices[:local_rank], *devices[local_rank + 1 :]))
+
+
 @contextlib.contextmanager
 def process_group(device: str) -> Iterator[torch.device]:
     size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -37,18 +44,24 @@ def process_group(device: str) -> Iterator[torch.device]:
         yield torch.device(device)
         return
     local = int(os.environ["LOCAL_RANK"])
-    if (
-        device != "cuda"
-        or size < 2
-        or int(os.environ["LOCAL_WORLD_SIZE"]) != size
-        or int(os.environ["RANK"]) != local
-        or not 0 <= local < size <= torch.cuda.device_count()
-    ):
+    if device != "cuda" or size < 2 or int(os.environ["LOCAL_WORLD_SIZE"]) != size or int(os.environ["RANK"]) != local:
         raise ValueError("O65 distributed training requires one torchrun node with one CUDA device per rank")
-    torch.cuda.set_device(local)
-    selected = torch.device("cuda", local)
+    if torch.cuda.is_initialized():
+        raise ValueError("CUDA must not initialize before the process group selects the rank's GPU")
+    # Each rank lists its own GPU first and keeps the others visible for NCCL peer access. Every
+    # rank then compiles for cuda:0, so all ranks share one set of compiler cache entries. The CUDA
+    # runtime reads this variable once, so it is set before any device query.
+    os.environ["CUDA_VISIBLE_DEVICES"] = rank_visible_devices(os.environ.get("CUDA_VISIBLE_DEVICES"), local, size)
+    if torch.cuda.device_count() < size:
+        raise ValueError("O65 distributed training requires one CUDA device per rank")
+    torch.cuda.set_device(0)
+    selected = torch.device("cuda", 0)
     dist.init_process_group("nccl", device_id=selected, timeout=timedelta(minutes=30))
     try:
+        devices: list[object] = [None] * size
+        dist.all_gather_object(devices, str(torch.cuda.get_device_properties(selected).uuid))
+        if len(set(devices)) != size:
+            raise ValueError("ranks share a GPU; CUDA read CUDA_VISIBLE_DEVICES before the rank reordered it")
         yield selected
     finally:
         dist.destroy_process_group()
