@@ -226,7 +226,7 @@ def main(args: Args) -> None:
                 hidden = compiled_history(current.trunk, tokens, padding)
             else:
                 hidden = history(current.trunk, tokens, padding)
-        operation = replay_windows if fp32 else compiled_replay
+        operation = compiled_replay if compiled else replay_windows
         if current is model and not compiled and not fp32:
             validate_replay_inputs(current, hidden, observed, replay_slots)
         return operation(current, hidden, observed, replay_slots, grad=True), hidden, tokens
