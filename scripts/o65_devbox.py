@@ -72,7 +72,7 @@ def _sandbox(name: str) -> tuple[modal.Sandbox, str]:
 
 
 def _run(sandbox: modal.Sandbox, command: str) -> int:
-    process = sandbox.exec("bash", "-c", f"{command} 2>&1", workdir=str(launch.REMOTE_ROOT))
+    process = sandbox.exec("bash", "-c", f"exec 2>&1\n{command}", workdir=str(launch.REMOTE_ROOT))
     for line in process.stdout:
         print(line, end="", flush=True)
     process.wait()

@@ -1,6 +1,7 @@
 """Preserve explicit training batch choices in the command sent to the B200."""
 
 import dataclasses
+import subprocess
 import sys
 from pathlib import Path
 from typing import cast
@@ -10,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
+    from scripts.o65_devbox import _run
     from scripts.o65_devbox import bench
 finally:
     sys.path.pop(0)
@@ -112,3 +114,12 @@ def test_bench_rejects_invalid_decision_milestone(decisions: int | str) -> None:
     with pytest.raises(ValueError, match="decisions per window"):
         bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, decisions_per_window=decisions)
     assert not sandbox.commands
+
+
+def test_exec_streams_stderr_for_every_command_in_a_shell_script() -> None:
+    sandbox = Sandbox()
+    _run(cast(modal.Sandbox, sandbox), "printf diagnostic >&2\nfalse")
+    result = subprocess.run(sandbox.commands[0], capture_output=True, text=True, check=False)
+    assert result.returncode == 1
+    assert result.stdout == "diagnostic"
+    assert result.stderr == ""
