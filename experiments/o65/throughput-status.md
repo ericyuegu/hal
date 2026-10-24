@@ -7,16 +7,16 @@ checkpoint `step-0098304.pt`, unless a line says otherwise.
 
 ## Production run
 
-Launched on 2026-10-24 from `o65-rollout-speed` at `c208e887` as Modal run `o65-o64-outcome-256`:
+Launched on 2026-10-24 from `o65-rollout-speed` at `ca58a905` as Modal run `o65-o64-outcome-256-r2`:
 
-    uv run python -m scripts.launch_o65_modal --mode ddp --name o65-o64-outcome-256 --gpus 8 \
+    uv run python -m scripts.launch_o65_modal --mode ddp --name o65-o64-outcome-256-r2 --gpus 8 \
       --matches 1024 --windows-per-step 512 --actor-microbatches 8 --ddp-updates 256 \
-      --damage-weight 0.1 --game-win-weight 120 --timeout-seconds 12600 --b200-max-usd 390
+      --damage-weight 0.1 --game-win-weight 120 --timeout-seconds 12600 --b200-max-usd 455
 
-The production identity records the Git SHA, so a resume has to launch from `c208e887`; later
+The production identity records the Git SHA, so a resume has to launch from `ca58a905`; later
 commits, including documentation, change the SHA and the resume check refuses them.
 The local launcher process blocks on the Modal call; its log is
-`~/data/scratch/o65-launch-outcome-256.log`. W&B project `hal-o65`, run id equal to the run name.
+`~/data/scratch/o65-launch-outcome-256-r2.log`; the trainer writes its own log to `/opt/o65-work/o65-o64-outcome-256-r2/run.log` inside the container, and only `modal container exec` can read it. W&B project `hal-o65`, run id equal to the run name.
 
 Settings, checked against the qualifying bench's `resolved.json` by an Opus review:
 
@@ -183,6 +183,14 @@ option for a later run.
 - Agent briefs and logs: `/tmp/claude-1000/-home-ericgu-src-hal/c49ac9e4-5488-472e-b5ff-cbdf532e937b/scratchpad/codex/`.
 
 ## Working notes
+
+- The first production attempt (`o65-o64-outcome-256`) was stopped after about an hour, roughly $65,
+  recorded in the budget ledger. Its rank 0 needed 33 minutes of startup; ranks 1 to 7 were still
+  compiling after 48 minutes. Inductor keys graphs by device index, so each rank compiled for its own
+  `cuda:N` and missed the cache, and every lookup went to the Modal network volume. Ranks now reorder
+  `CUDA_VISIBLE_DEVICES` so each compiles for `cuda:0` (`ca58a905`).
+- Next improvement: keep compiler cache lookups on local disk. Pack the cache into one archive on the
+  volume and unpack it to local disk at container start, as `hal.inference.compile_cache` does.
 
 - Codex `exec` cannot take a message mid-task. Stop it while no sandbox job runs and continue with
   `codex exec resume <session id> -` plus the message on stdin.
