@@ -5770,9 +5770,6 @@ class Trainer:
         ]
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
-            # Group-dependent decision counts leave differently sized eager
-            # workspaces cached. Graph pools and live state remain allocated.
-            torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(self.policy.device)
         self.memory.active = self.policy.device.type == "cuda" and (
             self.memory.measure_all

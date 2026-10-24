@@ -1,4 +1,3 @@
-import contextlib
 import dataclasses
 import weakref
 from typing import Any
@@ -55,33 +54,6 @@ def test_memory_inventory_counts_views_once() -> None:
     assert exp.tensor_storage_bytes({"base": value, "view": (value[:3],)}, seen) == value.untyped_storage().nbytes()
     assert exp.tensor_storage_bytes(value[3:], seen) == 0
     assert exp.tensor_storage_bytes(value.clone(), seen) == value.untyped_storage().nbytes()
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_update_reclaims_unused_blocks_and_preserves_live_graph_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    run = trainer("cpu")
-    run.policy.device = torch.device("cuda")
-    live = torch.arange(16384, device="cuda", dtype=torch.float32)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = live * 3
-    cached = torch.empty(32 * 1024 * 1024, device="cuda")
-    del cached
-    before = torch.cuda.memory_reserved()
-    monkeypatch.setattr(run.memory, "phase", lambda _name: contextlib.nullcontext())
-
-    class CollectionStarted(Exception):
-        pass
-
-    def collect(_update: int) -> None:
-        assert torch.cuda.memory_reserved() <= before - 64 * 1024 * 1024
-        graph.replay()
-        torch.testing.assert_close(output, live * 3, rtol=0, atol=0)
-        raise CollectionStarted
-
-    monkeypatch.setattr(run.engine, "collect", collect)
-    with pytest.raises(CollectionStarted):
-        run.run_update()
 
 
 @pytest.mark.parametrize("extra", ["reference", "mask"])
