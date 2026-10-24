@@ -1447,8 +1447,11 @@ class TransformerPolicy:
         model: SelfPlayTransformer,
         schedule: ScheduleConfig,
         statistics: dict[str, FeatureStats],
+        *,
+        capture_priority: int = 0,
     ) -> None:
         self.profile: UpdateProfile | None = None
+        self.capture_priority = capture_priority
         self.startup_finished = False
         self.post_startup_captures = 0
         self.capture_count = 0
@@ -1786,6 +1789,7 @@ class TransformerPolicy:
                                 static_restart,
                                 (*cache.cache.buffers(), cache.frames_in_block),
                                 device=self.device,
+                                priority=self.capture_priority,
                             )
                         self.restart_graphs[key] = captured_restart
                     captured_restart(restart_inputs)
@@ -1933,6 +1937,7 @@ class TransformerPolicy:
                                     ring.length_device,
                                 ),
                                 device=self.device,
+                                priority=self.capture_priority,
                             )
                 captured = self.tick_graphs.get(graph_key)
             self.work_flops["rollout"] += self.flops.rollout(
@@ -2304,7 +2309,7 @@ class StackedAnchorPolicy(TransformerPolicy):
         self.anchor_groups = len(sources)
         self.anchor_sources = sources
         self.anchor_embeddings = tuple(embeddings)
-        super().__init__(model, first.schedule, first.statistics)
+        super().__init__(model, first.schedule, first.statistics, capture_priority=-1)
         # Each row uses one model; counting the stacked parameter storage would
         # multiply the per-row GEMM work by the number of anchor groups.
         self.flops = first.flops

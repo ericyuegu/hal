@@ -300,6 +300,7 @@ def test_anchor_preparation_and_snapshot_load_refresh_captured_weight_storage() 
     engine.prepare_anchor_stacks()
     stack = engine.anchor_stacks[0]
     assert stack is not None
+    assert stack.capture_priority < original.policy.capture_priority
     for policy in sources.values():
         rotary = policy.model.temporal.blocks[0].rotary
         for length in (policy.max_delay, policy.max_delay + 2, policy.max_delay + 4):

@@ -96,6 +96,7 @@ class CapturedCall[T]:
         *,
         device: torch.device,
         counter: CaptureCounter | None = None,
+        priority: int = 0,
     ) -> None:
         if device.type != "cuda":
             raise ValueError("CUDA graph capture needs a CUDA device")
@@ -107,7 +108,8 @@ class CapturedCall[T]:
         with torch.cuda.device(self.device):
             self.graph = torch.cuda.CUDAGraph()
             current = torch.cuda.current_stream(self.device)
-            capture = torch.cuda.Stream(device=self.device)
+            # Torch 2.11 uses captured per-node priorities when it instantiates graphs.
+            capture = torch.cuda.Stream(device=self.device, priority=priority)
             saved = tuple(value.clone() for value in state)
             capture.wait_stream(current)
             try:

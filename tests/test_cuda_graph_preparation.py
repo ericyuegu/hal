@@ -120,3 +120,19 @@ def test_graph_capture_binds_the_declared_device() -> None:
         CapturedCall(partial(_increment_state, torch.zeros(1)), (), (torch.zeros(1),), device=device)
     with pytest.raises(ValueError, match="needs a CUDA device"):
         CapturedCall(partial(_increment_state, state), (), (state,), device=torch.device("cpu"))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("priority", [0, -1])
+def test_graph_operations_use_the_declared_capture_priority(priority: int) -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    value = torch.ones(1, device=device)
+    seen: list[int] = []
+
+    def operation() -> torch.Tensor:
+        seen.append(torch.cuda.current_stream(device).priority)
+        return value + 1
+
+    captured = CapturedCall(operation, (value,), device=device, priority=priority)
+    assert seen == [priority] * 3
+    torch.testing.assert_close(captured((value,)), value + 1, atol=0, rtol=0)
