@@ -63,6 +63,8 @@ def test_bench_preserves_training_batch_choices(windows: int | None, microbatche
     else:
         assert f"--training.actor-microbatches {microbatches} " in command
     assert "--profiling.rollout-only" not in command
+    assert "cat /sys/fs/cgroup/memory.peak" in command
+    assert "host-memory-peak-bytes.txt" in command
 
 
 def test_bench_input_capture_is_explicit_and_requires_training() -> None:
@@ -197,3 +199,33 @@ def test_bench_downloads_startup_memory_when_capture_fails_before_the_main_repor
     monkeypatch.setattr(devbox.time, "strftime", lambda *_args: "fixed")
     assert bench(cast(modal.Sandbox, FailedCapture()), 64, 512, full=True) == 137
     assert (tmp_path / "runs" / name / "startup/phase-memory.json").read_bytes() == payload
+
+
+def test_bench_uses_production_head_start_rewards_and_snapshot_cadence() -> None:
+    import json
+
+    production = json.loads(Path("experiments/o65/production-256.json").read_text())["training"]
+    sandbox = Sandbox()
+    assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, groups=4) == 0
+    arguments = shlex.split(sandbox.commands[1][2])
+    for field in ("seed", "head_start_frames", "checkpoint_interval", "snapshot_interval"):
+        assert int(arguments[arguments.index("--training." + field.replace("_", "-")) + 1]) == production[field]
+    for field in ("damage", "stock", "game_win"):
+        flag = "--training.reward-weights." + field.replace("_", "-")
+        assert float(arguments[arguments.index(flag) + 1]) == production["reward_weights"][field]
+    assert arguments[arguments.index("--training.critic-warmup-updates") + 1] == "0"
+
+
+def test_cache_commit_runs_in_the_mounted_sandbox_and_rejects_failure() -> None:
+    sandbox = Sandbox()
+    devbox.commit_cache(cast(modal.Sandbox, sandbox))
+    assert "modal.Volume.from_name" in sandbox.commands[0][-1]
+    assert devbox.CACHE_VOLUME in sandbox.commands[0][-1]
+    assert ".commit()" in sandbox.commands[0][-1]
+
+    class FailedSandbox(Sandbox):
+        def exec(self, *command: str, workdir: str) -> Process:
+            return Process(1)
+
+    with pytest.raises(RuntimeError, match="failed to commit"):
+        devbox.commit_cache(cast(modal.Sandbox, FailedSandbox()))

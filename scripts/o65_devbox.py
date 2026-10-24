@@ -187,6 +187,8 @@ def bench(
         "MKL_NUM_THREADS": "2",
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     }
+    production = json.loads(Path("experiments/o65/production-256.json").read_text())
+    training = production["training"]
     argv = [
         "/opt/venv/bin/python",
         f"{root}/experiments/065_selfplay_ppo.py",
@@ -212,17 +214,22 @@ def bench(
         "--updates",
         str(groups + 2),
         "--training.seed",
-        "65",
+        str(training["seed"]),
+        # Time full PPO immediately; its kernels and optimizer choices match production.
         "--training.critic-warmup-updates",
         "0",
         "--training.head-start-frames",
-        "0",
+        str(training["head_start_frames"]),
+        "--training.snapshot-interval",
+        str(training["snapshot_interval"]),
+        "--training.checkpoint-interval",
+        str(training["checkpoint_interval"]),
         "--training.reward-weights.damage",
-        "0.1",
+        str(training["reward_weights"]["damage"]),
         "--training.reward-weights.stock",
-        "120",
+        str(training["reward_weights"]["stock"]),
         "--training.reward-weights.game-win",
-        "120",
+        str(training["reward_weights"]["game_win"]),
         *(() if windows_per_step is None else ("--training.windows-per-step", str(windows_per_step))),
         *(() if actor_microbatches is None else ("--training.actor-microbatches", str(actor_microbatches))),
         "--training.decisions-per-window",
@@ -243,6 +250,12 @@ def bench(
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
     arguments = " ".join(argument if argument == "$CPUS" else shlex.quote(argument) for argument in argv)
     command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {arguments}"
+    command += (
+        "\nstatus=$?\n"
+        f"mkdir -p {shlex.quote(str(output))}\n"
+        f"cat /sys/fs/cgroup/memory.peak > {shlex.quote(str(output / 'host-memory-peak-bytes.txt'))} || exit $?\n"
+        'exit "$status"'
+    )
     code = _run(sandbox, command)
     startup = output.with_name(f"{output.name}-startup")
     directories = [path for path in (output, startup) if not _run(sandbox, f"test -d {shlex.quote(str(path))}")]
@@ -252,6 +265,16 @@ def bench(
     # Traces and reports go to one local directory per run for offline analysis.
     local = LOCAL_RESULTS / "runs" / name
     local.mkdir(parents=True)
+    (local / "worktree.json").write_text(
+        json.dumps(
+            {
+                "git_sha": _git("rev-parse", "HEAD"),
+                "dirty": bool(_git("status", "--porcelain")),
+                "trainer_sha256": trainer_sha,
+            },
+            indent=2,
+        )
+    )
     for directory in directories:
         prefix = local / "startup" if directory == startup else local
         for path in _capture(sandbox, f"find {shlex.quote(str(directory))} -type f -print0").split("\0"):
@@ -262,6 +285,15 @@ def bench(
             target.write_bytes(sandbox.filesystem.read_bytes(path))
     print(f"report: {local}", flush=True)
     return code
+
+
+def commit_cache(sandbox: modal.Sandbox) -> None:
+    # Commit from the mounted sandbox after writers exit, before it can be terminated.
+    command = "/opt/venv/bin/python -c " + shlex.quote(
+        f"import modal; modal.Volume.from_name({CACHE_VOLUME!r}).commit()"
+    )
+    if _run(sandbox, command):
+        raise RuntimeError("failed to commit the devbox compile cache volume")
 
 
 def main(args: Args) -> None:
@@ -275,25 +307,32 @@ def main(args: Args) -> None:
         return
     sync(sandbox, sha)
     if args.action == "exec":
-        raise SystemExit(_run(sandbox, args.command))
+        try:
+            code = _run(sandbox, args.command)
+        finally:
+            commit_cache(sandbox)
+        raise SystemExit(code)
     if args.action == "bench":
-        codes = [
-            bench(
-                sandbox,
-                matches,
-                args.rollout_frames,
-                full=args.full,
-                groups=args.groups,
-                windows_per_step=args.windows_per_step,
-                actor_microbatches=args.actor_microbatches,
-                decisions_per_window=args.decisions_per_window,
-                capture_training_inputs=args.capture_training_inputs,
-                update_gradient_inputs=args.update_gradient_inputs,
-                cache_root=args.cache_root,
-                compile_threads=args.compile_threads,
-            )
-            for matches in args.matches_per_shard
-        ]
+        try:
+            codes = [
+                bench(
+                    sandbox,
+                    matches,
+                    args.rollout_frames,
+                    full=args.full,
+                    groups=args.groups,
+                    windows_per_step=args.windows_per_step,
+                    actor_microbatches=args.actor_microbatches,
+                    decisions_per_window=args.decisions_per_window,
+                    capture_training_inputs=args.capture_training_inputs,
+                    update_gradient_inputs=args.update_gradient_inputs,
+                    cache_root=args.cache_root,
+                    compile_threads=args.compile_threads,
+                )
+                for matches in args.matches_per_shard
+            ]
+        finally:
+            commit_cache(sandbox)
         raise SystemExit(max(codes))
 
 
