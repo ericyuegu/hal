@@ -39,6 +39,11 @@ class Sandbox:
         return Process(0 if len(self.commands) <= 2 else 1)
 
 
+def child_arguments(command: str) -> list[str]:
+    arguments = shlex.split(command)
+    return shlex.split(arguments[arguments.index("--command") + 1])
+
+
 @pytest.mark.parametrize("windows,microbatches", [(None, None), (64, 1), (512, 8)])
 def test_bench_preserves_training_batch_choices(windows: int | None, microbatches: int | None) -> None:
     sandbox = Sandbox()
@@ -63,8 +68,8 @@ def test_bench_preserves_training_batch_choices(windows: int | None, microbatche
     else:
         assert f"--training.actor-microbatches {microbatches} " in command
     assert "--profiling.rollout-only" not in command
-    assert "cat /sys/fs/cgroup/memory.peak" in command
-    assert "host-memory-peak-bytes.txt" in command
+    assert "scripts.o65_devbox monitor" in command
+    assert "host-memory.jsonl" in command
 
 
 def test_bench_input_capture_is_explicit_and_requires_training() -> None:
@@ -85,7 +90,7 @@ def test_bench_update_gradient_capture_keeps_the_full_quoted_path() -> None:
         bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, update_gradient_inputs=Path("relative"))
     assert not sandbox.commands
     assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, update_gradient_inputs=path) == 0
-    arguments = shlex.split(sandbox.commands[1][2])
+    arguments = child_arguments(sandbox.commands[1][2])
     assert arguments[arguments.index("--profiling.update-gradient-inputs") + 1] == str(path)
 
 
@@ -93,7 +98,7 @@ def test_bench_update_gradient_capture_keeps_the_full_quoted_path() -> None:
 def test_bench_warms_all_groups_and_revisits_them(groups: int) -> None:
     sandbox = Sandbox()
     assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, groups=groups) == 0
-    arguments = shlex.split(sandbox.commands[1][2])
+    arguments = child_arguments(sandbox.commands[1][2])
     for option, expected in (("--groups", groups), ("--updates", groups + 2), ("--profiling.warm-updates", groups)):
         assert int(arguments[arguments.index(option) + 1]) == expected
 
@@ -207,7 +212,7 @@ def test_bench_uses_production_head_start_rewards_and_snapshot_cadence() -> None
     production = json.loads(Path("experiments/o65/production-256.json").read_text())["training"]
     sandbox = Sandbox()
     assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, groups=4) == 0
-    arguments = shlex.split(sandbox.commands[1][2])
+    arguments = child_arguments(sandbox.commands[1][2])
     for field in ("seed", "head_start_frames", "checkpoint_interval", "snapshot_interval"):
         assert int(arguments[arguments.index("--training." + field.replace("_", "-")) + 1]) == production[field]
     for field in ("damage", "stock", "game_win"):
@@ -219,9 +224,7 @@ def test_bench_uses_production_head_start_rewards_and_snapshot_cadence() -> None
 def test_cache_commit_runs_in_the_mounted_sandbox_and_rejects_failure() -> None:
     sandbox = Sandbox()
     devbox.commit_cache(cast(modal.Sandbox, sandbox))
-    assert "modal.Volume.from_name" in sandbox.commands[0][-1]
-    assert devbox.CACHE_VOLUME in sandbox.commands[0][-1]
-    assert ".commit()" in sandbox.commands[0][-1]
+    assert sandbox.commands[0][-1] == "exec 2>&1\nsync /cache"
 
     class FailedSandbox(Sandbox):
         def exec(self, *command: str, workdir: str) -> Process:
@@ -229,3 +232,27 @@ def test_cache_commit_runs_in_the_mounted_sandbox_and_rejects_failure() -> None:
 
     with pytest.raises(RuntimeError, match="failed to commit"):
         devbox.commit_cache(cast(modal.Sandbox, FailedSandbox()))
+
+
+def test_host_memory_monitor_records_v1_usage_and_preserves_child_failure(tmp_path: Path) -> None:
+    import json
+
+    usage, limit = tmp_path / "usage", tmp_path / "limit"
+    usage.write_text("12345")
+    limit.write_text("65536")
+    output = tmp_path / "startup/host-memory.jsonl"
+    assert devbox.monitor_host_memory("exit 7", output, usage=usage, limit=limit) == 7
+    rows = [json.loads(row) for row in output.read_text().splitlines()]
+    assert rows[0]["usage"] == str(usage)
+    assert rows[0]["limit_bytes"] == 65536
+    assert rows[-1] == {"sampled_peak_bytes": 12345, "returncode": 7}
+    assert all(row["bytes"] == 12345 for row in rows[1:-1])
+
+
+def test_host_memory_monitor_rejects_missing_usage_before_starting_child(tmp_path: Path) -> None:
+    limit = tmp_path / "limit"
+    limit.write_text("65536")
+    marker = tmp_path / "child-started"
+    with pytest.raises(FileNotFoundError):
+        devbox.monitor_host_memory(f"touch {marker}", tmp_path / "log", usage=tmp_path / "missing", limit=limit)
+    assert not marker.exists()

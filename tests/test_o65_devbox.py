@@ -38,7 +38,8 @@ def test_benchmark_uses_declared_cache_root(cache_root: Path) -> None:
         o65_devbox.bench(cast(modal.Sandbox, sandbox), 64, 128, full=False, windows_per_step=64, cache_root=cache_root)
         == 0
     )
-    arguments = shlex.split(sandbox.commands[1])
+    outer = shlex.split(sandbox.commands[1])
+    arguments = shlex.split(outer[outer.index("--command") + 1])
     for name, relative in (("TMPDIR", "tmp"), ("TORCHINDUCTOR_CACHE_DIR", "inductor"), ("TRITON_CACHE_DIR", "triton")):
         assert f"{name}={cache_root / relative}" in arguments
     output = Path(arguments[arguments.index("--output") + 1])

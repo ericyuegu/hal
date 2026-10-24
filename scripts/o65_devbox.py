@@ -32,7 +32,7 @@ SHARD_CPUS = 16
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
-    action: tyro.conf.Positional[Literal["up", "sync", "bench", "exec", "down"]]
+    action: tyro.conf.Positional[Literal["up", "sync", "bench", "exec", "down", "monitor"]]
     # Each name keeps its own sandbox, so parallel workstreams measure on separate GPUs.
     name: str = "main"
     # up: the commit the image is built from; defaults to HEAD, which must be pushed to origin.
@@ -56,6 +56,7 @@ class Args:
     compile_threads: int = 16
     # exec: a shell command to run in the repository root.
     command: str = ""
+    host_memory_output: Path = Path("/tmp/o65-host-memory.jsonl")
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
     hours: float = 6.0
     idle_minutes: int = 10
@@ -250,11 +251,19 @@ def bench(
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
     arguments = " ".join(argument if argument == "$CPUS" else shlex.quote(argument) for argument in argv)
     command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {arguments}"
-    command += (
-        "\nstatus=$?\n"
-        f"mkdir -p {shlex.quote(str(output))}\n"
-        f"cat /sys/fs/cgroup/memory.peak > {shlex.quote(str(output / 'host-memory-peak-bytes.txt'))} || exit $?\n"
-        'exit "$status"'
+    startup = output.with_name(f"{output.name}-startup")
+    command = " ".join(
+        shlex.quote(argument)
+        for argument in (
+            "/opt/venv/bin/python",
+            "-m",
+            "scripts.o65_devbox",
+            "monitor",
+            "--host-memory-output",
+            str(startup / "host-memory.jsonl"),
+            "--command",
+            command,
+        )
     )
     code = _run(sandbox, command)
     startup = output.with_name(f"{output.name}-startup")
@@ -287,16 +296,56 @@ def bench(
     return code
 
 
+def monitor_host_memory(
+    command: str,
+    output: Path,
+    *,
+    usage: Path = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    limit: Path = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+) -> int:
+    """Sample the Modal sandbox's cgroup v1; it exposes no historical peak counter."""
+    limit_bytes = int(limit.read_text())
+    int(usage.read_text())
+    output.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    peak = 0
+    with output.open("x") as log, subprocess.Popen(["bash", "-c", command]) as process:
+        try:
+            log.write(
+                json.dumps(
+                    {
+                        "format": "hal.o65.host-memory.v1",
+                        "usage": str(usage),
+                        "limit_bytes": limit_bytes,
+                        "sample_seconds": 0.5,
+                    }
+                )
+                + "\n"
+            )
+            while True:
+                current = int(usage.read_text())
+                peak = max(peak, current)
+                log.write(json.dumps({"elapsed_seconds": time.perf_counter() - started, "bytes": current}) + "\n")
+                log.flush()
+                if process.poll() is not None:
+                    break
+                time.sleep(0.5)
+            log.write(json.dumps({"sampled_peak_bytes": peak, "returncode": process.returncode}) + "\n")
+            return process.wait()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+
+
 def commit_cache(sandbox: modal.Sandbox) -> None:
-    # Commit from the mounted sandbox after writers exit, before it can be terminated.
-    command = "/opt/venv/bin/python -c " + shlex.quote(
-        f"import modal; modal.Volume.from_name({CACHE_VOLUME!r}).commit()"
-    )
-    if _run(sandbox, command):
+    # Volumes v2 commit through sync; sandbox execs have no Modal SDK credentials.
+    if _run(sandbox, "sync /cache"):
         raise RuntimeError("failed to commit the devbox compile cache volume")
 
 
 def main(args: Args) -> None:
+    if args.action == "monitor":
+        raise SystemExit(monitor_host_memory(args.command, args.host_memory_output))
     if args.action == "up":
         up(args.name, args.sha, args.hours, args.idle_minutes)
         return
