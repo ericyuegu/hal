@@ -1496,10 +1496,12 @@ class TransformerPolicy:
         self.restart_graphs: dict[tuple[ActionRing, tuple[int, ...]], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
         self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
-        # Replay chunks are serial and copy outputs before another graph runs.
-        # One capture stream lets their temporary allocations share a graph pool.
+        # Student buffers are ordered by stream waits; training follows rollout.
+        # Anchors can overlap the student and keep their own policy's pool.
         self.replay_pool: torch.cuda.CUDAGraph | None = None
-        self.replay_capture_stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
+        self.replay_capture_stream = (
+            torch.cuda.Stream(device=self.device, priority=capture_priority) if self.device.type == "cuda" else None
+        )
         self.reference_forward_model: SelfPlayTransformer | None = None
         self.value_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[Tensor]] = {}
         self.queue_replay = (
@@ -1816,8 +1818,12 @@ class TransformerPolicy:
                                 (*cache.cache.buffers(), cache.frames_in_block),
                                 device=self.device,
                                 priority=self.capture_priority,
+                                share_pool_with=self.replay_pool,
+                                capture_stream=self.replay_capture_stream,
                             )
                         self.restart_graphs[key] = captured_restart
+                        if self.replay_pool is None:
+                            self.replay_pool = captured_restart.graph
                     captured_restart(restart_inputs)
             appended = 1 if restart else 2
             count = 4 if clock % 4 == 0 else 2
@@ -1964,7 +1970,11 @@ class TransformerPolicy:
                                 ),
                                 device=self.device,
                                 priority=self.capture_priority,
+                                share_pool_with=self.replay_pool,
+                                capture_stream=self.replay_capture_stream,
                             )
+                        if self.replay_pool is None:
+                            self.replay_pool = self.tick_graphs[capture_key].graph
                 captured = self.tick_graphs.get(graph_key)
             self.work_flops["rollout"] += self.flops.rollout(
                 len(states),
@@ -2042,6 +2052,10 @@ class TransformerPolicy:
                 tokens = model.context_tokens(context, observed)
             with torch.enable_grad():
                 hidden = self.window_history(model.trunk, tokens)
+            # Keep the grad-enabled forward arithmetic required by Torch 2.11,
+            # but release its unused trunk backward graph before decoder replay.
+            hidden = hidden.detach().requires_grad_(True)
+            del tokens, context
             parts = []
             for slot in range(0, inputs[5].shape[1], count):
                 fields = tuple(
@@ -2060,7 +2074,11 @@ class TransformerPolicy:
                         output.features,
                     )
                 )
+                # Detached outputs must not retain this decoder's backward graph
+                # while the next chunk allocates its own saved activations.
+                del output
             batches.append(concatenate_replays(parts, 1))
+            del hidden, observed
         return concatenate_replays(batches, 0)
 
     @torch.no_grad()
@@ -2219,8 +2237,16 @@ class TransformerPolicy:
             self.admit_capture(("value", key))
             static = tuple(value.clone() for value in inputs)
             with prepared_shape_compilation(64):
-                captured = CapturedCall(lambda: self.value_forward(static), static, device=self.device)
+                captured = CapturedCall(
+                    lambda: self.value_forward(static),
+                    static,
+                    device=self.device,
+                    share_pool_with=self.replay_pool,
+                    capture_stream=self.replay_capture_stream,
+                )
             self.value_graphs[key] = captured
+            if self.replay_pool is None:
+                self.replay_pool = captured.graph
         return captured(inputs)
 
     def actor_step(
@@ -4132,19 +4158,29 @@ def _log_distribution(probabilities: Tensor) -> Tensor:
 
 
 def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF: Tensor) -> Tensor:
+    # KL validates and promotes probabilities to loss precision. Bound temporaries,
+    # keeping each category reduction identical to the full-rollout operation.
+    chunk = 4096
     rows = []
     for group, (p, q) in enumerate(zip(policy.distributions, reference.distributions, strict=True)):
-        valid = executed_JF[:, group::4, None]
-        for probabilities in (p, q):
-            active = probabilities[valid.expand_as(probabilities)]
-            _check_finite("executed KL probabilities", active)
-            if bool((active < 0).any()):
-                raise ValueError("executed KL probabilities must be nonnegative")
-        neutral = torch.nn.functional.one_hot(torch.zeros_like(p[..., 0], dtype=torch.long), p.shape[-1]).to(p.dtype)
-        p = torch.where(valid, p, neutral)
-        q = torch.where(valid, q, neutral)
-        rows.append(categorical_kl(_log_distribution(p), _log_distribution(q)))
+        parts = []
+        for start in range(0, len(p), chunk):
+            stop = start + chunk
+            parts.append(_distribution_kl(p[start:stop], q[start:stop], executed_JF[start:stop, group::4, None]))
+        rows.append(torch.cat(parts) if parts else _loss_precision(p).new_empty(p.shape[:-1]))
     return torch.stack(rows, -1).flatten(1)
+
+
+def _distribution_kl(p: Tensor, q: Tensor, valid: Tensor) -> Tensor:
+    for probabilities in (p, q):
+        active = probabilities[valid.expand_as(probabilities)]
+        _check_finite("executed KL probabilities", active)
+        if bool((active < 0).any()):
+            raise ValueError("executed KL probabilities must be nonnegative")
+    neutral = torch.nn.functional.one_hot(torch.zeros_like(p[..., 0], dtype=torch.long), p.shape[-1]).to(p.dtype)
+    p = torch.where(valid, p, neutral)
+    q = torch.where(valid, q, neutral)
+    return categorical_kl(_log_distribution(p), _log_distribution(q))
 
 
 def explained_variance(values: Tensor, targets: Tensor) -> float:
@@ -4482,6 +4518,24 @@ class PhaseMemory:
         }
 
 
+def tensor_storage_bytes(value: object, seen: set[tuple[torch.device, int]]) -> int:
+    """Count aliased tensor storage once across inventory categories."""
+    if isinstance(value, Tensor):
+        storage = value.untyped_storage()
+        key = value.device, storage.data_ptr()
+        if key in seen:
+            return 0
+        seen.add(key)
+        return storage.nbytes()
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return sum(tensor_storage_bytes(getattr(value, field.name), seen) for field in dataclasses.fields(value))
+    if isinstance(value, dict):
+        return sum(tensor_storage_bytes(item, seen) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(tensor_storage_bytes(item, seen) for item in value)
+    return 0
+
+
 def gradient_metrics(name: str, norms: Sequence[Tensor], cap: float) -> dict[str, float]:
     if not norms:
         return {}
@@ -4786,6 +4840,75 @@ class Trainer:
         self.partial_episodes: set[tuple[int, int]] = set()
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
 
+    def write_memory_inventory(
+        self, name: Literal["startup", "preparation", "fit"], extra: dict[str, object] | None = None
+    ) -> None:
+        output = self.startup_memory.output if name == "startup" else self.memory.output
+        if output is None or self.policy.device.type != "cuda":
+            return
+        seen: set[tuple[torch.device, int]] = set()
+        engine = self.engine
+        categories: dict[str, object] = {
+            "frame_stores": [tuple(vars(store).values()) for store in engine.stores if store is not None],
+            "rollout_tables": [tuple(vars(table).values()) for table in engine.tables if table is not None],
+            "group_ring_backing": [tuple(vars(ring).values()) for ring in engine.group_rings],
+            "active_rings": [tuple(vars(ring).values()) for ring in engine.rings],
+            "group_state": (
+                engine.dense_meta,
+                engine.dense_logs,
+                engine.active,
+                engine.stops,
+                engine.observed_clocks,
+                engine.episode_clocks,
+                engine.episode_returns,
+                engine.owners,
+            ),
+            "actor_optimizer_state": self.actor_optimizer.state,
+            "critic_optimizer_state": self.critic_optimizer.state,
+        }
+        graphs: list[dict[str, object]] = []
+        pools: dict[str, dict[str, int]] = {}
+        for index, policy in enumerate(engine.execution_policies()):
+            assert isinstance(policy, TransformerPolicy)
+            categories[f"policy{index}_weights"] = tuple(policy.model.parameters())
+            categories[f"policy{index}_buffers"] = tuple(policy.model.buffers())
+            categories[f"policy{index}_kv"] = [
+                (*cache.cache.buffers(), cache.frames_in_block) for cache in policy.tick_caches.values()
+            ]
+            if policy.reference_forward_model is not None:
+                categories[f"policy{index}_reference_weights"] = tuple(policy.reference_forward_model.parameters())
+            categories[f"policy{index}_actor_gradients"] = policy.actor_gradients
+            for kind, calls in (
+                ("tick", policy.tick_graphs),
+                ("restart", policy.restart_graphs),
+                ("value", policy.value_graphs),
+                ("reference", policy.reference_graphs),
+                ("actor", {key: step.captured for key, step in policy.actor_graphs.items()}),
+            ):
+                for key, call in calls.items():
+                    pool = str(call.graph.pool())
+                    if pool not in pools:
+                        segments = torch.cuda.memory_snapshot(call.graph.pool(), include_traces=False)
+                        pools[pool] = {
+                            "reserved_bytes": sum(segment["total_size"] for segment in segments),
+                            "allocated_bytes": sum(segment["allocated_size"] for segment in segments),
+                        }
+                    graphs.append({"policy": index, "kind": kind, "key": str(key), "pool": pool})
+                    categories[f"policy{index}_{kind}_{key}_inputs"] = call.inputs
+                    categories[f"policy{index}_{kind}_{key}_outputs"] = call.output
+        if extra is not None:
+            categories.update(extra)
+        report = {
+            "format": "hal.o65.memory-inventory.v1",
+            "allocated_bytes": torch.cuda.memory_allocated(self.policy.device),
+            "reserved_bytes": torch.cuda.memory_reserved(self.policy.device),
+            "graphs": graphs,
+            "pools": pools,
+            "unique_storage_bytes": {key: tensor_storage_bytes(value, seen) for key, value in categories.items()},
+        }
+        output.mkdir(parents=True, exist_ok=True)
+        (output / f"memory-inventory-{name}.json").write_text(json.dumps(report, indent=2))
+
     @torch.no_grad()
     def capture_startup(self, *, rollout_only: bool = False) -> None:
         if not isinstance(self.policy, TransformerPolicy) or self.policy.device.type != "cuda":
@@ -4831,6 +4954,7 @@ class Trainer:
             if rollout_only:
                 table.reset()
                 continue
+            self.reference.replay_pool = self.policy.replay_pool
             # Bootstrap and context-gap graphs have fixed player/diagnostic row counts.
             with self.startup_memory.phase("value"):
                 for count in {2 * len(matches), min(32, 2 * len(matches))}:
@@ -4886,6 +5010,7 @@ class Trainer:
             assert isinstance(policy, TransformerPolicy)
             policy.startup_finished = True
         self.startup_seconds = time.perf_counter() - started
+        self.write_memory_inventory("startup")
         self.startup_memory.active = False
         if self.compilation_counter is not None:
             self.compilation_counter.starts = 0
@@ -5138,6 +5263,10 @@ class Trainer:
                     old.actions,
                     compact,
                 )
+            )
+        if not self.memory.first_checked:
+            self.write_memory_inventory(
+                "preparation", {"windows": windows, "old": old, "reference": reference, "decisions": decisions}
             )
         kl = (
             torch.zeros_like(old.log_probs)
@@ -5656,6 +5785,8 @@ class Trainer:
             batch = self.prepare(rollout)
         with self.memory.phase("optimization"):
             metrics = self.fit(batch)
+        if not self.memory.first_checked:
+            self.write_memory_inventory("fit", {"prepared": batch})
         metrics.update(self.completed_metrics(rollout, batch.kl))
         metrics.update(self.anchor_metrics(rollout))
         for role, counts in rollout.behavior:
@@ -7737,6 +7868,7 @@ def profile_native(
         profile_rollout(trainer, config, native_config)
         return
     trainer.memory.output = config.output
+    trainer.memory.measure_all = True
     (config.output / "resolved.json").write_text(
         json.dumps(
             {

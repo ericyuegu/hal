@@ -25,10 +25,14 @@ class PerGroupEngine(exp.RolloutEngine):
         return super().activate_rollout_storage()
 
 
-def rotating_trainer(*, control: bool = False, device: str = "cpu", head_start: int = 0) -> Any:
+def rotating_trainer(*, control: bool = False, device: str = "cpu", head_start: int = 0, split: bool = False) -> Any:
     source = transformer_trainer(device, development=True, episode_length=197)
+    matches = 8 if split else 4
     groups = tuple(
-        (FakeShard(tuple(range(4 * group, 4 * group + 4)), length=197, timeout=True, device=device),)
+        tuple(
+            FakeShard(tuple(range(start, start + 4)), length=197, timeout=True, device=device)
+            for start in range(matches * group, matches * (group + 1), 4)
+        )
         for group in range(4)
     )
     cls = PerGroupEngine if control else exp.RolloutEngine
@@ -39,11 +43,20 @@ def rotating_trainer(*, control: bool = False, device: str = "cpu", head_start: 
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_four_groups_match_independent_caches_and_reuse_storage(device: str) -> None:
+def test_four_groups_match_independent_caches_and_reuse_storage(device: str, monkeypatch: pytest.MonkeyPatch) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    control, run = rotating_trainer(control=True, device=device), rotating_trainer(device=device)
+    control, run = (
+        rotating_trainer(control=True, device=device, split=True),
+        rotating_trainer(device=device, split=True),
+    )
     storage = None
+    original_capture = exp.CapturedCall
+
+    def independent_capture(*args: Any, **kwargs: Any) -> Any:
+        kwargs["share_pool_with"] = None
+        return original_capture(*args, **kwargs)
+
     for update in range(5):
         if update == 2:
             # Promotion truncates this slot in inactive groups, which reset on their next visit.
@@ -51,7 +64,9 @@ def test_four_groups_match_independent_caches_and_reuse_storage(device: str) -> 
                 engine.truncate_slot(1)
                 with torch.no_grad():
                     next(engine.anchors[1].model.parameters()).add_(0.005)
-        expected = control.engine.collect(update)
+        with monkeypatch.context() as patch:
+            patch.setattr(exp, "CapturedCall", independent_capture)
+            expected = control.engine.collect(update)
         actual = run.engine.collect(update)
         assert actual.group == expected.group == update % 4
         for name in ("valid", "duration", "rewards", "bootstrap"):
@@ -67,8 +82,8 @@ def test_four_groups_match_independent_caches_and_reuse_storage(device: str) -> 
         if storage is None:
             storage = current
         assert current == storage
-        assert len(run.policy.tick_caches) == 1
-        assert len(control.policy.tick_caches) == min(update + 1, 4)
+        assert len(run.policy.tick_caches) == 2
+        assert len(control.policy.tick_caches) == 2 * min(update + 1, 4)
         stacks = tuple(stack for stack in run.engine.anchor_stacks if stack is not None)
         if device == "cuda":
             assert len(stacks) == 4 and len(set(stacks)) == 1

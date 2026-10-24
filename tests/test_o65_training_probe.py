@@ -125,6 +125,7 @@ def test_full_profile_preserves_memory_when_the_first_preparation_fails(
     monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 456)
 
     def fail_preparation() -> tuple[exp.PreparedUpdate, dict[str, float]]:
+        assert run.memory.measure_all
         with run.memory.phase("preparation"):
             raise torch.cuda.OutOfMemoryError("test preparation failure")
 

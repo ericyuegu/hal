@@ -326,14 +326,28 @@ def test_actor_grouping_rejects_a_queue_shorter_than_a_valid_delay() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks() -> None:
+def test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks(tmp_path: Path) -> None:
     run = transformer_trainer("cuda", development=True, matches=(0, 1, 2, 3), episode_length=10000)
     run.config = dataclasses.replace(run.config, decisions_per_window="all")
+    run.startup_memory.output = tmp_path
     run.capture_startup()
     graphs = [*run.reference.reference_graphs.values(), *(step.captured for step in run.policy.actor_graphs.values())]
     assert len(graphs) == 4
-    assert len({graph.graph.pool() for graph in graphs}) == 1
+    graphs.extend(run.policy.tick_graphs.values())
+    graphs.extend(run.policy.restart_graphs.values())
+    graphs.extend(run.policy.value_graphs.values())
+    pools = {graph.graph.pool() for graph in graphs}
+    assert len(pools) == 1
+    for stack in run.engine.anchor_stacks:
+        if stack is not None:
+            anchors = (*stack.tick_graphs.values(), *stack.restart_graphs.values())
+            assert len({graph.graph.pool() for graph in anchors}) == 1
+            assert all(graph.graph.pool() not in pools for graph in anchors)
     assert run.policy.replay_capture_stream is run.reference.replay_capture_stream
+    inventory = json.loads((tmp_path / "memory-inventory-startup.json").read_text())
+    assert {entry["kind"] for entry in inventory["graphs"]} == {"tick", "restart", "reference", "actor", "value"}
+    assert all(pool["reserved_bytes"] >= pool["allocated_bytes"] > 0 for pool in inventory["pools"].values())
+    assert 0 < sum(inventory["unique_storage_bytes"].values()) <= inventory["allocated_bytes"]
     assert not run.startup_memory.active
     assert not run.memory.first_checked and not run.memory.actor_checked
     for phase in ("rollout", "value", "reference", "actor"):
