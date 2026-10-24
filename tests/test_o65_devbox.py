@@ -2,6 +2,7 @@
 
 import io
 import shlex
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -27,7 +28,7 @@ class Sandbox:
     def exec(self, shell: str, flag: str, command: str, *, workdir: str) -> Process:
         assert (shell, flag, workdir) == ("bash", "-c", str(o65_devbox.launch.REMOTE_ROOT))
         self.commands.append(command)
-        return Process(int(command.startswith("test -d ")))
+        return Process(int(command.startswith("{\ntest -d ")))
 
 
 @pytest.mark.parametrize("cache_root", [Path("/cache"), Path("/tmp/tick cache")])
@@ -42,4 +43,12 @@ def test_benchmark_uses_declared_cache_root(cache_root: Path) -> None:
         assert f"{name}={cache_root / relative}" in arguments
     output = Path(arguments[arguments.index("--output") + 1])
     assert output.parent == cache_root / "runs"
-    assert shlex.split(sandbox.commands[1])[:3] == ["test", "-d", str(output)]
+    assert shlex.split(sandbox.commands[1])[1:4] == ["test", "-d", str(output)]
+
+
+def test_run_captures_stderr_from_every_command() -> None:
+    sandbox = Sandbox()
+    assert o65_devbox._run(cast(modal.Sandbox, sandbox), "printf first >&2\nprintf second") == 0
+    result = subprocess.run(["bash", "-c", sandbox.commands[0]], capture_output=True, text=True, check=True)
+    assert result.stdout == "firstsecond"
+    assert result.stderr == ""
