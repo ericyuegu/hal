@@ -9,6 +9,7 @@ import torch
 from test_065_loop import PROVENANCE
 from test_065_loop import FakeShard
 from test_065_loop import exp
+from test_065_loop import trainer
 from test_065_loop import transformer_trainer
 
 
@@ -106,6 +107,10 @@ def test_four_group_head_start_and_resume_preserve_next_batch_and_update(tmp_pat
     assert exp._batch_hash(actual) == exp._batch_hash(expected)
     for value, reference in zip(restored.policy.model.parameters(), run.policy.model.parameters(), strict=True):
         torch.testing.assert_close(value, reference, atol=0, rtol=0)
+    for name in ("actor_optimizer", "critic_optimizer", "scheduler"):
+        assert exp._state_hash(getattr(restored, name).state_dict()) == exp._state_hash(
+            getattr(run, name).state_dict()
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -122,3 +127,21 @@ def test_four_cuda_groups_never_recapture_after_startup() -> None:
         assert run.policy.tick_caches == caches
     assert len(caches) == 1
     assert run.policy.post_startup_captures == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_unsealed_frame_acceptance_prepares_single_and_multiple_match_shapes() -> None:
+    from torch._dynamo import config as dynamo_config
+
+    source = trainer("cuda", groups=1)
+    with dynamo_config.patch(recompile_limit=1):
+        for matches in ((0, 1), (0,)):
+            engine = exp.RolloutEngine(
+                ((FakeShard(matches, device="cuda"),),),
+                source.policy,
+                source.engine.sampler,
+                source.engine.anchors,
+            )
+            engine.initialize()
+            engine.collect(0)
+            assert dynamo_config.recompile_limit == 1

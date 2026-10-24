@@ -1,6 +1,7 @@
 """Capture the actual first PPO inputs without changing the learner."""
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -94,3 +95,44 @@ def test_profile_continues_after_saving_training_inputs(tmp_path: Path, monkeypa
     monkeypatch.setattr(exp, "compilation_report", compile_report)
     with pytest.raises(WarmupComplete):
         exp.profile_native(run, config, PROVENANCE, {})
+
+
+def test_full_profile_preserves_memory_when_the_first_preparation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import trainer
+
+    run = trainer("cpu", groups=1)
+    config = exp.NativeCli(
+        checkpoint=tmp_path / "checkpoint.pt",
+        sampler=tmp_path / "sampler.json",
+        output=tmp_path / "profile",
+        data_dir=tmp_path,
+        updates=3,
+        cpus=tuple(sorted(exp.os.sched_getaffinity(0)))[:1],
+        groups=1,
+        training=run.config,
+        profiling=exp.ProfileConfig(warm_updates=1),
+    )
+    run.memory.device = torch.device("cuda")
+    run.memory.active = True
+    run.memory.label = "first_ppo"
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *_args: "NVIDIA B200")
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _device: 123)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda _device: 456)
+
+    def fail_preparation() -> tuple[exp.PreparedUpdate, dict[str, float]]:
+        with run.memory.phase("preparation"):
+            raise torch.cuda.OutOfMemoryError("test preparation failure")
+
+    monkeypatch.setattr(run, "run_update", fail_preparation)
+    with pytest.raises(RuntimeError, match="CUDA OOM in preparation"):
+        exp.profile_native(run, config, PROVENANCE, {})
+    report = json.loads((config.output / "phase-memory.json").read_text())
+    assert report["memory/first_ppo_preparation_peak_allocated_bytes"] == 123
+    assert report["memory/first_ppo_preparation_peak_reserved_bytes"] == 456
+    assert "systems/first_ppo_preparation_seconds" in report
+    assert not (config.output / "warm.jsonl").read_text()

@@ -3593,17 +3593,25 @@ class RolloutEngine:
         timeouts = 0
         active_host = self.live_host[group][host_lanes]
         terminals, truncations = frames.terminal, frames.timeout
-        self.accept_frame(
-            frames,
-            lanes,
-            pending,
-            table,
-            ring,
-            self.active[group],
-            self.stops[group],
-            self.observed_clocks[group],
-            self.episode_returns[group],
+        preparing = self.policy.device.type == "cuda" and (
+            not isinstance(self.policy, TransformerPolicy) or not self.policy.startup_finished
         )
+        with (
+            prepared_shape_compilation(64, instance_count=4 * len(self.groups))
+            if preparing
+            else contextlib.nullcontext()
+        ):
+            self.accept_frame(
+                frames,
+                lanes,
+                pending,
+                table,
+                ring,
+                self.active[group],
+                self.stops[group],
+                self.observed_clocks[group],
+                self.episode_returns[group],
+            )
         frames_stepped = int(active_host.sum())
         for shard in shards:
             if isinstance(shard, NativeSimulatorShard):
@@ -7728,6 +7736,7 @@ def profile_native(
     if config.profiling.rollout_only:
         profile_rollout(trainer, config, native_config)
         return
+    trainer.memory.output = config.output
     (config.output / "resolved.json").write_text(
         json.dumps(
             {
