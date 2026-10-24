@@ -23,8 +23,8 @@ import tyro
 from scripts import launch_o65_modal as launch
 
 APP = "o65-devbox"
-CACHE_VOLUME = "hal-o65-devbox-v2"
-CACHE = Path("/cache")
+CACHE_VOLUME = launch.COMPILE_CACHE_VOLUME
+CACHE = launch.COMPILE_CACHE
 LOCAL_RESULTS = Path.home() / "data/scratch/o65-devbox"
 SYNCED = ("hal", "experiments", "scripts", "tests")
 SHARD_CPUS = 16

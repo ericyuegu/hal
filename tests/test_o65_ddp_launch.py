@@ -99,7 +99,7 @@ def test_o64_commands_parse_the_native_cli(tmp_path: Path, measurement: bool) ->
     parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
     assert parsed.cadence == "production" and parsed.rollout_frames == 512
     assert parsed.training.reward_weights == exp.native.RewardWeights(0.1, 120, 120)
-    assert parsed.groups == 1 and parsed.training.snapshot_interval == 64
+    assert parsed.groups == 4 and parsed.training.snapshot_interval == 64
     assert parsed.training.windows_per_step == 1 and parsed.training.actor_microbatches == 1
     assert parsed.training.decisions_per_window == "all"
     assert parsed.matches_per_shard == 16

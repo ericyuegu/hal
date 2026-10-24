@@ -31,6 +31,9 @@ REMOTE_ROOT = Path("/opt/o65-hal")
 RESULTS = Path("/o65-results")
 WORK = Path("/opt/o65-work")
 VOLUME = "hal-o65-profile"
+# The devbox benches populate these compiler caches; DDP runs start from them warm.
+COMPILE_CACHE_VOLUME = "hal-o65-devbox-v2"
+COMPILE_CACHE = Path("/cache")
 IMAGE = "ghcr.io/ericyuegu/hal@sha256:c9160a7bb2dc0aa3eb6dc583b1c4753ff98d9a40f802512ca402e2b93a3a7413"
 AWS_KEYS = ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET")
 CPU_CORES = 17
@@ -270,8 +273,6 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             str(request.actor_microbatches),
             "--updates",
             str(request.ddp_updates),
-            "--compile-cache",
-            str(RESULTS / "compile-cache"),
         ]
         if request.measurement:
             argv.append("--measurement")
@@ -462,6 +463,11 @@ def run_child(request: Request, output: Path, started: float) -> int:
         MKL_NUM_THREADS="2",
         CUBLAS_WORKSPACE_CONFIG=":4096:8",
     )
+    if request.mode == "ddp":
+        env.update(
+            TORCHINDUCTOR_CACHE_DIR=str(COMPILE_CACHE / "inductor"),
+            TRITON_CACHE_DIR=str(COMPILE_CACHE / "triton"),
+        )
     Path(env["TMPDIR"]).mkdir()
     identity = {
         "format": "hal.o65.modal-launch.v2",
@@ -492,7 +498,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
         identity.update(
             treatment=f"O64 outcome PPO; matches per GPU={request.matches}, windows per actor step={request.windows_per_step}",
             control="frozen O64 step-0098304 with matched episode sampling",
-            invariants="seed 65, full-corpus sampler, 11 production cadences, 512 rollout frames, one group, all valid decisions per window, outcome reward (0.1,120,120)",
+            invariants="seed 65, full-corpus sampler, 11 production cadences, 512 rollout frames, four rotating groups, all valid decisions per window, outcome reward (0.1,120,120)",
         )
     (output / "launch.json").write_text(json.dumps(identity, indent=2))
     if request.mode == "ddp":
@@ -746,7 +752,10 @@ def main(args: Args) -> None:
         gpu=f"B200:{request.gpus}" if args.mode == "ddp" else "RTX-PRO-6000",
         cpu=(float(cores), float(cores)),
         memory=(memory, memory),
-        volumes={str(RESULTS): volume},
+        volumes={str(RESULTS): volume}
+        | (
+            {str(COMPILE_CACHE): modal.Volume.from_name(COMPILE_CACHE_VOLUME, version=2)} if args.mode == "ddp" else {}
+        ),
         timeout=request.timeout_seconds,
         startup_timeout=300,
         retries=0,
