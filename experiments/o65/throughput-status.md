@@ -13,6 +13,8 @@ Launched on 2026-10-24 from `o65-rollout-speed` at `c208e887` as Modal run `o65-
       --matches 1024 --windows-per-step 512 --actor-microbatches 8 --ddp-updates 256 \
       --damage-weight 0.1 --game-win-weight 120 --timeout-seconds 12600 --b200-max-usd 390
 
+The production identity records the Git SHA, so a resume has to launch from `c208e887`; later
+commits, including documentation, change the SHA and the resume check refuses them.
 The local launcher process blocks on the Modal call; its log is
 `~/data/scratch/o65-launch-outcome-256.log`. W&B project `hal-o65`, run id equal to the run name.
 
