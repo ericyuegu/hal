@@ -58,6 +58,8 @@ from hal.inference.decision_decoder import DecisionDecoder
 from hal.inference.graphed_actor import GraphedActorStep
 from hal.inference.kv_cache import BlockRestartCache
 from hal.inference.kv_cache import forward_tokens_with_kv_cache
+from hal.models.action_sequence import CausalTemporalDecoder
+from hal.models.action_sequence import NonlinearActionHead
 from hal.models.attention import KVMemory
 from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
@@ -1020,6 +1022,7 @@ def tick_decoder_buckets(rows: int, count: int) -> tuple[int, ...]:
 
 # Anchor layouts span every buffer: one graph per anchor and tick, sampled with the first buffer.
 ALL_BUFFERS = -1
+STACKED_ANCHORS = -2
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1326,10 +1329,114 @@ class TickLinear(torch.nn.Linear):
             assert self.tick_bias is not None
             self.tick_bias.copy_(self.bias)
 
-    def forward(self, inputs: Tensor) -> Tensor:
-        if self.tick and torch.is_autocast_enabled(inputs.device.type):
-            return torch.nn.functional.linear(inputs, self.tick_weight, self.tick_bias)
-        return torch.nn.functional.linear(inputs, self.weight, self.bias)
+    def forward(self, input: Tensor) -> Tensor:
+        if self.tick and torch.is_autocast_enabled(input.device.type):
+            return torch.nn.functional.linear(input, self.tick_weight, self.tick_bias)
+        return torch.nn.functional.linear(input, self.weight, self.bias)
+
+
+class AnchorLinear(TickLinear):
+    """Apply one frozen model per equal-sized, contiguous group of rows."""
+
+    def __init__(self, sources: tuple[torch.nn.Linear, ...]) -> None:
+        super().__init__(sources[0])
+        self.sources = sources
+        self.weight = torch.nn.Parameter(
+            torch.stack([source.weight.detach() for source in sources]), requires_grad=False
+        )
+        self.bias = (
+            None
+            if sources[0].bias is None
+            else torch.nn.Parameter(
+                torch.stack([cast(Tensor, source.bias).detach() for source in sources]), requires_grad=False
+            )
+        )
+        self.tick_weight = self.weight.to(torch.bfloat16)
+        self.tick_bias = None if self.bias is None else self.bias.to(torch.bfloat16)
+
+    @torch.no_grad()
+    def refresh(self) -> None:
+        for index, source in enumerate(self.sources):
+            self.weight[index].copy_(source.weight)
+            if self.bias is not None:
+                self.bias[index].copy_(cast(Tensor, source.bias))
+        super().refresh()
+
+    def project(self, inputs: Tensor, start: int = 0, stop: int | None = None, *, bias: bool = True) -> Tensor:
+        groups = len(self.sources)
+        if inputs.shape[0] % groups:
+            raise ValueError("stacked linear rows must contain equal anchor groups")
+        tick = self.tick and torch.is_autocast_enabled(inputs.device.type)
+        weight = (self.tick_weight if tick else self.weight)[:, :, start:stop]
+        biases = (self.tick_bias if tick else self.bias) if bias else None
+        grouped = inputs.reshape(groups, -1, inputs.shape[-1])
+        result = (
+            torch.bmm(grouped, weight.transpose(1, 2))
+            if biases is None
+            else torch.baddbmm(biases[:, None], grouped, weight.transpose(1, 2))
+        )
+        return result.reshape(*inputs.shape[:-1], self.out_features)
+
+    def add_bias(self, inputs: Tensor) -> Tensor:
+        if self.bias is None:
+            raise ValueError("stacked readout requires a bias")
+        return (inputs.reshape(len(self.sources), -1, self.out_features) + self.bias[:, None]).reshape_as(inputs)
+
+    def forward(self, input: Tensor) -> Tensor:
+        return self.project(input)
+
+
+class AnchorEmbedding(torch.nn.Embedding):
+    def __init__(self, sources: tuple[torch.nn.Embedding, ...]) -> None:
+        source = sources[0]
+        super().__init__(source.num_embeddings, source.embedding_dim, device="meta")
+        self.sources = sources
+        self.weight = torch.nn.Parameter(
+            torch.stack([source.weight.detach() for source in sources]), requires_grad=False
+        )
+
+    @torch.no_grad()
+    def refresh(self) -> None:
+        for index, source in enumerate(self.sources):
+            self.weight[index].copy_(source.weight)
+
+    def forward(self, input: Tensor) -> Tensor:
+        groups = len(self.sources)
+        if input.shape[0] % groups:
+            raise ValueError("stacked embedding rows must contain equal anchor groups")
+        torch._assert_async(
+            ((input >= 0) & (input < self.num_embeddings)).all(), "stacked embedding index is out of range"
+        )
+        indices = input.reshape(groups, -1) + torch.arange(groups, device=input.device)[:, None] * self.num_embeddings
+        result = torch.nn.functional.embedding(indices, self.weight.flatten(0, 1))
+        return result.reshape(*input.shape, self.embedding_dim)
+
+
+class AnchorTemporalDecoder(CausalTemporalDecoder):
+    def _state_bias(self, trunk: Tensor) -> Tensor:
+        return cast(AnchorLinear, self.token_projection).project(trunk, stop=self.trunk_width)
+
+    def _step_features(self, previous: Tensor, offsets: Tensor, embedded: Tensor | None = None) -> Tensor:
+        projection = cast(AnchorLinear, self.token_projection)
+        action = projection.project(
+            self.codec.embed_frame(previous) if embedded is None else embedded,
+            self.trunk_width,
+            self.trunk_width + self.controller_width,
+            bias=False,
+        )
+        offset = projection.project(
+            self.offset_embedding(offsets.expand(previous.shape[:-1])),
+            self.trunk_width + self.controller_width,
+            bias=False,
+        )
+        return action.float() + offset.float() if self.return_conditioner.ranges is not None else action + offset
+
+    def _project_action_head(self, head: NonlinearActionHead, features: Tensor) -> Tensor:
+        if self.return_conditioner.ranges is None or not torch.is_autocast_enabled(features.device.type):
+            return head.project(features)
+        hidden = torch.nn.functional.silu(head.up(features))
+        down = cast(AnchorLinear, head.down)
+        return down.add_bias(down.project(hidden, bias=False).float())
 
 
 class TransformerPolicy:
@@ -1588,8 +1695,21 @@ class TransformerPolicy:
         appended, count = (1 if clock % 128 == 0 else 2), (4 if clock % 4 == 0 else 2)
         return all(
             (key, appended, count, bucket) in self.tick_graphs
-            for bucket in tick_decoder_buckets(len(layout.streams), count)
+            for bucket in self.decoder_buckets(len(layout.streams), count)
         ) and (clock % 128 != 0 or key in self.restart_graphs)
+
+    def decoder_buckets(self, rows: int, count: int) -> tuple[int, ...]:
+        return tick_decoder_buckets(rows, count)
+
+    def decoder_layout(
+        self, rows: tuple[int, ...], batch: int, bucket: int
+    ) -> tuple[tuple[int, ...], tuple[bool, ...]]:
+        return rows + rows[:1] * (bucket - len(rows)), (True,) * len(rows) + (False,) * (bucket - len(rows))
+
+    def decoder_bucket(self, rows: tuple[int, ...], batch: int, count: int) -> int:
+        if self.device.type != "cuda":
+            return len(rows)
+        return next(size for size in self.decoder_buckets(batch, count) if size >= len(rows))
 
     @torch.no_grad()
     def sample_tick(
@@ -1666,11 +1786,11 @@ class TransformerPolicy:
                 meta = states.tensor(states.table.integers)
                 due = states.tensor(states.table.active) & (meta[:, CLOCK] % meta[:, REPLAN] == 0)
                 decoder_rows = tuple(torch.nonzero(due).flatten().tolist())
-            buckets = tick_decoder_buckets(len(states), count)
-            bucket = next(size for size in buckets if size >= len(decoder_rows)) if enabled else len(decoder_rows)
+            buckets = self.decoder_buckets(len(states), count)
+            bucket = self.decoder_bucket(decoder_rows, len(states), count)
             # Padded slots repeat a due row, so no live row that is not due enters
             # the decoder. Their writes go only to the ring and table spare rows.
-            padded_rows = decoder_rows + decoder_rows[:1] * (bucket - len(decoder_rows))
+            padded_rows, decoder_valid = self.decoder_layout(decoder_rows, len(states), bucket)
             selected = torch.tensor(padded_rows, dtype=torch.long, pin_memory=enabled).to(
                 self.device, non_blocking=True
             )
@@ -1681,7 +1801,7 @@ class TransformerPolicy:
                 else states.enabled,
                 selected,
                 torch.tensor(
-                    [True] * len(decoder_rows) + [False] * (bucket - len(decoder_rows)),
+                    decoder_valid,
                     dtype=torch.bool,
                     pin_memory=enabled,
                 ).to(self.device, non_blocking=True),
@@ -2120,6 +2240,113 @@ class TransformerPolicy:
         return result
 
 
+class StackedAnchorPolicy(TransformerPolicy):
+    def __init__(self, sources: tuple[TransformerPolicy, ...]) -> None:
+        if len(sources) < 2:
+            raise ValueError("a stacked anchor policy requires at least two groups")
+        first = sources[0]
+        shapes = tuple((name, tuple(parameter.shape)) for name, parameter in first.model.named_parameters())
+        if any(
+            source.device != first.device
+            or source.model.cfg != first.model.cfg
+            or source.model.ranges != first.model.ranges
+            or source.model.decoder_precision != first.model.decoder_precision
+            or source.schedule != first.schedule
+            or source.statistics != first.statistics
+            or tuple((name, tuple(parameter.shape)) for name, parameter in source.model.named_parameters()) != shapes
+            for source in sources
+        ):
+            raise ValueError("stacked anchors require matching model and representation contracts")
+        for name, _ in shapes:
+            parent, _, local = name.rpartition(".")
+            module = first.model.get_submodule(parent)
+            linear = isinstance(module, torch.nn.Linear) and local in ("weight", "bias")
+            embedding = isinstance(module, torch.nn.Embedding) and local == "weight"
+            if not (linear or embedding):
+                raise ValueError("stacked anchors require linear or embedding parameters")
+        model = copy.deepcopy(first.model).requires_grad_(False)
+        temporal = model.temporal
+        with torch.device("meta"):
+            model.temporal = AnchorTemporalDecoder(
+                model.cfg,
+                model.codec,
+                live_horizons=temporal.live_horizons,
+                training_diagnostics=temporal.training_diagnostics,
+            )
+        model.temporal.return_conditioner = temporal.return_conditioner
+        for name, buffer in tuple(model.named_buffers()):
+            if buffer.device.type == "meta":
+                parent, _, local_name = name.rpartition(".")
+                model.get_submodule(parent).register_buffer(local_name, first.model.get_buffer(name).clone())
+        embeddings = []
+        for name, module in tuple(model.named_modules()):
+            if isinstance(module, torch.nn.Linear):
+                model.set_submodule(
+                    name,
+                    AnchorLinear(tuple(cast(torch.nn.Linear, source.model.get_submodule(name)) for source in sources)),
+                )
+            elif isinstance(module, torch.nn.Embedding):
+                embedding = AnchorEmbedding(
+                    tuple(cast(torch.nn.Embedding, source.model.get_submodule(name)) for source in sources)
+                )
+                model.set_submodule(name, embedding)
+                embeddings.append(embedding)
+        self.anchor_groups = len(sources)
+        self.anchor_sources = sources
+        self.anchor_embeddings = tuple(embeddings)
+        super().__init__(model, first.schedule, first.statistics)
+        # Each row uses one model; counting the stacked parameter storage would
+        # multiply the per-row GEMM work by the number of anchor groups.
+        self.flops = first.flops
+
+    @torch.no_grad()
+    def prepare_tick_weights(self) -> None:
+        super().prepare_tick_weights()
+        # CPU policies do not install the CUDA tick-weight lifecycle.
+        if self.device.type != "cuda":
+            for module in self.model.modules():
+                if isinstance(module, AnchorLinear):
+                    module.refresh()
+        for embedding in self.anchor_embeddings:
+            embedding.refresh()
+
+    def decoder_buckets(self, rows: int, count: int) -> tuple[int, ...]:
+        if rows % self.anchor_groups:
+            raise ValueError("stacked tick rows must contain equal anchor groups")
+        return tuple(size * self.anchor_groups for size in tick_decoder_buckets(rows // self.anchor_groups, count))
+
+    def decoder_bucket(self, rows: tuple[int, ...], batch: int, count: int) -> int:
+        width = batch // self.anchor_groups
+        maximum = max(sum(start <= row < start + width for row in rows) for start in range(0, batch, width))
+        return next(size for size in self.decoder_buckets(batch, count) if size >= maximum * self.anchor_groups)
+
+    def decoder_layout(
+        self, rows: tuple[int, ...], batch: int, bucket: int
+    ) -> tuple[tuple[int, ...], tuple[bool, ...]]:
+        width = batch // self.anchor_groups
+        if bucket == 0:
+            return (), ()
+        per_group = bucket // self.anchor_groups
+        padded: list[int] = []
+        valid: list[bool] = []
+        for start in range(0, batch, width):
+            selected = tuple(row for row in rows if start <= row < start + width)
+            padded.extend(selected + (selected[0] if selected else rows[0],) * (per_group - len(selected)))
+            valid.extend((True,) * len(selected) + (False,) * (per_group - len(selected)))
+        return tuple(padded), tuple(valid)
+
+    def validate_layout(self, policies: tuple[LoopPolicy, ...], counts: tuple[int, ...]) -> None:
+        total = sum(counts)
+        if total % self.anchor_groups:
+            raise ValueError("stacked anchor row groups changed")
+        width = total // self.anchor_groups
+        if width < 1 or any(count % width for count in counts):
+            raise ValueError("stacked anchor row groups changed")
+        expected = tuple(policy for policy, count in zip(policies, counts, strict=True) for _ in range(count // width))
+        if expected != self.anchor_sources:
+            raise ValueError("stacked anchor weights disagree with the row layout")
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class EpisodeResult:
     match: int
@@ -2290,6 +2517,8 @@ class RolloutEngine:
         self.sampler = sampler
         self.configurations = sampler.schedule.configurations
         self.anchors = anchors
+        self.anchor_stacks: list[StackedAnchorPolicy | None] = [None for _ in groups]
+        self.stacked_owners: dict[int, Tensor] = {}
         self.tick_layouts: dict[tuple[int, int | None], TickLayout] = {}
         self.tick_decoder_rows: dict[tuple[int, int | None], tuple[int, ...]] = {}
         self.tick_decoder_candidates: dict[tuple[int, int | None], tuple[NDArray[np.int64], NDArray[np.int64]]] = {}
@@ -2381,6 +2610,39 @@ class RolloutEngine:
             if policy.device.type == "cuda"
             else accept_frame_tensors
         )
+
+    def prepare_anchor_stacks(self) -> None:
+        """Build execution copies before capture; restore retains their storage."""
+        if self.policy.device.type != "cuda" or not all(
+            isinstance(policy, TransformerPolicy) for policy in self.anchors.values()
+        ):
+            return
+        # Reference replay also uses these immutable factors. Its canonical
+        # model no longer visits the live tick path that used to prepare them.
+        for policy in self.anchors.values():
+            cast(TransformerPolicy, policy).tick_decoder.prepare_rotary()
+        prepared: dict[tuple[int, ...], StackedAnchorPolicy] = {}
+        for group, matches in enumerate(self.group_matches):
+            owners = tuple(
+                owner for owner in self.anchors if any(self.lane_roles[match] == owner for match in matches)
+            )
+            if len(owners) < 2:
+                self.anchor_stacks[group] = None
+                continue
+            counts = tuple(2 * sum(self.lane_roles[match] == owner for match in matches) for owner in owners)
+            width = math.gcd(*counts)
+            # Split the larger pi_ref cohort into equal groups. This preserves
+            # every real row without padding the other three anchor trunks.
+            groups = tuple(owner for owner, count in zip(owners, counts, strict=True) for _ in range(count // width))
+            if groups not in prepared:
+                prepared[groups] = StackedAnchorPolicy(
+                    tuple(cast(TransformerPolicy, self.anchors[owner]) for owner in groups)
+                )
+            self.anchor_stacks[group] = prepared[groups]
+
+    def execution_policies(self) -> tuple[LoopPolicy, ...]:
+        stacks = tuple(dict.fromkeys(stack for stack in self.anchor_stacks if stack is not None))
+        return self.policy, *self.anchors.values(), *stacks
 
     def snapshot(self) -> PoolSnapshot:
         groups = []
@@ -2475,7 +2737,7 @@ class RolloutEngine:
             self.stores[group_id] = store
         self.matches = restored
         self.tables = [None] * len(self.groups)
-        for policy in (self.policy, *self.anchors.values()):
+        for policy in self.execution_policies():
             policy.clear_caches()
 
     def initialize(self) -> None:
@@ -2764,11 +3026,35 @@ class RolloutEngine:
                     tuple((selected // 2).tolist()),
                     buffer_index,
                 )
+            stack = self.anchor_stacks[group]
+            if stack is not None:
+                keys = tuple((ALL_BUFFERS, owner) for owner in anchor_ids if (ALL_BUFFERS, owner) in self.tick_layouts)
+                layouts = tuple(self.tick_layouts.pop(key) for key in keys)
+                slots = tuple(self.group_slots[group].pop(key) for key in keys)
+                stack.validate_layout(
+                    tuple(self.anchors[owner] for _, owner in keys),
+                    tuple(len(layout.streams) for layout in layouts),
+                )
+                key = ALL_BUFFERS, STACKED_ANCHORS
+                self.group_slots[group][key] = torch.cat(slots)
+                self.tick_layouts[key] = TickLayout(
+                    tuple(stream for layout in layouts for stream in layout.streams),
+                    tuple(lane for layout in layouts for lane in layout.lanes),
+                    ALL_BUFFERS,
+                )
+                self.stacked_owners[group] = torch.tensor(
+                    [owner for (_, owner), layout in zip(keys, layouts, strict=True) for _ in layout.streams],
+                    device=self.policy.device,
+                )
             if self.policy.device.type == "cuda":
                 layout_ready = torch.cuda.Event()
                 layout_ready.record()
                 layout_ready.synchronize()
-            for owner, policy in ((None, self.policy), *self.anchors.items()):
+            for owner, policy in (
+                (None, self.policy),
+                *self.anchors.items(),
+                *(() if stack is None else ((STACKED_ANCHORS, stack),)),
+            ):
                 layouts = tuple(layout for (_, anchor), layout in self.tick_layouts.items() if anchor == owner)
                 if isinstance(policy, TransformerPolicy):
                     policy.tick_compile_instances = max(policy.tick_compile_instances, 4 * len(self.groups))
@@ -2781,7 +3067,12 @@ class RolloutEngine:
                     [
                         (row, lane, self.matches[stream // 2].episode.players[stream % 2].timing.replan)
                         for row, (stream, lane) in enumerate(zip(layout.streams, layout.lanes, strict=True))
-                        if self.assignments[group][2 * lane + stream % 2] == (-1 if key[1] is None else key[1])
+                        if self.assignments[group][2 * lane + stream % 2]
+                        == (
+                            self.lane_roles[stream // 2]
+                            if key[1] == STACKED_ANCHORS
+                            else (-1 if key[1] is None else key[1])
+                        )
                     ],
                     dtype=np.int64,
                 ).reshape(-1, 3)
@@ -2836,10 +3127,18 @@ class RolloutEngine:
     def _sample_layout(self, key: tuple[int, int | None], clock: int, table: DenseRollout, ids: Tensor) -> None:
         buffer_index, anchor = key
         layout = self.tick_layouts[key]
-        policy = self.policy if anchor is None else self.anchors[anchor]
+        policy = (
+            self.policy
+            if anchor is None
+            else cast(StackedAnchorPolicy, self.anchor_stacks[self.cursor])
+            if anchor == STACKED_ANCHORS
+            else self.anchors[anchor]
+        )
         selected = ids[self.group_slots[self.cursor][key]]
         owner = -1 if anchor is None else anchor
-        enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == owner
+        enabled = self.owners[self.cursor][self.group_slots[self.cursor][key]] == (
+            self.stacked_owners[self.cursor] if anchor == STACKED_ANCHORS else owner
+        )
         rows = TickInputs(table, selected, enabled, self.tick_decoder_rows[key])
         with (
             torch.profiler.record_function(f"o65_graph/buffer{buffer_index}/policy{owner}/rows{len(layout.streams)}")
@@ -2854,7 +3153,13 @@ class RolloutEngine:
         for (buffer_index, anchor), layout in self.tick_layouts.items():
             if buffer_index != buffer.index and not (first and buffer_index == ALL_BUFFERS):
                 continue
-            policy = self.policy if anchor is None else self.anchors[anchor]
+            policy = (
+                self.policy
+                if anchor is None
+                else cast(StackedAnchorPolicy, self.anchor_stacks[self.cursor])
+                if anchor == STACKED_ANCHORS
+                else self.anchors[anchor]
+            )
             if not policy.tick_ready(layout, ring, clock=clock):
                 return False
         return True
@@ -3276,7 +3581,7 @@ class RolloutEngine:
         if not self._initialized:
             raise ValueError("initialize or restore the pool before rollout")
         started = time.perf_counter()
-        for policy in (self.policy, *self.anchors.values()):
+        for policy in self.execution_policies():
             if isinstance(policy, TransformerPolicy):
                 policy.prepare_tick_weights()
         self.results = []
@@ -4162,6 +4467,7 @@ class Trainer:
             raise ValueError("fresh trainer requires only pi_ref")
         self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
+        engine.prepare_anchor_stacks()
         self.slot_updates = {1: 0, 2: 0, 3: 0}
         self.compilation_counter: CompilationStartCounter | None = None
         self.startup_seconds = 0.0
@@ -4175,7 +4481,7 @@ class Trainer:
     def capture_startup(self, *, rollout_only: bool = False) -> None:
         if not isinstance(self.policy, TransformerPolicy) or self.policy.device.type != "cuda":
             return
-        policies = (self.policy, *self.engine.anchors.values())
+        policies = self.engine.execution_policies()
         if any(not isinstance(policy, TransformerPolicy) or policy.startup_finished for policy in policies):
             raise ValueError("startup capture requires unsealed transformer policies")
         started = time.perf_counter()
@@ -4931,7 +5237,7 @@ class Trainer:
     def flops_metrics(self, batch: PreparedUpdate, metrics: dict[str, float]) -> dict[str, float]:
         if not isinstance(self.policy, TransformerPolicy):
             return {}
-        policies = (self.policy, *self.engine.anchors.values())
+        policies = self.engine.execution_policies()
         rollout = sum(
             policy.work_flops.get("rollout", 0) for policy in policies if isinstance(policy, TransformerPolicy)
         )
@@ -4958,7 +5264,7 @@ class Trainer:
         if self.updating:
             raise ValueError("previous update did not finish; restore an update-boundary checkpoint")
         self.updating = True
-        for policy in (self.policy, *self.engine.anchors.values()):
+        for policy in self.engine.execution_policies():
             if isinstance(policy, TransformerPolicy):
                 policy.work_flops.clear()
         self.metric_totals = distributed.MetricTotals(self.policy.device)
@@ -5077,7 +5383,7 @@ class Trainer:
         metrics["systems/post_startup_captures"] = float(
             sum(
                 policy.post_startup_captures
-                for policy in (self.policy, *self.engine.anchors.values())
+                for policy in self.engine.execution_policies()
                 if isinstance(policy, TransformerPolicy)
             )
         )
@@ -6420,7 +6726,7 @@ def profile_rollout(trainer: Trainer, config: NativeCli, native_config: dict[str
     """Time rollouts without PPO updates, then trace sampled ticks and split them by policy graph."""
     profiling = cast(ProfileConfig, config.profiling)
     engine = trainer.engine
-    policies = (trainer.policy, *engine.anchors.values())
+    policies = engine.execution_policies()
     warm_started = time.perf_counter()
     for _ in range(profiling.warm_updates):
         engine.collect(trainer.update)
@@ -6774,7 +7080,7 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
         recorder = UpdateProfile(output, trainer.policy.device, traces=False)
         trainer.profile = trainer.engine.profile = recorder
         try:
-            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            for policy in trainer.engine.execution_policies():
                 if not isinstance(policy, TransformerPolicy):
                     raise TypeError("profiling requires TransformerPolicy")
                 policy.profile = recorder
@@ -6804,7 +7110,7 @@ def profile_nsys(trainer: Trainer, output: Path) -> None:
             del batch
         finally:
             trainer.profile = trainer.engine.profile = None
-            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            for policy in trainer.engine.execution_policies():
                 if isinstance(policy, TransformerPolicy):
                     policy.profile = None
 
@@ -6816,6 +7122,10 @@ def compilation_report(engine: RolloutEngine) -> dict[str, object]:
     for name, policy in (
         ("student", engine.policy),
         *((f"anchor{key}", value) for key, value in engine.anchors.items()),
+        *(
+            (f"anchor_stack{index}", policy)
+            for index, policy in enumerate(dict.fromkeys(stack for stack in engine.anchor_stacks if stack is not None))
+        ),
     ):
         if not isinstance(policy, TransformerPolicy):
             raise TypeError("compilation report requires TransformerPolicy")
@@ -6927,7 +7237,7 @@ def profile_native(
             recorder = UpdateProfile(config.output, trainer.policy.device, traces=traces)
             recorders.append(recorder)
             trainer.profile = trainer.engine.profile = recorder
-            for policy in (trainer.policy, *trainer.engine.anchors.values()):
+            for policy in trainer.engine.execution_policies():
                 if not isinstance(policy, TransformerPolicy):
                     raise TypeError("profiling requires TransformerPolicy")
                 policy.profile = recorder
@@ -6954,7 +7264,7 @@ def profile_native(
         (config.output / "estimates.json").write_text(json.dumps(estimates, indent=2, sort_keys=True))
     finally:
         trainer.profile = trainer.engine.profile = None
-        for policy in (trainer.policy, *trainer.engine.anchors.values()):
+        for policy in trainer.engine.execution_policies():
             if isinstance(policy, TransformerPolicy):
                 policy.profile = None
 
@@ -7286,7 +7596,7 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
 
 
 def _clear_execution_caches(trainer: Trainer) -> None:
-    for policy in (trainer.policy, *trainer.engine.anchors.values(), *trainer.snapshot_slots):
+    for policy in (*trainer.engine.execution_policies(), *trainer.snapshot_slots):
         policy.clear_caches()
 
 
