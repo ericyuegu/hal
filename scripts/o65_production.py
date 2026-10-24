@@ -206,6 +206,13 @@ def evaluation_command(args: Args) -> list[str]:
     ]
 
 
+def resume_settings(args: Args) -> dict[str, object]:
+    # A replacement container may expose different virtual CPU IDs; they do not change the run.
+    settings = json.loads(json.dumps(dataclasses.asdict(args), default=str))
+    del settings["cpus"]
+    return settings
+
+
 def main(args: Args) -> None:
     if sha256(args.checkpoint) != O64_SHA256:
         raise ValueError("O64 checkpoint SHA-256 mismatch")
@@ -214,7 +221,7 @@ def main(args: Args) -> None:
         "format": "hal.o65.production-identity.v1",
         "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "checkpoint_sha256": O64_SHA256,
-        "settings": json.loads(json.dumps(dataclasses.asdict(args), default=str)),
+        "settings": resume_settings(args),
         "inputs": {
             name: sha256(ROOT / "experiments/o65" / name)
             for name in (

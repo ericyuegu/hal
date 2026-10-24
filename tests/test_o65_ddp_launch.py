@@ -207,3 +207,12 @@ def test_native_match_count_is_per_rank_before_process_group_initialization(
     assert config.active_matches_per_gpu == 8
     with pytest.raises(ValueError, match="active matches"):
         dataclasses.replace(config, active_matches_per_gpu=4)
+
+
+def test_resume_settings_ignore_virtual_cpu_ids(tmp_path: Path) -> None:
+    args = production_args(tmp_path)
+    moved = dataclasses.replace(args, cpus=(100, 101))
+    assert o65_production.resume_settings(args) == o65_production.resume_settings(moved)
+    assert o65_production.resume_settings(dataclasses.replace(args, windows_per_step=2)) != (
+        o65_production.resume_settings(args)
+    )
