@@ -1,20 +1,21 @@
 """Persist compiler artifacts behind a checked source and hardware identity."""
 
-import contextlib
 import dataclasses
 import hashlib
 import importlib.metadata
 import json
 import os
+import pickle
 import tempfile
-import threading
-from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
 import torch
 from torch._dynamo.utils import counters
+from torch._inductor.output_code import CompiledFxGraph
+from torch._inductor.triton_bundler import TritonBundle
+from torch._inductor.triton_bundler import TritonBundler
 
 
 def compilation_statistics() -> dict[str, int]:
@@ -27,14 +28,33 @@ def compilation_statistics() -> dict[str, int]:
     }
 
 
-def _stop_on_miss(stop: threading.Event, before: dict[str, int], directory: Path) -> None:
-    # Torch 2.11 increments these counters before expensive graph compilation.
-    # Remove this watcher when Torch offers a supported cache-only compile mode.
-    while not stop.wait(0.05):
-        current = compilation_statistics()
-        if any(current[name] > before[name] for name in ("fxgraph_cache_miss", "fxgraph_cache_bypass")):
-            print(json.dumps({"compiler_cache_abort": str(directory), "counters": current}), flush=True)
-            os._exit(1)
+def _restore_kernels(directory: Path) -> int:
+    # Torch 2.11 restores kernels lazily on an FX hit. A different FX wrapper
+    # can use the same kernels, so restore every bundle before compilation.
+    # Remove this adapter when load_cache_artifacts restores Triton eagerly.
+    if str(torch.__version__).split("+")[0] != "2.11.0":
+        raise RuntimeError("Triton bundle restore requires tested Torch 2.11.0")
+    seen: set[tuple[int, str]] = set()
+    for path in (directory / "fxgraph").rglob("*"):
+        if not path.is_file():
+            continue
+        graph = pickle.loads(path.read_bytes())
+        if not isinstance(graph, CompiledFxGraph):
+            raise ValueError("invalid FX compiler artifact")
+        bundle = graph._triton_bundle
+        if bundle is None:
+            continue
+        artifacts = []
+        for entry in bundle.kernel_artifacts:
+            if entry.device != 0:
+                raise ValueError("compiler kernels must target the rank's cuda:0")
+            key = entry.device, entry.kernel_hash
+            if key not in seen:
+                artifacts.append(entry)
+                seen.add(key)
+        if artifacts and TritonBundler.read_and_emit(TritonBundle(artifacts, [])) is None:
+            raise RuntimeError("Torch did not restore bundled Triton kernels")
+    return len(seen)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -128,8 +148,18 @@ class CompileCache:
     """
 
     def __init__(
-        self, root: Path, identity: CacheIdentity, *, seed_root: Path | None = None, require_loaded: bool = False
+        self,
+        root: Path,
+        identity: CacheIdentity,
+        *,
+        seed_root: Path | None = None,
+        seed_identity: CacheIdentity | None = None,
+        require_loaded: bool = False,
     ) -> None:
+        if seed_identity is not None and (
+            seed_root is None or dataclasses.replace(seed_identity, source_sha256=identity.source_sha256) != identity
+        ):
+            raise ValueError("compiler seed must have the same compiler and hardware identity")
         self.identity = identity
         self.directory = root.resolve() / identity.key
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -147,15 +177,16 @@ class CompileCache:
         self.entries = _read_manifest(manifest, identity) if manifest.exists() else []
         sources = [(self.directory, item) for item in self.entries]
         if seed_root is not None:
-            seed = seed_root.resolve() / identity.key
+            expected = identity if seed_identity is None else seed_identity
+            seed = seed_root.resolve() / expected.key
             if seed != self.directory:
                 if not (seed / "identity.json").is_file():
                     raise ValueError("compiler cache seed identity is missing")
-                if (seed / "identity.json").read_bytes() != identity.encoded():
+                if (seed / "identity.json").read_bytes() != expected.encoded():
                     raise ValueError("compiler cache seed identity mismatch")
                 if not (seed / "artifacts.json").is_file():
                     raise ValueError("compiler cache seed manifest is missing")
-                sources.extend((seed, item) for item in _read_manifest(seed / "artifacts.json", identity))
+                sources.extend((seed, item) for item in _read_manifest(seed / "artifacts.json", expected))
         payloads: list[bytes] = []
         loaded_keys: set[tuple[str, str]] = set()
         for directory, item in sources:
@@ -179,24 +210,9 @@ class CompileCache:
             if torch.compiler.load_cache_artifacts(payload) is None:
                 raise ValueError("Torch rejected compiler cache artifacts")
             self.loaded = True
-
-    @contextlib.contextmanager
-    def require_hits(self) -> Iterator[None]:
-        """Stop this supervised worker on an unexpected cold graph compilation."""
-        if not self.loaded:
-            raise ValueError("cache-only compilation requires loaded artifacts")
-        before = compilation_statistics()
-        stop = threading.Event()
-        worker = threading.Thread(target=_stop_on_miss, args=(stop, before, self.directory), daemon=True)
-        worker.start()
-        try:
-            yield
-        finally:
-            stop.set()
-            worker.join()
-        current = compilation_statistics()
-        if any(current[name] > before[name] for name in ("fxgraph_cache_miss", "fxgraph_cache_bypass")):
-            raise RuntimeError("warm compiler cache missed during startup")
+        self.restored_kernels = _restore_kernels(scratch / "inductor") if self.loaded else 0
+        if require_loaded:
+            os.environ["TRITON_CACHE_MANAGER"] = "hal.inference.triton_cache:CacheOnlyManager"
 
     def save(self) -> bool:
         artifacts = torch.compiler.save_cache_artifacts()

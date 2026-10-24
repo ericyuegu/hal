@@ -182,6 +182,26 @@ def test_o64_warm_cache_command_and_resume_identity(tmp_path: Path) -> None:
     assert parsed.compile_cache == tmp_path / "packed-cache"
 
 
+def test_cache_source_import_is_explicit_and_measurement_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_065_loop import exp
+
+    command = o65_production.training_command(production_args(tmp_path, measurement=True))
+    config = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
+    imported = dataclasses.replace(
+        config,
+        compile_cache=tmp_path / "cache",
+        compile_cache_seed=tmp_path / "seed",
+        compile_cache_seed_source="a" * 64,
+    )
+    with pytest.raises(ValueError, match="cross-source cache seeds"):
+        dataclasses.replace(imported, measurement=False)
+    with pytest.raises(ValueError, match="cross-source cache seeds"):
+        dataclasses.replace(imported, compile_cache_seed_source=None)
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    with pytest.raises(ValueError, match="cross-source cache seeds"):
+        dataclasses.replace(imported)
+
+
 def test_o64_final_evaluation_uses_frozen_384_game_grid(tmp_path: Path) -> None:
     from scripts import eval_o65
 

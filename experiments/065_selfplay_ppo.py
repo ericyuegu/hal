@@ -292,11 +292,16 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
             f"flat category {index}, shape {tuple(log_probs.shape)}: "
             f"policy={float(log_probs.flatten()[index])}, reference={float(reference_log_probs.flatten()[index])}"
         )
-    for value in (log_probs, reference_log_probs):
-        if bool((torch.isnan(value) | torch.isposinf(value)).any()) or not bool(
-            torch.isclose(value.logsumexp(-1), torch.zeros_like(value[..., 0]), atol=1e-5).all()
-        ):
-            raise ValueError("log-probs must be normalized")
+    for name, value in (("policy", log_probs), ("reference", reference_log_probs)):
+        log_mass = value.logsumexp(-1)
+        normalized = torch.isclose(log_mass, torch.zeros_like(value[..., 0]), atol=1e-5)
+        if bool((torch.isnan(value) | torch.isposinf(value)).any()) or not bool(normalized.all()):
+            index = int((~normalized).flatten().to(torch.int8).argmax())
+            row = value.reshape(-1, value.shape[-1])[index]
+            raise ValueError(
+                f"{name} log-probs must be normalized; row={index}, "
+                f"log_mass={float(log_mass.flatten()[index])}, values={row.tolist()}"
+            )
     difference = torch.where(legal, log_probs, 0) - torch.where(legal, reference_log_probs, 0)
     return (log_probs.exp() * difference).sum(-1)
 
@@ -6764,6 +6769,8 @@ class NativeCli:
     decoder_precision: DecoderPrecision = "bf16"
     compile_cache: Path | None = None
     require_compile_cache: bool = False
+    compile_cache_seed: Path | None = None
+    compile_cache_seed_source: str | None = None
     publication: self_play_publication.Args | None = None
     measurement: bool = False
     measurement_rank: int = 0
@@ -6772,6 +6779,17 @@ class NativeCli:
         validate_decoder_precision(self.decoder_precision)
         if self.require_compile_cache and self.compile_cache is None:
             raise ValueError("required compiler artifacts need a compile cache directory")
+        if (self.compile_cache_seed is None) != (self.compile_cache_seed_source is None) or (
+            self.compile_cache_seed_source is not None
+            and (
+                not self.measurement
+                or int(os.environ.get("WORLD_SIZE", "1")) != 1
+                or self.compile_cache is None
+                or len(self.compile_cache_seed_source) != 64
+                or any(c not in "0123456789abcdef" for c in self.compile_cache_seed_source)
+            )
+        ):
+            raise ValueError("cross-source cache seeds require measurement, a cache and an explicit source hash")
         if type(self.measurement_rank) is not int or not 0 <= self.measurement_rank < 8:
             raise ValueError("measurement rank must be in 0..7")
         if self.measurement_rank and not self.measurement:
@@ -6905,7 +6923,9 @@ def train_native(config: NativeCli) -> None:
                     if config.compile_cache is not None
                     else None,
                 ),
-                cache_seed=config.compile_cache / "rank0"
+                cache_seed=config.compile_cache_seed
+                if config.compile_cache_seed is not None
+                else config.compile_cache / "rank0"
                 if config.compile_cache is not None and config.measurement_rank and config.require_compile_cache
                 else None,
             )
@@ -6967,6 +6987,9 @@ def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> N
                 compile_cache.source_hash(source_root, cache_sources), torch.device(config.device)
             ),
             seed_root=cache_seed,
+            seed_identity=compile_cache.current_identity(config.compile_cache_seed_source, torch.device(config.device))
+            if config.compile_cache_seed_source is not None
+            else None,
             require_loaded=config.require_compile_cache,
         )
         if config.compile_cache is not None
@@ -7000,11 +7023,7 @@ def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> N
         and (config.resume_learner is None or set(config.output.iterdir()) != {config.output / "metrics.jsonl"})
     ):
         raise FileExistsError(config.output)
-    with (
-        contextlib.ExitStack() as resources,
-        distributed.fail_fast(),
-        cache.require_hits() if cache is not None and config.require_compile_cache else contextlib.nullcontext(),
-    ):
+    with contextlib.ExitStack() as resources, distributed.fail_fast():
         if cache is not None:
             resources.callback(cache.save)
         groups = []
@@ -7093,6 +7112,9 @@ def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> N
             "loaded_counts": cache.loaded_counts if cache is not None else {},
             "load_seconds": cache_load_seconds,
             "seed_directory": str(cache_seed) if cache_seed is not None else None,
+            "seed_source": config.compile_cache_seed_source,
+            "restored_triton_kernels": cache.restored_kernels if cache is not None else 0,
+            "kernel_cache_required": config.require_compile_cache,
             "counters": {
                 name: value - cache_statistics_before[name]
                 for name, value in compile_cache.compilation_statistics().items()

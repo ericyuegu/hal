@@ -20,6 +20,12 @@ from hal.models.window_replay import ReplayOutput
 from hal.training import self_play_distributed as distributed
 
 
+def test_normalization_error_preserves_the_failing_distribution() -> None:
+    logs = torch.tensor([0.2, 0.3]).log()
+    with pytest.raises(ValueError, match="policy log-probs must be normalized; row=0, log_mass=.*values="):
+        exp.categorical_kl(logs, torch.tensor([0.4, 0.6]).log())
+
+
 @pytest.mark.parametrize("tail", [(-110.0, -102.58578491210938), (-102.58578491210938, -110.0)])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_rollout_and_actor_kl_keep_finite_log_tails(tail: tuple[float, float], device: str) -> None:

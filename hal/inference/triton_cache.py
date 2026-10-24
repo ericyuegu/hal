@@ -9,6 +9,31 @@ import triton
 from triton.runtime.cache import FileCacheManager
 
 
+class CacheOnlyManager(FileCacheManager):
+    """Reject a Triton 3.6.0 kernel miss before its LLVM compilation starts.
+
+    Driver glue can still compile through get_file. Kernel groups must be complete
+    and local. This uses Triton's cache-manager extension rather than a patch.
+    """
+
+    def __init__(self, key: str, override: bool = False, dump: bool = False) -> None:
+        if triton.__version__ != "3.6.0":
+            raise RuntimeError("cache-only kernels require tested Triton 3.6.0")
+        super().__init__(key, override=override, dump=dump)
+
+    def get_group(self, filename: str) -> dict[str, str]:
+        group = super().get_group(filename)
+        if group is None or filename not in group:
+            raise RuntimeError(f"required Triton kernel cache miss: {self.key}/{filename}")
+        entry = json.loads((Path(self.cache_dir) / f"__grp__{filename}").read_text())
+        children = entry.get("child_paths")
+        if not isinstance(children, dict) or set(group) != set(children):
+            raise ValueError("required Triton kernel cache group is incomplete")
+        if any(Path(path).parent != Path(self.cache_dir) for path in group.values()):
+            raise ValueError("required Triton kernel cache group is not local")
+        return group
+
+
 class LocalCacheManager(FileCacheManager):
     """Copy only requested artifacts from the read-only warm cache.
 

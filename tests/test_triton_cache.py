@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 import triton
+from triton.runtime.cache import get_cache_manager
 
+from hal.inference.triton_cache import CacheOnlyManager
 from hal.inference.triton_cache import LocalCacheManager
 
 
@@ -70,3 +72,27 @@ def test_untested_triton_version_is_rejected(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(triton, "__version__", "3.7.0")
     with pytest.raises(RuntimeError, match="tested Triton 3.6.0"):
         LocalCacheManager("kernel")
+    with pytest.raises(RuntimeError, match="tested Triton 3.6.0"):
+        CacheOnlyManager("kernel")
+
+
+def test_cache_only_plugin_uses_local_kernels_and_stops_before_cold_compile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_CACHE_MANAGER", "triton.runtime.cache:FileCacheManager")
+    key = "0" * 64
+    writer = get_cache_manager(key)
+    metadata = writer.put(b"{}", "kernel.json")
+    binary = writer.put(b"binary", "kernel.cubin")
+    writer.put_group("kernel.json", {"kernel.json": metadata, "kernel.cubin": binary})
+    monkeypatch.setenv("TRITON_CACHE_MANAGER", "hal.inference.triton_cache:CacheOnlyManager")
+    reader = get_cache_manager(key)
+    assert isinstance(reader, CacheOnlyManager)
+    assert reader.get_group("kernel.json") == {"kernel.json": metadata, "kernel.cubin": binary}
+    assert reader.get_file("driver.so") is None
+    with pytest.raises(RuntimeError, match="required Triton kernel cache miss"):
+        reader.get_group("cold-kernel.json")
+    Path(binary).unlink()
+    with pytest.raises(ValueError, match="incomplete"):
+        reader.get_group("kernel.json")
