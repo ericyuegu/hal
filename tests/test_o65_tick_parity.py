@@ -518,11 +518,17 @@ def test_prefetched_ids_survive_asynchronous_consumer_and_allocator_reuse() -> N
         def _stage_tick(self, *args: Any, **kwargs: Any) -> torch.Tensor:
             return torch.arange(size, device="cuda")
 
+        def _tick_ready(self, buffer: Any, clock: int) -> bool:
+            return self.next_ready
+
         def _sample_layout(self, key: Any, clock: int, table: Any, ids: torch.Tensor) -> None:
             torch.cuda._sleep(20_000_000)
             self.observed = ids.index_select(0, self.indices)
 
     probe = PrefetchProbe()
+    probe.next_ready = False
+    assert probe._prefetch_tick(2, 128, 0, None, None, ready=True) is None
+    probe.next_ready = True
     assert probe._prefetch_tick(2, 128, 0, None, None, ready=True)
     with torch.cuda.stream(probe.buffers[0][1].stream):
         for _ in range(16):

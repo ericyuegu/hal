@@ -3185,6 +3185,8 @@ class RolloutEngine:
         ):
             return None
         first, last = buffers
+        if not self._tick_ready(first, clock):
+            return None
         first_stream = cast(torch.cuda.Stream, first.stream)
         completion_stream = cast(torch.cuda.Stream, last.stream)
         # The first buffer is complete. Its next student graph can cover the
