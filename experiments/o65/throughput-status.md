@@ -80,9 +80,10 @@ decisions per second. 256 updates take about 1.9 hours plus startup.
 
 ## Before the 8xB200 run
 
-0. The first four-group bench ran out of GPU memory in startup capture (176 GiB allocated, 93.7 GiB
-   in graph pools). The policy keys its trunk KV cache and tick and restart graphs by group, so all
-   four groups hold their own copies. The integration agent is making the groups share them.
+0. The groups now share captured rollout storage. The next four-group bench completed startup
+   capture (48 graphs, 833.3 s), then ran out of memory in the first PPO preparation's KL calculation
+   (172.91 GiB allocated, 91.50 GiB in graph pools). No update completed. The sandbox is down.
+   Capacity remains unqualified; see `rotating-groups-report.md` and `rotating-groups-measurement.json`.
 1. Read the merged four-group bench: update time, memory per phase, host RAM, group switch cost,
    game length, gradient-noise comparison.
 2. Fill `active_matches_per_gpu`, `windows_per_step` and `actor_microbatches` in

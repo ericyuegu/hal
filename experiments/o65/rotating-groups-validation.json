@@ -1,0 +1,205 @@
+{
+  "format": "hal.o65.rotating-groups-validation.v1",
+  "head": "72eab0a6",
+  "environment": {
+    "PYTHONPATH": ".",
+    "TMPDIR": "/home/ericgu/data/scratch/o65-tmp-main",
+    "OMP_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2",
+    "full_suite_TORCHINDUCTOR_COMPILE_THREADS": "2",
+    "full_suite_MALLOC_ARENA_MAX": "2",
+    "integration_env_file": ".env (sourced; values omitted)"
+  },
+  "static_checks": [
+    {
+      "command": "uv run ruff format --check .",
+      "status": "passed"
+    },
+    {
+      "command": "uv run ruff check .",
+      "status": "passed"
+    },
+    {
+      "command": "uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "pytest": [
+    {
+      "name": "full",
+      "command": "nice uv run pytest -q -m \"not integration\"",
+      "xml": "/home/ericgu/data/scratch/o65-main-shared-full.xml",
+      "sha256": "ee10f4eda8f59f07d75f49c9777b84f419a88494c8fdda2bbbcda8d2ea85893e",
+      "collected": 2942,
+      "passed": 2894,
+      "failed": 9,
+      "skipped": {
+        "dev archive missing at /home/ericgu/src/hal-o65-247m/data/raw/dev.7z; run `python -m hal.scripts.fetch --name dev.7z`": 22,
+        "set HAL_REQUIRE_NETPLAY_HARDWARE_QUALIFICATION=1 on the production GPU": 2,
+        "run once explicitly with HAL_O65_FIXED_GPU=1 on the RTX 3060": 1,
+        "set HAL_O65_PROXY_CHECKPOINT to the O63 bootstrap30 final.pt": 2,
+        "run once explicitly with HAL_O65_REWARD_GPU=1 on the RTX 3060": 1,
+        "local dev MDS is not available": 5,
+        "local v7 subset is not available": 6
+      },
+      "failures": [
+        {
+          "test": "tests.test_control_timing_recovery::test_repeated_recovery_keeps_original_wave_seed_matchups_and_slots",
+          "message": "hal.r2.R2Error: missing env vars for R2: ['AWS_ENDPOINT_URL', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']. See .env.example."
+        },
+        {
+          "test": "tests.test_netplay_overlay_service::test_overlay_can_restart_without_replacing_game_state_or_stream_lease",
+          "message": "assert 793451.271468681 < 793451.268941598\n +  where 793451.271468681 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_netplay_stream::test_stream_supervisor_starts_once_and_stops_on_lease_loss",
+          "message": "assert 793455.869072323 < 793455.864752589\n +  where 793455.869072323 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_netplay_stream::test_stream_supervisor_caps_restart_backoff_at_thirty_seconds",
+          "message": "assert 793457.886594808 < 793457.883812767\n +  where 793457.886594808 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_o65_training_batching::test_actor_step_reuses_windows_without_writes_or_gradient_changes[cuda]",
+          "message": "torch._dynamo.exc.FailOnRecompileLimitHit: Hard failure due to fullgraph=True"
+        },
+        {
+          "test": "tests.test_o65_training_batching::test_grouped_reference_matches_padded_replay_for_every_valid_decision[cuda-16]",
+          "message": "torch._dynamo.exc.FailOnRecompileLimitHit: Hard failure due to fullgraph=True"
+        },
+        {
+          "test": "tests.test_o65_training_batching::test_grouped_actor_matches_padded_gradients_for_mixed_shapes[cuda-16]",
+          "message": "torch._dynamo.exc.FailOnRecompileLimitHit: Hard failure due to fullgraph=True"
+        },
+        {
+          "test": "tests.test_o65_training_batching::test_grouped_actor_matches_padded_gradients_for_mixed_shapes[cuda-all]",
+          "message": "torch._dynamo.exc.FailOnRecompileLimitHit: Hard failure due to fullgraph=True"
+        },
+        {
+          "test": "tests.test_o65_training_batching::test_actor_trailing_queue_padding_preserves_all_planned_outputs[cuda]",
+          "message": "torch._dynamo.exc.FailOnRecompileLimitHit: Hard failure due to fullgraph=True"
+        }
+      ]
+    },
+    {
+      "name": "netplay_retry",
+      "command": "uv run pytest -q tests/test_netplay_overlay_service.py::test_overlay_can_restart_without_replacing_game_state_or_stream_lease tests/test_netplay_stream.py::test_stream_supervisor_starts_once_and_stops_on_lease_loss tests/test_netplay_stream.py::test_stream_supervisor_caps_restart_backoff_at_thirty_seconds",
+      "xml": "/home/ericgu/data/scratch/o65-main-netplay-retry.xml",
+      "sha256": "48d44da48b9422ace08f8702d9f5e68b33c960f4a7f5e2f703c59b8019c46eb7",
+      "collected": 3,
+      "passed": 0,
+      "failed": 3,
+      "skipped": {},
+      "failures": [
+        {
+          "test": "tests.test_netplay_overlay_service::test_overlay_can_restart_without_replacing_game_state_or_stream_lease",
+          "message": "assert 794294.427525337 < 794294.423018065\n +  where 794294.427525337 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_netplay_stream::test_stream_supervisor_starts_once_and_stops_on_lease_loss",
+          "message": "assert 794296.460216914 < 794296.456524345\n +  where 794296.460216914 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        },
+        {
+          "test": "tests.test_netplay_stream::test_stream_supervisor_caps_restart_backoff_at_thirty_seconds",
+          "message": "assert 794298.477333894 < 794298.474538444\n +  where 794298.477333894 = <built-in function monotonic>()\n +    where <built-in function monotonic> = time.monotonic"
+        }
+      ]
+    },
+    {
+      "name": "focused_fixes",
+      "command": "nice uv run pytest -q tests/test_o65_group_storage.py tests/test_o65_training_batching.py tests/test_o65_devbox.py tests/test_o65_devbox_batching.py",
+      "xml": "/home/ericgu/data/scratch/o65-main-fixes.xml",
+      "sha256": "1f0baed0b4320f0f289980856ed1c63b09747acba625951bfc77d24675517552",
+      "collected": 65,
+      "passed": 65,
+      "failed": 0,
+      "skipped": {},
+      "failures": []
+    },
+    {
+      "name": "devbox_final",
+      "command": "uv run pytest -q tests/test_o65_devbox.py tests/test_o65_devbox_batching.py",
+      "xml": "/home/ericgu/data/scratch/o65-main-devbox-final.xml",
+      "sha256": "da95175ea5fc0a715f40cf744804fd2132fe8bc58748099fc1c0f976f56d5983",
+      "collected": 28,
+      "passed": 28,
+      "failed": 0,
+      "skipped": {},
+      "failures": []
+    },
+    {
+      "name": "phase_report",
+      "command": "uv run pytest -q tests/test_o65_training_probe.py -k first_preparation",
+      "xml": "/home/ericgu/data/scratch/o65-main-phase-report.xml",
+      "sha256": "456b11947db30787eb42b8d674e3d6f433b1fada9101878306c65df5bdacf61c",
+      "collected": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": {},
+      "failures": []
+    },
+    {
+      "name": "training_probe_final",
+      "command": "nice uv run pytest -q tests/test_o65_training_probe.py",
+      "xml": "/home/ericgu/data/scratch/o65-main-training-probe-final.xml",
+      "sha256": "b9e134ab4e105fda0850d9e34cb15315058cfbe20f88bb52a7aa3f2b749e83c7",
+      "collected": 7,
+      "passed": 7,
+      "failed": 0,
+      "skipped": {},
+      "failures": []
+    },
+    {
+      "name": "integration",
+      "command": "HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration",
+      "xml": "/home/ericgu/data/scratch/o65-main-integration.xml",
+      "sha256": "5f506388643cf626cd32fa5f44cc720fe18190669020cfcb7364dd9ba5475ab9",
+      "collected": 8,
+      "passed": 2,
+      "failed": 6,
+      "skipped": {},
+      "failures": [
+        {
+          "test": "tests.test_roundtrip::test_controller_wire_format_faithful",
+          "message": "Failed: dev MDS missing at /home/ericgu/src/hal-o65-247m/data/processed/dev/mds; run `python -m hal.scripts.fetch --name dev-mds`"
+        },
+        {
+          "test": "tests.test_roundtrip::test_fresh_recording_roundtrip_bit_exact",
+          "message": "Failed: dev MDS missing at /home/ericgu/src/hal-o65-247m/data/processed/dev/mds; run `python -m hal.scripts.fetch --name dev-mds`"
+        },
+        {
+          "test": "tests.test_roundtrip::test_instant_restart_enabled_match_is_bit_exact",
+          "message": "Failed: dev MDS missing at /home/ericgu/src/hal-o65-247m/data/processed/dev/mds; run `python -m hal.scripts.fetch --name dev-mds`"
+        },
+        {
+          "test": "tests.test_roundtrip::test_instant_restart_plays_clean_independent_matches",
+          "message": "Failed: dev MDS missing at /home/ericgu/src/hal-o65-247m/data/processed/dev/mds; run `python -m hal.scripts.fetch --name dev-mds`"
+        },
+        {
+          "test": "tests.test_roundtrip::test_analog_sweep_reads_back_grid_exact",
+          "message": "Failed: dev MDS missing at /home/ericgu/src/hal-o65-247m/data/processed/dev/mds; run `python -m hal.scripts.fetch --name dev-mds`"
+        },
+        {
+          "test": "tests.test_roundtrip::test_stick_vocabulary_readback_matches_game_processing",
+          "message": "Failed: dev MDS missing at /home/ericgu/src/hal-o65-247m/data/processed/dev/mds; run `python -m hal.scripts.fetch --name dev-mds`"
+        }
+      ]
+    }
+  ],
+  "resolved_failures": [
+    "Five O65 CUDA failures in the full suite exhausted the pre-startup accept_frame_tensors compilation budget; scoped preparation guard and regression test pass in focused_fixes.",
+    "Initial storage parity compared invalid stale rows; comparison now checks valid evaluation rows and all semantic masks.",
+    "An initial devbox collection needed PYTHONPATH=.; final commands set it.",
+    "Initial phase-report regression omitted NativeCli.updates; corrected, phase_report and training_probe_final pass."
+  ],
+  "remaining_failures": [
+    "Known R2 credentials failure in control timing recovery.",
+    "Three netplay test timeouts repeat in isolation.",
+    "Six required roundtrip tests fail due missing v7 dev MDS; shared manifest has no top-level schema and annotation schema2, so it was rejected."
+  ],
+  "full_suite_repeated": false
+}

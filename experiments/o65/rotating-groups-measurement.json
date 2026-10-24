@@ -1,0 +1,270 @@
+{
+  "format": "hal.o65.rotating-groups-measurement.v1",
+  "status": "startup_capture_passed_first_preparation_oom",
+  "treatment": "one captured rollout workspace per shard topology across four groups",
+  "control": {
+    "status": "startup_oom",
+    "startup_phase_memory": {
+      "systems/startup_rollout_seconds": 2.5320320400001037,
+      "systems/startup_value_seconds": 84.10159259200009,
+      "systems/startup_reference_seconds": 80.36446391499999,
+      "systems/startup_actor_seconds": 0.10388053599990599,
+      "memory/startup_rollout_peak_allocated_bytes": 88293006336.0,
+      "memory/startup_rollout_peak_reserved_bytes": 189181984768.0,
+      "memory/startup_value_peak_allocated_bytes": 72641621504.0,
+      "memory/startup_value_peak_reserved_bytes": 126793809920.0,
+      "memory/startup_reference_peak_allocated_bytes": 84519697920.0,
+      "memory/startup_reference_peak_reserved_bytes": 183142187008.0,
+      "memory/startup_actor_peak_allocated_bytes": 97556868608.0,
+      "memory/startup_actor_peak_reserved_bytes": 189486071808.0
+    },
+    "first_group_startup_phases": [
+      {
+        "rollout_seconds": 984.060854804,
+        "value_seconds": 84.10159259200009,
+        "reference_seconds": 502.9072046089998,
+        "actor_seconds": 494.98947354300003,
+        "cadences": 11
+      }
+    ],
+    "oom_reported_gib": {
+      "allocated": 175.97,
+      "graph_private_pools": 93.74,
+      "request": 1.01
+    },
+    "implementation": "separate per-group captured rollout storage",
+    "configuration_status": "full settings and host peak unavailable; older devbox defaults differed from the treatment production settings"
+  },
+  "invariants": "Treatment holds the O64 checkpoint, sampler, seed65, representation, rewards, optimizer, simulator and adapters fixed. The earlier control did not record its full configuration and used older devbox defaults; compare startup outcomes only, not steady-state speed.",
+  "control_run": "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-003100-m64-full",
+  "treatment_run": "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-012332-m64-full",
+  "measured_git_sha": "21c8e8a212ad2b460b8e9c8a2b89b78acfed57de",
+  "trainer_sha256": "ef09f29662e5e6f5599cbc4f286b1cd425146a367f1f2c3a27c2f76cc758eac8",
+  "settings": {
+    "active_matches_per_gpu": null,
+    "cadence": "production",
+    "checkpoint": "/o65-results/o64-inputs/step-0098304.pt",
+    "compile_cache": null,
+    "compile_cache_status": {
+      "directory": null,
+      "load_seconds": 0.003215420999993057,
+      "loaded_artifacts": false,
+      "loaded_counts": {}
+    },
+    "configurations": [],
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "data_dir": "/opt/o65-hal/delivery/inputs/msl/data",
+    "decoder_precision": "bf16",
+    "device": "cuda",
+    "groups": 4,
+    "matches_per_shard": 64,
+    "max_frame": 28800,
+    "measurement": false,
+    "output": "/cache/runs/bench-20261024-012332-m64-full",
+    "profiling": {
+      "capture_training_inputs": false,
+      "nsys": false,
+      "rollout_only": false,
+      "update_gradient_inputs": "/cache/o65-main-gradients-20261024-012325",
+      "warm_updates": 4
+    },
+    "publication": null,
+    "resume": null,
+    "resume_learner": null,
+    "rollout_frames": 512,
+    "sampler": "/opt/o65-hal/experiments/o65/production-sampler.json",
+    "sampler_sha256": "1605d4c7be39cf77115a28d9ea559e041cff4f491ca4b9155c08a94c655e7daf",
+    "simulator_manifest_sha256": "4c2b074e872a7ad55176b63a3971fd6a3bbf09dd1988240d1dbdaf61a63616cb",
+    "startup_capture_seconds": 833.26621647,
+    "startup_memory": {
+      "memory/startup_actor_peak_allocated_bytes": 97562012160.0,
+      "memory/startup_actor_peak_reserved_bytes": 189519626240.0,
+      "memory/startup_reference_peak_allocated_bytes": 84525401600.0,
+      "memory/startup_reference_peak_reserved_bytes": 183158964224.0,
+      "memory/startup_rollout_peak_allocated_bytes": 75306686976.0,
+      "memory/startup_rollout_peak_reserved_bytes": 161694613504.0,
+      "memory/startup_value_peak_allocated_bytes": 72646003200.0,
+      "memory/startup_value_peak_reserved_bytes": 161694613504.0,
+      "systems/startup_actor_seconds": 0.1027621089999684,
+      "systems/startup_reference_seconds": 0.03783425000005991,
+      "systems/startup_rollout_seconds": 4.03881630900014,
+      "systems/startup_value_seconds": 0.4129809500000192
+    },
+    "startup_seconds": 957.969975481,
+    "training": {
+      "actor_lr": 1e-05,
+      "actor_microbatches": 8,
+      "actor_optimizer": "muon",
+      "checkpoint_interval": 32,
+      "clip_epsilon": 0.2,
+      "critic_epochs": 4,
+      "critic_lr": 0.0003,
+      "critic_warmup_updates": 0,
+      "decisions_per_window": "all",
+      "deterministic": false,
+      "gradient_clip": 1.0,
+      "head_start_frames": 1200,
+      "lambda_spread_multiplier": 3.0,
+      "reward_weights": {
+        "damage": 0.1,
+        "game_win": 120.0,
+        "stock": 120.0
+      },
+      "seed": 65,
+      "snapshot_capacity": 3,
+      "snapshot_interval": 64,
+      "value_scale": 150.0,
+      "warmup_steps": 32,
+      "windows_per_step": 512
+    },
+    "updates": 6,
+    "verify_only": false,
+    "verify_resume": false,
+    "wandb_project": null
+  },
+  "environment": {
+    "cuda": "13.0",
+    "device": "NVIDIA B200",
+    "numpy": "2.1.3",
+    "python": "3.14.3",
+    "tf32_cudnn": "True",
+    "tf32_matmul": "False",
+    "torch": "2.11.0+cu130",
+    "world_size": "1"
+  },
+  "provenance": {
+    "adapter_sha256": "4d5a4711c14303206006d85a046cabcdf2dc48e55d81735afaed5478ba322668",
+    "checkpoint_sha256": "e6d6303fbf25993c768b1e86fecbb350433a2fb229235b556334e9eb6ae868cf",
+    "data_manifest_sha256": "b97eab90e761bcf2bf03b48981f0ab6acc1ac3057157c58ae0c5a72c76c43bd8",
+    "git_sha": "a0ae12dfe5db4d72b2cbd612e42b215c0302fa17",
+    "simulator_sha256": "e74a8657186957a1ccfcacd11f044c97ea4033258ab93cae3b5cd42b8e282654"
+  },
+  "treatment_results": {
+    "startup_seconds": 957.969975481,
+    "startup_capture_seconds": 833.26621647,
+    "graphs": 48,
+    "startup_phase_memory": {
+      "systems/startup_rollout_seconds": 4.03881630900014,
+      "systems/startup_value_seconds": 0.4129809500000192,
+      "systems/startup_reference_seconds": 0.03783425000005991,
+      "systems/startup_actor_seconds": 0.1027621089999684,
+      "memory/startup_rollout_peak_allocated_bytes": 75306686976.0,
+      "memory/startup_rollout_peak_reserved_bytes": 161694613504.0,
+      "memory/startup_value_peak_allocated_bytes": 72646003200.0,
+      "memory/startup_value_peak_reserved_bytes": 161694613504.0,
+      "memory/startup_reference_peak_allocated_bytes": 84525401600.0,
+      "memory/startup_reference_peak_reserved_bytes": 183158964224.0,
+      "memory/startup_actor_peak_allocated_bytes": 97562012160.0,
+      "memory/startup_actor_peak_reserved_bytes": 189519626240.0
+    },
+    "per_group_startup_phases": [
+      {
+        "rollout_seconds": 672.695831841,
+        "value_seconds": 11.674755345999984,
+        "reference_seconds": 79.31244207999976,
+        "actor_seconds": 52.64108286299995,
+        "cadences": 11
+      },
+      {
+        "rollout_seconds": 3.621966530000009,
+        "value_seconds": 0.41291387899991605,
+        "reference_seconds": 0.3077254470003936,
+        "actor_seconds": 0.9507118670005639,
+        "cadences": 11
+      },
+      {
+        "rollout_seconds": 4.08336063899992,
+        "value_seconds": 0.4134610090000024,
+        "reference_seconds": 0.30860052999946674,
+        "actor_seconds": 0.9496399239997118,
+        "cadences": 11
+      },
+      {
+        "rollout_seconds": 4.03881630900014,
+        "value_seconds": 0.4129809500000192,
+        "reference_seconds": 0.3075349720002123,
+        "actor_seconds": 0.9506042649998108,
+        "cadences": 11
+      }
+    ],
+    "oom_phase": "preparation/factor_kl/categorical_kl",
+    "oom_reported_gib": {
+      "allocated": 172.91,
+      "graph_private_pools": 91.5,
+      "request": 1.41,
+      "process_in_use": 177.8,
+      "reserved_unallocated": 2.98
+    },
+    "sampled_host_peak_bytes": 27933388800,
+    "host_sampling_seconds": 0.5,
+    "completed_updates": 0,
+    "update_seconds": null,
+    "training_phase_seconds": null,
+    "mfu": null,
+    "group_switch_seconds": null,
+    "mean_finished_game_frames": null,
+    "gradient_cosines": null
+  },
+  "cache": {
+    "volume": "hal-o65-devbox-v2",
+    "inductor": "/cache/inductor",
+    "triton": "/cache/triton",
+    "observed_cache_hit": true,
+    "flush": "sync /cache in mounted sandbox before down",
+    "cold_whole_startup_seconds": null,
+    "cold_first_group_startup_phases": {
+      "rollout_seconds": 984.060854804,
+      "value_seconds": 84.10159259200009,
+      "reference_seconds": 502.9072046089998,
+      "actor_seconds": 494.98947354300003,
+      "cadences": 11
+    },
+    "warm_first_group_startup_phases": {
+      "rollout_seconds": 672.695831841,
+      "value_seconds": 11.674755345999984,
+      "reference_seconds": 79.31244207999976,
+      "actor_seconds": 52.64108286299995,
+      "cadences": 11
+    },
+    "caveat": "cold and warm phase comparisons also include the shared-storage treatment; no causal speedup claimed"
+  },
+  "session": {
+    "sandbox": "sb-hs6GzFhcP6V2npeYNZOZjZ",
+    "closed": true,
+    "resumed_driver_seconds": 1001.185,
+    "gradient_comparison_ran": false,
+    "gradient_input_directory": "/cache/o65-main-gradients-20261024-012325",
+    "gradient_input_manifest_created": false
+  },
+  "limits": [
+    "first-preparation phase memory was not persisted because profile_native did not set PhaseMemory.output; fixed locally after measurement",
+    "critic_warmup_updates=0 for actor profiling, versus production32",
+    "no second session, 2048 bench or optimizer-step overhead study"
+  ],
+  "artifact_sha256": {
+    "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-012332-m64-full/resolved.json": "1f82411d690e6cb9e4f96cbbd23fb370a13b57a7f101c2e50af6eb0c9415eb88",
+    "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-012332-m64-full/startup/host-memory.jsonl": "b0b9c92ac0104ff596239b62fd67582e5923dc7a40811e00ae7fac2a95001a6e",
+    "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-012332-m64-full/startup/phase-memory.json": "0f1ba3bef32bc4c25425c9d34945cd96f68aecb078db66978fb5eef984885258",
+    "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-012332-m64-full/warm.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/home/ericgu/data/scratch/o65-devbox/runs/bench-20261024-012332-m64-full/worktree.json": "c07b7cd5288315e2a9fb96eebd8e9dbe132d3a2f62f79795d5d0a745707e76b7",
+    "/home/ericgu/data/scratch/o65-main-shared-measure.log": "a67c2f98d6f4ff92e0616bbbe8003790d761c0a0861d96b0e55ff55c110f02b4",
+    "/home/ericgu/data/scratch/o65-main-1024-bench.log": "1fd9176690d56f955890248c4206d85bff125289daf1af1a2395f289b85b0e14"
+  }
+}
