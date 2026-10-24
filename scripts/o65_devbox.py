@@ -43,11 +43,14 @@ class Args:
     rollout_frames: int = 128
     # bench: profile whole updates (rollout, preparation, actor, critic) instead of rollout ticks.
     full: bool = False
-    # bench: 512 windows exhaust memory at 1,024 matches on a B200.
+    # Rotate independent simulator groups; warm each group before timing.
+    groups: int = 1
+    # bench: optimizer batch size; captured model chunks stay capped at 64 windows.
     windows_per_step: int = 64
     actor_microbatches: int | None = None
     decisions_per_window: int | Literal["all"] = "all"
     capture_training_inputs: bool = False
+    update_gradient_inputs: Path | None = None
     # Use local sandbox disk if the shared cache volume reaches its inode limit.
     cache_root: Path = CACHE
     compile_threads: int = 16
@@ -141,15 +144,23 @@ def bench(
     rollout_frames: int,
     *,
     full: bool,
+    groups: int = 1,
     windows_per_step: int | None = None,
     actor_microbatches: int | None = None,
     decisions_per_window: int | Literal["all"] = "all",
     capture_training_inputs: bool = False,
+    update_gradient_inputs: Path | None = None,
     cache_root: Path = CACHE,
     compile_threads: int = 16,
 ) -> int:
-    if capture_training_inputs and not full:
+    if type(groups) is not int or groups < 1:
+        raise ValueError("groups must be a positive integer")
+    if capture_training_inputs and groups != 1:
+        raise ValueError("cohort input capture requires one group; use update gradient inputs for rotating groups")
+    if (capture_training_inputs or update_gradient_inputs is not None) and not full:
         raise ValueError("training input capture requires --full")
+    if update_gradient_inputs is not None and not update_gradient_inputs.is_absolute():
+        raise ValueError("update gradient input directory must be absolute")
     if not cache_root.is_absolute():
         raise ValueError("sandbox cache root must be absolute")
     if compile_threads < 1:
@@ -197,9 +208,9 @@ def bench(
         "--rollout-frames",
         str(rollout_frames),
         "--groups",
-        "1",
+        str(groups),
         "--updates",
-        "3",
+        str(groups + 2),
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",
@@ -218,9 +229,14 @@ def bench(
         str(decisions_per_window),
         "profiling:profile-config",
         "--profiling.warm-updates",
-        "1",
+        str(groups),
         *(() if full else ("--profiling.rollout-only",)),
         *(("--profiling.capture-training-inputs",) if capture_training_inputs else ()),
+        *(
+            ()
+            if update_gradient_inputs is None
+            else ("--profiling.update-gradient-inputs", str(update_gradient_inputs))
+        ),
     ]
     exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     # Sandbox CPU numbering varies; take the first available cores for simulator shards.
@@ -267,10 +283,12 @@ def main(args: Args) -> None:
                 matches,
                 args.rollout_frames,
                 full=args.full,
+                groups=args.groups,
                 windows_per_step=args.windows_per_step,
                 actor_microbatches=args.actor_microbatches,
                 decisions_per_window=args.decisions_per_window,
                 capture_training_inputs=args.capture_training_inputs,
+                update_gradient_inputs=args.update_gradient_inputs,
                 cache_root=args.cache_root,
                 compile_threads=args.compile_threads,
             )

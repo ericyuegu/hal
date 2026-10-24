@@ -2,6 +2,7 @@
 
 import dataclasses
 import io
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -71,6 +72,36 @@ def test_bench_input_capture_is_explicit_and_requires_training() -> None:
     assert not sandbox.commands
     assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, capture_training_inputs=True) == 0
     assert "--profiling.capture-training-inputs" in sandbox.commands[1][2]
+
+
+def test_bench_update_gradient_capture_keeps_the_full_quoted_path() -> None:
+    sandbox = Sandbox()
+    path = Path("/cache/gradient inputs")
+    with pytest.raises(ValueError, match="requires --full"):
+        bench(cast(modal.Sandbox, sandbox), 64, 512, full=False, update_gradient_inputs=path)
+    with pytest.raises(ValueError, match="must be absolute"):
+        bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, update_gradient_inputs=Path("relative"))
+    assert not sandbox.commands
+    assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, update_gradient_inputs=path) == 0
+    arguments = shlex.split(sandbox.commands[1][2])
+    assert arguments[arguments.index("--profiling.update-gradient-inputs") + 1] == str(path)
+
+
+@pytest.mark.parametrize("groups", [1, 4])
+def test_bench_warms_all_groups_and_revisits_them(groups: int) -> None:
+    sandbox = Sandbox()
+    assert bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, groups=groups) == 0
+    arguments = shlex.split(sandbox.commands[1][2])
+    for option, expected in (("--groups", groups), ("--updates", groups + 2), ("--profiling.warm-updates", groups)):
+        assert int(arguments[arguments.index(option) + 1]) == expected
+
+
+@pytest.mark.parametrize("groups", [0, -1, True])
+def test_bench_rejects_invalid_group_count(groups: int) -> None:
+    sandbox = Sandbox()
+    with pytest.raises(ValueError, match="groups must be"):
+        bench(cast(modal.Sandbox, sandbox), 64, 512, full=True, groups=groups)
+    assert not sandbox.commands
 
 
 def test_bench_rejects_stale_trainer_source_before_launch() -> None:
