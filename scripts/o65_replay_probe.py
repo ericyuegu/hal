@@ -169,9 +169,10 @@ def fp32_copy(model: SelfPlayTransformer) -> SelfPlayTransformer:
     return high
 
 
-def history(trunk: Trunk, tokens: Tensor, padding: Tensor) -> Tensor:
-    with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
-        return trunk(tokens, padding)
+def history(trunk: Trunk, tokens: Tensor) -> Tensor:
+    """Match the trainer's compiled history boundary, including zero padding."""
+    with torch.autocast(tokens.device.type, dtype=torch.bfloat16, enabled=tokens.is_cuda, cache_enabled=False):
+        return trunk(tokens, torch.zeros(len(tokens), dtype=torch.long, device=tokens.device))
 
 
 def main(args: Args) -> None:
@@ -219,13 +220,14 @@ def main(args: Args) -> None:
         with torch.enable_grad():
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=not fp32, cache_enabled=False):
                 tokens = current.context_tokens(context, observed)
-            padding = torch.zeros(windows, dtype=torch.long, device=device)
             if fp32:
-                hidden = current.trunk.forward_dense(tokens, padding, force_dense=True)
+                hidden = current.trunk.forward_dense(
+                    tokens, torch.zeros(windows, dtype=torch.long, device=device), force_dense=True
+                )
             elif compiled:
-                hidden = compiled_history(current.trunk, tokens, padding)
+                hidden = compiled_history(current.trunk, tokens)
             else:
-                hidden = history(current.trunk, tokens, padding)
+                hidden = history(current.trunk, tokens)
         operation = compiled_replay if compiled else replay_windows
         if current is model and not compiled and not fp32:
             validate_replay_inputs(current, hidden, observed, replay_slots)

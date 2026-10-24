@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from test_065_loop import exp
 from test_065_loop import transformer_trainer
 
 from hal.eval.self_play_checkpoint import EvaluationCheckpoint
@@ -40,6 +41,18 @@ def test_gradient_gate_accepts_small_error_with_the_same_direction() -> None:
     high = torch.tensor([0.001, 1.001])
     candidate = torch.tensor([0.0001, 1.0001])
     assert compare(candidate, eager, high, eager.clone())["passed"]
+
+
+def test_history_matches_the_training_boundary_and_input_gradient() -> None:
+    run = transformer_trainer("cpu", decoder_precision="fp32")
+    tokens = torch.randn(2, 256, run.policy.model.cfg.d_model, requires_grad=True)
+    expected = exp.replay_history(run.policy.model.trunk, tokens)
+    actual = probe.history(run.policy.model.trunk, tokens)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    upstream = torch.randn_like(actual)
+    expected_gradient = torch.autograd.grad(expected, tokens, upstream)[0]
+    actual_gradient = torch.autograd.grad(actual, tokens, upstream)[0]
+    torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0, atol=0)
 
 
 def test_probe_loader_rejects_another_checkpoint_before_tensor_use(tmp_path: Path) -> None:
@@ -112,7 +125,12 @@ def test_eager_precision_control_runs_before_any_compiled_decoder(
                 raise CompiledDecoderReached
 
             return compiled
-        return operation
+
+        def compiled_history(trunk: probe.Trunk, tokens: torch.Tensor) -> torch.Tensor:
+            assert operation is probe.history
+            return probe.history(trunk, tokens)
+
+        return compiled_history
 
     monkeypatch.setattr(torch, "compile", compile_operation)
     with pytest.raises(CompiledDecoderReached):
