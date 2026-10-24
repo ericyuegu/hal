@@ -23,7 +23,7 @@ import tyro
 from scripts import launch_o65_modal as launch
 
 APP = "o65-devbox"
-CACHE_VOLUME = "hal-o65-devbox"
+CACHE_VOLUME = "hal-o65-devbox-v2"
 CACHE = Path("/cache")
 LOCAL_RESULTS = Path.home() / "data/scratch/o65-devbox"
 SYNCED = ("hal", "experiments", "scripts", "tests")
@@ -55,7 +55,7 @@ class Args:
     command: str = ""
     # Sandbox lifetime; idle sandboxes stop after idle_minutes without an exec.
     hours: float = 6.0
-    idle_minutes: int = 30
+    idle_minutes: int = 10
 
 
 def _git(*args: str) -> str:
@@ -106,7 +106,7 @@ def up(name: str, sha: str | None, hours: float, idle_minutes: int) -> None:
         memory=(launch.MEMORY_MIB, launch.MEMORY_MIB),
         volumes={
             str(launch.RESULTS): modal.Volume.from_name(launch.VOLUME),
-            str(CACHE): modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True),
+            str(CACHE): modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True, version=2),
         },
         timeout=int(hours * 3600),
         idle_timeout=idle_minutes * 60,
