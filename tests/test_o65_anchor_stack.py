@@ -130,6 +130,14 @@ def test_stacked_anchor_ticks_match_separate_models_and_weight_refresh(device: s
             captures = stack.capture_count
         if clock == 130:
             assert stack.capture_count == captures
+    if device == "cuda":
+        for changed in (copy.copy(table), table):
+            if changed is table:
+                changed.store = copy.deepcopy(table.store)
+            with pytest.raises(ValueError, match="tick graph storage changed"):
+                stack.sample_tick(exp.TickInputs(changed, ids, decoder_rows=selected), rng, layout, ring, clock=130)
+        stack.clear_caches()
+        assert not stack.tick_sources
 
 
 def test_stacked_decoder_padding_uses_due_rows_and_preserves_weight_groups() -> None:

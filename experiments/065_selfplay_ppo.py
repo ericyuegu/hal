@@ -1481,6 +1481,7 @@ class TransformerPolicy:
         self.decode_order = torch.tensor(DECODE_GROUP_INDICES, device=self.device)
         self.tick_decoder = DecisionDecoder(model, configurations, compiled=False)
         self.tick_caches: dict[tuple[ActionRing, tuple[int, ...]], BlockRestartCache] = {}
+        self.tick_sources: dict[tuple[ActionRing, tuple[int, ...]], tuple[DenseRollout, FrameStore]] = {}
         self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int, int], CapturedCall[None]] = {}
         self.restart_graphs: dict[tuple[ActionRing, tuple[int, ...]], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
@@ -1556,6 +1557,7 @@ class TransformerPolicy:
     def clear_caches(self) -> None:
         self.startup_finished = False
         self.tick_caches.clear()
+        self.tick_sources.clear()
         self.tick_graphs.clear()
         self.restart_graphs.clear()
         self.current_layouts.clear()
@@ -1676,6 +1678,9 @@ class TransformerPolicy:
         self.tick_caches = {
             key: cache for key, cache in self.tick_caches.items() if key[0] is not ring or key in current
         }
+        self.tick_sources = {
+            key: source for key, source in self.tick_sources.items() if key[0] is not ring or key in current
+        }
         self.tick_graphs = {
             key: graph for key, graph in self.tick_graphs.items() if key[0][0] is not ring or key[0] in current
         }
@@ -1727,6 +1732,11 @@ class TransformerPolicy:
             raise ValueError("tick decoder rows must be sorted, distinct row indices")
         key = ring, (layout.buffer, len(states))
         layout_key = ring, layout.buffer
+        if self.device.type == "cuda":
+            sources = states.table, states.table.store
+            if key in self.tick_sources and self.tick_sources[key] != sources:
+                raise ValueError("tick graph storage changed; clear caches before replacing rollout storage")
+            self.tick_sources[key] = sources
         previous_layout = self.current_layouts.get(layout_key)
         if previous_layout is not layout:
             if previous_layout is not None and clock % 128 and previous_layout.streams != layout.streams:
