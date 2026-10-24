@@ -12,8 +12,10 @@ from torch.profiler import record_function
 
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import sha256
+from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
+from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
 from scripts.o65_replay_probe import history
@@ -32,7 +34,11 @@ class Args:
 
 def stage_seconds(path: Path) -> dict[str, float]:
     events = json.loads(path.read_text())["traceEvents"]
-    stages = [event for event in events if event.get("name", "").startswith("o65_actor/")]
+    stages = [
+        event
+        for event in events
+        if event.get("cat") == "user_annotation" and event.get("name", "").startswith("o65_actor/")
+    ]
     cpu = {event.get("args", {}).get("External id"): event for event in events if event.get("cat") == "cpu_op"}
     totals: dict[str, float] = {}
     for event in events:
@@ -151,8 +157,70 @@ def main(args: Args) -> None:
         torch.cuda.synchronize()
     profile.export_chrome_trace(str(trace))
     seconds = stage_seconds(trace)
+    # External event nodes survive replay. Hooks mark the history gradient
+    # boundary in the actor's single backward, including shared codec weights.
+    events = tuple(torch.cuda.Event(enable_timing=True, external=True) for _ in range(6))
+
+    def decoder_backward_done(gradient: torch.Tensor) -> torch.Tensor:
+        events[4].record()
+        return gradient
+
+    def trunk_backward_done(gradient: torch.Tensor) -> torch.Tensor:
+        events[5].record()
+        return gradient
+
+    names = tuple(context)
+    inputs = (observed, *(getattr(slots, field.name) for field in dataclasses.fields(slots)), *context.values())
+    slot_count = len(dataclasses.fields(slots))
+
+    def replay_forward(values: tuple[torch.Tensor, ...]) -> ReplayOutput:
+        actions = values[0]
+        current_slots = ReplaySlots(*values[1 : 1 + slot_count])
+        current_context = dict(zip(names, values[1 + slot_count :], strict=True))
+        events[0].record()
+        with torch.enable_grad(), torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+            tokens = model.context_tokens(current_context, actions)
+        events[1].record()
+        with torch.enable_grad():
+            hidden = trunk(model.trunk, tokens, torch.zeros(args.windows, dtype=torch.long, device=device))
+            hidden.register_hook(decoder_backward_done)
+            tokens.register_hook(trunk_backward_done)
+            events[2].record()
+            output = decoder(model, hidden, actions, current_slots, grad=True)
+        events[3].record()
+        return output
+
+    graph = GraphedActorStep(replay_forward, inputs, targets, parameters)
+    graph.captured.graph.replay()
+    torch.cuda.synchronize()
+    start, stop = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+    replay_samples: list[dict[str, float]] = []
+    for _ in range(10):
+        start.record()
+        graph.captured.graph.replay()
+        stop.record()
+        stop.synchronize()
+        spans = {
+            name: events[first].elapsed_time(events[last]) / 1e3
+            for name, first, last in (
+                ("observation_forward", 0, 1),
+                ("trunk_forward", 1, 2),
+                ("decoder_forward", 2, 3),
+                ("loss_and_decoder_backward", 3, 4),
+                ("trunk_backward", 4, 5),
+            )
+        }
+        total = start.elapsed_time(stop) / 1e3
+        replay_samples.append({**spans, "other": total - sum(spans.values()), "total": total})
+    replay_trace = args.output.with_suffix(".replay.json")
+    with torch.profiler.profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as profile:
+        graph.captured.graph.replay()
+        torch.cuda.synchronize()
+    profile.export_chrome_trace(str(replay_trace))
+    if any(not bool(torch.isfinite(value).all()) for value in graph.gradients):
+        raise ValueError("actor graph gradient contains NaN or infinity")
     report = {
-        "format": "hal.o65.actor-split.v1",
+        "format": "hal.o65.actor-split.v2",
         "checkpoint_sha256": checkpoint.checkpoint_sha256,
         "inputs_sha256": sha256(args.inputs),
         "probe_sha256": sha256(Path(__file__)),
@@ -174,6 +242,12 @@ def main(args: Args) -> None:
         "gpu": torch.cuda.get_device_name(device),
         "kernel_seconds": seconds,
         "trace": str(trace),
+        "graph_replay_seconds": {
+            name: sum(sample[name] for sample in replay_samples) / len(replay_samples) for name in replay_samples[0]
+        },
+        "graph_replay_samples": replay_samples,
+        "graph_replay_trace": str(replay_trace),
+        "graph_replay_boundaries": "CUDA events and history gradient hooks in one actor backward; decoder backward includes loss; other includes gradient zeroing, observation backward and leaf accumulation",
     }
     args.output.with_suffix(".report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)
