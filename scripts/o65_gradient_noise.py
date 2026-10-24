@@ -13,6 +13,7 @@ import torch
 import tyro
 from torch import Tensor
 
+from hal.eval.self_play_checkpoint import evaluation_actor_path
 from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.eval.self_play_checkpoint import sha256
 from hal.models.replay_actor import ActorTargets
@@ -127,7 +128,8 @@ def main(args: Args) -> None:
     torch.set_num_threads(2)
     torch.manual_seed(65)
     device = torch.device("cuda", torch.cuda.current_device())
-    manifest = load_manifest(args.inputs, sha256(args.checkpoint))
+    actor = evaluation_actor_path(args.checkpoint) if args.checkpoint.suffix == ".json" else args.checkpoint
+    manifest = load_manifest(args.inputs, sha256(actor))
     checkpoint = load_evaluation_checkpoint(
         args.checkpoint, device=device, decoder_precision=manifest["decoder_precision"]
     )

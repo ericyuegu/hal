@@ -14,6 +14,7 @@ from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
+from scripts import o65_gradient_noise
 from scripts.o65_gradient_noise import accumulate
 from scripts.o65_gradient_noise import comparison
 from scripts.o65_gradient_noise import load_chunk
@@ -121,6 +122,42 @@ def test_update_capture_requires_one_full_first_update(rollout: bool, nsys: bool
 
 def test_update_capture_allows_warming_every_group() -> None:
     exp.ProfileConfig(warm_updates=4, update_gradient_inputs=Path("/cache/gradients"))
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
+@pytest.mark.parametrize("published", [False, True])
+def test_gradient_reader_loads_the_recorded_decoder_precision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, precision: str, published: bool
+) -> None:
+    actor = tmp_path / "checkpoint.pt"
+    actor.write_bytes(b"checkpoint identity")
+    checkpoint = tmp_path / "checkpoint.json" if published else actor
+    if published:
+        checkpoint.write_text("training manifest")
+
+    def resolve(path: Path) -> Path:
+        assert published and path == checkpoint
+        return actor
+
+    def manifest(path: Path, checkpoint_sha256: str) -> dict[str, str]:
+        assert path == tmp_path and checkpoint_sha256 == o65_gradient_noise.sha256(actor)
+        return {"decoder_precision": precision}
+
+    monkeypatch.setattr(o65_gradient_noise, "evaluation_actor_path", resolve)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(o65_gradient_noise, "load_manifest", manifest)
+
+    class CheckpointReached(Exception):
+        pass
+
+    def load(path: Path, *, device: torch.device, decoder_precision: str) -> None:
+        assert path == checkpoint and device == torch.device("cuda", 0)
+        assert decoder_precision == precision
+        raise CheckpointReached
+
+    monkeypatch.setattr(o65_gradient_noise, "load_evaluation_checkpoint", load)
+    with pytest.raises(CheckpointReached):
+        o65_gradient_noise.main(o65_gradient_noise.Args(tmp_path, checkpoint=checkpoint))
 
 
 def test_profile_counts_only_finished_games() -> None:
