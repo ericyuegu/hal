@@ -64,3 +64,33 @@ def test_training_probe_preserves_the_actual_first_step_inputs(
     loaded = load_cohort(path, PROVENANCE["checkpoint_sha256"], 0)
     torch.testing.assert_close(loaded["denominator"], targets_seen[0].denominator, rtol=0, atol=0)
     assert exp._state_hash(run.policy.model.state_dict()) == before
+
+
+def test_profile_continues_after_saving_training_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_065_loop import PROVENANCE
+
+    run = transformer_trainer("cpu", decoder_precision="fp32")
+    output = tmp_path / "profile"
+    config = exp.NativeCli(
+        checkpoint=tmp_path / "checkpoint.pt",
+        sampler=tmp_path / "sampler.json",
+        output=output,
+        data_dir=tmp_path,
+        cpus=tuple(sorted(exp.os.sched_getaffinity(0)))[:1],
+        updates=3,
+        groups=1,
+        training=run.config,
+        profiling=exp.ProfileConfig(warm_updates=1, capture_training_inputs=True),
+    )
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *_args: "NVIDIA B200")
+
+    class WarmupComplete(Exception):
+        pass
+
+    def compile_report(_engine: exp.RolloutEngine) -> None:
+        assert (output / "training-inputs.pt").is_file()
+        raise WarmupComplete
+
+    monkeypatch.setattr(exp, "compilation_report", compile_report)
+    with pytest.raises(WarmupComplete):
+        exp.profile_native(run, config, PROVENANCE, {})

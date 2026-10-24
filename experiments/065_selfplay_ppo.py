@@ -3462,19 +3462,28 @@ def replay_chunks(
         raise ValueError("replay chunk must contain at least one window")
     slots = batch.rows.shape[1]
     permutation = (~batch.slots.valid_WK).long().argsort(dim=-1, stable=True)
-    chunks: list[ReplayChunk] = []
+    queue_capacity = batch.slots.forced_queue_WKD4.shape[2]
+    if bool((batch.slots.valid_WK & (batch.slots.delay_WK > queue_capacity)).any()):
+        raise ValueError("actor delay exceeds the stored queue capacity")
+    # Delay stays in each slot. Causal attention makes trailing queue padding
+    # inert, so only decision capacity needs a separate actor graph.
+    capacities: dict[int, Tensor] = {}
     for configuration, members in window_configurations(batch, configurations):
+        capacity = min(slots, 128 // configuration.replan)
+        capacities[capacity] = members if capacity not in capacities else capacities[capacity] | members
+    chunks: list[ReplayChunk] = []
+    for capacity, members in capacities.items():
         group = torch.nonzero(members).flatten()
-        positions = permutation[:, : min(slots, 128 // configuration.replan)]
+        positions = permutation[:, :capacity]
         for start in range(0, len(group), windows_per_chunk):
             ids = group[start : start + windows_per_chunk]
             padded = torch.nn.functional.pad(ids, (0, windows_per_chunk - len(ids)), value=-1)
-            chunks.append(ReplayChunk(padded, positions, configuration.delay, len(ids)))
+            chunks.append(ReplayChunk(padded, positions, queue_capacity, len(ids)))
     if not chunks:
         configuration = configurations[0]
         padded = torch.full((windows_per_chunk,), -1, dtype=torch.long, device=batch.rows.device)
         positions = permutation[:, : min(slots, 128 // configuration.replan)]
-        chunks.append(ReplayChunk(padded, positions, configuration.delay, 0))
+        chunks.append(ReplayChunk(padded, positions, queue_capacity, 0))
     return tuple(chunks)
 
 
@@ -3970,6 +3979,8 @@ class Trainer:
         self.profile: UpdateProfile | None = None
         self.metric_totals = distributed.MetricTotals(engine.policy.device)
         self.memory = PhaseMemory(engine.policy.device, config.windows_per_step)
+        self.startup_memory = PhaseMemory(engine.policy.device, config.windows_per_step)
+        self.startup_memory.label = "startup"
         self.engine = engine
         self.policy = engine.policy
         self.reference = engine.anchors[0]
@@ -4010,6 +4021,11 @@ class Trainer:
         if any(not isinstance(policy, TransformerPolicy) or policy.startup_finished for policy in policies):
             raise ValueError("startup capture requires unsealed transformer policies")
         started = time.perf_counter()
+        self.startup_memory.active = True
+        assert isinstance(self.reference, TransformerPolicy)
+        # Reference and actor replay are serial and copy their outputs before
+        # the other policy runs. Both use one capture stream and graph pool.
+        self.reference.replay_capture_stream = self.policy.replay_capture_stream
         engine = self.engine
         cursor = engine.cursor
         frames = engine.sampler.schedule.rollout_frames
@@ -4037,20 +4053,22 @@ class Trainer:
             engine.tables[group] = table
             engine.tick_layouts = engine.group_layouts[group]
             pending = torch.full((2 * len(matches),), -1, dtype=torch.long, device=self.policy.device)
-            for offset in (0, 2, 4):
-                clock = engine.clocks[group] + offset
-                ids = engine._stage_tick(clock, self.update, table, pending)
-                table.active[ids] = False
-                for buffer in engine.buffers[group]:
-                    engine._sample_buffer(buffer, clock, table, ids)
+            with self.startup_memory.phase("rollout"):
+                for offset in (0, 2, 4):
+                    clock = engine.clocks[group] + offset
+                    ids = engine._stage_tick(clock, self.update, table, pending)
+                    table.active[ids] = False
+                    for buffer in engine.buffers[group]:
+                        engine._sample_buffer(buffer, clock, table, ids)
             if rollout_only:
                 table.reset()
                 continue
             # Bootstrap and context-gap graphs have fixed player/diagnostic row counts.
-            for count in {2 * len(matches), min(32, 2 * len(matches))}:
-                rows = torch.zeros(count, 1, dtype=torch.long, device=self.policy.device)
-                batch = replay_batch(self.policy, table, rows, torch.zeros_like(rows, dtype=torch.bool))
-                self.policy.evaluate_values(batch)
+            with self.startup_memory.phase("value"):
+                for count in {2 * len(matches), min(32, 2 * len(matches))}:
+                    rows = torch.zeros(count, 1, dtype=torch.long, device=self.policy.device)
+                    batch = replay_batch(self.policy, table, rows, torch.zeros_like(rows, dtype=torch.bool))
+                    self.policy.evaluate_values(batch)
             chunk = self.config.windows_per_chunk
             rows = torch.zeros(chunk, 64, dtype=torch.long, device=self.policy.device)
             batch = replay_batch(self.policy, table, rows, torch.zeros_like(rows, dtype=torch.bool))
@@ -4060,11 +4078,13 @@ class Trainer:
             for configuration in self.policy.schedule.configurations:
                 capacity = min(64, 128 // configuration.replan)
                 ref_positions = torch.arange(capacity, device=self.policy.device)[None].expand(chunk, -1)
-                output = self.reference.reference_chunk(
-                    compact_replay(batch, order, ref_positions, configuration.delay), min(count, 16, capacity)
-                )
+                with self.startup_memory.phase("reference"):
+                    output = self.reference.reference_chunk(
+                        compact_replay(batch, order, ref_positions, configuration.delay), min(count, 16, capacity)
+                    )
+                self.policy.replay_pool = self.reference.replay_pool
                 positions = ref_positions[:, : min(count, capacity)]
-                part = compact_replay(batch, order, positions, configuration.delay)
+                part = compact_replay(batch, order, positions, self.policy.max_delay)
                 shape = part.slots.valid_WK.shape
                 zero = torch.zeros(shape, device=self.policy.device)
                 targets = ActorTargets(
@@ -4077,7 +4097,18 @@ class Trainer:
                     zero.new_ones(()),
                     zero.new_ones(()),
                 )
-                self.policy.actor_step(part, targets, clip_epsilon=self.config.clip_epsilon)
+                with self.startup_memory.phase("actor"):
+                    self.policy.actor_step(part, targets, clip_epsilon=self.config.clip_epsilon)
+                if distributed.rank() == 0:
+                    print(
+                        json.dumps(
+                            {
+                                "startup_cadence": dataclasses.asdict(configuration),
+                                "memory": self.startup_memory.metrics(),
+                            }
+                        ),
+                        flush=True,
+                    )
             table.reset()
         engine.cursor = cursor
         engine.tick_layouts = engine.group_layouts[cursor]
@@ -4086,6 +4117,7 @@ class Trainer:
             assert isinstance(policy, TransformerPolicy)
             policy.startup_finished = True
         self.startup_seconds = time.perf_counter() - started
+        self.startup_memory.active = False
         if self.compilation_counter is not None:
             self.compilation_counter.starts = 0
         if distributed.rank() == 0:
@@ -6045,6 +6077,8 @@ def train_native_rank(config: NativeCli) -> None:
             {0: policy.frozen_copy()},
         )
         trainer = Trainer(engine, config.training)
+        if config.profiling is not None:
+            trainer.startup_memory.output = config.output.with_name(f"{config.output.name}-startup")
         distributed.check_parameters(tuple(policy.model.parameters()))
         head_start = None
         trainer.compilation_counter = resources.enter_context(count_compilation_starts())
@@ -6071,6 +6105,7 @@ def train_native_rank(config: NativeCli) -> None:
         native_config["sampler_sha256"] = sha256(config.sampler)
         native_config["startup_capture_seconds"] = trainer.startup_seconds
         native_config["startup_seconds"] = time.perf_counter() - startup_started
+        native_config["startup_memory"] = trainer.startup_memory.metrics()
         native_config["compile_cache_status"] = {
             "directory": str(cache.directory) if cache is not None else None,
             "loaded_artifacts": cache.loaded if cache is not None else False,
@@ -6136,7 +6171,7 @@ class ProfileConfig:
     nsys: bool = False
     # Capture only the rollout graphs and time rollouts without PPO updates.
     rollout_only: bool = False
-    # Save compact chunks of the first optimizer step instead of timing/tracing updates.
+    # Also save compact chunks of the first optimizer step for precision diagnostics.
     capture_training_inputs: bool = False
 
     def __post_init__(self) -> None:
@@ -6828,8 +6863,6 @@ def profile_native(
             batch, metrics = trainer.run_update()
             if config.profiling.capture_training_inputs:
                 save_training_probe(trainer, batch, config.output / "training-inputs.pt", provenance)
-                log.write(json.dumps(metrics) + "\n")
-                return
             del batch
             log.write(json.dumps(metrics) + "\n")
             log.flush()

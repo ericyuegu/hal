@@ -2,6 +2,7 @@
 
 import copy
 import dataclasses
+import json
 import math
 from pathlib import Path
 
@@ -187,7 +188,11 @@ def test_grouped_actor_matches_padded_gradients_for_mixed_shapes(decisions: int 
     ids = torch.full((4,), source, dtype=torch.long, device=device)
     positions = torch.arange(64, device=device)[None].expand(len(windows.rows), -1)
     windows = windows.take(ids, positions, ids >= 0)
-    delay = torch.tensor([8, 10, 8, 10], device=device)[:, None].expand(-1, 64)
+    run.policy.schedule = dataclasses.replace(
+        run.policy.schedule, configurations=(exp.DelayReplan(7, 4), exp.DelayReplan(8, 4), exp.DelayReplan(10, 2))
+    )
+    run.policy.model.ranges = dataclasses.replace(run.policy.model.ranges, delay=(7, 10))
+    delay = torch.tensor([8, 10, 7, 10], device=device)[:, None].expand(-1, 64)
     replan = torch.tensor([4, 2, 4, 2], device=device)[:, None].expand(-1, 64)
     valid = (replan == 2) | (torch.arange(64, device=device)[None] % 2 == 0)
     # One missing decision and an entirely invalid window exercise both masks.
@@ -210,6 +215,11 @@ def test_grouped_actor_matches_padded_gradients_for_mixed_shapes(decisions: int 
         torch.arange(4, device=device), placement.positions, torch.ones(4, dtype=torch.bool, device=device)
     )
     selected = placement.selected.gather(1, placement.positions)
+    chunks = exp.replay_chunks(windows, run.policy.schedule.configurations, 3)
+    assert len(chunks) == (1 if decisions == 16 else 2)
+    mixed = next(chunk for chunk in chunks if 0 in chunk.windows[: chunk.count].tolist())
+    assert 2 in mixed.windows[: mixed.count].tolist()
+    assert mixed.delay == 10
     with torch.no_grad(), prepared_shape_compilation(64):
         initial = run.policy.window_forward(windows.inputs(), grad=False)
     reference = []
@@ -226,8 +236,14 @@ def test_grouped_actor_matches_padded_gradients_for_mixed_shapes(decisions: int 
         torch.tensor(1.0, device=device),
         selected.sum().float(),
     )
+    initial_state = copy.deepcopy(run.policy.model.state_dict())
+    optimizer_state = copy.deepcopy(run.actor_optimizer.state_dict())
     expected, expected_output = run.policy.actor_step(windows, targets, clip_epsilon=0.2)
     gradients = tuple(torch.zeros_like(p) if p.grad is None else p.grad.clone() for p in run.policy.actor_parameters())
+    run.actor_optimizer.step()
+    expected_state = copy.deepcopy(run.policy.model.state_dict())
+    run.policy.model.load_state_dict(initial_state)
+    run.actor_optimizer.load_state_dict(optimizer_state)
     before = tuple(value.clone() for value in windows.inputs())
     actual, actual_output = run.policy.grouped_actor_step(windows, targets, windows_per_chunk=3, clip_epsilon=0.2)
     tolerance = {"rtol": 0.05, "atol": 0.005} if device == "cuda" else {"rtol": 1e-4, "atol": 1e-6}
@@ -248,6 +264,97 @@ def test_grouped_actor_matches_padded_gradients_for_mixed_shapes(decisions: int 
         torch.testing.assert_close(candidate, control, rtol=1e-4, atol=1e-6)
     for actual_input, saved in zip(windows.inputs(), before, strict=True):
         torch.testing.assert_close(actual_input, saved, rtol=0, atol=0)
+    run.actor_optimizer.step()
+    actor_ids = {id(parameter) for parameter in run.policy.actor_parameters()}
+    names = [name for name, parameter in run.policy.model.named_parameters() if id(parameter) in actor_ids]
+    actual_state = run.policy.model.state_dict()
+    candidate_delta = torch.cat([(actual_state[name] - initial_state[name]).flatten() for name in names])
+    control_delta = torch.cat([(expected_state[name] - initial_state[name]).flatten() for name in names])
+    if device == "cuda":
+        assert float(torch.nn.functional.cosine_similarity(candidate_delta, control_delta, dim=0)) > 0.995
+        assert float((candidate_delta - control_delta).norm() / control_delta.norm()) < 0.1
+    else:
+        torch.testing.assert_close(candidate_delta, control_delta, rtol=1e-3, atol=1e-8)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_actor_trailing_queue_padding_preserves_all_planned_outputs(device: str) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    run = transformer_trainer(device, development=True, decoder_precision="bf16" if device == "cuda" else "fp32")
+    windows = run.prepare(run.engine.collect(0)).windows
+    source = int(torch.nonzero(windows.slots.valid_WK.any(-1))[0, 0])
+    ids = torch.tensor([source], device=device)
+    positions = torch.arange(16, device=device)[None].expand(len(windows.rows), -1)
+    wide = windows.take(ids, positions, ids >= 0)
+    delay = torch.full_like(wide.slots.delay_WK, 8)
+    replan = torch.full_like(wide.slots.replan_WK, 4)
+    wide = dataclasses.replace(
+        wide,
+        slots=dataclasses.replace(
+            wide.slots,
+            delay_WK=delay,
+            replan_WK=replan,
+            condition_WK4=run.policy.model.ranges.normalize(
+                torch.full_like(delay, math.log(0.01), dtype=torch.float32), delay, replan
+            ),
+        ),
+    )
+    narrow = dataclasses.replace(
+        wide,
+        slots=dataclasses.replace(wide.slots, forced_queue_WKD4=wide.slots.forced_queue_WKD4[:, :, :8].contiguous()),
+    )
+    with torch.no_grad(), prepared_shape_compilation(64):
+        expected = run.policy.window_forward(narrow.inputs(), grad=True)
+        actual = run.policy.window_forward(wide.inputs(), grad=True)
+    tolerance = {"rtol": 0.02, "atol": 0.005} if device == "cuda" else {"rtol": 1e-4, "atol": 1e-5}
+    torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, **tolerance)
+    torch.testing.assert_close(actual.factor_mask_WKF, expected.factor_mask_WKF)
+    torch.testing.assert_close(actual.features.decoder_WKt, expected.features.decoder_WKt, **tolerance)
+    for first, second in zip(actual.distributions, expected.distributions, strict=True):
+        torch.testing.assert_close(first, second, **tolerance)
+
+
+def test_actor_grouping_rejects_a_queue_shorter_than_a_valid_delay() -> None:
+    run = transformer_trainer("cpu", development=True, decoder_precision="fp32")
+    windows = run.prepare(run.engine.collect(0)).windows
+    windows = dataclasses.replace(
+        windows, slots=dataclasses.replace(windows.slots, forced_queue_WKD4=windows.slots.forced_queue_WKD4[:, :, :1])
+    )
+    with pytest.raises(ValueError, match="delay exceeds the stored queue capacity"):
+        exp.replay_chunks(windows, run.policy.schedule.configurations, 3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_startup_reference_and_actor_share_one_pool_and_measure_separate_peaks() -> None:
+    run = transformer_trainer("cuda", development=True, matches=(0, 1, 2, 3), episode_length=10000)
+    run.config = dataclasses.replace(run.config, decisions_per_window="all")
+    run.capture_startup()
+    graphs = [*run.reference.reference_graphs.values(), *(step.captured for step in run.policy.actor_graphs.values())]
+    assert len(graphs) == 4
+    assert len({graph.graph.pool() for graph in graphs}) == 1
+    assert run.policy.replay_capture_stream is run.reference.replay_capture_stream
+    assert not run.startup_memory.active
+    assert not run.memory.first_checked and not run.memory.actor_checked
+    for phase in ("rollout", "value", "reference", "actor"):
+        allocated, reserved = run.startup_memory.peaks[f"startup_{phase}"]
+        assert reserved >= allocated > 0
+    run.run_update()
+    assert run.policy.post_startup_captures == run.reference.post_startup_captures == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_startup_memory_keeps_oom_peaks_before_the_main_report_exists(tmp_path: Path) -> None:
+    memory = exp.PhaseMemory(torch.device("cuda", torch.cuda.current_device()), 64)
+    memory.label = "startup"
+    memory.active = True
+    memory.output = tmp_path / "profile-startup"
+    with pytest.raises(RuntimeError, match="CUDA OOM in actor"), memory.phase("actor"):
+        allocation = torch.ones(16, device="cuda")
+        raise torch.cuda.OutOfMemoryError("test capture failure")
+    report = json.loads((memory.output / "phase-memory.json").read_text())
+    assert report["memory/startup_actor_peak_allocated_bytes"] >= allocation.numel() * allocation.element_size()
+    assert not (tmp_path / "profile").exists()
 
 
 @pytest.mark.parametrize("windows,microbatches,chunk", [(512, 1, 64), (512, 8, 64), (96, 1, 64), (4, 2, 2)])

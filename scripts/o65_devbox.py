@@ -227,18 +227,22 @@ def bench(
     cpus = f"import os; print(*sorted(os.sched_getaffinity(0))[:{SHARD_CPUS}])"
     command = f"mkdir -p {shlex.quote(str(cache_root / 'tmp'))} && CPUS=$(/opt/venv/bin/python -c '{cpus}') && env {exports} {' '.join(argv)}"
     code = _run(sandbox, command)
-    if _run(sandbox, f"test -d {shlex.quote(str(output))}"):
+    startup = output.with_name(f"{output.name}-startup")
+    directories = [path for path in (output, startup) if not _run(sandbox, f"test -d {shlex.quote(str(path))}")]
+    if not directories:
         print("no report written", flush=True)
         return code
     # Traces and reports go to one local directory per run for offline analysis.
     local = LOCAL_RESULTS / "runs" / name
     local.mkdir(parents=True)
-    for path in _capture(sandbox, f"find {shlex.quote(str(output))} -type f -print0").split("\0"):
-        if not path:
-            continue
-        target = local / Path(path).relative_to(output)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(sandbox.filesystem.read_bytes(path))
+    for directory in directories:
+        prefix = local / "startup" if directory == startup else local
+        for path in _capture(sandbox, f"find {shlex.quote(str(directory))} -type f -print0").split("\0"):
+            if not path:
+                continue
+            target = prefix / Path(path).relative_to(directory)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(sandbox.filesystem.read_bytes(path))
     print(f"report: {local}", flush=True)
     return code
 

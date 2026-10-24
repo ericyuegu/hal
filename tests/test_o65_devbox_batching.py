@@ -1,6 +1,7 @@
 """Preserve explicit training batch choices in the command sent to the B200."""
 
 import dataclasses
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
+    from scripts import o65_devbox as devbox
     from scripts.o65_devbox import _run
     from scripts.o65_devbox import bench
 finally:
@@ -123,3 +125,44 @@ def test_exec_streams_stderr_for_every_command_in_a_shell_script() -> None:
     assert result.returncode == 1
     assert result.stdout == "diagnostic"
     assert result.stderr == ""
+
+
+def test_bench_downloads_startup_memory_when_capture_fails_before_the_main_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "bench-fixed-m64-full"
+    remote = f"/cache/runs/{name}-startup/phase-memory.json"
+    payload = b'{"memory/startup_actor_peak_allocated_bytes": 123}'
+
+    class Filesystem:
+        def read_bytes(self, path: str) -> bytes:
+            assert path == remote
+            return payload
+
+    class Result:
+        def __init__(self, code: int, output: str = "") -> None:
+            self.returncode = code
+            self.stdout = io.StringIO(output)
+            self.stderr = io.StringIO()
+
+        def wait(self) -> None:
+            pass
+
+    class FailedCapture:
+        filesystem = Filesystem()
+
+        def exec(self, *command: str, workdir: str) -> Result:
+            script = command[-1]
+            if "sha256sum" in script:
+                return Result(0)
+            if "env " in script:
+                return Result(137)
+            if "test -d" in script:
+                return Result(0 if "-startup" in script else 1)
+            assert "find " in script
+            return Result(0, remote + "\0")
+
+    monkeypatch.setattr(devbox, "LOCAL_RESULTS", tmp_path)
+    monkeypatch.setattr(devbox.time, "strftime", lambda *_args: "fixed")
+    assert bench(cast(modal.Sandbox, FailedCapture()), 64, 512, full=True) == 137
+    assert (tmp_path / "runs" / name / "startup/phase-memory.json").read_bytes() == payload
