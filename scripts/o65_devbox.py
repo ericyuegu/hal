@@ -171,6 +171,11 @@ def bench(
     ):
         raise ValueError("decisions per window must be 'all' or an integer from 1 to 16")
     trainer_sha = hashlib.sha256(Path("experiments/065_selfplay_ppo.py").read_bytes()).hexdigest()
+    worktree = {
+        "git_sha": _git("rev-parse", "HEAD"),
+        "dirty": bool(_git("status", "--porcelain")),
+        "trainer_sha256": trainer_sha,
+    }
     if _run(sandbox, f"test \"$(sha256sum experiments/065_selfplay_ppo.py | cut -d ' ' -f1)\" = {trainer_sha}"):
         raise ValueError("remote trainer source differs from the worktree; restore the sandbox source and sync again")
     name = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-m{matches_per_shard}{'-full' if full else ''}"
@@ -266,7 +271,6 @@ def bench(
         )
     )
     code = _run(sandbox, command)
-    startup = output.with_name(f"{output.name}-startup")
     directories = [path for path in (output, startup) if not _run(sandbox, f"test -d {shlex.quote(str(path))}")]
     if not directories:
         print("no report written", flush=True)
@@ -274,16 +278,7 @@ def bench(
     # Traces and reports go to one local directory per run for offline analysis.
     local = LOCAL_RESULTS / "runs" / name
     local.mkdir(parents=True)
-    (local / "worktree.json").write_text(
-        json.dumps(
-            {
-                "git_sha": _git("rev-parse", "HEAD"),
-                "dirty": bool(_git("status", "--porcelain")),
-                "trainer_sha256": trainer_sha,
-            },
-            indent=2,
-        )
-    )
+    (local / "worktree.json").write_text(json.dumps(worktree, indent=2))
     for directory in directories:
         prefix = local / "startup" if directory == startup else local
         for path in _capture(sandbox, f"find {shlex.quote(str(directory))} -type f -print0").split("\0"):

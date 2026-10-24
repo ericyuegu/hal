@@ -168,6 +168,13 @@ def test_exec_streams_stderr_for_every_command_in_a_shell_script() -> None:
 def test_bench_downloads_startup_memory_when_capture_fails_before_the_main_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import json
+
+    head = "a" * 40
+
+    def git(*args: str) -> str:
+        return head if args == ("rev-parse", "HEAD") else ""
+
     name = "bench-fixed-m64-full"
     remote = f"/cache/runs/{name}-startup/phase-memory.json"
     payload = b'{"memory/startup_actor_peak_allocated_bytes": 123}'
@@ -190,20 +197,25 @@ def test_bench_downloads_startup_memory_when_capture_fails_before_the_main_repor
         filesystem = Filesystem()
 
         def exec(self, *command: str, workdir: str) -> Result:
+            nonlocal head
             script = command[-1]
             if "sha256sum" in script:
                 return Result(0)
             if "env " in script:
+                head = "b" * 40
                 return Result(137)
             if "test -d" in script:
                 return Result(0 if "-startup" in script else 1)
             assert "find " in script
             return Result(0, remote + "\0")
 
+    monkeypatch.setattr(devbox, "_git", git)
     monkeypatch.setattr(devbox, "LOCAL_RESULTS", tmp_path)
     monkeypatch.setattr(devbox.time, "strftime", lambda *_args: "fixed")
     assert bench(cast(modal.Sandbox, FailedCapture()), 64, 512, full=True) == 137
     assert (tmp_path / "runs" / name / "startup/phase-memory.json").read_bytes() == payload
+
+    assert json.loads((tmp_path / "runs" / name / "worktree.json").read_text())["git_sha"] == "a" * 40
 
 
 def test_bench_uses_production_head_start_rewards_and_snapshot_cadence() -> None:
