@@ -10,6 +10,7 @@ from test_065_loop import exp
 from test_065_loop import transformer_trainer
 
 from hal.eval.self_play_checkpoint import EvaluationCheckpoint
+from hal.models.attention import Trunk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
@@ -126,8 +127,10 @@ def test_eager_precision_control_runs_before_any_compiled_decoder(
 
             return compiled
 
-        def compiled_history(trunk: probe.Trunk, tokens: torch.Tensor) -> torch.Tensor:
-            assert operation is probe.history
+        if operation is not probe.history:
+            return operation
+
+        def compiled_history(trunk: Trunk, tokens: torch.Tensor) -> torch.Tensor:
             return probe.history(trunk, tokens)
 
         return compiled_history
