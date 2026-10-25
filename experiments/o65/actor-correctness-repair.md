@@ -1,5 +1,11 @@
 # Actor correctness repair
 
+The full-model numerical defect is unresolved. Diagnostic target units, live
+pre-update checks, probability naming, continuation lineage and cache identity
+have focused regression coverage. The obsolete proxy qualification was retired.
+Repaired-source numerical qualification, exact launch qualification, eight-rank
+continuation through checkpoint 64 and performance measurements remain open.
+
 This work starts at `603a1f9229ca17c49d0e1c608114d85318e1ac96`, from the
 2026-10-25 Astra review. The checkpoint-32 producer is
 `fde1887c6f7170cd817f2497fa1582b071f62c71`; its manifest SHA-256 is
@@ -176,11 +182,53 @@ launcher does. PyTorch 2.11 defaults this optional scheduling optimization to of
 a dependency-name mismatch that permits a consumer to read an in-place producer's
 buffer before it finishes writing. The same dependency comparison is present in
 the installed 2.11 source. This is a hypothesis for HAL, not a demonstrated cause.
-The prepared PDL on/off diagnostic keeps the source, captured models, inputs, RNG,
-precision and compiler options fixed, with separate fresh caches. It reuses image
-`im-mNLSZTaONBvkFQESBg3Rp2`; its 720-second bound fits the existing repair reservation.
-The automatic approval review rejected this launch; explicit user approval is
-pending. No PDL control result exists yet.
+The PDL on/off diagnostic kept source, captured models, inputs, RNG, precision
+and other compiler options fixed, with separate fresh caches. Approved call
+`fc-01M5RH70V4VVWZTTBQRVE7DER3` reused image `im-mNLSZTaONBvkFQESBg3Rp2` and
+finished in 193.126 seconds within the existing repair reservation. Both rank-0
+conditions completed all nine chunks and all three observation stages:
+
+| PDL | Failed rows at forward | Rows with nonfinite log mass |
+| --- | ---: | ---: |
+| Disabled | 4,190 | 3,177 |
+| Enabled | 5,001 | 3,998 |
+
+Both conditions fail in capacity-64 chunks; capacity-32 chunks pass. PDL is not
+necessary for the observed failure, and disabling it is not a repair. The run
+stopped after this failed pair. It did not run rank 1, the serialized compiled
+control, optimizer comparison, or graph benchmarks. These are not passes or
+numerical comparisons. The next reduction isolates readout operations with
+synthetic inputs; it must reproduce the failure before it can serve as a regression.
+
+The first synthetic reduction retained BF16 temporal/trunk scores, FP32 bias
+addition, centering, FP32 log-softmax and the selected-action gather at the
+`[64, 64, 4, 65]` production shape. Call `fc-01M5RHJ81BV4CJ4N6KS8V33N1S`
+used Torch 2.11.0+cu130 on B200 with PDL disabled. Twenty random batches passed
+with normal buffer settings, and twenty passed with in-place buffers disabled;
+maximum absolute log mass was `2.70654e-7`. Both conditions had backward execution.
+This reduction does not reproduce the defect and is not a qualification test.
+Its script SHA-256 is
+`a4efa3fe027163d6ab4ade920f9457b7d288887e81a3a94651da6c853eb6394e`.
+The next local reduction retains the captured four-head readout weights and
+actions, while generating the upstream states. At source `9a161a277fe1f7ef13761c5e1bc8674ff0f1b215`,
+one CPU batch passed both eager and compiled execution, including backward.
+All four heads normalized; the maximum absolute log mass was `2.84220e-7`.
+The diagnostic SHA-256 is
+`c76d15b581479c280479f5e45157e790fc0d616863b3f90f63c3f8c6bdd5516e`.
+On RTX 3060 at source `c7d2de674ea2db57d5ec3ee60e0009f2f893dfcc`, three batches
+also passed eager and compiled forward/backward. Maximum absolute log mass was
+`3.49888e-7`; the diagnostic SHA-256 is
+`4d96dd831c5c2515dda0fe3ed8c306d1bfab55ef756ca70f7c61bb23c6cbbba7`.
+The recorded outputs have contiguous FP32 layouts with separate storage.
+
+A second input set records the readout inputs from failing window 359 using eager
+CPU BF16 execution and dense attention. All 44 feature-statistics files match the
+checkpoint's hashes. The extracted artifact SHA-256 is
+`1986d0ad085ed9f244c5f21bd5ea6c420a1cb21ef4895d0897912e07222f0408`.
+Repeating that window to the 64-window GPU readout shape passed three eager and
+compiled forward/backward comparisons; maximum absolute log mass was `3.16616e-7`.
+These reductions do not reproduce the defect. They do not qualify the full actor,
+its attention implementation, the B200 kernels, or learning behavior.
 
 The root cause, repaired-source GPU qualification, eight-rank continuation through
 checkpoint 64, gradient/update comparison and performance measurements remain open.
@@ -248,5 +296,12 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
 - Compiler-cache regression: the new PDL mismatch case failed on the old code
   because the cache was imported. After adding PDL to cache format v3,
   `pytest -q tests/test_compile_cache.py -ra`: 28 passed, no skips.
+- Frozen `c7d2de67`: required format, lint and active type checks passed. The full
+  CUDA-enabled suite ended without a final summary or supervisor receipt. The
+  kernel log at `2026-10-24T20:41:12-07:00` confirms a global out-of-memory kill of
+  pytest PID 913872, with about 13.2 GiB of anonymous resident memory. The queued
+  reproduction and supervisor also stopped during the session interruption.
+  This run is incomplete; integration had not started. Subsequent heavy checks
+  run serially with explicit process-group memory limits and fewer compiler workers.
 
 Full required checks and GPU checks remain pending.
