@@ -13,6 +13,37 @@ import tyro
 from scripts import o65_production
 
 
+def test_resumed_attempt_preserves_discarded_metrics_and_has_separate_history(tmp_path: Path) -> None:
+    from test_o65_pilot import write_boundary
+
+    output = tmp_path / "logical-run/pilot"
+    checkpoint = write_boundary(output / "train/checkpoints", 32)
+    metrics = output / "train/metrics.jsonl"
+    original = b'{"global_step": 32, "loss": 1}\n{"global_step": 33, "loss": 2}\n'
+    metrics.write_bytes(original)
+    first = o65_production.begin_attempt(output, "a" * 40, checkpoint)
+    assert first.previous_attempt_run_id == "logical-run"
+    assert first.resume_update == 32 and first.source == "a" * 40
+    assert first.checkpoint_sha256 == o65_production.sha256(checkpoint)
+    archive = output / "attempts" / first.run_id
+    assert (archive / "metrics-before-resume.jsonl").read_bytes() == original
+    assert first.prior_metrics_sha256 == o65_production.sha256(archive / "metrics-before-resume.jsonl")
+    assert metrics.read_bytes() == original.splitlines(keepends=True)[0]
+    metrics.write_bytes(metrics.read_bytes() + b'{"global_step": 33, "loss": 3}\n')
+    second = o65_production.begin_attempt(output, "b" * 40, checkpoint)
+    assert second.run_id != first.run_id
+    assert second.previous_attempt_run_id == first.run_id
+    assert second.group == first.group == "logical-run"
+    assert (archive / "metrics-before-resume.jsonl").read_bytes() == original
+    assert (
+        (output / "attempts" / second.run_id / "metrics-before-resume.jsonl")
+        .read_bytes()
+        .endswith(b'{"global_step": 33, "loss": 3}\n')
+    )
+    assert json.loads((archive / "lineage.json").read_text())["source"] == "a" * 40
+    assert json.loads((output / "run-attempt.json").read_text())["source"] == "b" * 40
+
+
 def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -22,9 +53,11 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
     args = production_args(tmp_path)
     source = "a" * 40
     commands: list[list[str]] = []
+    environments: list[dict[str, str]] = []
 
     def execute(command: list[str], **kwargs: object) -> None:
         commands.append(command)
+        environments.append(dict(kwargs["env"]))
         result = args.output / "held-out/results.json"
         result.parent.mkdir(exist_ok=True)
         result.write_text("{}")
@@ -51,6 +84,11 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
     assert history[0]["previous"]["git_sha"] == "a" * 40
     assert history[0]["current"]["git_sha"] == "b" * 40
     assert o65_production.resume_settings(resumed) == o65_production.resume_settings(args)
+    assert environments[0]["WANDB_RUN_ID"] != environments[-1]["WANDB_RUN_ID"]
+    assert environments[-1]["WANDB_RESUME"] == "never"
+    lineage = json.loads(environments[-1]["WANDB_NOTES"])
+    assert lineage["source"] == "b" * 40 and lineage["resume_update"] == 32
+    assert lineage["previous_attempt_run_id"] == environments[0]["WANDB_RUN_ID"]
 
 
 def test_launcher_passes_explicit_resume_source(tmp_path: Path) -> None:

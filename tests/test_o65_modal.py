@@ -48,7 +48,15 @@ def test_budget_rejects_invalid_or_unversioned_records(tmp_path: Path, change: d
 
 
 @pytest.mark.parametrize(
-    "change", [{}, {"format": "old"}, {"exit_code": True}, {"elapsed_seconds": float("inf")}, {"finished_unix": 99}]
+    "change",
+    [
+        {},
+        {"format": "old"},
+        {"exit_code": True},
+        {"elapsed_seconds": float("inf")},
+        {"finished_unix": 99},
+        {"attempt_directory": "../other"},
+    ],
 )
 def test_result_duration_validates_identity(tmp_path: Path, change: dict[str, object]) -> None:
     path = tmp_path / "result.json"
@@ -58,6 +66,7 @@ def test_result_duration_validates_identity(tmp_path: Path, change: dict[str, ob
         "started_unix": 100,
         "finished_unix": 103,
         "elapsed_seconds": 3,
+        "attempt_directory": "attempts/example",
     }
     record.update(change)
     path.write_text(json.dumps(record))
@@ -66,6 +75,22 @@ def test_result_duration_validates_identity(tmp_path: Path, change: dict[str, ob
     else:
         with pytest.raises(ValueError, match="result identity"):
             launcher.result_seconds(path, 0)
+
+
+def test_recorded_v1_result_can_still_reconcile_a_completed_call(tmp_path: Path) -> None:
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "format": "hal.o65.modal-result.v1",
+                "exit_code": 1,
+                "started_unix": 100,
+                "finished_unix": 103,
+                "elapsed_seconds": 3,
+            }
+        )
+    )
+    assert launcher.result_seconds(path, 1) == 3
 
 
 def test_download_paths_stay_inside_the_named_run() -> None:
@@ -196,7 +221,15 @@ def test_failed_pilot_preserves_the_published_resume_tree(tmp_path: Path, monkey
     monkeypatch.setattr(launcher.modal.Volume, "from_name", Mock(return_value=Mock()))
     assert launcher.run_remote(Request("pilot", "a" * 40, mode="pilot")) == 1
     assert (published / "checkpoint").read_text() == "published update 32"
-    assert (results / "pilot/last-attempt/pilot/checkpoint").read_text() == "unpublished update 64"
+    first = json.loads((results / "pilot/result.json").read_text())
+    first_attempt = results / "pilot" / first["attempt_directory"]
+    assert (first_attempt / "pilot/checkpoint").read_text() == "unpublished update 64"
+    monkeypatch.setattr(launcher, "WORK", work / "next")
+    assert launcher.run_remote(Request("pilot", "b" * 40, mode="pilot")) == 1
+    second = json.loads((results / "pilot/result.json").read_text())
+    assert first["attempt_directory"] != second["attempt_directory"]
+    assert (first_attempt / "pilot/checkpoint").read_text() == "unpublished update 64"
+    assert (published / "checkpoint").read_text() == "published update 32"
 
 
 def test_learner_migration_uses_read_only_source_volume_and_new_run() -> None:

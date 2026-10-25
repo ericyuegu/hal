@@ -6,7 +6,9 @@ This work starts at `603a1f9229ca17c49d0e1c608114d85318e1ac96`, from the
 `206883a06d62321c672ed1a8141233de8d429e110947e4c83a0dfd2299508968`.
 The latest reviewed Modal call, `fc-01M5R9B2E4RKTTZT164ZHE0MCS`, returned 1.
 The preserved Modal volume contains the manifest and 265 checkpoint shards.
-Their individual hashes have not yet been rechecked by this repair.
+All 265 shard hashes were rechecked by the CPU preflight. The preflight also
+verified the compiler-cache payload hashes before copying them to a separate
+diagnostic namespace. This establishes artifact identity, not numerical validity.
 
 ## Contracts
 
@@ -51,8 +53,14 @@ Their individual hashes have not yet been rechecked by this repair.
   format is now v3. The redundant test for a removed gradient gate was deleted.
   Direction metrics have explicit numeric expectations. Historical v2 reports are
   unchanged. The unsupported BF16 learning conclusion was corrected.
+- Each continuation gets a new W&B run ID. Its lineage records the restored
+  checkpoint hash, checkpoint producer, current source, and previous attempt ID.
+  Original metrics are archived before rollback. Modal retains each attempt's
+  files in a separate directory instead of overwriting `last-attempt`.
+  The historical W&B run remains unchanged: its 44 rows end at update 43,
+  while its last published checkpoint is update 32.
 
-The full-model normalization cause, exact-source GPU qualification, run-history repair,
+The full-model normalization cause, exact-source GPU qualification,
 and performance comparison remain open. No production recovery is qualified by these
 CPU results.
 
@@ -73,5 +81,9 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
 - Focused Ruff checks passed after correcting import order and explicit loop-variable
   bindings. Type checks of the two diagnostic scripts and of the modified experiment
   passed with Python 3.14 and `--error-on-warning`.
+- Attempt lineage and Modal archive tests: `pytest -q tests/test_o65_ddp_launch.py
+  tests/test_o65_modal.py`: 50 passed. These include two successive failed attempts,
+  exact preservation of the original metrics bytes, and distinct restored-checkpoint
+  and previous-attempt identities.
 
 Full required checks and GPU checks remain pending.

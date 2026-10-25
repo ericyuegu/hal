@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import time
+import uuid
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,7 @@ BUILD_RESERVE_USD = 3.0
 PILOT_TIMEOUT_SECONDS = 36000
 PILOT_MAX_USD = 50.0
 BUDGET_FORMAT = "hal.o65.modal-budget.v1"
-RESULT_FORMAT = "hal.o65.modal-result.v1"
+RESULT_FORMAT = "hal.o65.modal-result.v2"
 MODAL_SDK = "1.5.3"
 
 
@@ -131,10 +132,21 @@ def b200_budget(path: Path, name: str, dollars: float, cap: float, *, reserve: b
 
 def result_seconds(path: Path, exit_code: int) -> float:
     raw = json.loads(path.read_text())
+    fields = {"format", "exit_code", "started_unix", "finished_unix", "elapsed_seconds"}
+    if isinstance(raw, dict) and raw.get("format") == RESULT_FORMAT:
+        fields.add("attempt_directory")
+        directory = raw.get("attempt_directory")
+        if (
+            not isinstance(directory, str)
+            or not directory
+            or Path(directory).is_absolute()
+            or ".." in Path(directory).parts
+        ):
+            raise ValueError("invalid Modal result identity or duration")
     if (
         not isinstance(raw, dict)
-        or set(raw) != {"format", "exit_code", "started_unix", "finished_unix", "elapsed_seconds"}
-        or raw["format"] != RESULT_FORMAT
+        or set(raw) != fields
+        or raw["format"] not in ("hal.o65.modal-result.v1", RESULT_FORMAT)
         or type(raw["exit_code"]) is not int
         or raw["exit_code"] != exit_code
         or any(
@@ -384,6 +396,7 @@ def run_remote(request: Request) -> int:
         stage_results(output / "pilot", local / "pilot")
     started = time.time()
     started_clock = time.perf_counter()
+    attempt = output / "attempts" / uuid.uuid4().hex
     code = -1
     try:
         code = run_child(request, local, started)
@@ -391,19 +404,21 @@ def run_remote(request: Request) -> int:
     finally:
         # Only the publisher may replace the pilot resume tree. A failed trainer
         # can have newer local checkpoints which were never published.
-        stage_results(local, output / "last-attempt" if request.mode in ("pilot", "ddp") else output)
-        (output / "result.json").write_text(
-            json.dumps(
-                {
-                    "format": RESULT_FORMAT,
-                    "exit_code": code,
-                    "started_unix": started,
-                    "finished_unix": time.time(),
-                    "elapsed_seconds": time.perf_counter() - started_clock,
-                },
-                indent=2,
-            )
+        destination = attempt if request.mode in ("pilot", "ddp") else output
+        stage_results(local, destination)
+        result = json.dumps(
+            {
+                "format": RESULT_FORMAT,
+                "exit_code": code,
+                "started_unix": started,
+                "finished_unix": time.time(),
+                "elapsed_seconds": time.perf_counter() - started_clock,
+                "attempt_directory": str(destination.relative_to(output)),
+            },
+            indent=2,
         )
+        (destination / "result.json").write_text(result)
+        (output / "result.json").write_text(result)
         modal.Volume.from_name(VOLUME).commit()
 
 

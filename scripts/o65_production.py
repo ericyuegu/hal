@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from contextlib import closing
 from pathlib import Path
 
@@ -233,6 +234,74 @@ def resume_settings(args: Args) -> dict[str, object]:
     return settings
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class RunAttempt:
+    run_id: str
+    group: str
+    source: str
+    previous_attempt_run_id: str | None
+    checkpoint: str | None
+    checkpoint_sha256: str | None
+    checkpoint_source: str | None
+    resume_update: int
+    prior_metrics_sha256: str | None
+
+
+def begin_attempt(output: Path, source: str, checkpoint: Path | None) -> RunAttempt:
+    """Preserve rolled-back history and assign a distinct W&B trajectory to this attempt."""
+    group = output.parent.name
+    previous = output / "run-attempt.json"
+    previous_attempt_run_id = group if checkpoint is not None else None
+    if previous.exists():
+        recorded = json.loads(previous.read_text())
+        if (
+            not isinstance(recorded, dict)
+            or set(recorded) != {"format", *RunAttempt.__dataclass_fields__}
+            or recorded["format"] != "hal.o65.run-attempt.v1"
+            or recorded["group"] != group
+            or not isinstance(recorded["run_id"], str)
+            or not recorded["run_id"]
+        ):
+            raise ValueError("production attempt identity mismatch")
+        previous_attempt_run_id = recorded["run_id"] if checkpoint is not None else None
+    manifest = read_training_manifest(checkpoint) if checkpoint is not None else None
+    update = manifest["update"] if manifest is not None else 0
+    run_id = f"{group}-{uuid.uuid4().hex[:12]}"
+    directory = output / "attempts" / run_id
+    directory.mkdir(parents=True, exist_ok=False)
+    metrics = output / "train/metrics.jsonl"
+    prior_metrics_sha256 = None
+    if metrics.exists():
+        payload = metrics.read_bytes()
+        rows = [json.loads(line) for line in payload.splitlines()]
+        if any(type(row.get("global_step")) not in (int, float) for row in rows):
+            raise ValueError("production metrics need a global_step")
+        archived = directory / "metrics-before-resume.jsonl"
+        archived.write_bytes(payload)
+        prior_metrics_sha256 = sha256(archived)
+        retained = [
+            line
+            for line, row in zip(payload.splitlines(keepends=True), rows, strict=True)
+            if row["global_step"] <= update
+        ]
+        metrics.write_bytes(b"".join(retained))
+    attempt = RunAttempt(
+        run_id,
+        group,
+        source,
+        previous_attempt_run_id,
+        str(checkpoint) if checkpoint is not None else None,
+        sha256(checkpoint) if checkpoint is not None else None,
+        manifest["provenance"]["git_sha"] if manifest is not None else None,
+        update,
+        prior_metrics_sha256,
+    )
+    encoded = json.dumps({"format": "hal.o65.run-attempt.v1", **dataclasses.asdict(attempt)}, indent=2)
+    (directory / "lineage.json").write_text(encoded)
+    previous.write_text(encoded)
+    return attempt
+
+
 def main(args: Args) -> None:
     if sha256(args.checkpoint) != O64_SHA256:
         raise ValueError("O64 checkpoint SHA-256 mismatch")
@@ -275,10 +344,6 @@ def main(args: Args) -> None:
                 raise ValueError("checkpoint source differs from the explicit resume source")
             position = command.index("publication:args")
             command[position:position] = ["--resume-source", source]
-        metrics = args.output / "train/metrics.jsonl"
-        if metrics.is_file():
-            retained = [line for line in metrics.read_text().splitlines() if json.loads(line)["global_step"] <= update]
-            metrics.write_text("".join(line + "\n" for line in retained))
     elif args.resume_source is not None:
         raise ValueError("resume source requires an existing checkpoint")
     if prior_identity != identity:
@@ -298,7 +363,15 @@ def main(args: Args) -> None:
     if not args.measurement:
         if not environment.get("WANDB_API_KEY"):
             raise ValueError("O64 training requires WANDB_API_KEY")
-        environment.update(WANDB_RUN_ID=args.output.parent.name, WANDB_RESUME="allow")
+        if update < args.updates:
+            attempt = begin_attempt(args.output, identity["git_sha"], previous)
+            environment.update(
+                WANDB_RUN_ID=attempt.run_id,
+                WANDB_RUN_GROUP=attempt.group,
+                WANDB_NAME=f"{attempt.group} from {attempt.resume_update} {attempt.source[:8]}",
+                WANDB_RESUME="never",
+                WANDB_NOTES=json.dumps(dataclasses.asdict(attempt), sort_keys=True),
+            )
     if update < args.updates:
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
     if args.measurement:
