@@ -620,7 +620,7 @@ class DecisionOutput:
     decoder_state: Tensor  # z at D+1, before its first factor
 
     @property
-    def distributions(self) -> tuple[Tensor, ...]:
+    def head_probabilities(self) -> tuple[Tensor, ...]:
         return tuple(value.exp() for value in self.log_distributions)
 
 
@@ -1404,18 +1404,18 @@ class CausalTemporalDecoder(nn.Module):
             previous = torch.stack([picks[name] for name in CONTROLLER_GROUP_NAMES], dim=-1)
             frames.append(previous)
         actions = torch.stack(frames, dim=1)
-        distributions: list[Tensor] = []
-        log_probs: list[Tensor] = []
+        head_log_probs: list[Tensor] = []
+        action_log_probs: list[Tensor] = []
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
             log_distribution = F.log_softmax(torch.stack(captured[name], dim=1).float(), dim=-1)
-            distributions.append(log_distribution)
-            log_probs.append(log_distribution.gather(-1, actions[..., group, None]).squeeze(-1))
+            head_log_probs.append(log_distribution)
+            action_log_probs.append(log_distribution.gather(-1, actions[..., group, None]).squeeze(-1))
         valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
         return DecisionOutput(
             actions,
             valid,
-            torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
-            tuple(distributions),
+            torch.where(valid[..., None], torch.stack(action_log_probs, dim=-1), 0),
+            tuple(head_log_probs),
             states[0],
         )
 
@@ -1479,8 +1479,8 @@ class CausalTemporalDecoder(nn.Module):
         actions = targets[rows[:, None], indices]
         embedded = self.codec.embed_groups(actions)
         skips = self._trunk_skip_logits(raw_trunk)
-        distributions: list[Tensor] = []
-        log_probs: list[Tensor] = []
+        head_log_probs: list[Tensor] = []
+        action_log_probs: list[Tensor] = []
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
             head = cast(NonlinearActionHead, self.outputs[name])
             logits = self._center(
@@ -1489,14 +1489,14 @@ class CausalTemporalDecoder(nn.Module):
             if name == "buttons":
                 logits = logits.masked_fill(self.codec.button_mask(actions[..., TRIGGERS_GROUP]), -torch.inf)
             logs = F.log_softmax(logits.float(), dim=-1)
-            distributions.append(logs)
-            log_probs.append(logs.gather(-1, actions[..., group, None]).squeeze(-1))
+            head_log_probs.append(logs)
+            action_log_probs.append(logs.gather(-1, actions[..., group, None]).squeeze(-1))
         valid = torch.arange(sampled_offsets, device=hidden.device)[None] < replan[:, None]
         return DecisionOutput(
             actions,
             valid,
-            torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
-            tuple(distributions),
+            torch.where(valid[..., None], torch.stack(action_log_probs, dim=-1), 0),
+            tuple(head_log_probs),
             state[rows, delay],
         )
 
@@ -1618,8 +1618,8 @@ class CausalTemporalDecoder(nn.Module):
         selected = state[slot_rows, indices].reshape(windows, slots, 4, self.d_model)
         embedded = self.codec.embed_groups(sampled_actions)
         skips = self._trunk_skip_logits(raw_trunk)
-        distributions: list[Tensor] = []
-        log_probs: list[Tensor] = []
+        head_log_probs: list[Tensor] = []
+        action_log_probs: list[Tensor] = []
         for group, name in enumerate(CONTROLLER_GROUP_NAMES):
             head = cast(NonlinearActionHead, self.outputs[name])
             logits = self._center(
@@ -1629,14 +1629,14 @@ class CausalTemporalDecoder(nn.Module):
             if name == "buttons":
                 logits = logits.masked_fill(self.codec.button_mask(sampled_actions[..., TRIGGERS_GROUP]), -torch.inf)
             logs = F.log_softmax(logits.float(), dim=-1)
-            distributions.append(logs)
-            log_probs.append(logs.gather(-1, sampled_actions[..., group, None]).squeeze(-1))
+            head_log_probs.append(logs)
+            action_log_probs.append(logs.gather(-1, sampled_actions[..., group, None]).squeeze(-1))
         valid = torch.arange(4, device=hidden.device) < replan[..., None]
         return DecisionOutput(
             sampled_actions,
             valid,
-            torch.where(valid[..., None], torch.stack(log_probs, dim=-1), 0),
-            tuple(distributions),
+            torch.where(valid[..., None], torch.stack(action_log_probs, dim=-1), 0),
+            tuple(head_log_probs),
             state[slot_rows[:, 0], delay.reshape(-1)].reshape(windows, slots, self.d_model),
         )
 

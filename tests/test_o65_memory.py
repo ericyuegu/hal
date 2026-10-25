@@ -178,12 +178,12 @@ def test_reference_releases_unused_backward_graphs_without_changing_arithmetic(
             patch.setattr(reference, "window_replay", replay)
             result = reference.reference_forward(windows.inputs(), len(windows.rows), 16)
         assert not result.log_probs_WKF.requires_grad
-        assert all(not p.requires_grad for p in result.distributions)
+        assert all(not p.requires_grad for p in result.head_probabilities)
         return result
 
     expected, actual = forward(True), forward(False)
     torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=0, atol=0)
-    for got, saved in zip(actual.distributions, expected.distributions, strict=True):
+    for got, saved in zip(actual.head_probabilities, expected.head_probabilities, strict=True):
         torch.testing.assert_close(got, saved, rtol=0, atol=0)
     for field in dataclasses.fields(actual.features):
         torch.testing.assert_close(

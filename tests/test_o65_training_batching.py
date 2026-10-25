@@ -74,7 +74,7 @@ def test_grouped_reference_matches_padded_replay_for_every_valid_decision(device
     tolerance = {"rtol": 0.02, "atol": 0.02} if device == "cuda" else {"rtol": 1e-4, "atol": 1e-5}
     torch.testing.assert_close(actual.log_probs_WKF[mask], expected.log_probs_WKF[mask], **tolerance)
     frame_mask = mask.reshape(*mask.shape[:2], 4, 4)
-    for group, (p, q) in enumerate(zip(actual.distributions, expected.distributions, strict=True)):
+    for group, (p, q) in enumerate(zip(actual.head_probabilities, expected.head_probabilities, strict=True)):
         torch.testing.assert_close(p[frame_mask[..., group]], q[frame_mask[..., group]], **tolerance)
     # Reward KL consumes every live slot, not only the 16 actor samples.
     assert torch.equal(actual.factor_mask_WKF.any(-1), windows.slots.valid_WK & windows.slots.executed_WKF.any(-1))
@@ -114,7 +114,7 @@ def test_grouped_reference_covers_all_production_shapes_and_partial_groups() -> 
     mask = expected.factor_mask_WKF
     torch.testing.assert_close(actual.factor_mask_WKF, mask)
     torch.testing.assert_close(actual.log_probs_WKF[mask], expected.log_probs_WKF[mask], rtol=1e-4, atol=1e-5)
-    for group, (p, q) in enumerate(zip(actual.distributions, expected.distributions, strict=True)):
+    for group, (p, q) in enumerate(zip(actual.head_probabilities, expected.head_probabilities, strict=True)):
         active = mask.reshape(len(ids), 64, 4, 4)[..., group]
         torch.testing.assert_close(p[active], q[active], rtol=1e-4, atol=1e-5)
 
@@ -223,7 +223,7 @@ def test_grouped_actor_matches_padded_gradients_for_mixed_shapes(decisions: int 
     with torch.no_grad(), prepared_shape_compilation(64):
         initial = run.policy.window_forward(windows.inputs(), grad=False)
     reference = []
-    for p in initial.distributions:
+    for p in initial.head_probabilities:
         q = p * torch.linspace(0.9, 1.1, p.shape[-1], device=device)
         reference.append(q / q.sum(-1, keepdim=True))
     targets = exp.ActorTargets(
@@ -311,7 +311,7 @@ def test_actor_trailing_queue_padding_preserves_all_planned_outputs(device: str)
     torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, **tolerance)
     torch.testing.assert_close(actual.factor_mask_WKF, expected.factor_mask_WKF)
     torch.testing.assert_close(actual.features.decoder_WKt, expected.features.decoder_WKt, **tolerance)
-    for first, second in zip(actual.distributions, expected.distributions, strict=True):
+    for first, second in zip(actual.head_probabilities, expected.head_probabilities, strict=True):
         torch.testing.assert_close(first, second, **tolerance)
 
 

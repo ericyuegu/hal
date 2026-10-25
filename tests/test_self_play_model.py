@@ -213,7 +213,7 @@ def test_mixed_delay_sampling_matches_individual_bc_and_replay() -> None:
         torch.testing.assert_close(output.actions[row, :replan], indices[0, delay:])
         for group, reference in enumerate(logits):
             expected = reference[:, delay:].float().softmax(-1)[0]
-            torch.testing.assert_close(output.distributions[group][row, :replan], expected, atol=2e-6, rtol=2e-5)
+            torch.testing.assert_close(output.head_probabilities[group][row, :replan], expected, atol=2e-6, rtol=2e-5)
             logs = expected.gather(-1, output.actions[row, :replan, group, None]).squeeze(-1).log()
             torch.testing.assert_close(output.log_probs[row, :replan, group], logs, atol=2e-6, rtol=2e-5)
     replay = decoder(*args, sampled_offsets=4, sampled_actions=output.actions)
@@ -403,7 +403,7 @@ def test_decoder_owns_compute_precision_and_keeps_probabilities_and_critic_in_fp
         handle.remove()
     assert actual.log_probs.dtype == torch.float32
     assert actual.decoder_state.dtype == torch.float32
-    assert all(probability.dtype == torch.float32 for probability in actual.distributions)
+    assert all(probability.dtype == torch.float32 for probability in actual.head_probabilities)
     torch.testing.assert_close(actual.log_probs, expected.log_probs, rtol=0, atol=0)
     (-actual.log_probs.sum()).backward()
     grad = policy.temporal.token_projection.weight.grad

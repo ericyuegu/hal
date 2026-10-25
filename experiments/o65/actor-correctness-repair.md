@@ -64,6 +64,13 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
 - Actor loss and KL locals now distinguish action logs, full-head logs, full-head
   probabilities, and the joint log ratio. Empty-rank target validation is explicitly
   documented as providing no numerical coverage.
+- Probability conversion is named `head_probabilities` on decision, replay and
+  evaluation outputs. Decoder lists distinguish `head_log_probs` from
+  `action_log_probs`. The old ambiguous `.distributions` interface is removed;
+  the historical tick control retains its recorded interface in its own checkout.
+- The shared KL validator reports NaN and positive infinity before support
+  differences. Removing the duplicate outer scan had exposed a misleading support
+  error for these values. Focused tests now check the failing policy and category.
 - Each continuation gets a new W&B run ID. Its lineage records the restored
   checkpoint hash, checkpoint producer, current source, and previous attempt ID.
   Original metrics are archived before rollback. Modal retains each attempt's
@@ -110,5 +117,19 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
   3 errors, 24 warnings. Socket restrictions caused most failures; source edits
   overlapped this run and caused two stale-import failures. This is not final-source
   validation. A frozen-source rerun with local socket access is required.
+- The frozen `2acf7724` rerun had local CUDA and socket access. It reached
+  2006 passed and 2 skipped, then was interrupted after the `/tmp` user quota
+  caused 49 failures and 3 errors (38 warnings, 90 deselected). Its first failure
+  was a compiler file write; later checkpoint and subprocess files were also
+  affected. The test artifacts and log are preserved. This is incomplete validation.
+  Subsequent test temporary files and a copy of the compiler cache use the workspace
+  filesystem instead of the quota-limited temporary mount.
+- Shared KL regression command: `pytest -q tests/test_o65_memory.py
+  tests/test_o65_numerical_recovery.py -k 'kl or normalization' -ra`:
+  20 passed, 2 CUDA skips, 6 deselected.
+- Probability-interface and KL tests across the self-play model, memory, dense
+  replay, training batches, historical tick parity, proxy checkpoint, anchor
+  stacking and diagnostic targets: 150 passed, 46 CUDA skips, 1 distributed-worker
+  test deselected. These checks ran on CPU; full CUDA checks remain separate.
 
 Full required checks and GPU checks remain pending.

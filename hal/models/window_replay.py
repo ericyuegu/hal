@@ -60,7 +60,7 @@ class ReplayOutput:
     features: ReplayCriticFeatures
 
     @property
-    def distributions(self) -> tuple[Tensor, ...]:
+    def head_probabilities(self) -> tuple[Tensor, ...]:
         return tuple(value.exp() for value in self.log_distributions)
 
 

@@ -106,7 +106,9 @@ def test_stacked_anchor_ticks_match_separate_models_and_weight_refresh(device: s
             table.evaluation.log_probs[:batch], serial.evaluation.log_probs[:batch], atol=3e-2, rtol=3e-2
         )
         torch.testing.assert_close(table.values[:batch], serial.values[:batch], atol=3e-2, rtol=3e-2)
-        for actual, expected in zip(table.evaluation.distributions, serial.evaluation.distributions, strict=True):
+        for actual, expected in zip(
+            table.evaluation.head_probabilities, serial.evaluation.head_probabilities, strict=True
+        ):
             torch.testing.assert_close(actual[:batch], expected[:batch], atol=1.6e-2, rtol=1.6e-2)
         combined = stack.tick_caches[ring, (exp.ALL_BUFFERS, batch)].cache
         separate = [
@@ -219,8 +221,8 @@ def test_stacked_decoder_replay_matches_separate_models_for_fixed_actions(device
     torch.testing.assert_close(
         actual.decoder_state, torch.cat([control.decoder_state for control in controls]), atol=3e-2, rtol=3e-2
     )
-    for group, probabilities in enumerate(actual.distributions):
-        expected = torch.cat([control.distributions[group] for control in controls])
+    for group, probabilities in enumerate(actual.head_probabilities):
+        expected = torch.cat([control.head_probabilities[group] for control in controls])
         torch.testing.assert_close(probabilities, expected, atol=1.6e-2, rtol=1.6e-2)
 
 

@@ -382,7 +382,7 @@ def test_reference_cohorts_preserve_slots_and_frozen_parameters(count: int) -> N
     actual = run.reference.evaluate_reference(windows, positions, order)
     torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=3e-5, atol=5e-6)
     torch.testing.assert_close(actual.factor_mask_WKF, expected.factor_mask_WKF, rtol=0, atol=0)
-    for first, second in zip(actual.distributions, expected.distributions, strict=True):
+    for first, second in zip(actual.head_probabilities, expected.head_probabilities, strict=True):
         # Compaction omits invalid decisions. Keep all four planned frames for valid slots.
         torch.testing.assert_close(first[windows.slots.valid_WK], second[windows.slots.valid_WK], rtol=3e-5, atol=5e-6)
         assert not first.requires_grad

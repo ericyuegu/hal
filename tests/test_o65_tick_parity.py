@@ -173,7 +173,13 @@ def tick_outputs(root: Path = ROOT, device: str = "cpu", frozen: bool = False) -
                 "actions": table.actions[rows].clone(),
                 "log_probs": table.behavior[rows].clone(),
                 "values": table.values[rows].clone(),
-                "distributions": tuple(value[rows].clone() for value in table.evaluation.distributions),
+                # The pinned historical control stores probabilities directly.
+                "distributions": tuple(
+                    value[rows].clone()
+                    for value in (
+                        table.evaluation.head_probabilities if root == ROOT else table.evaluation.distributions
+                    )
+                ),
                 "decoder": table.evaluation.features.decoder[rows].clone(),
                 "ring": ring.values.clone(),
                 "controllers": ring.controllers.clone(),

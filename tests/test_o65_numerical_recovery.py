@@ -29,8 +29,11 @@ def test_normalization_error_preserves_the_failing_distribution() -> None:
     assert maximum == pytest.approx(-torch.tensor(0.25).log().item())
 
 
-@pytest.mark.parametrize("invalid", [torch.nan, torch.inf, -torch.inf, 0.0])
-def test_masked_kl_rejects_invalid_live_values_and_ignores_padding(invalid: float) -> None:
+@pytest.mark.parametrize(
+    "invalid,message",
+    [(torch.nan, "finite or -inf"), (torch.inf, "finite or -inf"), (-torch.inf, "normalized"), (0.0, "normalized")],
+)
+def test_masked_kl_rejects_invalid_live_values_and_ignores_padding(invalid: float, message: str) -> None:
     run = trainer(groups=1)
     batch = run.prepare(run.engine.collect(0))
     policy_heads = tuple(logs.clone() for logs in batch.old.log_distributions)
@@ -45,8 +48,18 @@ def test_masked_kl_rejects_invalid_live_values_and_ignores_padding(invalid: floa
     expected = exp.factor_kl(batch.old, batch.reference, mask)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     policy_heads[0][1, 0, 0] = invalid
-    with pytest.raises(ValueError, match="normalized|identical support"):
+    with pytest.raises(ValueError, match=message):
         exp.factor_kl(policy, reference, mask)
+
+
+@pytest.mark.parametrize("name", ["policy", "reference"])
+@pytest.mark.parametrize("invalid", [torch.nan, torch.inf])
+def test_kl_error_locates_invalid_values_before_comparing_support(name: str, invalid: float) -> None:
+    policy = torch.tensor([[0.4, 0.6], [0.2, 0.8]]).log()
+    reference = policy.clone()
+    (policy if name == "policy" else reference)[1, 0] = invalid
+    with pytest.raises(ValueError, match=rf"{name} log-probs must be finite or -inf; flat category 2"):
+        exp.categorical_kl(policy, reference)
 
 
 @pytest.mark.parametrize("tail", [(-110.0, -102.58578491210938), (-102.58578491210938, -110.0)])

@@ -104,7 +104,7 @@ def test_real_bootstrap30_checkpoint_conditioning_and_cache_parity(dtype: torch.
             error = (cached_output.log_probs - output.log_probs).abs().max().item()
             errors.append(error)
             joint_errors.append((cached_output.log_probs - output.log_probs).sum((1, 2)).abs().max().item())
-            for cached_probs, probs in zip(cached_output.distributions, output.distributions, strict=True):
+            for cached_probs, probs in zip(cached_output.head_probabilities, output.head_probabilities, strict=True):
                 kl = (probs * (probs.clamp_min(1e-30).log() - cached_probs.clamp_min(1e-30).log())).sum(-1)
                 divergences.append(kl[output.valid])
             tolerance = 1e-4 if dtype == torch.float32 else 0.1
@@ -138,8 +138,8 @@ def test_real_bootstrap30_checkpoint_conditioning_and_cache_parity(dtype: torch.
                 torch.testing.assert_close(single.actions[0, :r], indices[0, d:])
                 for group, value in enumerate(logits):
                     probs = value[0, d:].float().softmax(-1)
-                    conditioner_errors.append((probs - single.distributions[group][0, :r]).abs().max().item())
-                    torch.testing.assert_close(single.distributions[group][0, :r], probs, atol=1e-5, rtol=1e-4)
+                    conditioner_errors.append((probs - single.head_probabilities[group][0, :r]).abs().max().item())
+                    torch.testing.assert_close(single.head_probabilities[group][0, :r], probs, atol=1e-5, rtol=1e-4)
         # Compile/run the 2-offset program as a separate variant too.
         only_two = decoder(
             full,

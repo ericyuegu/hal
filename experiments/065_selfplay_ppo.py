@@ -284,6 +284,25 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
         raise ValueError("log-probs must have a category dimension")
     log_probs = _loss_precision(log_probs)
     reference_log_probs = _loss_precision(reference_log_probs.detach())
+    for name, value in (("policy", log_probs), ("reference", reference_log_probs)):
+        invalid = torch.isnan(value) | torch.isposinf(value)
+        if bool(invalid.any()):
+            index = int(invalid.flatten().to(torch.int8).argmax())
+            raise ValueError(
+                f"{name} log-probs must be finite or -inf; "
+                f"flat category {index}, shape {tuple(value.shape)}: value={float(value.flatten()[index])}"
+            )
+        log_mass = value.logsumexp(-1)
+        normalized = torch.isclose(log_mass, torch.zeros_like(value[..., 0]), atol=1e-5)
+        if not bool(normalized.all()):
+            index = int((~normalized).flatten().to(torch.int8).argmax())
+            row = value.reshape(-1, value.shape[-1])[index]
+            raise ValueError(
+                f"{name} log-probs must be normalized; row={index}, "
+                f"log_mass={float(log_mass.flatten()[index])}, "
+                f"failed_rows={int((~normalized).sum())}/{normalized.numel()}, "
+                f"max_abs_log_mass={float(log_mass.abs().max())}, values={row.tolist()}"
+            )
     legal = torch.isfinite(log_probs)
     if not torch.equal(legal, torch.isfinite(reference_log_probs)):
         mismatch = (legal != torch.isfinite(reference_log_probs)).flatten()
@@ -293,18 +312,6 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
             f"flat category {index}, shape {tuple(log_probs.shape)}: "
             f"policy={float(log_probs.flatten()[index])}, reference={float(reference_log_probs.flatten()[index])}"
         )
-    for name, value in (("policy", log_probs), ("reference", reference_log_probs)):
-        log_mass = value.logsumexp(-1)
-        normalized = torch.isclose(log_mass, torch.zeros_like(value[..., 0]), atol=1e-5)
-        if bool((torch.isnan(value) | torch.isposinf(value)).any()) or not bool(normalized.all()):
-            index = int((~normalized).flatten().to(torch.int8).argmax())
-            row = value.reshape(-1, value.shape[-1])[index]
-            raise ValueError(
-                f"{name} log-probs must be normalized; row={index}, "
-                f"log_mass={float(log_mass.flatten()[index])}, "
-                f"failed_rows={int((~normalized).sum())}/{normalized.numel()}, "
-                f"max_abs_log_mass={float(log_mass.abs().max())}, values={row.tolist()}"
-            )
     difference = torch.where(legal, log_probs, 0) - torch.where(legal, reference_log_probs, 0)
     return (log_probs.exp() * difference).sum(-1)
 
@@ -961,7 +968,7 @@ class PolicyEvaluation:
     features: CriticFeatures
 
     @property
-    def distributions(self) -> tuple[Tensor, ...]:
+    def head_probabilities(self) -> tuple[Tensor, ...]:
         return tuple(value.exp() for value in self.log_distributions)
 
 
@@ -5484,7 +5491,7 @@ class Trainer:
             )
         metrics["data/episode_age_mean_frames"] = self.metric_totals.mean("data/episode_age_mean_frames", ages)
         u_bins = torch.bucketize(table.conditions[ids, 2], table.conditions.new_tensor((0.5, 0.75, 0.9, 0.97)))
-        entropy = torch.stack([-(p * torch.where(p > 0, p, 1).log()).sum(-1) for p in old.distributions]).sum(0)
+        entropy = torch.stack([-(p * torch.where(p > 0, p, 1).log()).sum(-1) for p in old.head_probabilities]).sum(0)
         for index in range(5):
             mask = u_bins == index
             frames = executed[:, ::4] & mask[:, None]
