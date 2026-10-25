@@ -253,6 +253,7 @@ def test_fresh_process_resume_matches_next_batch_and_update_on_every_rank(gloo_r
         report = json.loads((gloo_result / "resume-controls" / f"rank{rank}-result.json").read_text())
         assert report["passed"]
         assert report["rank"] == rank and report["world_size"] == 2
+        assert len(set(report["simulator_bytes_sha256"])) == 2
         assert len(set(report["next_batch_sha256"])) == 1
         assert len(set(report["next_scheduler_sha256"])) == 1
         assert not (gloo_result / "resume-controls" / f"rank{rank}-controls.pt").exists()

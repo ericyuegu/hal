@@ -118,6 +118,8 @@ class FakeShard:
         return json.dumps(
             {
                 "format": 1,
+                # Native snapshots contain addresses that change in a fresh process.
+                "process_id": os.getpid(),
                 "length": self.length,
                 "timeout": self.timeout,
                 "ticks": self.ticks.tolist(),
@@ -913,6 +915,43 @@ def test_muon_resume_restores_state_and_matches_measured_next_update(tmp_path: P
     assert result["passed"]
     assert all(row["passed"] for row in result["groups"].values())
     assert not result["deterministic"]
+
+
+@pytest.mark.parametrize("field", ["model", "sampler", "rng"])
+def test_fresh_resume_reports_changed_state_before_running_update(tmp_path: Path, field: str) -> None:
+    run = trainer(groups=1)
+    run.run_update()
+    manifest = exp.save_checkpoint(run, tmp_path / "checkpoint", PROVENANCE)
+    directory = tmp_path / "controls"
+    exp.check_resume_process(run, manifest, directory, PROVENANCE, prepare=True)
+    boundary = exp._resume_state_hashes(run)
+    path = directory / "rank0-controls.pt"
+    controls = torch.load(path, weights_only=True)
+    controls["boundary"][field] = "0" * 64
+    torch.save(controls, path)
+    with pytest.raises(ValueError, match=rf"resume control mismatch: boundary\.{field}"):
+        exp.check_resume_process(run, manifest, directory, PROVENANCE, prepare=False)
+    report = json.loads((directory / "rank0-identity-mismatch.json").read_text())
+    assert report["changed"] == [f"boundary.{field}"]
+    assert report["expected"]["boundary"][field] == boundary[field]
+    assert report["observed"]["boundary"][field] == "0" * 64
+    assert exp._resume_state_hashes(run) == boundary
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_resume_verification_recaptures_and_seals_production_graphs(tmp_path: Path) -> None:
+    run = transformer_trainer("cuda")
+    run.run_update()
+    manifest = exp.save_checkpoint(run, tmp_path / "checkpoint", PROVENANCE)
+    directory = tmp_path / "controls"
+    exp.check_resume_process(run, manifest, directory, PROVENANCE, prepare=True)
+    boundary = exp._resume_state_hashes(run)
+    exp.check_resume_process(run, manifest, directory, PROVENANCE, prepare=False)
+    assert all(policy.startup_finished for policy in run.engine.execution_policies())
+    assert exp._resume_state_hashes(run) == boundary
+    captures = sum(policy.capture_count for policy in run.engine.execution_policies())
+    run.run_update()
+    assert sum(policy.capture_count for policy in run.engine.execution_policies()) == captures
 
 
 @pytest.mark.parametrize("error,passed", [(0.0015, True), (0.003, False)])

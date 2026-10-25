@@ -6,6 +6,7 @@ Run with PYTHONPATH pointing at the MSL checkout and zstandard installed.
 from __future__ import annotations
 
 import importlib
+import multiprocessing
 import os
 from collections.abc import Iterator
 from dataclasses import replace
@@ -80,6 +81,40 @@ def test_real_build_buffers_and_cross_batch_restore(real_msl: Path) -> None:
                 actual = target.step(target_actions, target_mask)
                 assert actual.records is not None
                 assert actual.records[[2, 0, 3]].tobytes() == reference.tobytes()
+
+
+def _fresh_native_continuation(data: Path, states: tuple[bytes, ...], actions: np.ndarray, output: Path) -> None:
+    with native.NativeRolloutBatch(data, len(states)) as batch:
+        batch.restore_many(tuple(range(len(states))), states)
+        (output / "restored.bin").write_bytes(batch.save(0))
+        selected = np.ones(len(states), dtype=np.bool_)
+        frames = [batch.step(frame, selected).records.copy() for frame in actions]
+        np.save(output / "frames.npy", np.stack(frames))
+
+
+def test_fresh_process_restore_relocates_bytes_but_preserves_continuation(real_msl: Path, tmp_path: Path) -> None:
+    actions = np.zeros((64, 2, 2, 14), dtype=np.float32)
+    actions[:, :, 0, 0] = 0.75
+    selected = np.ones(2, dtype=np.bool_)
+    with native.NativeRolloutBatch(real_msl, 2) as source:
+        source.reset((_match(1), _match(2)), selected)
+        for _ in range(160):
+            source.step(actions[0], selected)
+        saved = tuple(source.save(lane) for lane in range(2))
+        expected = np.stack([source.step(frame, selected).records.copy() for frame in actions])
+        child = multiprocessing.get_context("spawn").Process(
+            target=_fresh_native_continuation, args=(real_msl, saved, actions, tmp_path)
+        )
+        child.start()
+        try:
+            child.join(60)
+            assert child.exitcode == 0
+        finally:
+            if child.is_alive():
+                child.terminate()
+                child.join()
+    assert (tmp_path / "restored.bin").read_bytes() != saved[0]
+    assert np.load(tmp_path / "frames.npy").tobytes() == expected.tobytes()
 
 
 def _recording(msl_root: Path, name: str) -> Iterator[tuple[Path, native.NativeMatch, ReplayExport]]:

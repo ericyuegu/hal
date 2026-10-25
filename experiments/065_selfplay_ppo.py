@@ -8561,6 +8561,7 @@ class ResumeControls(TypedDict):
     world_size: int
     rank: int
     boundary: dict[str, str]
+    simulator_bytes_sha256: str
     next_batch_sha256: list[str]
     next_scheduler_sha256: list[str]
     updates: list[dict[str, Tensor]]
@@ -8586,13 +8587,16 @@ def check_resume_process(
     path = directory / f"rank{rank}-controls.pt"
     restore_checkpoint(trainer, manifest, provenance, source_git_sha=source_git_sha)
     boundary = _resume_state_hashes(trainer)
+    # MSL snapshots contain relocated addresses. Raw simulator bytes can only
+    # check a rewind within one process; the next update checks continuation.
+    portable_boundary = {name: value for name, value in boundary.items() if name != "simulators"}
     identity = {
-        "format": "hal.o65.resume-controls.v1",
+        "format": "hal.o65.resume-controls.v2",
         "manifest_sha256": sha256(manifest),
         "provenance": provenance,
         "world_size": distributed.world_size(),
         "rank": rank,
-        "boundary": boundary,
+        "boundary": portable_boundary,
     }
     started = time.perf_counter()
     if rank == 0:
@@ -8602,25 +8606,36 @@ def check_resume_process(
         if path.exists():
             raise FileExistsError(path)
         controls = ResumeControls(
-            format="hal.o65.resume-controls.v1",
+            format="hal.o65.resume-controls.v2",
             manifest_sha256=sha256(manifest),
             provenance=provenance,
             world_size=distributed.world_size(),
             rank=rank,
-            boundary=boundary,
+            boundary=portable_boundary,
+            simulator_bytes_sha256=boundary["simulators"],
             next_batch_sha256=[],
             next_scheduler_sha256=[],
             updates=[],
         )
     else:
         controls = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-        if (
-            not isinstance(controls, dict)
-            or set(controls) != set(ResumeControls.__annotations__)
-            or any(controls[key] != value for key, value in identity.items())
-            or any(len(controls[key]) != 2 for key in ("updates", "next_batch_sha256", "next_scheduler_sha256"))
-        ):
-            raise ValueError("resume control identity or restored state differs")
+        if not isinstance(controls, dict) or set(controls) != set(ResumeControls.__annotations__):
+            raise ValueError("resume control schema differs")
+        changed = [key for key, value in identity.items() if controls[key] != value]
+        if "boundary" in changed:
+            changed.remove("boundary")
+            changed.extend(
+                f"boundary.{name}"
+                for name, value in portable_boundary.items()
+                if controls["boundary"].get(name) != value
+            )
+            changed.extend(f"boundary.{name}" for name in controls["boundary"].keys() - portable_boundary.keys())
+        if changed:
+            report = {"expected": identity, "observed": {key: controls[key] for key in identity}, "changed": changed}
+            (directory / f"rank{rank}-identity-mismatch.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+            raise ValueError(f"resume control mismatch: {', '.join(changed)}; see {directory}")
+        if any(len(controls[key]) != 2 for key in ("updates", "next_batch_sha256", "next_scheduler_sha256")):
+            raise ValueError("resume check requires two complete controls")
     comparison = None
     batch_hash = scheduler_hash = ""
     try:
@@ -8646,8 +8661,9 @@ def check_resume_process(
             assert comparison is not None
             report = {
                 **identity,
-                "format": "hal.o65.resume-process-check.v1",
+                "format": "hal.o65.resume-process-check.v2",
                 "controls_sha256": sha256(path),
+                "simulator_bytes_sha256": [controls["simulator_bytes_sha256"], boundary["simulators"]],
                 "next_batch_sha256": [*controls["next_batch_sha256"], batch_hash],
                 "next_scheduler_sha256": [*controls["next_scheduler_sha256"], scheduler_hash],
                 "groups": comparison.groups,
@@ -8666,6 +8682,8 @@ def check_resume_process(
     finally:
         restore_checkpoint(trainer, manifest, provenance, source_git_sha=source_git_sha)
         _clear_execution_caches(trainer)
+    if not prepare:
+        trainer.capture_startup()
 
 
 def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str]) -> None:
