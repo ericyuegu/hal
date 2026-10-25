@@ -545,7 +545,7 @@ def run_child(request: Request, output: Path, started: float) -> int:
                 env,
                 log,
                 remaining_seconds(request, time.time()) - 90,
-                startup_timeout=900 if request.mode == "ddp" else None,
+                startup_timeout=1500 if request.mode == "ddp" else None,
             )
         result = subprocess.run(
             argv,
