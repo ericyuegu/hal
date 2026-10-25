@@ -11,11 +11,11 @@ from triton.runtime.cache import FileCacheManager
 
 
 class WarmCacheManager(FileCacheManager):
-    """Bound new Triton 3.6.0 variants across a rank's compiler workers.
+    """Count new Triton 3.6.0 variants across a rank's compiler workers.
 
-    Most kernels must come from the restored cache. Small indexing variants can
-    differ on a fresh process; 64 misses allow those without permitting a cold
-    model compile. The ledger and lock are on local disk, outside frame loops.
+    Fresh processes can need many variants even with a restored cache. The
+    launcher bounds startup by elapsed time. This local ledger provides
+    telemetry without rejecting valid variants.
     """
 
     def __init__(self, key: str, override: bool = False, dump: bool = False) -> None:
@@ -35,13 +35,11 @@ class WarmCacheManager(FileCacheManager):
                 if not isinstance(misses, list) or any(not isinstance(item, str) for item in misses):
                     raise ValueError("invalid kernel cache miss ledger")
                 if marker not in misses:
-                    if len(misses) >= 64:
-                        raise RuntimeError(f"warm Triton cache exceeded 64 new kernels: {marker}")
                     misses.append(marker)
                     temporary = record.with_name(f".kernel-misses.{os.getpid()}.partial")
                     temporary.write_text(json.dumps(misses))
                     temporary.replace(record)
-                    print(f"triton_cache_new_kernel count={len(misses)} limit=64 key={marker}", flush=True)
+                    print(f"triton_cache_new_kernel count={len(misses)} key={marker}", flush=True)
             return None
         if filename not in group:
             raise ValueError("required Triton kernel cache group is incomplete")

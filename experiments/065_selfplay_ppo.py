@@ -7116,7 +7116,6 @@ def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> N
             "restored_triton_kernels": cache.restored_kernels if cache is not None else 0,
             "kernel_cache_required": config.require_compile_cache,
             "new_triton_kernels": cache.kernel_misses() if cache is not None else 0,
-            "new_triton_kernel_limit": 64 if config.require_compile_cache else None,
             "counters": {
                 name: value - cache_statistics_before[name]
                 for name, value in compile_cache.compilation_statistics().items()

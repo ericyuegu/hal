@@ -76,7 +76,7 @@ def test_untested_triton_version_is_rejected(monkeypatch: pytest.MonkeyPatch) ->
         WarmCacheManager("kernel")
 
 
-def test_cache_only_plugin_uses_local_kernels_and_stops_before_cold_compile(
+def test_warm_plugin_uses_local_kernels_and_counts_new_variants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path))
@@ -91,11 +91,11 @@ def test_cache_only_plugin_uses_local_kernels_and_stops_before_cold_compile(
     assert isinstance(reader, WarmCacheManager)
     assert reader.get_group("kernel.json") == {"kernel.json": metadata, "kernel.cubin": binary}
     assert reader.get_file("driver.so") is None
-    for index in range(64):
+    for index in range(128):
         assert reader.get_group(f"cold-kernel-{index}.json") is None
     assert reader.get_group("cold-kernel-0.json") is None
-    with pytest.raises(RuntimeError, match="exceeded 64 new kernels"):
-        reader.get_group("cold-kernel-64.json")
+    assert get_cache_manager(key).get_group("cold-kernel-127.json") is None
+    assert len(json.loads((tmp_path / "kernel-misses.json").read_text())) == 128
     Path(binary).unlink()
     with pytest.raises(ValueError, match="incomplete"):
         reader.get_group("kernel.json")
