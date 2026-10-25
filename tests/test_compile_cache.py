@@ -14,7 +14,7 @@ from torch._inductor.triton_bundler import TritonKernelArtifact
 from torch._inductor.triton_bundler import TritonKernelArtifacts
 
 from hal.inference import compile_cache
-from hal.inference.triton_cache import CacheOnlyManager
+from hal.inference.triton_cache import WarmCacheManager
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +164,7 @@ def test_rank_cache_uses_shared_seed_and_isolated_local_writes(
         )
         assert cache.loaded_counts == {"inductor": 1}
         local_paths.add(os.environ["TRITON_CACHE_DIR"])
-        assert os.environ["TRITON_CACHE_MANAGER"] == "hal.inference.triton_cache:CacheOnlyManager"
+        assert os.environ["TRITON_CACHE_MANAGER"] == "hal.inference.triton_cache:WarmCacheManager"
         assert "HAL_TRITON_CACHE_SOURCE" not in os.environ
         assert cache.directory != seed.directory
         assert cache.save()
@@ -227,7 +227,7 @@ def test_all_bundled_kernels_are_local_before_any_fx_lookup(tmp_path: Path, monk
     (directory / "first").write_bytes(pickle.dumps(graph))
     (directory / "second").write_bytes(pickle.dumps(graph))
     assert compile_cache._restore_kernels(tmp_path / "inductor") == 1
-    restored = CacheOnlyManager("kernel").get_group("kernel.json")
+    restored = WarmCacheManager("kernel").get_group("kernel.json")
     assert Path(restored["kernel.cubin"]).read_bytes() == b"binary"
     assert all(Path(path).parent == tmp_path / "triton/kernel" for path in restored.values())
 

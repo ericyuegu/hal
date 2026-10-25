@@ -1,5 +1,6 @@
 """Read warm Triton 3.6.0 kernels through a local disk cache on Modal."""
 
+import fcntl
 import json
 import os
 import shutil
@@ -9,22 +10,41 @@ import triton
 from triton.runtime.cache import FileCacheManager
 
 
-class CacheOnlyManager(FileCacheManager):
-    """Reject a Triton 3.6.0 kernel miss before its LLVM compilation starts.
+class WarmCacheManager(FileCacheManager):
+    """Bound new Triton 3.6.0 variants across a rank's compiler workers.
 
-    Driver glue can still compile through get_file. Kernel groups must be complete
-    and local. This uses Triton's cache-manager extension rather than a patch.
+    Most kernels must come from the restored cache. Small indexing variants can
+    differ on a fresh process; 64 misses allow those without permitting a cold
+    model compile. The ledger and lock are on local disk, outside frame loops.
     """
 
     def __init__(self, key: str, override: bool = False, dump: bool = False) -> None:
         if triton.__version__ != "3.6.0":
-            raise RuntimeError("cache-only kernels require tested Triton 3.6.0")
+            raise RuntimeError("warm kernels require tested Triton 3.6.0")
         super().__init__(key, override=override, dump=dump)
 
-    def get_group(self, filename: str) -> dict[str, str]:
+    def get_group(self, filename: str) -> dict[str, str] | None:
         group = super().get_group(filename)
-        if group is None or filename not in group:
-            raise RuntimeError(f"required Triton kernel cache miss: {self.key}/{filename}")
+        if group is None:
+            root = Path(self.cache_dir).parent
+            marker = f"{self.key}/{filename}"
+            with (root / "kernel-misses.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                record = root / "kernel-misses.json"
+                misses = json.loads(record.read_text()) if record.exists() else []
+                if not isinstance(misses, list) or any(not isinstance(item, str) for item in misses):
+                    raise ValueError("invalid kernel cache miss ledger")
+                if marker not in misses:
+                    if len(misses) >= 64:
+                        raise RuntimeError(f"warm Triton cache exceeded 64 new kernels: {marker}")
+                    misses.append(marker)
+                    temporary = record.with_name(f".kernel-misses.{os.getpid()}.partial")
+                    temporary.write_text(json.dumps(misses))
+                    temporary.replace(record)
+                    print(f"triton_cache_new_kernel count={len(misses)} limit=64 key={marker}", flush=True)
+            return None
+        if filename not in group:
+            raise ValueError("required Triton kernel cache group is incomplete")
         entry = json.loads((Path(self.cache_dir) / f"__grp__{filename}").read_text())
         children = entry.get("child_paths")
         if not isinstance(children, dict) or set(group) != set(children):

@@ -212,7 +212,11 @@ class CompileCache:
             self.loaded = True
         self.restored_kernels = _restore_kernels(scratch / "inductor") if self.loaded else 0
         if require_loaded:
-            os.environ["TRITON_CACHE_MANAGER"] = "hal.inference.triton_cache:CacheOnlyManager"
+            os.environ["TRITON_CACHE_MANAGER"] = "hal.inference.triton_cache:WarmCacheManager"
+
+    def kernel_misses(self) -> int:
+        path = Path(os.environ["TRITON_CACHE_DIR"]) / "kernel-misses.json"
+        return len(json.loads(path.read_text())) if path.exists() else 0
 
     def save(self) -> bool:
         artifacts = torch.compiler.save_cache_artifacts()
