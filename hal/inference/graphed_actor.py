@@ -83,7 +83,18 @@ class GraphedActorStep:
         static = tuple(t.detach().clone() for t in (*inputs, *_target_tensors(targets)))
         self.static_inputs = static
         with torch.no_grad():
-            validate_actor_targets(forward(static[: self.input_count]), _targets(static[self.input_count :]))
+            initial = forward(static[: self.input_count])
+            validate_actor_targets(initial, _targets(static[self.input_count :]))
+            # These outputs must not share the captured graphs' scratch pool.
+            evaluation = ReplayOutput(
+                initial.log_probs_WKF.clone(),
+                tuple(p.clone() for p in initial.log_distributions),
+                initial.factor_mask_WKF.clone(),
+                ReplayCriticFeatures(
+                    *(getattr(initial.features, field.name).clone() for field in fields(initial.features))
+                ),
+            )
+            del initial
         # Graph replay writes into these gradient buffers at fixed addresses.
         original_gradients = tuple(p.grad for p in parameters)
         self.gradients = tuple(torch.zeros_like(p) for p in parameters) if gradients is None else gradients
@@ -96,18 +107,20 @@ class GraphedActorStep:
             with torch.enable_grad():
                 output = forward(static[: self.input_count])
                 result = actor_loss(output, _targets(static[self.input_count :]), clip_epsilon=clip_epsilon)
-                # Torch 2.11 backward can reuse saved forward buffers. Preserve
-                # the reported evaluation before backward releases those values.
-                detached = ReplayOutput(
-                    output.log_probs_WKF.detach().clone(),
-                    tuple(p.detach().clone() for p in output.log_distributions),
-                    output.factor_mask_WKF.clone(),
-                    ReplayCriticFeatures(
-                        *(getattr(output.features, field.name).detach().clone() for field in fields(output.features))
+                # Preserve the forward values before backward can reuse them.
+                pairs = (
+                    (evaluation.log_probs_WKF, output.log_probs_WKF),
+                    *zip(evaluation.log_distributions, output.log_distributions, strict=True),
+                    (evaluation.factor_mask_WKF, output.factor_mask_WKF),
+                    *(
+                        (getattr(evaluation.features, field.name), getattr(output.features, field.name))
+                        for field in fields(output.features)
                     ),
                 )
+                for destination, source in pairs:
+                    destination.copy_(source.detach())
                 result.loss.backward()
-            return ActorLoss(*(getattr(result, field.name).detach() for field in fields(result))), detached
+            return ActorLoss(*(getattr(result, field.name).detach() for field in fields(result))), evaluation
 
         ready = False
         try:

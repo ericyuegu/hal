@@ -321,6 +321,16 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
             share_pool_with=graph.captured.graph,
         )
         assert graph.gradients is other.gradients is buffers
+        segments = torch.cuda.memory_snapshot(include_traces=False)
+        for captured in (graph, other):
+            evaluation = captured.captured.output[1]
+            for value in (evaluation.log_probs_WKF, *evaluation.log_distributions, evaluation.factor_mask_WKF):
+                segment = next(
+                    item
+                    for item in segments
+                    if item["address"] <= value.data_ptr() < item["address"] + item["total_size"]
+                )
+                assert segment["segment_pool_id"] == (0, 0)
         saved: tuple[Tensor, Tensor] | None = None
         saved_evaluation: tuple[Tensor, Tensor] | None = None
         for step in range(3):
