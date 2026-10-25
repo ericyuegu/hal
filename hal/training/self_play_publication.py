@@ -9,9 +9,12 @@ import tempfile
 import time
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from contextlib import closing
 from pathlib import Path
 
 import modal
+from boto3.s3.transfer import S3Transfer
 from boto3.s3.transfer import TransferConfig
 
 from hal import r2
@@ -221,27 +224,36 @@ def publish(args: Args) -> None:
     # Commit the complete resume state even if the subsequent R2 backup fails.
     volume = modal.Volume.from_name(args.volume)
     volume.commit()
-    client, bucket = r2.client(timeout_seconds=60), r2.bucket()
+    bucket = r2.bucket()
     changed = [relative for relative, digest in hashes.items() if previous.get(relative) != digest]
     manifests = [name for name in changed if Path(name).name.startswith("update-") and name.endswith(".json")]
 
-    def upload(relative: str) -> None:
-        client.upload_file(
-            str(args.destination / relative),
-            bucket,
-            f"{args.r2_prefix}/state/{relative}",
-            Config=TransferConfig(use_threads=False),
-        )
-
-    # Parallelize object latency, but expose manifests only after all shards arrive.
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="checkpoint-upload") as uploads:
-        for _ in uploads.map(upload, [name for name in changed if name not in manifests]):
-            pass
-    for relative in manifests:
-        upload(relative)
-    record = {"format": "hal.o65.pilot-publication.v1", "files": hashes}
-    temporary = args.destination / ".publication.partial"
-    temporary.write_text(json.dumps(record, sort_keys=True))
-    temporary.replace(previous_path)
-    client.upload_file(str(previous_path), bucket, f"{args.r2_prefix}/publication.json")
+    # One transfer pool bounds request concurrency across files and multipart shards.
+    # Close it before joining file workers so a failed upload cancels in-flight parts.
+    with (
+        closing(r2.client(timeout_seconds=60, total_attempts=4)) as client,
+        ThreadPoolExecutor(max_workers=8, thread_name_prefix="checkpoint-upload") as uploads,
+        S3Transfer(client, TransferConfig(max_concurrency=8, multipart_chunksize=64 * 1024**2)) as transfer,
+    ):
+        pending = [
+            uploads.submit(
+                transfer.upload_file, str(args.source / relative), bucket, f"{args.r2_prefix}/state/{relative}"
+            )
+            for relative in changed
+            if relative not in manifests
+        ]
+        try:
+            for future in as_completed(pending):
+                future.result()
+        finally:
+            for future in pending:
+                future.cancel()
+        # A manifest is a commit record: every referenced shard must already exist.
+        for relative in manifests:
+            transfer.upload_file(str(args.source / relative), bucket, f"{args.r2_prefix}/state/{relative}")
+        record = {"format": "hal.o65.pilot-publication.v1", "files": hashes}
+        temporary = args.destination / ".publication.partial"
+        temporary.write_text(json.dumps(record, sort_keys=True))
+        transfer.upload_file(str(temporary), bucket, f"{args.r2_prefix}/publication.json")
+        temporary.replace(previous_path)
     volume.commit()

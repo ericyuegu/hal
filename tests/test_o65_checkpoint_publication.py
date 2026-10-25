@@ -1,16 +1,22 @@
 """Exercise distributed progress while checkpoint storage is blocked."""
 
 import dataclasses
+import hashlib
 import json
 import threading
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs
+from urllib.parse import urlsplit
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from boto3.exceptions import S3UploadFailedError
 from test_o65_pilot import write_boundary
 
 from hal.training import self_play_publication as publication
@@ -138,40 +144,137 @@ def test_publication_bounds_snapshots_by_waiting_for_oldest(tmp_path: Path, monk
         publisher.close()
 
 
-@pytest.mark.parametrize("fail", [False, True])
-def test_r2_uploads_overlap_and_publish_manifest_last(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+@pytest.mark.parametrize("failure", ["transient_part", "persistent_part", "publication_record"])
+def test_r2_retries_multipart_requests_and_commits_only_complete_uploads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     source = tmp_path / "pilot"
-    write_boundary(source / "train/checkpoints", 1)
-    barrier = threading.Barrier(3, timeout=10)
-    uploaded: list[str] = []
+    checkpoint = write_boundary(source / "train/checkpoints", 1)
+    large = source / "optimizer.pt"
+    # Cross the production part size. A serial multipart upload cannot pass the barrier.
+    with large.open("wb") as stream:
+        stream.truncate(65 * 1024**2)
+    expected = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in source.rglob("*") if path.is_file()
+    }
+    uploaded: dict[str, str] = {}
+    parts: dict[int, str] = {}
+    attempts: dict[int, int] = {}
+    aborted = threading.Event()
+    overlapping_parts = threading.Event()
+    lock = threading.Lock()
+    record_attempts = 0
+    commits = 0
 
-    class Client:
-        def upload_file(self, source: str, bucket: str, key: str, **kwargs: object) -> None:
-            name = Path(key).name
-            if name.endswith((".pt", ".zlib")):
-                barrier.wait()
-                if fail:
-                    raise OSError("upload failed")
-            if name.startswith("update-"):
-                assert len(uploaded) == 3
-            if name == "publication.json":
-                assert len(uploaded) == 4
-            uploaded.append(name)
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def reply(self, status: int = 200, body: bytes = b"") -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("ETag", '"test-etag"')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def consume(self) -> str:
+            digest = hashlib.sha256()
+            remaining = int(self.headers["Content-Length"])
+            while remaining:
+                chunk = self.rfile.read(min(remaining, 1024**2))
+                assert chunk
+                digest.update(chunk)
+                remaining -= len(chunk)
+            return digest.hexdigest()
+
+        def do_POST(self) -> None:
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            self.consume()
+            if "uploads" in query:
+                self.reply(
+                    body=b"<InitiateMultipartUploadResult><UploadId>test</UploadId></InitiateMultipartUploadResult>"
+                )
+            else:
+                with lock:
+                    assert set(parts) == {1, 2}
+                    assert parts[1] == hashlib.sha256(bytes(64 * 1024**2)).hexdigest()
+                    assert parts[2] == hashlib.sha256(bytes(1024**2)).hexdigest()
+                    uploaded[large.name] = expected[large.name]
+                self.reply(
+                    body=b"<CompleteMultipartUploadResult><ETag>test-etag</ETag></CompleteMultipartUploadResult>"
+                )
+
+        def do_PUT(self) -> None:
+            nonlocal record_attempts
+            parsed = urlsplit(self.path)
+            name = Path(parsed.path).name
+            query = parse_qs(parsed.query)
+            digest = self.consume()
+            if "partNumber" in query:
+                part = int(query["partNumber"][0])
+                with lock:
+                    attempts[part] = attempts.get(part, 0) + 1
+                    attempt = attempts[part]
+                    if len(attempts) == 2:
+                        overlapping_parts.set()
+                assert overlapping_parts.wait(timeout=10), "multipart requests did not overlap"
+                if part == 1 and (failure == "persistent_part" or attempt == 1):
+                    self.reply(502, b"<Error><Code>BadGateway</Code></Error>")
+                    return
+                with lock:
+                    parts[part] = digest
+            else:
+                with lock:
+                    if name == checkpoint.name:
+                        assert set(uploaded) == expected.keys() - {checkpoint.name}
+                    if name == "publication.json":
+                        record_attempts += 1
+                        assert uploaded == expected
+                        if failure == "publication_record":
+                            self.reply(502, b"<Error><Code>BadGateway</Code></Error>")
+                            return
+                    uploaded[name] = digest
+            self.reply()
+
+        def do_DELETE(self) -> None:
+            aborted.set()
+            self.reply(204)
 
     class Volume:
         def commit(self) -> None:
-            pass
+            nonlocal commits
+            commits += 1
 
-    monkeypatch.setattr(publication.r2, "client", lambda **kwargs: Client())
-    monkeypatch.setattr(publication.r2, "bucket", lambda: "test")
-    monkeypatch.setattr(publication.modal.Volume, "from_name", lambda name: Volume())
-    args = publication.Args(source, tmp_path / "volume", "test", "o65/pilot-results/test")
-    if fail:
-        with pytest.raises(OSError, match="upload failed"):
-            publication.publish(args)
-        assert not uploaded
-    else:
-        publication.publish(args)
-        assert uploaded[-1] == "publication.json"
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        monkeypatch.setenv("AWS_ENDPOINT_URL", f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-access")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+        monkeypatch.setenv("AWS_BUCKET", "test")
+        monkeypatch.setattr(publication.modal.Volume, "from_name", lambda name: Volume())
+        args = publication.Args(source, tmp_path / "volume", "test", "o65/pilot-results/test")
+        previous = args.destination / "publication.json"
+        try:
+            if failure == "transient_part":
+                publication.publish(args)
+                assert attempts == {1: 2, 2: 1}
+                assert record_attempts == 1 and commits == 2
+                assert json.loads(previous.read_text())["files"]["optimizer.pt"] == expected[large.name]
+                assert uploaded["publication.json"] == hashlib.sha256(previous.read_bytes()).hexdigest()
+            else:
+                with pytest.raises(S3UploadFailedError, match="BadGateway"):
+                    publication.publish(args)
+                assert not previous.exists() and commits == 1
+                if failure == "persistent_part":
+                    assert attempts[1] == 4 and aborted.is_set()
+                    assert checkpoint.name not in uploaded and record_attempts == 0
+                else:
+                    assert record_attempts == 4 and "publication.json" not in uploaded
+            # R2 failure must not remove the committed Volume recovery checkpoint.
+            assert (args.destination / checkpoint.relative_to(source)).read_bytes() == checkpoint.read_bytes()
+        finally:
+            server.shutdown()
+            thread.join(timeout=10)

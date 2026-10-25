@@ -32,7 +32,7 @@ def bucket() -> str:
     return name
 
 
-def client(*, timeout_seconds: float | None = None):  # type: ignore[no-untyped-def]
+def client(*, timeout_seconds: float | None = None, total_attempts: int | None = None):  # type: ignore[no-untyped-def]
     """boto3 S3 client against R2's endpoint. Raises `R2Error` if creds are missing."""
     missing = missing_credentials()
     if missing:
@@ -44,6 +44,10 @@ def client(*, timeout_seconds: float | None = None):  # type: ignore[no-untyped-
         config = config.merge(
             Config(connect_timeout=timeout_seconds, read_timeout=timeout_seconds, retries={"total_max_attempts": 1})
         )
+    if total_attempts is not None:
+        if type(total_attempts) is not int or total_attempts < 1:
+            raise ValueError("R2 total attempts must be a positive integer")
+        config = config.merge(Config(retries={"mode": "standard", "total_max_attempts": total_attempts}))
     return boto3.client(
         "s3",
         endpoint_url=os.environ["AWS_ENDPOINT_URL"],
