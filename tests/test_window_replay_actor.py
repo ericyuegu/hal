@@ -262,7 +262,9 @@ def test_fullgraph_capture_has_no_breaks() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("precision", ["fp32", "bf16"])
-def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precision: DecoderPrecision) -> None:
+def test_graphed_actor_matches_uncaptured_step_and_reads_updated_inputs_and_weights(
+    precision: DecoderPrecision,
+) -> None:
     with prepared_shape_compilation(64):
         torch.manual_seed(8)
         base = model()
@@ -383,8 +385,8 @@ def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
     hidden, observed, slots = inputs(policy)
     output = replay_windows(policy, hidden, observed, slots, grad=False)
     target = targets_for(output)
-    probabilities = output.log_distributions[0]
-    positive = torch.nonzero(torch.isfinite(probabilities) & output.factor_mask_WKF[..., 0::4, None])[0]
+    head_log_probs = output.log_distributions[0]
+    positive = torch.nonzero(torch.isfinite(head_log_probs) & output.factor_mask_WKF[..., 0::4, None])[0]
     target.reference_log_distributions[0][tuple(positive)] = -torch.inf
     assert bool(torch.isinf(actor_loss(output, target).kl_loss))
 

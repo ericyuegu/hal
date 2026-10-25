@@ -17,6 +17,7 @@ from torch._inductor import config as inductor_config
 from torch._inductor.output_code import CompiledFxGraph
 from torch._inductor.triton_bundler import TritonBundle
 from torch._inductor.triton_bundler import TritonBundler
+from torch.compiler import config as compiler_config
 
 
 def compilation_statistics() -> dict[str, int]:
@@ -67,7 +68,8 @@ class CacheIdentity:
     capability: tuple[int, int]
     source_sha256: str
     enable_pdl: bool
-    format: str = "hal.o65.compile-cache.v3"
+    cache_key_tag: str = ""
+    format: str = "hal.o65.compile-cache.v4"
 
     def encoded(self) -> bytes:
         return json.dumps(dataclasses.asdict(self), sort_keys=True).encode()
@@ -98,6 +100,7 @@ def current_identity(source_sha256: str, device: torch.device) -> CacheIdentity:
         torch.cuda.get_device_capability(device),
         source_sha256,
         inductor_config.triton.enable_pdl,
+        compiler_config.cache_key_tag,
     )
 
 

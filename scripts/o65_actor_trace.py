@@ -85,8 +85,11 @@ def recorded_actor_targets(
 
 
 def main(args: Args) -> None:
+    from hal.inference.inductor_compat import install_reduction_barrier
+
     if args.windows < 1:
         raise ValueError("actor trace requires a positive window count")
+    install_reduction_barrier()
     torch.manual_seed(65)
     device = torch.device("cuda", torch.cuda.current_device())
     checkpoint = load_evaluation_checkpoint(args.checkpoint, device=device)

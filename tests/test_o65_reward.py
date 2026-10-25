@@ -1,8 +1,6 @@
 """Reward treatment identity and critic warmup after learner migration."""
 
 import dataclasses
-import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -77,45 +75,3 @@ def test_full_resume_rejects_reward_change(tmp_path: Path, field: str) -> None:
     target.config = dataclasses.replace(source.config, reward_weights=weights)
     with pytest.raises(ValueError, match="resume configuration mismatch"):
         exp.restore_checkpoint(target, path, PROVENANCE)
-
-
-def test_short_gpu_reward_treatment() -> None:
-    if os.environ.get("HAL_O65_REWARD_GPU") != "1":
-        pytest.skip("run once explicitly with HAL_O65_REWARD_GPU=1 on the RTX 3060")
-    assert torch.cuda.is_available() and "3060" in torch.cuda.get_device_name()
-    output = Path("runs/reward/gpu")
-    exp.train_native(
-        exp.NativeCli(
-            checkpoint=Path("runs/proxy/final.pt"),
-            sampler=Path("experiments/o65/pilot-sampler.json"),
-            output=output,
-            data_dir=Path("/home/ericgu/src/melee-sim-light/data"),
-            cpus=(min(os.sched_getaffinity(0)),),
-            groups=1,
-            matches_per_shard=16,
-            updates=2,
-            training=exp.TrainConfig(
-                reward_weights=TREATMENT,
-                critic_warmup_updates=0,
-                windows_per_step=32,
-                checkpoint_interval=2,
-            ),
-        )
-    )
-    metrics = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
-    assert len(metrics) == 2 and metrics[-1]["train/actor_steps"] > 0
-    assert all(torch.isfinite(torch.tensor(row["return/interval_reward"])) for row in metrics)
-    assert all(row["systems/post_startup_compiles"] == row["systems/post_startup_captures"] == 0 for row in metrics)
-    (output / "measurement.json").write_text(
-        json.dumps(
-            {
-                "reward_weights": dataclasses.asdict(TREATMENT),
-                "finite_rewards": True,
-                "interval_reward": [row["return/interval_reward"] for row in metrics],
-                "seconds_per_update": [row["systems/update_seconds"] for row in metrics],
-                "peak_allocated_bytes": max(row["systems/peak_allocated_bytes"] for row in metrics),
-                "peak_reserved_bytes": max(row["systems/peak_reserved_bytes"] for row in metrics),
-            },
-            indent=2,
-        )
-    )

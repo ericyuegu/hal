@@ -125,6 +125,9 @@ def accumulate(
 
 
 def main(args: Args) -> None:
+    from hal.inference.inductor_compat import install_reduction_barrier
+
+    install_reduction_barrier()
     torch.set_num_threads(2)
     torch.manual_seed(65)
     device = torch.device("cuda", torch.cuda.current_device())

@@ -2,8 +2,10 @@
 
 import dataclasses
 import json
+import threading
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -75,8 +77,34 @@ def _worker(rank: int, rendezvous: str, directory: str) -> None:
         np.testing.assert_array_equal(run.engine.behavior_tracker.state, behavior)
         assert run.engine.sampler.cursor == local_cursor
         assert torch.equal(torch.get_rng_state(), local_rng)
-        # A next update after resume still has identical optimizer progress.
+        exp.check_resume_process(run, checkpoint, Path(directory) / "resume-controls", PROVENANCE, prepare=True)
+        boundary = exp._resume_state_hashes(run)
+        started, release = threading.Event(), threading.Event()
+        write = exp.write_checkpoint_shards
+
+        def delayed_write(snapshot: exp.CheckpointSnapshot, target: Path, local_rank: int) -> list[dict[str, str]]:
+            assert threading.current_thread() is not threading.main_thread()
+            started.set()
+            assert release.wait(30)
+            return write(snapshot, target, local_rank)
+
+        # Training must advance while immutable checkpoint bytes await background I/O.
+        with patch.object(exp, "write_checkpoint_shards", delayed_write):
+            worker = exp.DistributedCheckpointWorker(Path(directory) / "async", PROVENANCE, None)
+            try:
+                worker.submit(run)
+                assert started.wait(10)
+                run.run_update()
+                worker.check()
+                assert not (Path(directory) / "async/update-00000002.json").exists()
+            finally:
+                release.set()
+                worker.close()
+        after = exp._update_tensors(run)
+        exp.restore_checkpoint(run, Path(directory) / "async/update-00000002.json", PROVENANCE)
+        assert exp._resume_state_hashes(run) == boundary
         run.run_update()
+        assert exp._compare_resume_updates(after, after, exp._update_tensors(run)).passed
         distributed.check_parameters(tuple(run.policy.model.parameters()))
 
         # Unequal local counts must give the gradient of the merged objective.
@@ -137,10 +165,48 @@ def _worker(rank: int, rendezvous: str, directory: str) -> None:
         dist.destroy_process_group()
 
 
+def _fresh_resume_worker(rank: int, rendezvous: str, directory: str) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import FakeShard
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=90))
+    try:
+        run = trainer(groups=1, length=67 if rank == 0 else 1, delay=8)
+        engine = exp.RolloutEngine(
+            (
+                (
+                    FakeShard((2 * rank,), length=67 if rank == 0 else 1),
+                    FakeShard((2 * rank + 1,), length=67 if rank == 0 else 1),
+                ),
+            ),
+            run.policy,
+            run.engine.sampler,
+            {0: run.reference},
+        )
+        engine.initialize()
+        run = exp.Trainer(engine, dataclasses.replace(run.config, actor_microbatches=2))
+        manifest = Path(directory) / "checkpoint/update-00000002.json"
+        exp.check_resume_process(run, manifest, Path(directory) / "resume-controls", PROVENANCE, prepare=False)
+        assert run.update == 2
+        exp.run_training(run, 5, Path(directory) / "continued", PROVENANCE)
+        assert run.update == 5
+        final = Path(directory) / "continued/checkpoints/update-00000005.json"
+        exp.restore_checkpoint(run, final, PROVENANCE)
+        assert run.update == 5
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.fixture(scope="module")
 def gloo_result(tmp_path_factory: pytest.TempPathFactory) -> Path:
     directory = tmp_path_factory.mktemp("o65-gloo")
     mp.spawn(_worker, args=(f"file://{directory / 'rendezvous'}", str(directory)), nprocs=2, join=True)
+    mp.spawn(
+        _fresh_resume_worker, args=(f"file://{directory / 'fresh-rendezvous'}", str(directory)), nprocs=2, join=True
+    )
     return directory
 
 
@@ -182,6 +248,21 @@ def test_rank_zero_metrics_equal_merged_single_process(gloo_result: Path) -> Non
     assert merged["flops/rollout_per_match_frame"] == pytest.approx(3e12 / 21)
 
 
+def test_fresh_process_resume_matches_next_batch_and_update_on_every_rank(gloo_result: Path) -> None:
+    for rank in range(2):
+        report = json.loads((gloo_result / "resume-controls" / f"rank{rank}-result.json").read_text())
+        assert report["passed"]
+        assert report["rank"] == rank and report["world_size"] == 2
+        assert len(set(report["next_batch_sha256"])) == 1
+        assert len(set(report["next_scheduler_sha256"])) == 1
+        assert not (gloo_result / "resume-controls" / f"rank{rank}-controls.pt").exists()
+    metrics = [json.loads(line) for line in (gloo_result / "continued/metrics.jsonl").read_text().splitlines()]
+    assert [row["global_step"] for row in metrics] == [3, 4, 5]
+    manifest = json.loads((gloo_result / "continued/checkpoints/update-00000005.json").read_text())
+    assert manifest["update"] == 5
+    assert len(manifest["shards"]) == 6
+
+
 def test_resume_rejects_different_world_size(gloo_result: Path) -> None:
     from test_065_loop import PROVENANCE
     from test_065_loop import exp
@@ -197,6 +278,29 @@ def test_split_cpus_is_disjoint_and_rejects_unequal_partitions() -> None:
     assert distributed.split_cpus((2, 4, 6, 8), 2, 1) == (6, 8)
     with pytest.raises(ValueError, match="evenly"):
         distributed.split_cpus((2, 4, 6), 2, 0)
+
+
+@pytest.mark.parametrize("operation", ["write_checkpoint_shards", "write_checkpoint_manifest"])
+def test_background_distributed_write_failure_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from test_065_loop import PROVENANCE
+    from test_065_loop import exp
+    from test_065_loop import trainer
+
+    run = trainer(groups=1)
+    run.run_update()
+
+    def fail(*args: object) -> None:
+        raise OSError("checkpoint disk failure")
+
+    monkeypatch.setattr(exp, operation, fail)
+    worker = exp.DistributedCheckpointWorker(tmp_path, PROVENANCE, None)
+    worker.submit(run)
+    with pytest.raises(OSError, match="checkpoint disk failure"):
+        worker.close()
+    assert run.update == 1
+    assert not list(tmp_path.glob("update-*.json"))
 
 
 @pytest.mark.parametrize("version", [10, 11])

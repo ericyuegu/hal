@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -58,9 +59,6 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
     def execute(command: list[str], **kwargs: object) -> None:
         commands.append(command)
         environments.append(dict(kwargs["env"]))
-        result = args.output / "held-out/results.json"
-        result.parent.mkdir(exist_ok=True)
-        result.write_text("{}")
 
     monkeypatch.setenv("WANDB_API_KEY", "test")
     args.checkpoint.write_bytes(b"architecture checkpoint")
@@ -88,10 +86,14 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
         path.relative_to(args.output): path.read_bytes() for path in args.output.rglob("*") if path.is_file()
     } == before
     unexpected.unlink()
-    o65_production.main(resumed)
+    o65_production.main(dataclasses.replace(resumed, verify_resume=True))
     command = commands[-1]
     parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
     assert parsed.resume == checkpoint and parsed.resume_source == "a" * 40
+    preparation = tyro.cli(exp.NativeCli, args=commands[-2][commands[-2].index("train") + 1 :])
+    assert preparation.prepare_resume_check and preparation.resume_check == parsed.resume_check
+    assert preparation.publication is None and preparation.wandb_project is None
+    assert not parsed.prepare_resume_check and parsed.publication is not None
     history = [json.loads(line) for line in (args.output / "source-transitions.jsonl").read_text().splitlines()]
     assert len(history) == 1 and history[0]["update"] == 32
     assert history[0]["previous"]["git_sha"] == "a" * 40
@@ -102,6 +104,110 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
     lineage = json.loads(environments[-1]["WANDB_NOTES"])
     assert lineage["source"] == "b" * 40 and lineage["resume_update"] == 32
     assert lineage["previous_attempt_run_id"] == environments[0]["WANDB_RUN_ID"]
+    assert len(commands) == 3
+    assert not (args.output / "held-out-consumed.json").exists()
+    assert not (args.output / "held-out").exists()
+
+
+@pytest.mark.parametrize("endpoint", [65, 512, 1024])
+def test_training_endpoint_can_extend_without_changing_resume_identity(tmp_path: Path, endpoint: int) -> None:
+    from test_065_loop import exp
+    from test_o65_modal import launcher
+
+    args = production_args(tmp_path)
+    extended = dataclasses.replace(args, updates=endpoint)
+    assert o65_production.resume_settings(extended) == o65_production.resume_settings(args)
+    command = o65_production.training_command(extended)
+    parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
+    assert parsed.updates == endpoint
+    assert parsed.training == tyro.cli(exp.NativeCli, args=o65_production.training_command(args)[9:]).training
+    request = launcher.Request(
+        "extended",
+        "a" * 40,
+        mode="ddp",
+        gpus=2,
+        matches=16,
+        windows_per_step=1,
+        damage_weight=0.1,
+        game_win_weight=120,
+        ddp_updates=endpoint,
+    )
+    assert tyro.cli(o65_production.Args, args=launcher.command(request, (0, 1))[3:]).updates == endpoint
+
+
+def test_legacy_identity_migrates_only_execution_endpoint(tmp_path: Path) -> None:
+    settings = o65_production.resume_settings(production_args(tmp_path))
+    current = {
+        "format": "hal.o65.production-identity.v2",
+        "git_sha": "b" * 40,
+        "checkpoint_sha256": "c" * 64,
+        "settings": settings,
+        "inputs": {"sampler": "fixed"},
+    }
+    previous = current | {
+        "format": "hal.o65.production-identity.v1",
+        "git_sha": "a" * 40,
+        "settings": settings | {"updates": 256},
+    }
+    o65_production.validate_resume_identity(previous, current, "a" * 40)
+    for changed in (
+        previous | {"inputs": {"sampler": "changed"}},
+        previous | {"settings": previous["settings"] | {"windows_per_step": 2}},
+        previous | {"git_sha": "c" * 40},
+        previous | {"format": "unknown"},
+    ):
+        with pytest.raises(ValueError, match="identity differs"):
+            o65_production.validate_resume_identity(changed, current, "a" * 40)
+
+
+def evaluation_args(tmp_path: Path) -> o65_production.EvaluationArgs:
+    from test_o65_pilot import write_boundary
+
+    output = tmp_path / "evaluation"
+    checkpoint = write_boundary(output / "train/checkpoints", 512)
+    reference = tmp_path / "reference.pt"
+    reference.write_bytes(b"reference")
+    return o65_production.EvaluationArgs(
+        output,
+        tmp_path / "delivery",
+        checkpoint,
+        o65_production.sha256(checkpoint),
+        reference,
+        tmp_path / "published",
+        "hal-o65-profile",
+        "o65/pilot-results/test",
+    )
+
+
+def test_final_evaluation_claims_selected_checkpoint_and_preserves_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = evaluation_args(tmp_path)
+    monkeypatch.setattr(o65_production, "O64_SHA256", o65_production.sha256(args.reference_checkpoint))
+    publications = []
+    monkeypatch.setattr(
+        o65_production.self_play_publication,
+        "publish",
+        lambda _: publications.append((args.output / "held-out-consumed.json").read_bytes()),
+    )
+
+    def fail(command: list[str], **kwargs: object) -> None:
+        assert command[command.index("--checkpoint") + 1] == str(args.checkpoint)
+        assert len(publications) == 1
+        (args.output / "held-out").mkdir()
+        (args.output / "held-out/partial.json").write_text('{"games": 1}')
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(o65_production.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError):
+        o65_production.evaluate(args)
+    claim = json.loads(publications[0])
+    assert claim["update"] == 512 and claim["checkpoint_sha256"] == args.checkpoint_sha256
+    assert len(publications) == 2 and publications[0] == publications[1]
+    assert (args.output / "held-out/partial.json").is_file()
+    with pytest.raises(ValueError, match="already exist"):
+        o65_production.evaluate(args)
+    assert len(publications) == 2
 
 
 def test_launcher_passes_explicit_resume_source(tmp_path: Path) -> None:
@@ -237,6 +343,39 @@ def test_o64_warm_cache_command_and_resume_identity(tmp_path: Path) -> None:
     assert parsed.compile_cache == tmp_path / "packed-cache"
 
 
+def test_one_gpu_preparation_builds_the_cache_used_by_production_rank_zero(tmp_path: Path) -> None:
+    from test_065_loop import exp
+    from test_o65_modal import launcher
+
+    request = launcher.Request(
+        "cache-preparation",
+        "a" * 40,
+        mode="ddp",
+        gpus=1,
+        matches=1024,
+        windows_per_step=512,
+        actor_microbatches=8,
+        ddp_updates=6,
+        measurement=True,
+        cold_cache=True,
+        damage_weight=0.1,
+        game_win_weight=120,
+    )
+    cpus = tuple(sorted(os.sched_getaffinity(0)))[:8]
+    args = tyro.cli(o65_production.Args, args=launcher.command(request, cpus)[3:])
+    command = o65_production.training_command(args)
+    parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
+    assert parsed.compile_cache == launcher.RESULTS / "compile-cache/rank0"
+    assert parsed.measurement and not parsed.require_compile_cache
+    assert parsed.training.windows_per_step == 512 and parsed.training.actor_microbatches == 8
+    warm = dataclasses.replace(request, cold_cache=False)
+    assert "--require-compile-cache" in launcher.command(warm, cpus)
+    with pytest.raises(ValueError, match="one-GPU measurement"):
+        dataclasses.replace(request, gpus=2)
+    with pytest.raises(ValueError, match="one GPU is allowed for measurement"):
+        dataclasses.replace(request, measurement=False)
+
+
 def test_cache_source_import_is_explicit_and_measurement_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from test_065_loop import exp
 
@@ -258,10 +397,24 @@ def test_cache_source_import_is_explicit_and_measurement_only(tmp_path: Path, mo
 
 
 def test_o64_final_evaluation_uses_frozen_384_game_grid(tmp_path: Path) -> None:
+    from torch._inductor.codegen.triton import TritonKernel
+    from torch._inductor.codegen.triton import TritonScheduling
+    from torch.compiler import config as compiler_config
+
+    from hal.inference.inductor_compat import CACHE_KEY_TAG
     from scripts import eval_o65
 
-    command = o65_production.evaluation_command(production_args(tmp_path))
-    with patch.object(eval_o65, "evaluate", autospec=True) as evaluate:
+    command = o65_production.evaluation_command(evaluation_args(tmp_path))
+
+    def compiled_evaluation(*args: object, **kwargs: object) -> None:
+        assert compiler_config.cache_key_tag == CACHE_KEY_TAG
+        assert TritonScheduling.kernel_type is not TritonKernel
+
+    with (
+        patch.object(TritonScheduling, "kernel_type", TritonKernel),
+        patch.object(compiler_config, "cache_key_tag", ""),
+        patch.object(eval_o65, "evaluate", autospec=True, side_effect=compiled_evaluation) as evaluate,
+    ):
         eval_o65.main(tyro.cli(eval_o65.Args, args=command[2:]))
     settings = evaluate.call_args.kwargs
     assert settings["simulators"] == ("msl",) and settings["split"] == "held_out"
@@ -289,8 +442,8 @@ def test_o64_launch_requires_capacity_and_measurement_is_explicit(tmp_path: Path
     )
     with pytest.raises(ValueError, match="windows-per-step"):
         dataclasses.replace(request, windows_per_step=None)
-    with pytest.raises(ValueError, match="256 updates"):
-        dataclasses.replace(request, ddp_updates=2)
+    with pytest.raises(ValueError, match="positive integer"):
+        dataclasses.replace(request, ddp_updates=0)
     with pytest.raises(ValueError, match="outcome reward"):
         dataclasses.replace(request, damage_weight=1)
     with pytest.raises(ValueError, match="matches per GPU"):

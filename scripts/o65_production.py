@@ -8,6 +8,7 @@ import sys
 import uuid
 from contextlib import closing
 from pathlib import Path
+from typing import TypedDict
 
 import torch
 import tyro
@@ -87,6 +88,7 @@ class Args:
     r2_prefix: str | None = None
     resume_source: str | None = None
     resume_manifest_sha256: str | None = None
+    verify_resume: bool = False
 
     def __post_init__(self) -> None:
         if self.require_compile_cache and self.compile_cache is None:
@@ -106,8 +108,8 @@ class Args:
         if self.resume_source is not None and self.resume_manifest_sha256 is None:
             raise ValueError("source-changing resume requires a checkpoint manifest SHA-256")
         shards = shards_per_gpu(self.matches)
-        if type(self.gpus) is not int or not 2 <= self.gpus <= 8:
-            raise ValueError("O64 torchrun requires 2..8 GPUs")
+        if type(self.gpus) is not int or not 1 <= self.gpus <= 8 or (self.gpus == 1 and not self.measurement):
+            raise ValueError("training requires 2..8 GPUs; single-GPU measurement is supported")
         if len(self.cpus) != shards * self.gpus or len(set(self.cpus)) != len(self.cpus):
             raise ValueError("O64 requires distinct shard CPUs for every rank")
         if any(
@@ -121,8 +123,8 @@ class Args:
         if self.measurement:
             if any(value is not None for value in publication):
                 raise ValueError("measurement does not publish")
-        elif self.updates != 256 or any(value is None for value in publication):
-            raise ValueError("O64 training requires 256 updates and complete publication settings")
+        elif any(value is None for value in publication):
+            raise ValueError("O64 training requires complete publication settings")
 
 
 def training_command(args: Args) -> list[str]:
@@ -180,7 +182,8 @@ def training_command(args: Args) -> list[str]:
         "120",
     ]
     if args.compile_cache is not None:
-        argv.extend(("--compile-cache", str(args.compile_cache)))
+        directory = args.compile_cache / "rank0" if args.gpus == 1 else args.compile_cache
+        argv.extend(("--compile-cache", str(directory)))
     if args.require_compile_cache:
         argv.append("--require-compile-cache")
     if args.measurement:
@@ -205,14 +208,26 @@ def training_command(args: Args) -> list[str]:
     return argv
 
 
-def evaluation_command(args: Args) -> list[str]:
+@dataclasses.dataclass(frozen=True, slots=True)
+class EvaluationArgs:
+    output: Path
+    delivery: Path
+    checkpoint: Path
+    checkpoint_sha256: str
+    reference_checkpoint: Path
+    publish_directory: Path
+    publish_volume: str
+    r2_prefix: str
+
+
+def evaluation_command(args: EvaluationArgs) -> list[str]:
     return [
         sys.executable,
         str(ROOT / "scripts/eval_o65.py"),
         "--checkpoint",
-        str(args.output / f"train/checkpoints/update-{args.updates:08d}.json"),
-        "--anchors",
         str(args.checkpoint),
+        "--anchors",
+        str(args.reference_checkpoint),
         "--data-dir",
         str(args.delivery / "inputs/msl/data"),
         "--protocol",
@@ -239,9 +254,71 @@ def resume_settings(args: Args) -> dict[str, object]:
     del settings["resume_source"]
     del settings["resume_manifest_sha256"]
     del settings["require_compile_cache"]
+    # The learning-rate schedule uses optimizer steps, not the requested endpoint.
+    del settings["updates"]
+    del settings["verify_resume"]
     # Compiler storage changes startup cost, not the training configuration.
     settings["compile_cache"] = None
     return settings
+
+
+class ProductionIdentity(TypedDict):
+    format: str
+    git_sha: str
+    checkpoint_sha256: str
+    settings: dict[str, object]
+    inputs: dict[str, str]
+
+
+def validate_resume_identity(previous: ProductionIdentity, current: ProductionIdentity, source: str | None) -> None:
+    if not isinstance(previous, dict) or set(previous) != set(ProductionIdentity.__annotations__):
+        raise ValueError("invalid production identity schema")
+    expected = current | {"git_sha": source} if source is not None else current
+    normalized = dict(previous)
+    if normalized.get("format") == "hal.o65.production-identity.v1":
+        settings = previous["settings"]
+        if not isinstance(settings, dict):
+            raise ValueError("invalid legacy production settings")
+        updates = settings.get("updates")
+        if type(updates) is not int or updates < 1:
+            raise ValueError("invalid legacy production endpoint")
+        normalized["settings"] = {key: value for key, value in settings.items() if key != "updates"}
+        normalized["format"] = "hal.o65.production-identity.v2"
+    if normalized not in (current, expected):
+        raise ValueError("O64 source, settings or input identity differs on resume")
+
+
+def evaluate(args: EvaluationArgs) -> None:
+    if sha256(args.reference_checkpoint) != O64_SHA256:
+        raise ValueError("O64 reference checkpoint SHA-256 mismatch")
+    if sha256(args.checkpoint) != args.checkpoint_sha256:
+        raise ValueError("final checkpoint SHA-256 mismatch")
+    if args.checkpoint.parent != args.output / "train/checkpoints":
+        raise ValueError("final checkpoint must belong to the published training run")
+    manifest = read_training_manifest(args.checkpoint)
+    claim = {
+        "format": "hal.o65.final-evaluation.v2",
+        "checkpoint": str(args.checkpoint),
+        "checkpoint_sha256": args.checkpoint_sha256,
+        "reference_sha256": O64_SHA256,
+        "protocol_sha256": sha256(ROOT / "experiments/o65/production-evaluation.json"),
+        "update": manifest["update"],
+        "cadence": [18, 2],
+        "u": 0.95,
+        "lambda": 1,
+        "games": 384,
+    }
+    publication = self_play_publication.Args(args.output, args.publish_directory, args.publish_volume, args.r2_prefix)
+    if (args.output / "held-out").exists():
+        raise ValueError("held-out results already exist; preserve them instead of replaying evaluation")
+    with (args.output / "held-out-consumed.json").open("x") as file:
+        json.dump(claim, file, indent=2)
+    self_play_publication.publish(publication)
+    print("final_evaluation_started", flush=True)
+    try:
+        subprocess.run(evaluation_command(args), cwd=ROOT, check=True)
+    finally:
+        self_play_publication.publish(publication)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -316,8 +393,8 @@ def main(args: Args) -> None:
     if sha256(args.checkpoint) != O64_SHA256:
         raise ValueError("O64 checkpoint SHA-256 mismatch")
     args.output.mkdir(parents=True, exist_ok=not args.measurement)
-    identity = {
-        "format": "hal.o65.production-identity.v1",
+    identity: ProductionIdentity = {
+        "format": "hal.o65.production-identity.v2",
         "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "checkpoint_sha256": O64_SHA256,
         "settings": resume_settings(args),
@@ -336,10 +413,7 @@ def main(args: Args) -> None:
     if not path.exists() and any(args.output.iterdir()):
         raise ValueError("existing O64 state has no source/input identity")
     prior_identity = json.loads(path.read_text()) if path.exists() else identity
-    if prior_identity != identity and (
-        args.resume_source is None or prior_identity != identity | {"git_sha": args.resume_source}
-    ):
-        raise ValueError("O64 source, settings or input identity differs on resume")
+    validate_resume_identity(prior_identity, identity, args.resume_source)
     command = training_command(args)
     manifests = sorted((args.output / "train/checkpoints").glob("update-*.json"))
     previous = manifests[-1] if manifests else None
@@ -349,6 +423,12 @@ def main(args: Args) -> None:
         if sha256(previous) != args.resume_manifest_sha256:
             raise ValueError("checkpoint manifest differs from the requested SHA-256")
     update = read_training_manifest(previous)["update"] if previous is not None else 0
+    if not args.measurement and args.updates <= update:
+        raise ValueError("training endpoint must exceed the restored update")
+    if args.verify_resume and (args.measurement or previous is None):
+        raise ValueError("resume verification requires an existing training checkpoint")
+    if not args.measurement and (args.output / "held-out-consumed.json").exists():
+        raise ValueError("cannot extend a run after its final held-out evaluation was consumed")
     if previous is not None:
         # The union argument must remain last for Tyro's nested CLI parser.
         position = command.index("publication:args")
@@ -374,6 +454,9 @@ def main(args: Args) -> None:
         with (args.output / "source-transitions.jsonl").open("a") as history:
             history.write(json.dumps(transition, sort_keys=True) + "\n")
     path.write_text(json.dumps(identity, indent=2))
+    (args.output / "execution.json").write_text(
+        json.dumps({"resume_update": update, "updates": args.updates}, indent=2)
+    )
     environment = dict(os.environ)
     if not args.measurement:
         if not environment.get("WANDB_API_KEY"):
@@ -387,18 +470,21 @@ def main(args: Args) -> None:
                 WANDB_RESUME="never",
                 WANDB_NOTES=json.dumps(dataclasses.asdict(attempt), sort_keys=True),
             )
+            if args.verify_resume:
+                directory = args.output / "attempts" / attempt.run_id / "resume-check"
+                position = command.index("publication:args")
+                command[position:position] = ["--resume-check", str(directory)]
+                preparation = command[: command.index("publication:args")]
+                position = preparation.index("--wandb-project")
+                del preparation[position : position + 2]
+                preparation.append("--prepare-resume-check")
+                subprocess.run(preparation, cwd=ROOT, env=environment, check=True)
     if update < args.updates:
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
     if args.measurement:
         return
     assert args.publish_directory is not None and args.publish_volume is not None and args.r2_prefix is not None
     publication = self_play_publication.Args(args.output, args.publish_directory, args.publish_volume, args.r2_prefix)
-    if not (args.output / "held-out/results.json").is_file():
-        with (args.output / "held-out-consumed.json").open("x") as claim:
-            json.dump({"update": args.updates, "cadence": [18, 2], "u": 0.95, "lambda": 1, "games": 384}, claim)
-        self_play_publication.publish(publication)
-        print("final_evaluation_started", flush=True)
-        subprocess.run(evaluation_command(args), cwd=ROOT, env=environment, check=True)
     self_play_publication.publish(publication)
 
 

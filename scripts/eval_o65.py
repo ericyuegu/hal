@@ -49,6 +49,10 @@ class Args:
 
 def main(args: Args) -> None:
     torch.set_num_threads(2)
+    if torch.device(args.device).type == "cuda":
+        from hal.inference.inductor_compat import install_reduction_barrier
+
+        install_reduction_barrier()
     grid = None
     if args.lambda_grid or args.cadence_grid:
         pairs = []

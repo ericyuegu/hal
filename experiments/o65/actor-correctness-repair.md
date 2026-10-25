@@ -1,10 +1,17 @@
 # Actor correctness repair
 
-The full-model numerical defect is unresolved. Diagnostic target units, live
-pre-update checks, probability naming, continuation lineage and cache identity
-have focused regression coverage. The obsolete proxy qualification was retired.
-Repaired-source numerical qualification, exact launch qualification, eight-rank
-continuation through checkpoint 64 and performance measurements remain open.
+The normalization defect is isolated: an Inductor-generated Triton kernel reads
+reduction scratch written by other threads without a block barrier. Adding the
+barrier fixes the minimal reproduction and the captured B200 actor chunk.
+The narrow workaround is now integrated at the compiler boundary. Diagnostic
+target units, live pre-update checks, probability naming, continuation lineage
+and compiler-cache identity have focused regression coverage.
+
+Local runtime checks are complete. The next step is a bounded eight-B200
+qualification from checkpoint 32 through checkpoint 64 and a resume comparison.
+A long production continuation remains unqualified. The separate BF16 precision
+investigation does not change this repair's model, precision settings,
+normalization tolerance or objective.
 
 This work starts at `603a1f9229ca17c49d0e1c608114d85318e1ac96`, from the
 2026-10-25 Astra review. The checkpoint-32 producer is
@@ -46,6 +53,30 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
 
 ## Current changes and evidence
 
+- `hal/inference/inductor_compat.py` subclasses the tested Torch 2.11.0 / Triton
+  3.6.0 generator. It emits `tl.debug_barrier()` only when loading an invalidated
+  intermediate store. Installation is idempotent, rejects untested dependency
+  versions or conflicting generator customizations, and runs before CUDA training
+  compilation or cache loading. The three actor diagnostic entry points install
+  the same adapter. Remove it when the upstream generator passes both the retained
+  regression and the captured B200 case without the patch.
+- Cache format v4 includes `torch.compiler.config.cache_key_tag`, set to
+  `hal-inductor-reduction-barrier-v1`. This separates Torch's own FX/AOT caches
+  as well as HAL's persisted cache bundles. Even an explicit source-changing seed
+  import rejects an unpatched bundle before loading it or changing cache paths.
+  Production warm caches must be regenerated with the repaired source.
+- The retained compiler regression uses strided BF16 inputs, repeated trunk rows,
+  and the centered log-softmax reduction from the failing actor. It checks actual
+  generated barriers, cold unpatched-to-patched cache separation, warm cache hits,
+  ten repeated normalization/value checks per cache condition, and backward
+  gradients against an independent FP64 oracle. It passed on the RTX 3060 with
+  the integrated adapter. The focused run completed 54 tests without skips.
+- Retired four optional proxy smoke cases tied to an old O63 checkpoint and
+  machine-specific paths. Their source and scope are recorded in
+  `archive/o65-proxy-smoke-tests.md`. Current reward migration, exact resume,
+  cached-inference, replay-gradient and CUDA graph regressions remain supported.
+  Six schema regressions now use the maintained dev MDS fixture instead of an
+  optional private subset. A missing dev fixture fails explicitly. All six pass.
 - Both diagnostic reference paths now preserve log probabilities. CPU regressions
   use nonzero KL coefficients, equal and different policies, a scalar double-precision
   objective, finite-difference gradients, and deliberately incorrect probability units.
@@ -98,8 +129,9 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   real fixture bytes instead of replacing every file hash with one constant;
   an unexpected update-33 manifest is rejected without changing any run file.
   This binds the restore boundary. It does not supply missing numerical qualification.
-- Compiler-cache identity now includes the effective `triton.enable_pdl` setting.
-  Cache format v3 rejects a seed with a different setting before importing artifacts
+- Compiler-cache identity includes the effective `triton.enable_pdl` setting.
+  Cache format v3 introduced rejection of a seed with a different setting before
+  importing artifacts
   or changing cache paths, including an explicitly supplied seed identity. The
   regression failed before the repair; all 28 cache tests now pass. Earlier v2
   artifacts remain historical evidence and cannot qualify this identity.
@@ -238,11 +270,103 @@ compiled forward/backward comparisons; maximum absolute log mass was `3.16616e-7
 These reductions do not reproduce the defect. They do not qualify the full actor,
 its attention implementation, the B200 kernels, or learning behavior.
 
-The root cause, repaired-source GPU qualification, eight-rank continuation through
-checkpoint 64, gradient/update comparison and performance measurements remain open.
-The BF16 learning-effect uncertainty remains separate from this normalization defect.
+The reductions above are historical negative controls. The later minimal
+reproduction isolated the missing barrier. With the same captured checkpoint,
+inputs and production chunk shape (64 windows × 64 decisions), the unpatched
+B200 run failed 688 main-stick rows. The barrier treatment passed normalization
+for all four heads and selected-action gathers. Its forward/objective/backward
+median was 112.138 ms and peak allocation 37.138 GB; this excludes optimizer,
+simulation and distributed communication and is not a training-throughput result.
+
+The raw reports are retained under
+`runs/o65-compile-repair/minimal-normalization-race/b200-artifacts/`, in
+`whole-original-64`, `whole-barrier-64` and `minimal-barrier`. They identify source
+`7718afdb7e0ce67b232e53679bc777af5ac235a2`, diagnostic script SHA-256
+`8e0a3fd48f88e0ff2c0f422ce01b051a3d2ab29a2b82755696f8254a381bd7cd`,
+and barrier adapter SHA-256
+`a745da06e45884387d202372da9e65e6f32a928bcb45047c80025bed78d48bf4`.
+The barrier-only whole-model treatment used no model source patch. This evidence
+establishes the fix's mechanism and tested B200 scope, not final eight-rank
+training qualification. The BF16 learning-effect uncertainty remains separate.
+
+## Eight-B200 readiness
+
+Do not start an unattended production continuation yet. The remaining acceptance
+run should exercise HAL's complete training path, not a general compiler audit:
+
+1. Use the final repair commit, pinned environment, production configuration and
+   checkpoint-32 manifest identified above. Regenerate and validate compiler
+   caches with the barrier tag; old v2/v3 caches are not eligible.
+2. Resume all eight ranks from checkpoint 32. Require live head normalization,
+   selected-action gathers, execution masks, finite losses/gradients and unchanged
+   actor state on a failed check. Complete updates beyond the former failure
+   boundary at 44 and publish checkpoint 64. Preserve a separate attempt and W&B
+   lineage, without rewriting earlier evidence.
+3. Restore checkpoint 64 and compare the next rollout/batch and optimizer update
+   with uninterrupted execution, including all rank RNG, scheduler, optimizer and
+   simulator state. Unit resume tests do not replace this production-topology check.
+4. Record full-path update time, peak memory, post-startup compilation/capture
+   counts and eight-rank communication. Inspect unchanged-weight rollout/replay
+   joint ratios and actual PPO clipping. Use these task-level observations to
+   assess the existing BF16 treatment; do not require bitwise eager/compiled parity
+   or silently change precision to make a diagnostic comparison pass.
+
+The repaired source retains BF16 and the existing training treatment. Reported
+BF16 gradient-direction and rollout/replay differences remain an experimental
+risk, not evidence that normalization is still broken. Learning quality must be
+assessed through gameplay evaluation. No eight-B200 job was launched for this
+integration and readiness review.
 
 ## Validation log
+
+The barrier integration was checked at base commit
+`7718afdb7e0ce67b232e53679bc777af5ac235a2` plus the retained working-tree patch.
+The source fingerprint remained
+`b5cd6e62919c5252eb92e3b9fa1737772745826d7e966e7d80cf0c34d2dad5f0`
+through the full run. Later edits only clarify test names, activate the schema
+fixture tests and record results. All affected cases passed separate reruns;
+the production compiler source is unchanged.
+The production compiler-source SHA-256 is
+`f60abab6b2f63904910eb055d9ad2c40464828a6788024d1aae373082a0f615e`.
+The exact patch, new files, commands, environment, logs and exit receipts are in
+`runs/o65-compile-repair/local-artifacts/validation-barrier-integration/`.
+
+| Command | Result |
+| --- | --- |
+| `uv run ruff format --check .` | Passed. |
+| `uv run ruff check .` | Passed. |
+| `uv run ty check --python-version 3.14 --error-on-warning hal experiments/059_muon_action_sequence.py scripts` | Passed; the modified 065 experiment also passed a separate type check. |
+| `uv run pytest -q -m "not integration"` with CUDA hidden | 2,864 passed, four failed, 156 skipped, 89 deselected. All four failures were missing `uv`/`npm` on the service PATH; all four passed on a targeted rerun with PATH corrected. No application source changed to resolve them. |
+| `HAL_REQUIRE_INTEGRATION=1 uv run pytest -q tests/test_roundtrip.py tests/test_session_cleanup.py -m integration` | 8 passed, 6 deselected, no skips. |
+| Serial CUDA-enabled runs of the eight files below | 212 passed, 2 integration cases deselected, no skips. |
+| Three renamed/clarified cases in `test_065_dense.py` and `test_window_replay_actor.py` | 11 parameterized cases passed, no skips, including both CUDA capture cases. |
+| `uv run pytest -q tests/test_policy_world_schema.py` | 6 passed, no skips, using the maintained dev fixture. |
+
+The initial 156 full-suite skips comprised 148 CUDA cases, two separate netplay
+hardware qualification cases, and six schema cases missing their optional private
+fixture. The schema fixture dependency is now repaired and all six cases pass.
+Hardware skips are recorded as skips, not passes. The affected CUDA files were
+then exercised with the GPU visible:
+
+| Test file | Passed |
+| --- | ---: |
+| `test_inductor_compat.py` | 6 |
+| `test_065_loop.py` | 98 |
+| `test_window_replay_actor.py` | 26 |
+| `test_window_replay_model.py` | 13 |
+| `test_o65_actor_trace.py` | 3 |
+| `test_o65_numerical_recovery.py` | 15 |
+| `test_self_play_model.py` | 38 |
+| `test_o65_memory.py` | 13 |
+
+Runs used the existing shared environment with `uv run --no-sync`, two CPU math
+threads and one compiler worker. The full validation service had a 12 GiB memory
+limit and no swap allowance. The corrected-PATH rerun and focused checks used
+6 GiB limits. No missing required fixture was skipped. Warnings concern existing
+Python 3.14 fork/JIT deprecations, profiler event retention, and Inductor disabling
+online softmax for a split reduction; no tolerance was relaxed.
+
+Historical checks follow. Their interrupted results are not final validation.
 
 Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
 `uv run --no-sync --project /home/ericgu/src/hal` in the production worktree.
@@ -318,4 +442,5 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
   This run is incomplete; integration had not started. Subsequent heavy checks
   run serially with explicit process-group memory limits and fewer compiler workers.
 
-Full required checks and GPU checks remain pending.
+The earlier incomplete runs are superseded by the local checks above. The
+production-topology continuation and full-path performance measurements remain open.

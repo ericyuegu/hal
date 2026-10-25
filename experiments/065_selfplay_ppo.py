@@ -1503,6 +1503,9 @@ class TransformerPolicy:
         self.device = next(model.parameters()).device
         linears = []
         if self.device.type == "cuda":
+            from hal.inference.inductor_compat import install_reduction_barrier
+
+            install_reduction_barrier()
             for name, module in tuple(model.named_modules()):
                 if isinstance(module, torch.nn.Linear):
                     linear = module if isinstance(module, TickLinear) else TickLinear(module)
@@ -5468,9 +5471,9 @@ class Trainer:
             metrics[f"critic/explained_variance_{suffix}"] = self.metric_totals.explained_variance(
                 f"critic/explained_variance_{suffix}", values[mask], targets[mask]
             )
-        for factor, logs in zip(FACTOR_ORDER, old.log_distributions, strict=True):
-            distribution = logs.exp()
-            entropy = -(distribution * torch.where(distribution > 0, distribution, 1).log()).sum(-1)
+        for factor, head_log_probs in zip(FACTOR_ORDER, old.log_distributions, strict=True):
+            head_probs = head_log_probs.exp()
+            entropy = -(head_probs * torch.where(head_probs > 0, head_probs, 1).log()).sum(-1)
             valid = torch.arange(4, device=device)[None] < decisions.replan_J[:, None]
             metrics[f"policy/entropy_{factor}"] = self.metric_totals.mean(f"policy/entropy_{factor}", entropy[valid])
         for index, factor in enumerate(FACTOR_ORDER):
@@ -5580,11 +5583,11 @@ class Trainer:
         table = batch.rollout.table
         dense_advantage = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
-        reference_dense = tuple(
-            value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.log_distributions
+        reference_head_log_probs = tuple(
+            head.new_zeros(len(table.values), *head.shape[1:]) for head in batch.reference.log_distributions
         )
-        for target, value in zip(reference_dense, batch.reference.log_distributions, strict=True):
-            target[batch.rollout.ids] = value
+        for dense_head, head in zip(reference_head_log_probs, batch.reference.log_distributions, strict=True):
+            dense_head[batch.rollout.ids] = head
         with self.memory.phase("actor"), phase(self.profile, "actor"):
             for step, window_ids in enumerate(batch.steps):
                 live = window_ids >= 0
@@ -5613,7 +5616,7 @@ class Trainer:
                             advantages_WK=advantages,
                             selected_WK=selected,
                             kl_coefficient_WK=table.coefficients[windows.rows],
-                            reference_log_distributions=tuple(value[windows.rows] for value in reference_dense),
+                            reference_log_distributions=tuple(head[windows.rows] for head in reference_head_log_probs),
                             advantage_mean=statistics.mean.float(),
                             advantage_sigma=statistics.sigma.float(),
                             denominator=statistics.count.float() / distributed.world_size(),
@@ -5647,7 +5650,7 @@ class Trainer:
                                     advantages[start : start + chunk],
                                     selected[start : start + chunk],
                                     table.coefficients[part.rows],
-                                    tuple(value[part.rows] for value in reference_dense),
+                                    tuple(head[part.rows] for head in reference_head_log_probs),
                                     statistics.mean.float(),
                                     statistics.sigma.float(),
                                     statistics.count.float() / distributed.world_size(),
@@ -6095,7 +6098,6 @@ class CheckpointSnapshot:
     simulators: tuple[tuple[str, bytes | NativePoolSnapshot], ...]
     actor: dict[str, object] | None
     manifest: dict[str, object]
-    rank_shards: tuple[CheckpointShard, ...] = ()
 
 
 def _checkpoint_tensors(value: object) -> Iterator[Tensor]:
@@ -6227,29 +6229,42 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
     return CheckpointSnapshot(trainer.update, state, tuple(simulators), actor, manifest)
 
 
-def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
-    """Publish the manifest only after all immutable files are durable."""
+def write_checkpoint_shards(snapshot: CheckpointSnapshot, directory: Path, rank: int) -> list[CheckpointShard]:
+    """Write immutable CPU state without touching the trainer or collectives."""
     import io
 
     directory.mkdir(parents=True, exist_ok=True)
     buffer = io.BytesIO()
     torch.save(snapshot.state, buffer)
-    name, digest = _durable_file(directory, buffer.getvalue(), "rank0.pt")
-    shards: list[CheckpointShard] = [{"name": name, "sha256": digest, "role": "training"}, *snapshot.rank_shards]
+    name, digest = _durable_file(directory, buffer.getvalue(), "rank0.pt" if rank == 0 else "rank.pt")
+    shards: list[CheckpointShard] = [
+        {"name": name, "sha256": digest, "role": "training" if rank == 0 else f"rank{rank}"}
+    ]
     for role, state in snapshot.simulators:
         payload = encode_native_pool(state) if isinstance(state, NativePoolSnapshot) else state
         name, digest = _durable_file(directory, zlib.compress(payload), "sim.zlib")
-        shards.append({"name": name, "sha256": digest, "role": role})
+        shards.append({"name": name, "sha256": digest, "role": role if rank == 0 else f"rank{rank}_{role}"})
     if snapshot.actor is not None:
         buffer = io.BytesIO()
         torch.save(snapshot.actor, buffer)
         name, digest = _durable_file(directory, buffer.getvalue(), "actor.pt")
         shards.append({"name": name, "sha256": digest, "role": "actor"})
-    manifest = {**snapshot.manifest, "shards": shards}
-    temporary = directory / f".manifest-{snapshot.update}-{os.getpid()}.partial"
-    target = directory / f"update-{snapshot.update:08d}.json"
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return shards
+
+
+def write_checkpoint_manifest(
+    directory: Path, update: int, manifest: dict[str, object], shards: list[CheckpointShard]
+) -> Path:
+    """Commit only after every rank's shard names and bytes are durable."""
+    temporary = directory / f".manifest-{update}-{os.getpid()}.partial"
+    target = directory / f"update-{update:08d}.json"
     with temporary.open("w") as output:
-        json.dump(manifest, output, sort_keys=True)
+        json.dump({**manifest, "shards": shards}, output, sort_keys=True)
         output.flush()
         os.fsync(output.fileno())
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
@@ -6263,32 +6278,20 @@ def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
     return target
 
 
+def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
+    shards = write_checkpoint_shards(snapshot, directory, 0)
+    return write_checkpoint_manifest(directory, snapshot.update, snapshot.manifest, shards)
+
+
 def save_checkpoint(trainer: Trainer, directory: Path, provenance: dict[str, str]) -> Path:
     snapshot = capture_checkpoint(trainer, provenance)
     if distributed.world_size() == 1:
         return write_checkpoint(snapshot, directory)
-    import io
-
-    directory.mkdir(parents=True, exist_ok=True)
-    local: list[CheckpointShard] = []
-    if distributed.rank() != 0:
-        buffer = io.BytesIO()
-        torch.save(snapshot.state, buffer)
-        name, digest = _durable_file(directory, buffer.getvalue(), "rank.pt")
-        local.append({"name": name, "sha256": digest, "role": f"rank{distributed.rank()}"})
-        for role, state in snapshot.simulators:
-            payload = encode_native_pool(state) if isinstance(state, NativePoolSnapshot) else state
-            name, digest = _durable_file(directory, zlib.compress(payload), "sim.zlib")
-            local.append({"name": name, "sha256": digest, "role": f"rank{distributed.rank()}_{role}"})
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    shards = tuple(shard for rows in distributed.gather_objects(local) for shard in rows)
+    local = write_checkpoint_shards(snapshot, directory, distributed.rank())
+    shards = [shard for rows in distributed.gather_objects(local) for shard in rows]
     target = directory / f"update-{trainer.update:08d}.json"
     if distributed.rank() == 0:
-        write_checkpoint(dataclasses.replace(snapshot, rank_shards=shards), directory)
+        write_checkpoint_manifest(directory, snapshot.update, snapshot.manifest, shards)
     distributed.gather_objects(True)
     return target
 
@@ -6354,6 +6357,90 @@ class CheckpointWorker:
         self.pending = self.executor.submit(
             _write_and_publish_checkpoint, snapshot, self.directory, self.publisher, metadata
         )
+
+    def close(self) -> None:
+        try:
+            self.wait()
+        finally:
+            self.executor.shutdown(wait=True)
+
+
+def _publish_distributed_checkpoint(
+    directory: Path,
+    update: int,
+    manifest: dict[str, object],
+    shards: list[CheckpointShard],
+    publisher: self_play_publication.CheckpointPublisher | None,
+    metadata: dict[Path, bytes] | None,
+) -> None:
+    checkpoint = write_checkpoint_manifest(directory, update, manifest, shards)
+    if publisher is not None:
+        publisher.submit(checkpoint, metadata=metadata)
+        publisher.wait()
+
+
+class DistributedCheckpointWorker:
+    """Write rank-local snapshots in parallel; keep collectives on the main thread."""
+
+    def __init__(
+        self, directory: Path, provenance: dict[str, str], publisher: self_play_publication.CheckpointPublisher | None
+    ) -> None:
+        self.directory = directory
+        self.provenance = dict(provenance)
+        self.publisher = publisher
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkpoint-write")
+        self.pending: Future[list[CheckpointShard]] | None = None
+        self.publication: Future[None] | None = None
+        self.manifest: dict[str, object] = {}
+        self.metadata: dict[Path, bytes] | None = None
+        self.update = 0
+        self.started = 0.0
+
+    def check(self, *, wait: bool = False) -> None:
+        if self.publication is not None and self.publication.done():
+            self.publication.result()
+        if self.pending is None:
+            return
+        if self.pending.done() and self.pending.exception() is not None:
+            self.pending.result()
+        if not wait and not all(distributed.gather_objects(self.pending.done())):
+            return
+        shards = [shard for rows in distributed.gather_objects(self.pending.result()) for shard in rows]
+        self.pending = None
+        if distributed.rank() == 0:
+            print(
+                f"checkpoint_files_ready update={self.update} seconds={time.perf_counter() - self.started:.3f}",
+                flush=True,
+            )
+            self.publication = self.executor.submit(
+                _publish_distributed_checkpoint,
+                self.directory,
+                self.update,
+                self.manifest,
+                shards,
+                self.publisher,
+                self.metadata,
+            )
+        self.metadata = None
+
+    def wait(self) -> None:
+        self.check(wait=True)
+        if self.publication is not None:
+            self.publication.result()
+            self.publication = None
+        # Compaction must finish before any rank starts the next checkpoint.
+        distributed.gather_objects(True)
+
+    def submit(self, trainer: Trainer) -> None:
+        self.wait()
+        self.started = time.perf_counter()
+        snapshot = capture_checkpoint(trainer, self.provenance)
+        self.update, self.manifest = snapshot.update, snapshot.manifest
+        self.metadata = self.publisher.capture_metadata() if self.publisher is not None else None
+        capture_seconds = time.perf_counter() - self.started
+        if distributed.rank() == 0:
+            print(f"checkpoint_snapshot update={self.update} training_seconds={capture_seconds:.3f}", flush=True)
+        self.pending = self.executor.submit(write_checkpoint_shards, snapshot, self.directory, distributed.rank())
 
     def close(self) -> None:
         try:
@@ -6797,6 +6884,9 @@ def run_distributed_training(
         trainer.memory.output.mkdir(exist_ok=True)
     with contextlib.ExitStack() as resources, distributed.fail_fast():
         log = None
+        checkpoints = resources.enter_context(
+            contextlib.closing(DistributedCheckpointWorker(output / "checkpoints", provenance, publisher))
+        )
         if primary:
             resources.enter_context(
                 wandb.init(
@@ -6811,8 +6901,7 @@ def run_distributed_training(
                 (output / "head-start.json").write_text(json.dumps(dataclasses.asdict(head_start), indent=2))
                 wandb.log({"global_step": trainer.update, **head_start.metrics()})
         while trainer.update < updates:
-            if primary and publisher is not None:
-                publisher.check()
+            checkpoints.check()
             warming = trainer.warming
             batch, metrics = trainer.run_update()
             del batch
@@ -6825,11 +6914,7 @@ def run_distributed_training(
                 log.write(json.dumps(metrics, sort_keys=True) + "\n")
                 log.flush()
             if trainer.update % trainer.config.checkpoint_interval == 0 or trainer.update == updates:
-                # All ranks finish durable local state before rank zero publishes.
-                checkpoint = save_checkpoint(trainer, output / "checkpoints", provenance)
-                if primary and publisher is not None:
-                    publisher.submit(checkpoint)
-                distributed.gather_objects(True)
+                checkpoints.submit(trainer)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -6862,6 +6947,8 @@ class NativeCli:
     resume_learner: Path | None = None
     training: TrainConfig = TrainConfig()
     verify_resume: bool = False
+    resume_check: Path | None = None
+    prepare_resume_check: bool = False
     verify_only: bool = False
     wandb_project: str | None = None
     profiling: ProfileConfig | None = None
@@ -6877,6 +6964,16 @@ class NativeCli:
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
+        if self.prepare_resume_check and self.resume_check is None:
+            raise ValueError("preparing resume controls requires a resume-check directory")
+        if self.resume_check is not None and (
+            self.resume is None
+            or self.measurement
+            or self.profiling is not None
+            or self.verify_resume
+            or (self.prepare_resume_check and (self.publication is not None or self.wandb_project is not None))
+        ):
+            raise ValueError("resume controls require an exact resume; preparation must not publish or log training")
         if self.require_compile_cache and self.compile_cache is None:
             raise ValueError("required compiler artifacts need a compile cache directory")
         if (self.compile_cache_seed is None) != (self.compile_cache_seed_source is None) or (
@@ -7063,6 +7160,10 @@ def train_native(config: NativeCli) -> None:
 
 def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> None:
     startup_started = time.perf_counter()
+    if torch.device(config.device).type == "cuda":
+        from hal.inference.inductor_compat import install_reduction_barrier
+
+        install_reduction_barrier()
     torch.set_num_threads(2)
     if config.training.deterministic:
         workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
@@ -7195,6 +7296,18 @@ def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> N
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)
             return
+        if config.resume_check is not None:
+            assert config.resume is not None
+            check_resume_process(
+                trainer,
+                config.resume,
+                config.resume_check,
+                provenance,
+                prepare=config.prepare_resume_check,
+                source_git_sha=config.resume_source,
+            )
+            if config.prepare_resume_check:
+                return
         publisher = (
             resources.enter_context(contextlib.closing(self_play_publication.CheckpointPublisher(config.publication)))
             if config.publication is not None and distributed.rank() == 0
@@ -8277,7 +8390,9 @@ def _rng_hash() -> str:
             random.getstate(),
             np.random.get_state(),
             torch.get_rng_state(),
-            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else (),
+            ([torch.cuda.get_rng_state()] if distributed.world_size() > 1 else torch.cuda.get_rng_state_all())
+            if torch.cuda.is_available()
+            else (),
         )
     )
 
@@ -8437,6 +8552,120 @@ def _compare_resume_updates(
             "passed": integer_equal and error_rms <= tolerance_rms,
         }
     return ResumeComparison(tensors, groups)
+
+
+class ResumeControls(TypedDict):
+    format: str
+    manifest_sha256: str
+    provenance: dict[str, str]
+    world_size: int
+    rank: int
+    boundary: dict[str, str]
+    next_batch_sha256: list[str]
+    next_scheduler_sha256: list[str]
+    updates: list[dict[str, Tensor]]
+
+
+def check_resume_process(
+    trainer: Trainer,
+    manifest: Path,
+    directory: Path,
+    provenance: dict[str, str],
+    *,
+    prepare: bool,
+    source_git_sha: str | None = None,
+) -> None:
+    """Compare a fresh process's next update with two saved controls, then rewind.
+
+    Controls and reports are rank-local. Probe updates never enter production
+    metrics or replace the source checkpoint. Both processes retain the same
+    compiler settings and graphs used by training.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    rank = distributed.rank()
+    path = directory / f"rank{rank}-controls.pt"
+    restore_checkpoint(trainer, manifest, provenance, source_git_sha=source_git_sha)
+    boundary = _resume_state_hashes(trainer)
+    identity = {
+        "format": "hal.o65.resume-controls.v1",
+        "manifest_sha256": sha256(manifest),
+        "provenance": provenance,
+        "world_size": distributed.world_size(),
+        "rank": rank,
+        "boundary": boundary,
+    }
+    started = time.perf_counter()
+    if rank == 0:
+        print(f"resume_check_started prepare={prepare} update={trainer.update}", flush=True)
+    controls: ResumeControls
+    if prepare:
+        if path.exists():
+            raise FileExistsError(path)
+        controls = ResumeControls(
+            format="hal.o65.resume-controls.v1",
+            manifest_sha256=sha256(manifest),
+            provenance=provenance,
+            world_size=distributed.world_size(),
+            rank=rank,
+            boundary=boundary,
+            next_batch_sha256=[],
+            next_scheduler_sha256=[],
+            updates=[],
+        )
+    else:
+        controls = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        if (
+            not isinstance(controls, dict)
+            or set(controls) != set(ResumeControls.__annotations__)
+            or any(controls[key] != value for key, value in identity.items())
+            or any(len(controls[key]) != 2 for key in ("updates", "next_batch_sha256", "next_scheduler_sha256"))
+        ):
+            raise ValueError("resume control identity or restored state differs")
+    comparison = None
+    batch_hash = scheduler_hash = ""
+    try:
+        for _ in range(2 if prepare else 1):
+            _clear_execution_caches(trainer)
+            batch, _ = trainer.run_update()
+            batch_hash = _batch_hash(batch)
+            del batch
+            scheduler_hash = _state_hash((trainer.scheduler.state_dict(), trainer.update, trainer.actor_steps))
+            updated = _update_tensors(trainer)
+            if prepare:
+                controls["updates"].append(updated)
+                controls["next_batch_sha256"].append(batch_hash)
+                controls["next_scheduler_sha256"].append(scheduler_hash)
+            else:
+                comparison = _compare_resume_updates(controls["updates"][0], controls["updates"][1], updated)
+            restore_checkpoint(trainer, manifest, provenance, source_git_sha=source_git_sha)
+            if _resume_state_hashes(trainer) != boundary:
+                raise ValueError("resume probe failed to restore its checkpoint boundary")
+        if prepare:
+            torch.save(controls, path)
+        else:
+            assert comparison is not None
+            report = {
+                **identity,
+                "format": "hal.o65.resume-process-check.v1",
+                "controls_sha256": sha256(path),
+                "next_batch_sha256": [*controls["next_batch_sha256"], batch_hash],
+                "next_scheduler_sha256": [*controls["next_scheduler_sha256"], scheduler_hash],
+                "groups": comparison.groups,
+                "passed": comparison.passed and set(controls["next_scheduler_sha256"]) == {scheduler_hash},
+                "elapsed_seconds": time.perf_counter() - started,
+            }
+            (directory / f"rank{rank}-result.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+            if not report["passed"]:
+                raise ValueError(f"fresh-process resume exceeded control noise; see {directory}")
+        distributed.gather_objects(True)
+        if not prepare:
+            # Keep compact comparison evidence; successful control tensors are temporary.
+            path.unlink()
+        if rank == 0:
+            print(f"resume_check_complete prepare={prepare} seconds={time.perf_counter() - started:.3f}", flush=True)
+    finally:
+        restore_checkpoint(trainer, manifest, provenance, source_git_sha=source_git_sha)
+        _clear_execution_caches(trainer)
 
 
 def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[str, str]) -> None:

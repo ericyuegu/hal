@@ -1,5 +1,4 @@
 import functools
-import os
 from pathlib import Path
 
 import numpy as np
@@ -18,23 +17,12 @@ from hal.data.policy_world_schema import encode_policy_world_replay
 from hal.data.policy_world_schema import policy_row_from_world
 from hal.data.schema import Rank
 from hal.data.streaming_compat import patch_streaming
+from hal.paths import DEV_MDS_DIR
 from hal.wire import ITEM_FIELD_SUFFIXES
 from hal.wire import ITEM_SLOTS
 from hal.wire import item_column
 
-_V7_TRAIN = Path(
-    os.environ.get(
-        "HAL_POLICY_WORLD_V7_TRAIN",
-        str(
-            Path(__file__).resolve().parents[1]
-            / "data"
-            / "processed"
-            / "ranked-anonymized-1"
-            / "mds-v7-sub4"
-            / "train"
-        ),
-    )
-)
+_SOURCE_MDS = Path(DEV_MDS_DIR) / "train"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -44,11 +32,9 @@ def _prepare_streaming() -> None:
 
 @functools.lru_cache(maxsize=1)
 def _source() -> dict[str, object]:
-    if not _V7_TRAIN.is_dir():
-        if "HAL_POLICY_WORLD_V7_TRAIN" in os.environ:
-            pytest.fail(f"requested v7 fixture is missing: {_V7_TRAIN}")
-        pytest.skip("local v7 subset is not available")
-    return dict(StreamingDataset(local=str(_V7_TRAIN), batch_size=1, shuffle=False)[0])
+    if not (_SOURCE_MDS / "index.json").is_file():
+        pytest.fail(f"dev MDS fixture missing at {_SOURCE_MDS}; run `python -m hal.scripts.fetch --name dev-mds`")
+    return dict(StreamingDataset(local=str(_SOURCE_MDS), batch_size=1, shuffle=False)[0])
 
 
 def test_real_v7_world_round_trip_preserves_ranks_and_items() -> None:

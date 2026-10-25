@@ -14,6 +14,7 @@ import signal
 import subprocess
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -176,9 +177,11 @@ class Request:
     windows_per_step: int | None = None
     actor_microbatches: int = 1
     measurement: bool = False
+    cold_cache: bool = False
     measurement_sizes: tuple[str, ...] = ()
     resume_source: str | None = None
     resume_manifest_sha256: str | None = None
+    verify_resume: bool = False
 
     def __post_init__(self) -> None:
         validate_name(self.name)
@@ -194,8 +197,17 @@ class Request:
             raise ValueError("resume manifest requires DDP training and a full SHA-256")
         if self.resume_source is not None and self.resume_manifest_sha256 is None:
             raise ValueError("source-changing resume requires a checkpoint manifest SHA-256")
-        if type(self.gpus) is not int or not 1 <= self.gpus <= 8 or (self.gpus > 1) != (self.mode == "ddp"):
-            raise ValueError("DDP requires 2..8 GPUs; existing modes require one GPU")
+        if self.verify_resume and (self.mode != "ddp" or self.measurement):
+            raise ValueError("resume verification requires DDP training")
+        if (
+            type(self.gpus) is not int
+            or not 1 <= self.gpus <= 8
+            or (self.gpus > 1 and self.mode != "ddp")
+            or (self.mode == "ddp" and self.gpus == 1 and not self.measurement)
+        ):
+            raise ValueError("DDP requires 2..8 GPUs; one GPU is allowed for measurement")
+        if self.cold_cache and (self.mode != "ddp" or not self.measurement or self.gpus != 1):
+            raise ValueError("cold compiler preparation requires a one-GPU measurement")
         if type(self.ddp_updates) is not int or self.ddp_updates < 1:
             raise ValueError("DDP updates must be a positive integer")
         if self.mode == "ddp" and self.resume_learner is not None:
@@ -210,8 +222,6 @@ class Request:
                 or self.windows_per_step % self.actor_microbatches
             ):
                 raise ValueError("actor microbatches must divide windows per step")
-            if not self.measurement and self.ddp_updates != 256:
-                raise ValueError("O64 training requires 256 updates; use measurement for short checks")
             if (self.damage_weight, self.stock_weight, self.game_win_weight) != (0.1, 120.0, 120.0):
                 raise ValueError("O64 DDP requires outcome reward (0.1, 120, 120)")
         elif self.windows_per_step is not None or self.measurement or self.measurement_sizes:
@@ -301,12 +311,15 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             str(request.ddp_updates),
             "--compile-cache",
             str(RESULTS / "compile-cache"),
-            "--require-compile-cache",
         ]
+        if not request.cold_cache:
+            argv.append("--require-compile-cache")
         if request.resume_source is not None:
             argv.extend(("--resume-source", request.resume_source))
         if request.resume_manifest_sha256 is not None:
             argv.extend(("--resume-manifest-sha256", request.resume_manifest_sha256))
+        if request.verify_resume:
+            argv.append("--verify-resume")
         if request.measurement:
             argv.append("--measurement")
         else:
@@ -551,6 +564,25 @@ def run_child(request: Request, output: Path, started: float) -> int:
         log.flush()
         subprocess.run(["nvidia-smi", "-q"], stdout=log, stderr=subprocess.STDOUT, check=True)
     with (output / "run.log").open("a") as log:
+        if request.cold_cache:
+            report = output / "barrier-regression.xml"
+            code = run_pilot_child(
+                [
+                    "/opt/venv/bin/python",
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "tests/test_inductor_compat.py",
+                    f"--junitxml={report}",
+                ],
+                env,
+                log,
+                remaining_seconds(request, time.time()) - 90,
+            )
+            if code:
+                return code
+            if any(case.find("skipped") is not None for case in ET.parse(report).iter("testcase")):
+                raise RuntimeError("B200 barrier regression must execute without skips")
         if request.measurement:
             results = []
             for matches, windows in sizes or ((request.matches, request.windows_per_step),):
@@ -559,6 +591,16 @@ def run_child(request: Request, output: Path, started: float) -> int:
                     request, matches=matches, windows_per_step=windows, measurement_sizes=()
                 )
                 count = o65_production.shards_per_gpu(matches) * request.gpus
+                if request.cold_cache:
+                    cold_command = command(selected, cpus[:count])
+                    position = cold_command.index("--output") + 1
+                    cold_command[position] += "-cold"
+                    code = run_pilot_child(cold_command, env, log, remaining_seconds(request, time.time()) - 90)
+                    results.append({"matches": matches, "windows": windows, "cold": True, "exit_code": code})
+                    if code:
+                        (output / "measurement-sweep.json").write_text(json.dumps(results, indent=2))
+                        return code
+                    selected = dataclasses.replace(selected, cold_cache=False)
                 code = run_pilot_child(
                     command(selected, cpus[:count]), env, log, remaining_seconds(request, time.time()) - 90
                 )
@@ -720,6 +762,7 @@ class Args:
     resume_learner: str | None = None
     resume_source: str | None = None
     resume_manifest_sha256: str | None = None
+    verify_resume: bool = False
     damage_weight: float | None = None
     stock_weight: float = 120.0
     game_win_weight: float | None = None
@@ -728,6 +771,7 @@ class Args:
     windows_per_step: int | None = None
     actor_microbatches: int = 1
     measurement: bool = False
+    cold_cache: bool = False
     measurement_sizes: tuple[str, ...] = ()
     b200_max_usd: float | None = None
     secret: str = "hal"
@@ -769,6 +813,7 @@ def main(args: Args) -> None:
         resume_learner=args.resume_learner,
         resume_source=args.resume_source,
         resume_manifest_sha256=args.resume_manifest_sha256,
+        verify_resume=args.verify_resume,
         damage_weight=args.damage_weight if args.damage_weight is not None else (0.1 if args.mode == "ddp" else 1.0),
         stock_weight=args.stock_weight,
         game_win_weight=args.game_win_weight
@@ -779,6 +824,7 @@ def main(args: Args) -> None:
         windows_per_step=args.windows_per_step,
         actor_microbatches=args.actor_microbatches,
         measurement=args.measurement,
+        cold_cache=args.cold_cache,
         measurement_sizes=args.measurement_sizes,
     )
     args.output.mkdir(parents=True, exist_ok=True)
@@ -801,6 +847,8 @@ def main(args: Args) -> None:
     )
     cores = maximum_shards * request.gpus if args.mode == "ddp" else CPU_CORES
     memory = MEMORY_MIB * request.gpus
+    if request.cold_cache:
+        cores, memory = max(16, cores), max(131072, memory)
     rate = (
         (B200_USD_SECOND * request.gpus if args.mode == "ddp" else GPU_USD_SECOND)
         + cores * CPU_USD_SECOND
@@ -882,6 +930,8 @@ def main(args: Args) -> None:
         )
         if request.measurement:
             launch_command.append("--measurement")
+        if request.cold_cache:
+            launch_command.append("--cold-cache")
         if request.measurement_sizes:
             launch_command.extend(("--measurement-sizes", *request.measurement_sizes))
     if args.resume_learner is not None:
@@ -890,6 +940,8 @@ def main(args: Args) -> None:
         launch_command.extend(("--resume-source", args.resume_source))
     if args.resume_manifest_sha256 is not None:
         launch_command.extend(("--resume-manifest-sha256", args.resume_manifest_sha256))
+    if args.verify_resume:
+        launch_command.append("--verify-resume")
     launch_command.extend(
         (
             "--damage-weight",

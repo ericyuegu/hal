@@ -426,9 +426,9 @@ def test_kl_rejects_invalid_executed_log_probabilities(value: float, reference: 
     batch = run.prepare(run.engine.collect(0))
     policy = batch.old
     target = batch.reference
-    probabilities = target.log_distributions if reference else policy.log_distributions
+    head_log_probs = target.log_distributions if reference else policy.log_distributions
     row, frame = torch.nonzero(batch.decisions.executed_factors_JF[:, ::4])[0]
-    probabilities[0][row, frame, 0] = value
+    head_log_probs[0][row, frame, 0] = value
     with pytest.raises(ValueError):
         exp.factor_kl(policy, target, batch.decisions.executed_factors_JF)
 

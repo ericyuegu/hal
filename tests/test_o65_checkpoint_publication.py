@@ -45,14 +45,28 @@ def _distributed_worker(rank: int, rendezvous: str, directory: str) -> None:
     update = run.run_update
 
     def run_update():
-        if run.update == 1 and rank == 0:
+        uploading = run.update == 1 and rank == 0
+        if uploading:
             assert started.wait(timeout=10)
+        result = update()
+        if uploading:
             assert publisher is not None and publisher.pending and not publisher.pending[0].done()
             release.set()
-        return update()
+        return result
+
+    check = exp.DistributedCheckpointWorker.check
+
+    def check_after_local_write(worker: exp.DistributedCheckpointWorker, *, wait: bool = False) -> None:
+        # Control file readiness so this test isolates overlap with network I/O.
+        # The rank-worker test separately blocks disk writes during an update.
+        check(worker, wait=True)
 
     try:
-        with patch.object(publication, "publish", publish), patch.object(run, "run_update", run_update):
+        with (
+            patch.object(publication, "publish", publish),
+            patch.object(run, "run_update", run_update),
+            patch.object(exp.DistributedCheckpointWorker, "check", check_after_local_write),
+        ):
             exp.run_training(run, 2, output, PROVENANCE, publisher=publisher)
             if publisher is not None:
                 publisher.close()

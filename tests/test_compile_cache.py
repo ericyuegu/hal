@@ -13,6 +13,7 @@ from torch._inductor.output_code import CompiledFxGraph
 from torch._inductor.triton_bundler import TritonBundle
 from torch._inductor.triton_bundler import TritonKernelArtifact
 from torch._inductor.triton_bundler import TritonKernelArtifacts
+from torch.compiler import config as compiler_config
 
 from hal.inference import compile_cache
 from hal.inference.triton_cache import WarmCacheManager
@@ -40,6 +41,8 @@ def identity() -> compile_cache.CacheIdentity:
         ("gpu", "other"),
         ("capability", (12, 0)),
         ("source_sha256", "b" * 64),
+        ("enable_pdl", True),
+        ("cache_key_tag", "hal-inductor-reduction-barrier-v1"),
     ],
 )
 def test_cache_identity_isolates_versions_hardware_and_source(field: str, value: object) -> None:
@@ -108,6 +111,28 @@ def test_cache_rejects_orphaned_modular_cache(tmp_path: Path) -> None:
     (directory / "inductor").mkdir(parents=True)
     with pytest.raises(ValueError, match="no identity"):
         compile_cache.CompileCache(tmp_path, identity())
+
+
+def test_cache_rejects_unpatched_seed_even_with_explicit_source_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "RTX 3060")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (8, 6))
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"unpatched", SimpleNamespace(artifacts={})))
+    loaded: list[bytes] = []
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda payload: loaded.append(payload))
+    with compiler_config.patch(cache_key_tag=""):
+        unpatched = compile_cache.current_identity("a" * 64, torch.device("cuda"))
+    seed = compile_cache.CompileCache(tmp_path / "seed", unpatched)
+    assert seed.save()
+    with compiler_config.patch(cache_key_tag="hal-inductor-reduction-barrier-v1"):
+        patched = compile_cache.current_identity("b" * 64, torch.device("cuda"))
+    assert patched.cache_key_tag == "hal-inductor-reduction-barrier-v1"
+    monkeypatch.setenv("TRITON_CACHE_DIR", "unchanged")
+    with pytest.raises(ValueError, match="configuration"):
+        compile_cache.CompileCache(tmp_path / "new", patched, seed_root=tmp_path / "seed", seed_identity=unpatched)
+    assert not loaded
+    assert os.environ["TRITON_CACHE_DIR"] == "unchanged"
 
 
 def test_cache_rejects_unreadable_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

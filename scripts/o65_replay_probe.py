@@ -196,6 +196,9 @@ def capture_reference_log_probs(
 
 
 def main(args: Args) -> None:
+    from hal.inference.inductor_compat import install_reduction_barrier
+
+    install_reduction_barrier()
     torch.manual_seed(65)
     device = torch.device("cuda", torch.cuda.current_device())
     checkpoint = load_evaluation_checkpoint(args.checkpoint, device=device)
