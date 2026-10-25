@@ -3,6 +3,7 @@
 import dataclasses
 import hashlib
 import json
+import sys
 import threading
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler
@@ -160,6 +161,7 @@ def test_r2_retries_multipart_requests_and_commits_only_complete_uploads(
     uploaded: dict[str, str] = {}
     parts: dict[int, str] = {}
     attempts: dict[int, int] = {}
+    server_errors: list[str] = []
     aborted = threading.Event()
     overlapping_parts = threading.Event()
     lock = threading.Lock()
@@ -247,7 +249,14 @@ def test_r2_retries_multipart_requests_and_commits_only_complete_uploads(
             nonlocal commits
             commits += 1
 
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+    class Server(ThreadingHTTPServer):
+        def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
+            # socketserver catches handler assertions; SDK retries must not hide them.
+            with lock:
+                server_errors.append(repr(sys.exception()))
+            super().handle_error(request, client_address)
+
+    with Server(("127.0.0.1", 0), Handler) as server:
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         monkeypatch.setenv("AWS_ENDPOINT_URL", f"http://127.0.0.1:{server.server_port}")
@@ -278,3 +287,4 @@ def test_r2_retries_multipart_requests_and_commits_only_complete_uploads(
         finally:
             server.shutdown()
             thread.join(timeout=10)
+    assert not server_errors, server_errors
