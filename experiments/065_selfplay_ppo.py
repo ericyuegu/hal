@@ -4815,7 +4815,9 @@ def percentile_bin(u: float) -> int:
 
 
 class Trainer:
-    def __init__(self, engine: RolloutEngine, config: TrainConfig) -> None:
+    def __init__(
+        self, engine: RolloutEngine, config: TrainConfig, *, actor_failure_directory: Path | None = None
+    ) -> None:
         if torch.are_deterministic_algorithms_enabled() != config.deterministic:
             raise ValueError("trainer determinism differs from the configured execution mode")
         if engine.sampler.rng.seed != config.seed:
@@ -4829,6 +4831,7 @@ class Trainer:
         self.policy = engine.policy
         self.reference = engine.anchors[0]
         self.config = config
+        self.actor_failure_directory = actor_failure_directory
         actor_ids = {id(p) for p in self.policy.actor_parameters()}
         critic_ids = {id(p) for p in self.policy.critic_parameters()}
         if not actor_ids or not critic_ids or actor_ids & critic_ids:
@@ -5586,17 +5589,17 @@ class Trainer:
                         )
                     with sample(self.profile, "actor_work", limit=0):
                         # Statistics and the denominator cover the complete optimizer step.
+                        targets = ActorTargets(
+                            behavior_log_probs_WKF=table.behavior[windows.rows],
+                            advantages_WK=advantages,
+                            selected_WK=selected,
+                            kl_coefficient_WK=table.coefficients[windows.rows],
+                            reference_log_distributions=tuple(value[windows.rows] for value in reference_dense),
+                            advantage_mean=statistics.mean.float(),
+                            advantage_sigma=statistics.sigma.float(),
+                            denominator=statistics.count.float() / distributed.world_size(),
+                        )
                         if isinstance(self.policy, TransformerPolicy):
-                            targets = ActorTargets(
-                                table.behavior[windows.rows],
-                                advantages,
-                                selected,
-                                table.coefficients[windows.rows],
-                                tuple(value[windows.rows] for value in reference_dense),
-                                statistics.mean.float(),
-                                statistics.sigma.float(),
-                                statistics.count.float() / distributed.world_size(),
-                            )
                             result, current = self.policy.grouped_actor_step(
                                 windows,
                                 targets,
@@ -5620,7 +5623,7 @@ class Trainer:
                                     if cfg.actor_microbatches > 1
                                     else windows
                                 )
-                                targets = ActorTargets(
+                                chunk_targets = ActorTargets(
                                     table.behavior[part.rows],
                                     advantages[start : start + chunk],
                                     selected[start : start + chunk],
@@ -5630,7 +5633,9 @@ class Trainer:
                                     statistics.sigma.float(),
                                     statistics.count.float() / distributed.world_size(),
                                 )
-                                parts.append(self.policy.actor_step(part, targets, clip_epsilon=cfg.clip_epsilon))
+                                parts.append(
+                                    self.policy.actor_step(part, chunk_targets, clip_epsilon=cfg.clip_epsilon)
+                                )
                                 if cfg.actor_microbatches > 1:
                                     for gradient, parameter in zip(total, self.policy.actor_parameters(), strict=True):
                                         if parameter.grad is not None:
@@ -5661,6 +5666,31 @@ class Trainer:
                                 )
                             ),
                         )
+                        assert table.evaluation is not None
+                        current_evaluation = window_evaluation(
+                            current,
+                            table.actions[windows.rows].flatten(0, 1),
+                            torch.arange(windows.rows.numel(), device=windows.rows.device),
+                        )
+                        behavior_evaluation = _take_evaluation(table.evaluation, windows.rows.flatten())
+                        executed = current.factor_mask_WKF & selected[..., None]
+                        mask = executed.flatten(0, 1)
+                        # Establish the live full-head invariant before any actor state changes.
+                        failure: str | None = None
+                        try:
+                            old_kl = factor_kl(current_evaluation, behavior_evaluation, mask)
+                        except ValueError as error:
+                            if self.actor_failure_directory is None:
+                                raise
+                            failure = str(error)
+                            old_kl = torch.zeros_like(current_evaluation.log_probs)
+                        if self.actor_failure_directory is not None:
+                            failures = distributed.gather_objects(failure)
+                            if any(message is not None for message in failures):
+                                self.save_actor_failure(step, windows, targets, current, result, failures)
+                                # Peers must finish their evidence before torchrun terminates them.
+                                distributed.gather_objects(True)
+                                raise ValueError(f"actor head validation failed; captured all ranks: {failures}")
                     with sample(self.profile, "gradient_noise", limit=0):
                         distributed.average_gradients(self.policy.actor_parameters())
                         global_windows = distributed.sum_tensor(live.sum())
@@ -5679,7 +5709,6 @@ class Trainer:
                         kl_losses.append(result.kl_loss.detach())
                         ratio = result.joint_ratio_WK[selected].detach()
                         ratios.append(ratio)
-                        executed = current.factor_mask_WKF & selected[..., None]
                         log_ratio = (
                             torch.where(executed, current.log_probs_WKF - table.behavior[windows.rows], 0)
                             .sum(-1)[selected]
@@ -5689,15 +5718,6 @@ class Trainer:
                         metrics[f"policy/old_log_ratio_step{step}"] = self.metric_totals.mean(
                             f"policy/old_log_ratio_step{step}", log_ratio
                         )
-                        assert table.evaluation is not None
-                        new = window_evaluation(
-                            current,
-                            table.actions[windows.rows].flatten(0, 1),
-                            torch.arange(windows.rows.numel(), device=windows.rows.device),
-                        )
-                        previous = _take_evaluation(table.evaluation, windows.rows.flatten())
-                        mask = (current.factor_mask_WKF & selected[..., None]).flatten(0, 1)
-                        old_kl = factor_kl(new, previous, mask)
                         metrics[f"policy/old_kl_step{step}"] = self.metric_totals.ratio(
                             f"policy/old_kl_step{step}",
                             float(torch.where(mask, old_kl, 0).sum()),
@@ -5723,6 +5743,65 @@ class Trainer:
             }
         )
         return metrics
+
+    def save_actor_failure(
+        self,
+        step: int,
+        windows: ReplayBatch,
+        targets: ActorTargets,
+        current: ReplayOutput,
+        result: ActorLoss,
+        failures: list[str | None],
+    ) -> None:
+        """Persist replay inputs and unchanged actor state at the failed pre-step check."""
+        assert self.actor_failure_directory is not None
+        directory = self.actor_failure_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"update-{self.update:08d}-step-{step:04d}-rank{distributed.rank()}.pt"
+        temporary = path.with_suffix(".partial")
+        try:
+            torch.save(
+                {
+                    "format": "hal.o65.actor-failure.v1",
+                    "update": self.update,
+                    "step": step,
+                    "actor_steps": self.actor_steps,
+                    "rank": distributed.rank(),
+                    "environment": _environment(),
+                    "trainer_sha256": sha256(Path(__file__)),
+                    "configuration_sha256": _configuration_digest(self),
+                    "training": dataclasses.asdict(self.config),
+                    "failures": failures,
+                    "inputs": windows.inputs(),
+                    "rows": windows.rows,
+                    "targets": {field.name: getattr(targets, field.name) for field in dataclasses.fields(targets)},
+                    "output": {
+                        "log_probs_WKF": current.log_probs_WKF,
+                        "log_distributions": current.log_distributions,
+                        "factor_mask_WKF": current.factor_mask_WKF,
+                    },
+                    "loss": {field.name: getattr(result, field.name) for field in dataclasses.fields(result)},
+                    "model": self.policy.model.state_dict(),
+                    "actor_optimizer": self.actor_optimizer.state_dict(),
+                    "scheduler": self.scheduler.state_dict(),
+                    "gradients": {
+                        name: parameter.grad
+                        for name, parameter in self.policy.model.named_parameters()
+                        if parameter.requires_grad and parameter.grad is not None
+                    },
+                    "python_rng": random.getstate(),
+                    "numpy_rng": np.random.get_state(),
+                    "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state(self.policy.device)
+                    if self.policy.device.type == "cuda"
+                    else None,
+                },
+                temporary,
+            )
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(json.dumps({"actor_failure_capture": str(path), "sha256": sha256(path)}), flush=True)
 
     def _warmup(self, batch: PreparedUpdate) -> dict[str, float]:
         for timing in self.engine.sampler.schedule.configurations:
@@ -6774,6 +6853,7 @@ class NativeCli:
     publication: self_play_publication.Args | None = None
     measurement: bool = False
     measurement_rank: int = 0
+    actor_failure_directory: Path | None = None
 
     def __post_init__(self) -> None:
         validate_decoder_precision(self.decoder_precision)
@@ -7063,7 +7143,7 @@ def train_native_rank(config: NativeCli, *, cache_seed: Path | None = None) -> N
             EpisodeSampler(sampling, schedule, CounterRng(config.training.seed)),
             {0: policy.frozen_copy()},
         )
-        trainer = Trainer(engine, config.training)
+        trainer = Trainer(engine, config.training, actor_failure_directory=config.actor_failure_directory)
         if config.profiling is not None:
             trainer.startup_memory.output = config.output.with_name(f"{config.output.name}-startup")
         distributed.check_parameters(tuple(policy.model.parameters()))

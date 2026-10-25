@@ -1044,6 +1044,61 @@ def test_trainer_rejects_nonfinite_critic_gradient_before_optimizer_step(value: 
     assert run.updating
 
 
+@pytest.mark.parametrize("fault", ["normalization", "support"])
+@pytest.mark.parametrize("capture", [False, True])
+def test_live_actor_head_failure_preserves_actor_optimizer_and_schedule(
+    fault: str, capture: bool, tmp_path: Path
+) -> None:
+    class FaultPolicy(ToyPolicy):
+        corrupt = False
+
+        def actor_step(self, batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
+            result, output = super().actor_step(batch, targets, clip_epsilon=clip_epsilon)
+            if self.corrupt:
+                heads = tuple(logs.clone() for logs in output.log_distributions)
+                if fault == "normalization":
+                    heads[1].sub_(0.05)
+                else:
+                    heads[1][..., 0] = -torch.inf
+                output = dataclasses.replace(output, log_distributions=heads)
+            return result, output
+
+    base = trainer(groups=1)
+    policy = FaultPolicy("cpu")
+    engine = exp.RolloutEngine(base.engine.groups, policy, base.engine.sampler, {0: policy.frozen_copy()})
+    engine.initialize()
+    run = exp.Trainer(engine, base.config, actor_failure_directory=tmp_path if capture else None)
+    run.run_update()
+    assert run.actor_optimizer.state and run.actor_steps > 0
+    parameters = tuple(parameter.detach().clone() for parameter in policy.actor_parameters())
+    optimizer = copy.deepcopy(run.actor_optimizer.state_dict())
+    scheduler = copy.deepcopy(run.scheduler.state_dict())
+    steps, update = run.actor_steps, run.update
+    policy.corrupt = True
+    with pytest.raises(ValueError, match="normalized|identical support"):
+        run.run_update()
+    for actual, expected in zip(policy.actor_parameters(), parameters, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    actual_optimizer = run.actor_optimizer.state_dict()
+    assert actual_optimizer["param_groups"] == optimizer["param_groups"]
+    for index, state in optimizer["state"].items():
+        for name, expected in state.items():
+            torch.testing.assert_close(actual_optimizer["state"][index][name], expected, rtol=0, atol=0)
+    assert run.scheduler.state_dict() == scheduler
+    assert (run.actor_steps, run.update) == (steps, update)
+    if capture:
+        (path,) = tmp_path.glob("*.pt")
+        saved = torch.load(path, map_location="cpu", weights_only=False)
+        assert saved["format"] == "hal.o65.actor-failure.v1"
+        assert (saved["actor_steps"], saved["update"], saved["rank"]) == (steps, update, 0)
+        assert saved["scheduler"] == scheduler
+        assert len(saved["inputs"]) == 5 + len(dataclasses.fields(exp.ReplaySlots))
+        assert saved["targets"]["selected_WK"].any()
+        assert saved["failures"][0]
+        torch.testing.assert_close(saved["model"]["logits"], parameters[0], rtol=0, atol=0)
+        assert not tuple(tmp_path.glob("*.partial"))
+
+
 @pytest.mark.parametrize("last_noise,passed", [(0.0005, True), (0.1, False)])
 def test_resume_verifier_accepts_only_calibrated_update_noise(tmp_path: Path, last_noise: float, passed: bool) -> None:
     class NoisyTrainer(exp.Trainer):
