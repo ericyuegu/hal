@@ -1044,7 +1044,7 @@ def test_trainer_rejects_nonfinite_critic_gradient_before_optimizer_step(value: 
     assert run.updating
 
 
-@pytest.mark.parametrize("fault", ["normalization", "support"])
+@pytest.mark.parametrize("fault", ["normalization", "support", "selected_action", "mask"])
 @pytest.mark.parametrize("capture", [False, True])
 def test_live_actor_head_failure_preserves_actor_optimizer_and_schedule(
     fault: str, capture: bool, tmp_path: Path
@@ -1055,12 +1055,19 @@ def test_live_actor_head_failure_preserves_actor_optimizer_and_schedule(
         def actor_step(self, batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
             result, output = super().actor_step(batch, targets, clip_epsilon=clip_epsilon)
             if self.corrupt:
-                heads = tuple(logs.clone() for logs in output.log_distributions)
-                if fault == "normalization":
-                    heads[1].sub_(0.05)
+                if fault == "selected_action":
+                    output = dataclasses.replace(output, log_probs_WKF=output.log_probs_WKF - 0.01)
+                elif fault == "mask":
+                    mask = output.factor_mask_WKF.clone()
+                    mask[..., 0] = False
+                    output = dataclasses.replace(output, factor_mask_WKF=mask)
                 else:
-                    heads[1][..., 0] = -torch.inf
-                output = dataclasses.replace(output, log_distributions=heads)
+                    heads = tuple(logs.clone() for logs in output.log_distributions)
+                    if fault == "normalization":
+                        heads[1].sub_(0.05)
+                    else:
+                        heads[1][..., 0] = -torch.inf
+                    output = dataclasses.replace(output, log_distributions=heads)
             return result, output
 
     base = trainer(groups=1)
@@ -1075,7 +1082,7 @@ def test_live_actor_head_failure_preserves_actor_optimizer_and_schedule(
     scheduler = copy.deepcopy(run.scheduler.state_dict())
     steps, update = run.actor_steps, run.update
     policy.corrupt = True
-    with pytest.raises(ValueError, match="normalized|identical support"):
+    with pytest.raises(ValueError, match="normalized|identical support|selected-action|execution mask"):
         run.run_update()
     for actual, expected in zip(policy.actor_parameters(), parameters, strict=True):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

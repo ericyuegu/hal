@@ -46,6 +46,9 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   Reference capture is also checked against a forward function that reuses storage.
 - The existing full-head KL validation runs before actor optimizer mutation. Fault
   injection checks an already populated optimizer, scheduler, and actor-step count.
+  Live checks also compare selected-action logs to full-head gathers in codec/decode
+  order and require the replay execution mask to match the recorded factors.
+  Normalization errors report the failed-row count and maximum error.
 - Optional failure capture coordinates ranks, saves inputs, targets, output heads,
   model/optimizer state, gradients and RNG state, then terminates. It records a failed
   actor operation; it is not an exact-resume checkpoint.
@@ -53,6 +56,14 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   format is now v3. The redundant test for a removed gradient gate was deleted.
   Direction metrics have explicit numeric expectations. Historical v2 reports are
   unchanged. The unsupported BF16 learning conclusion was corrected.
+- Removed the duplicated invalid-value scan before categorical KL. Masked padding
+  remains excluded, and the categorical check rejects invalid active values.
+  Removed the mocked-compiler test that only checked printed stage labels and
+  stopped before consuming actor targets. The semantic target tests exercise the
+  repaired boundary. No speed improvement is claimed without a GPU measurement.
+- Actor loss and KL locals now distinguish action logs, full-head logs, full-head
+  probabilities, and the joint log ratio. Empty-rank target validation is explicitly
+  documented as providing no numerical coverage.
 - Each continuation gets a new W&B run ID. Its lineage records the restored
   checkpoint hash, checkpoint producer, current source, and previous attempt ID.
   Original metrics are archived before rollback. Modal retains each attempt's
@@ -85,5 +96,19 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
   tests/test_o65_modal.py`: 50 passed. These include two successive failed attempts,
   exact preservation of the original metrics bytes, and distinct restored-checkpoint
   and previous-attempt identities.
+- Actor and diagnostic tests: `pytest -q tests/test_o65_replay_probe.py
+  tests/test_actor_diagnostic_targets.py tests/test_window_replay_actor.py
+  tests/test_065_loop.py tests/test_window_replay_model.py
+  tests/test_o65_numerical_recovery.py -k 'not worker_failure' -ra`:
+  149 passed, 10 CUDA skips, 2 deselected, one NVML warning. This command used
+  `TMPDIR=/tmp OMP_NUM_THREADS=2 MKL_NUM_THREADS=2`.
+- Required Dolphin integration command, with `HAL_REQUIRE_INTEGRATION=1`:
+  initially 1 failed, 7 passed because `data/raw/dev.7z` was absent. After installing
+  both fixtures and checking their recorded hashes, 8 passed, 6 deselected,
+  7 multiprocessing fork warnings. No integration case was skipped.
+- Preliminary full CPU suite: 34 failed, 2780 passed, 187 skipped, 90 deselected,
+  3 errors, 24 warnings. Socket restrictions caused most failures; source edits
+  overlapped this run and caused two stale-import failures. This is not final-source
+  validation. A frozen-source rerun with local socket access is required.
 
 Full required checks and GPU checks remain pending.

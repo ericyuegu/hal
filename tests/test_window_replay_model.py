@@ -15,6 +15,7 @@ from hal.models.self_play import SelfPlayTransformer
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
 from hal.models.window_replay import validate_replay_inputs
+from hal.models.window_replay import validate_replay_output
 from hal.wire import ACTION_DIM
 
 
@@ -95,6 +96,7 @@ def test_window_replay_matches_individual_outputs_features_and_gradients() -> No
     parameters = (hidden, *policy.actor_parameters())
     expected_grad = torch.autograd.grad(expected_logs.sum(), parameters, allow_unused=True)
     result = replay_windows(policy, hidden, observed, slots, grad=True)
+    validate_replay_output(result, slots, slots.valid_WK)
     actual_grad = torch.autograd.grad(result.log_probs_WKF.sum(), parameters, allow_unused=True)
     torch.testing.assert_close(result.log_probs_WKF, expected_logs, atol=2e-6, rtol=2e-5)
     torch.testing.assert_close(
@@ -123,6 +125,7 @@ def test_padding_is_ignored_and_history_does_not_cross_resets() -> None:
     padded = ReplaySlots(**poisoned)
     validate_replay_inputs(policy, hidden, observed, padded)
     actual = replay_windows(policy, hidden, observed, padded, grad=False)
+    validate_replay_output(actual, padded, padded.valid_WK)
     torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF, rtol=0, atol=0)
     hidden[1, :24] = torch.randn_like(hidden[1, :24]) * 100
     changed = replay_windows(policy, hidden, observed, slots, grad=False)

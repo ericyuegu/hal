@@ -21,9 +21,32 @@ from hal.training import self_play_distributed as distributed
 
 
 def test_normalization_error_preserves_the_failing_distribution() -> None:
-    logs = torch.tensor([0.2, 0.3]).log()
-    with pytest.raises(ValueError, match="policy log-probs must be normalized; row=0, log_mass=.*values="):
-        exp.categorical_kl(logs, torch.tensor([0.4, 0.6]).log())
+    logs = torch.tensor([[0.4, 0.6], [0.2, 0.3], [0.1, 0.15]]).log()
+    with pytest.raises(ValueError, match="policy log-probs must be normalized; row=1, log_mass=.*values=") as error:
+        exp.categorical_kl(logs, torch.tensor([0.4, 0.6]).log().expand_as(logs))
+    assert "failed_rows=2/3" in str(error.value)
+    maximum = float(str(error.value).split("max_abs_log_mass=")[1].split(",")[0])
+    assert maximum == pytest.approx(-torch.tensor(0.25).log().item())
+
+
+@pytest.mark.parametrize("invalid", [torch.nan, torch.inf, -torch.inf, 0.0])
+def test_masked_kl_rejects_invalid_live_values_and_ignores_padding(invalid: float) -> None:
+    run = trainer(groups=1)
+    batch = run.prepare(run.engine.collect(0))
+    policy_heads = tuple(logs.clone() for logs in batch.old.log_distributions)
+    reference_heads = tuple(logs.clone() for logs in batch.reference.log_distributions)
+    mask = batch.decisions.executed_factors_JF.clone()
+    mask[0] = False
+    for heads in (policy_heads, reference_heads):
+        heads[0][0] = invalid
+    policy = dataclasses.replace(batch.old, log_distributions=policy_heads)
+    reference = dataclasses.replace(batch.reference, log_distributions=reference_heads)
+    actual = exp.factor_kl(policy, reference, mask)
+    expected = exp.factor_kl(batch.old, batch.reference, mask)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    policy_heads[0][1, 0, 0] = invalid
+    with pytest.raises(ValueError, match="normalized|identical support"):
+        exp.factor_kl(policy, reference, mask)
 
 
 @pytest.mark.parametrize("tail", [(-110.0, -102.58578491210938), (-102.58578491210938, -110.0)])

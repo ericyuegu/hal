@@ -1,6 +1,5 @@
 """Keep precision errors diagnostic while rejecting nonfinite results."""
 
-import copy
 import sys
 from pathlib import Path
 
@@ -8,9 +7,6 @@ import pytest
 import torch
 from test_065_loop import exp
 from test_065_loop import transformer_trainer
-
-from hal.eval.self_play_checkpoint import EvaluationCheckpoint
-from hal.models.attention import Trunk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
@@ -80,58 +76,3 @@ def test_probe_loader_rejects_unsupported_clipping(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="clip_epsilon"):
         load_cohort(path, "a" * 64, 0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_eager_precision_control_runs_before_any_compiled_decoder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    run = transformer_trainer("cpu", decoder_precision="bf16")
-    prepared = run.prepare(run.engine.collect(0))
-    windows = prepared.windows
-    index = int(torch.nonzero(windows.slots.valid_WK)[0, 0])
-    position = int(torch.nonzero(windows.slots.valid_WK[index])[0, 0])
-    part = windows.take(torch.tensor([index]), torch.full((len(windows.rows), 1), position), torch.tensor([True]))
-    context, observed = run.policy._packed_context(part.inputs()[:5])
-    checkpoint = EvaluationCheckpoint(
-        copy.deepcopy(run.policy.model).cuda(), run.policy.statistics, "a" * 64, "b" * 64, {}
-    )
-    monkeypatch.setattr(probe, "load_evaluation_checkpoint", lambda *_args, **_kwargs: checkpoint)
-    monkeypatch.setattr(
-        probe,
-        "load_cohort",
-        lambda *_args: {
-            "context": context,
-            "observed": observed,
-            "inputs": part.inputs(),
-            "selected": part.slots.valid_WK,
-            "coefficients": torch.zeros_like(part.rows, dtype=torch.float32),
-        },
-    )
-    decoder = probe.replay_windows
-
-    class CompiledDecoderReached(Exception):
-        pass
-
-    def compile_operation(operation: object, **_kwargs: object) -> object:
-        if operation is decoder:
-
-            def compiled(*_args: object, **_kwargs: object) -> None:
-                raise CompiledDecoderReached
-
-            return compiled
-
-        if operation is not probe.history:
-            return operation
-
-        def compiled_history(trunk: Trunk, tokens: torch.Tensor) -> torch.Tensor:
-            return probe.history(trunk, tokens)
-
-        return compiled_history
-
-    monkeypatch.setattr(torch, "compile", compile_operation)
-    with pytest.raises(CompiledDecoderReached):
-        probe.main(probe.Args(tmp_path / "inputs.pt"))
-    printed = capsys.readouterr().out
-    assert "eager reference" in printed
-    assert "compiled reference" in printed

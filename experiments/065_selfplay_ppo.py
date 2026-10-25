@@ -74,6 +74,7 @@ from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
+from hal.models.window_replay import validate_replay_output
 from hal.sim import native
 from hal.sim import native_bridge
 from hal.sim import native_shard
@@ -300,7 +301,9 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
             row = value.reshape(-1, value.shape[-1])[index]
             raise ValueError(
                 f"{name} log-probs must be normalized; row={index}, "
-                f"log_mass={float(log_mass.flatten()[index])}, values={row.tolist()}"
+                f"log_mass={float(log_mass.flatten()[index])}, "
+                f"failed_rows={int((~normalized).sum())}/{normalized.numel()}, "
+                f"max_abs_log_mass={float(log_mass.abs().max())}, values={row.tolist()}"
             )
     difference = torch.where(legal, log_probs, 0) - torch.where(legal, reference_log_probs, 0)
     return (log_probs.exp() * difference).sum(-1)
@@ -4175,30 +4178,39 @@ def factor_kl(policy: PolicyEvaluation, reference: PolicyEvaluation, executed_JF
     if executed_JF.ndim != 2 or executed_JF.shape[1] != 16 or executed_JF.dtype != torch.bool:
         raise ValueError("KL execution mask must be boolean [decisions, 16]")
     rows = []
-    for group, (p, q) in enumerate(zip(policy.log_distributions, reference.log_distributions, strict=True)):
-        if p.ndim != 3 or p.shape[1] != 4 or q.shape != p.shape or len(p) != len(executed_JF):
+    for group, (policy_logs, reference_logs) in enumerate(
+        zip(policy.log_distributions, reference.log_distributions, strict=True)
+    ):
+        if (
+            policy_logs.ndim != 3
+            or policy_logs.shape[1] != 4
+            or reference_logs.shape != policy_logs.shape
+            or len(policy_logs) != len(executed_JF)
+        ):
             raise ValueError("KL distributions and execution mask must have matching decision rows")
         parts = []
-        for start in range(0, len(p), chunk):
+        for start in range(0, len(policy_logs), chunk):
             stop = start + chunk
             try:
-                parts.append(_distribution_kl(p[start:stop], q[start:stop], executed_JF[start:stop, group::4, None]))
+                parts.append(
+                    _distribution_kl(
+                        policy_logs[start:stop], reference_logs[start:stop], executed_JF[start:stop, group::4, None]
+                    )
+                )
             except ValueError as error:
-                raise ValueError(f"KL factor {group}, decisions [{start}, {min(stop, len(p))}): {error}") from error
-        rows.append(torch.cat(parts) if parts else _loss_precision(p).new_empty(p.shape[:-1]))
+                raise ValueError(
+                    f"KL factor {group}, decisions [{start}, {min(stop, len(policy_logs))}): {error}"
+                ) from error
+        rows.append(torch.cat(parts) if parts else _loss_precision(policy_logs).new_empty(policy_logs.shape[:-1]))
     return torch.stack(rows, -1).flatten(1)
 
 
-def _distribution_kl(p: Tensor, q: Tensor, valid: Tensor) -> Tensor:
-    for logs in (p, q):
-        active = logs[valid.expand_as(logs)]
-        if bool((torch.isnan(active) | torch.isposinf(active)).any()):
-            raise ValueError("executed KL log-probabilities must be finite or negative infinity")
-    neutral = torch.full_like(p, -torch.inf)
+def _distribution_kl(policy_log_probs: Tensor, reference_log_probs: Tensor, valid: Tensor) -> Tensor:
+    neutral = torch.full_like(policy_log_probs, -torch.inf)
     neutral[..., 0] = 0
-    p = torch.where(valid, p, neutral)
-    q = torch.where(valid, q, neutral)
-    return categorical_kl(p, q)
+    return categorical_kl(
+        torch.where(valid, policy_log_probs, neutral), torch.where(valid, reference_log_probs, neutral)
+    )
 
 
 def explained_variance(values: Tensor, targets: Tensor) -> float:
@@ -5656,16 +5668,6 @@ class Trainer:
                             )
                             current = concatenate_replays([output for _, output in parts], 0)
                     with sample(self.profile, "loss_validation", limit=0):
-                        _check_finite(
-                            "actor loss, KL and joint ratio",
-                            torch.cat(
-                                (
-                                    torch.stack((result.loss, result.policy_loss, result.kl_loss)),
-                                    result.factor_kl_WKF.flatten(),
-                                    result.joint_ratio_WK[selected],
-                                )
-                            ),
-                        )
                         assert table.evaluation is not None
                         current_evaluation = window_evaluation(
                             current,
@@ -5678,7 +5680,18 @@ class Trainer:
                         # Establish the live full-head invariant before any actor state changes.
                         failure: str | None = None
                         try:
+                            _check_finite(
+                                "actor loss, KL and joint ratio",
+                                torch.cat(
+                                    (
+                                        torch.stack((result.loss, result.policy_loss, result.kl_loss)),
+                                        result.factor_kl_WKF.flatten(),
+                                        result.joint_ratio_WK[selected],
+                                    )
+                                ),
+                            )
                             old_kl = factor_kl(current_evaluation, behavior_evaluation, mask)
+                            validate_replay_output(current, windows.slots, selected)
                         except ValueError as error:
                             if self.actor_failure_directory is None:
                                 raise

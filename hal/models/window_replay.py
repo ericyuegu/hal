@@ -64,6 +64,34 @@ class ReplayOutput:
         return tuple(value.exp() for value in self.log_distributions)
 
 
+@torch.no_grad()
+def validate_replay_output(output: ReplayOutput, slots: ReplaySlots, selected_WK: Tensor) -> None:
+    """Check live mask and selected-action gathers before an optimizer update.
+
+    Full-head normalization is checked with the KL calculation. This check detects
+    a lost factor or stale selected-action output even when every head is normalized.
+    """
+    expected_mask = slots.executed_WKF & slots.valid_WK[..., None]
+    if output.factor_mask_WKF.dtype != torch.bool or not torch.equal(output.factor_mask_WKF, expected_mask):
+        raise ValueError("replay execution mask differs from recorded factors")
+    if output.log_probs_WKF.shape != expected_mask.shape or len(output.log_distributions) != 4:
+        raise ValueError("replay selected-action logs and full heads have incompatible shapes")
+    selected_factors = expected_mask & selected_WK[..., None]
+    frame_mask = selected_factors.reshape(*selected_WK.shape, 4, 4)
+    action_log_probs = output.log_probs_WKF.reshape(*selected_WK.shape, 4, 4)
+    for head, name in enumerate(CONTROLLER_DECODE_ORDER):
+        active = frame_mask[..., head]
+        head_log_probs = output.log_distributions[head][active]
+        actions = slots.sampled_actions_WK44[..., CONTROLLER_GROUP_INDEX[name]][active]
+        gathered_log_probs = head_log_probs.gather(-1, actions[:, None]).squeeze(-1)
+        selected_log_probs = action_log_probs[..., head][active]
+        if not torch.equal(selected_log_probs, gathered_log_probs):
+            mismatches = int((selected_log_probs != gathered_log_probs).sum())
+            raise ValueError(
+                f"replay {name} selected-action log-probs differ from full-head gather: {mismatches} factors"
+            )
+
+
 def _check_shapes(model: SelfPlayTransformer, hidden: Tensor, observed: Tensor, slots: ReplaySlots) -> None:
     if hidden.ndim != 3 or hidden.shape[-1] != model.cfg.d_model or min(hidden.shape[:2]) < 1:
         raise ValueError("window hidden states must be nonempty [W,L,d_model]")
