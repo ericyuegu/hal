@@ -151,6 +151,27 @@ def test_gae_terminal_timeout_and_rollout_end_are_distinct() -> None:
     assert not result.advantages.requires_grad and not result.value_targets.requires_grad
 
 
+@pytest.mark.parametrize("bootstrap_tail", [False, True], ids=["terminal", "rollout_or_timeout"])
+def test_gae_one_matches_returns_without_intermediate_critic_predictions(bootstrap_tail: bool) -> None:
+    rewards = torch.tensor([1.0, math.nan, -3.0, 5.0], dtype=torch.float64)
+    durations = torch.tensor([2, 0, 4, 1])
+    decided = torch.tensor([True, False, True, True])
+    bootstrap = torch.tensor([True, False, True, bootstrap_tail])
+    trace = torch.tensor([True, False, True, False])
+    boundary_value = 17.0 if bootstrap_tail else math.nan
+    tail_return = 5 + (exp.GAMMA * boundary_value if bootstrap_tail else 0)
+    middle_return = -3 + exp.GAMMA**4 * tail_return
+    first_return = 1 + exp.GAMMA**2 * middle_return
+    expected = rewards.new_tensor([first_return, 0, middle_return, tail_return])
+
+    for baseline in ([13.0, math.nan, -7.0, 41.0], [-23.0, math.nan, 101.0, -61.0]):
+        values = rewards.new_tensor(baseline)
+        next_values = rewards.new_tensor([baseline[2], math.nan, baseline[3], boundary_value])
+        result = exp.dense_advantages(rewards, values, next_values, durations, bootstrap, trace, decided)
+        torch.testing.assert_close(result.value_targets, expected)
+        torch.testing.assert_close(result.advantages[decided], (expected - values)[decided])
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_delayed_actions_receive_unshifted_credit_through_untrained_tail(device: str) -> None:
     # A decision at frame 0 enters a four-frame queue and executes at frame 5.

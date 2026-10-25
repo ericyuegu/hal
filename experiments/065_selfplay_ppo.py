@@ -77,7 +77,7 @@ from hal.wire import ACTION_DIM
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
 MAX_REPLAN = 4
 GAMMA = 0.99855
-GAE_LAMBDA = 0.99
+GAE_LAMBDA = 1.0
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4958,6 +4958,7 @@ def run_training(
         "train": dataclasses.asdict(trainer.config),
         "sampler": dataclasses.asdict(trainer.engine.sampler.config),
         "schedule": dataclasses.asdict(trainer.engine.sampler.schedule),
+        "returns": {"gamma_per_frame": GAMMA, "gae_lambda_per_frame": GAE_LAMBDA},
         "treatment": "KL-regularized joint PPO; independent per-player clipped Beta(5,1.3) u",
         "control": "frozen pi_ref with matched sampling, starts, episode u, and schedules",
         "invariants": "BC checkpoint, representation, data, simulator, adapter, reward, evaluation seeds",

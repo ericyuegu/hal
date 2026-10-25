@@ -169,9 +169,10 @@ def test_dense_gae_matches_decision_grid_with_mixed_cadences_and_boundaries() ->
         for index in range(len(at) - 1, -1, -1):
             tick = at[index]
             next_value = following[tick, player] if bootstrap[tick, player] else 0
-            delta = rewards[tick, player] + exp.GAMMA ** duration[tick, player] * next_value - values[tick, player]
+            frames = int(duration[tick, player])
+            delta = rewards[tick, player] + exp.GAMMA**frames * next_value - values[tick, player]
             continuation = tail if trace[tick, player] else 0
-            tail = delta + (exp.GAMMA * exp.GAE_LAMBDA) ** duration[tick, player] * continuation
+            tail = delta + (exp.GAMMA * exp.GAE_LAMBDA) ** frames * continuation
             expected[index] = tail
         torch.testing.assert_close(result.advantages[at, player], expected)
         torch.testing.assert_close(result.value_targets[at, player], expected + values[at, player])

@@ -295,6 +295,7 @@ def trainer(
     delay: int = 0,
     warmup: int = 0,
     development: bool = False,
+    trainer_class: type[Any] = exp.Trainer,
 ) -> Any:
     torch.manual_seed(19)
     policy = ToyPolicy(device)
@@ -320,7 +321,7 @@ def trainer(
         windows_per_step=2,
         snapshot_interval=2,
     )
-    return exp.Trainer(engine, config)
+    return trainer_class(engine, config)
 
 
 PROVENANCE = {
@@ -335,6 +336,8 @@ def transformer_trainer(
     development: bool = False,
     deterministic: bool = False,
     decoder_precision: Literal["bf16", "fp32"] = "bf16",
+    actor_optimizer: Literal["adam", "muon"] = "adam",
+    actor_lr: float = 1e-4,
 ) -> Any:
     from hal.data.feature_stats import FeatureStats
     from hal.data.feature_stats import consolidate_key
@@ -392,8 +395,8 @@ def transformer_trainer(
     engine.initialize()
     config = exp.TrainConfig(
         deterministic=deterministic,
-        actor_optimizer="adam",
-        actor_lr=1e-4,
+        actor_optimizer=actor_optimizer,
+        actor_lr=actor_lr,
         critic_epochs=1,
         windows_per_step=4,
         critic_warmup_updates=0,
@@ -517,7 +520,7 @@ def test_checkpoint_rejects_corruption_and_changed_config(tmp_path: Path) -> Non
 def test_toy_reward_increases_action_probability() -> None:
     run = trainer(groups=1)
     before = float(run.policy.model.logits[0].softmax(-1)[1].detach())
-    for _ in range(8):
+    for _ in range(16):
         run.run_update()
     after = float(run.policy.model.logits[0].softmax(-1)[1].detach())
     assert after > before + 0.15
@@ -894,8 +897,7 @@ def test_resume_diagnostic_covers_next_batch_and_both_optimizers(tmp_path: Path,
 def test_muon_resume_restores_state_and_matches_measured_next_update(tmp_path: Path, device: str) -> None:
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    run = transformer_trainer(device, development=True)
-    run = exp.Trainer(run.engine, dataclasses.replace(run.config, actor_optimizer="muon", actor_lr=1e-5))
+    run = transformer_trainer(device, development=True, actor_optimizer="muon", actor_lr=1e-5)
     run.run_update()
     boundary = exp._resume_state_hashes(run)
     exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
@@ -1050,8 +1052,7 @@ def test_resume_verifier_accepts_only_calibrated_update_noise(tmp_path: Path, la
                 self.policy.model.logits.add_(noise)
             return result
 
-    base = trainer(groups=1)
-    run = NoisyTrainer(base.engine, base.config)
+    run = trainer(groups=1, trainer_class=NoisyTrainer)
     before = exp._resume_state_hashes(run)
     if passed:
         exp.verify_checkpoint_resume(run, tmp_path, PROVENANCE)
