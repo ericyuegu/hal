@@ -61,6 +61,13 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   Removed the mocked-compiler test that only checked printed stage labels and
   stopped before consuming actor targets. The semantic target tests exercise the
   repaired boundary. No speed improvement is claimed without a GPU measurement.
+- Retired the 600-line historical proxy qualifier and its import helpers. The
+  adapter requested log-probability fields from a recorded control that stores
+  probabilities, and the loader combined that control with current library code.
+  Its source and recorded comparison remain identified in
+  `archive/o65-dense-proxy-qualification.md`. Current per-decision/window gradient
+  parity and actor objective tests remain supported; full-model qualification uses
+  the captured failing continuation.
 - Actor loss and KL locals now distinguish action logs, full-head logs, full-head
   probabilities, and the joint log ratio. Empty-rank target validation is explicitly
   documented as providing no numerical coverage.
@@ -131,5 +138,8 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
   replay, training batches, historical tick parity, proxy checkpoint, anchor
   stacking and diagnostic targets: 150 passed, 46 CUDA skips, 1 distributed-worker
   test deselected. These checks ran on CPU; full CUDA checks remain separate.
+- After retiring the proxy qualifier, collection succeeds with `TMPDIR` unset:
+  3018 tests collected, 89 integration tests deselected. The removed helper had
+  required that environment variable while collecting an otherwise deselected test.
 
 Full required checks and GPU checks remain pending.
