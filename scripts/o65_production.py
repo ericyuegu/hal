@@ -182,8 +182,7 @@ def training_command(args: Args) -> list[str]:
         "120",
     ]
     if args.compile_cache is not None:
-        directory = args.compile_cache / "rank0" if args.gpus == 1 else args.compile_cache
-        argv.extend(("--compile-cache", str(directory)))
+        argv.extend(("--compile-cache", str(args.compile_cache)))
     if args.require_compile_cache:
         argv.append("--require-compile-cache")
     if args.measurement:

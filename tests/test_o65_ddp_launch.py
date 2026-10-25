@@ -343,7 +343,12 @@ def test_o64_warm_cache_command_and_resume_identity(tmp_path: Path) -> None:
     assert parsed.compile_cache == tmp_path / "packed-cache"
 
 
-def test_one_gpu_preparation_builds_the_cache_used_by_production_rank_zero(tmp_path: Path) -> None:
+def test_one_gpu_preparation_builds_the_cache_used_by_production_rank_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import nullcontext
+
+    import torch
     from test_065_loop import exp
     from test_o65_modal import launcher
 
@@ -365,7 +370,12 @@ def test_one_gpu_preparation_builds_the_cache_used_by_production_rank_zero(tmp_p
     args = tyro.cli(o65_production.Args, args=launcher.command(request, cpus)[3:])
     command = o65_production.training_command(args)
     parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
-    assert parsed.compile_cache == launcher.RESULTS / "compile-cache/rank0"
+    monkeypatch.setattr(exp.distributed, "process_group", lambda device: nullcontext(torch.device(device)))
+    monkeypatch.setattr(exp.distributed, "world_size", lambda: 1)
+    with patch.object(exp, "train_native_rank") as train_rank:
+        exp.train_native(parsed)
+    rank_config = train_rank.call_args.args[0]
+    assert rank_config.compile_cache == launcher.RESULTS / "compile-cache/rank0"
     assert parsed.measurement and not parsed.require_compile_cache
     assert parsed.training.windows_per_step == 512 and parsed.training.actor_microbatches == 8
     warm = dataclasses.replace(request, cold_cache=False)
