@@ -332,9 +332,11 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
             replay = other if step == 1 else graph
             actual = replay.backward(current, targets)
             evaluated = replay.evaluation()
-            torch.testing.assert_close(
-                evaluated.log_probs_WKF, forward(current).log_probs_WKF.detach(), atol=2e-6, rtol=2e-5
-            )
+            direct = forward(current)
+            torch.testing.assert_close(evaluated.log_probs_WKF, direct.log_probs_WKF.detach(), atol=2e-6, rtol=2e-5)
+            for logs, expected_logs in zip(evaluated.log_distributions, direct.log_distributions, strict=True):
+                torch.testing.assert_close(logs, expected_logs.detach(), atol=2e-6, rtol=2e-5)
+                torch.testing.assert_close(logs.logsumexp(-1), torch.zeros_like(logs[..., 0]), atol=1e-5, rtol=0)
             assert not evaluated.log_probs_WKF.requires_grad
             torch.testing.assert_close(actual.loss, expected.loss, atol=2e-5, rtol=2e-4)
             for parameter, gradient in zip(parameters, gradients, strict=True):

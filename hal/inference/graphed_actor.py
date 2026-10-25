@@ -96,13 +96,17 @@ class GraphedActorStep:
             with torch.enable_grad():
                 output = forward(static[: self.input_count])
                 result = actor_loss(output, _targets(static[self.input_count :]), clip_epsilon=clip_epsilon)
+                # Torch 2.11 backward can reuse saved forward buffers. Preserve
+                # the reported evaluation before backward releases those values.
+                detached = ReplayOutput(
+                    output.log_probs_WKF.detach().clone(),
+                    tuple(p.detach().clone() for p in output.log_distributions),
+                    output.factor_mask_WKF.clone(),
+                    ReplayCriticFeatures(
+                        *(getattr(output.features, field.name).detach().clone() for field in fields(output.features))
+                    ),
+                )
                 result.loss.backward()
-            detached = ReplayOutput(
-                output.log_probs_WKF.detach(),
-                tuple(p.detach() for p in output.log_distributions),
-                output.factor_mask_WKF,
-                output.features,
-            )
             return ActorLoss(*(getattr(result, field.name).detach() for field in fields(result))), detached
 
         ready = False
