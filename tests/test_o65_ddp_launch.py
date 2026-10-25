@@ -63,7 +63,8 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
         result.write_text("{}")
 
     monkeypatch.setenv("WANDB_API_KEY", "test")
-    monkeypatch.setattr(o65_production, "sha256", lambda path: o65_production.O64_SHA256)
+    args.checkpoint.write_bytes(b"architecture checkpoint")
+    monkeypatch.setattr(o65_production, "O64_SHA256", o65_production.sha256(args.checkpoint))
     monkeypatch.setattr(o65_production.subprocess, "check_output", lambda *args, **kwargs: source + "\n")
     monkeypatch.setattr(o65_production.subprocess, "run", execute)
     monkeypatch.setattr(o65_production.self_play_publication, "publish", lambda args: None)
@@ -72,9 +73,21 @@ def test_explicit_source_transition_preserves_settings_and_resume_checkpoint(
     source = "b" * 40
     with pytest.raises(ValueError, match="identity differs"):
         o65_production.main(args)
-    resumed = dataclasses.replace(args, resume_source="a" * 40)
+    resumed = dataclasses.replace(
+        args, resume_source="a" * 40, resume_manifest_sha256=o65_production.sha256(checkpoint)
+    )
     with pytest.raises(ValueError, match="identity differs"):
         o65_production.main(dataclasses.replace(resumed, windows_per_step=2))
+    unexpected = write_boundary(args.output / "train/checkpoints", 33)
+    before = {path.relative_to(args.output): path.read_bytes() for path in args.output.rglob("*") if path.is_file()}
+    command_count = len(commands)
+    with pytest.raises(ValueError, match="checkpoint manifest differs from the requested SHA-256"):
+        o65_production.main(resumed)
+    assert len(commands) == command_count
+    assert {
+        path.relative_to(args.output): path.read_bytes() for path in args.output.rglob("*") if path.is_file()
+    } == before
+    unexpected.unlink()
     o65_production.main(resumed)
     command = commands[-1]
     parsed = tyro.cli(exp.NativeCli, args=command[command.index("train") + 1 :])
@@ -104,12 +117,16 @@ def test_launcher_passes_explicit_resume_source(tmp_path: Path) -> None:
         damage_weight=0.1,
         game_win_weight=120,
         resume_source="a" * 40,
+        resume_manifest_sha256="b" * 64,
     )
     command = launcher.command(request, (0, 1))
     parsed = tyro.cli(o65_production.Args, args=command[3:])
     assert parsed.resume_source == "a" * 40
+    assert parsed.resume_manifest_sha256 == "b" * 64
     with pytest.raises(ValueError, match="full Git SHA"):
         dataclasses.replace(request, resume_source="short")
+    with pytest.raises(ValueError, match="checkpoint manifest SHA-256"):
+        dataclasses.replace(request, resume_manifest_sha256=None)
 
 
 def test_single_gpu_pilot_and_torchrun_commands(tmp_path: Path) -> None:

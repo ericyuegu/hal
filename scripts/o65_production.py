@@ -86,6 +86,7 @@ class Args:
     publish_volume: str | None = None
     r2_prefix: str | None = None
     resume_source: str | None = None
+    resume_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.require_compile_cache and self.compile_cache is None:
@@ -96,6 +97,14 @@ class Args:
             or any(c not in "0123456789abcdef" for c in self.resume_source)
         ):
             raise ValueError("resume source requires training and a full Git SHA")
+        if self.resume_manifest_sha256 is not None and (
+            self.measurement
+            or len(self.resume_manifest_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in self.resume_manifest_sha256)
+        ):
+            raise ValueError("resume manifest requires training and a full SHA-256")
+        if self.resume_source is not None and self.resume_manifest_sha256 is None:
+            raise ValueError("source-changing resume requires a checkpoint manifest SHA-256")
         shards = shards_per_gpu(self.matches)
         if type(self.gpus) is not int or not 2 <= self.gpus <= 8:
             raise ValueError("O64 torchrun requires 2..8 GPUs")
@@ -228,6 +237,7 @@ def resume_settings(args: Args) -> dict[str, object]:
     settings = json.loads(json.dumps(dataclasses.asdict(args), default=str))
     del settings["cpus"]
     del settings["resume_source"]
+    del settings["resume_manifest_sha256"]
     del settings["require_compile_cache"]
     # Compiler storage changes startup cost, not the training configuration.
     settings["compile_cache"] = None
@@ -333,6 +343,11 @@ def main(args: Args) -> None:
     command = training_command(args)
     manifests = sorted((args.output / "train/checkpoints").glob("update-*.json"))
     previous = manifests[-1] if manifests else None
+    if args.resume_manifest_sha256 is not None:
+        if previous is None:
+            raise ValueError("resume manifest requires an existing checkpoint")
+        if sha256(previous) != args.resume_manifest_sha256:
+            raise ValueError("checkpoint manifest differs from the requested SHA-256")
     update = read_training_manifest(previous)["update"] if previous is not None else 0
     if previous is not None:
         # The union argument must remain last for Tyro's nested CLI parser.

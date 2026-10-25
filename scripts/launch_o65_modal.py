@@ -178,6 +178,7 @@ class Request:
     measurement: bool = False
     measurement_sizes: tuple[str, ...] = ()
     resume_source: str | None = None
+    resume_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         validate_name(self.name)
@@ -185,6 +186,14 @@ class Request:
             self.mode != "ddp" or self.measurement or re.fullmatch(r"[0-9a-f]{40}", self.resume_source) is None
         ):
             raise ValueError("resume source requires DDP training and a full Git SHA")
+        if self.resume_manifest_sha256 is not None and (
+            self.mode != "ddp"
+            or self.measurement
+            or re.fullmatch(r"[0-9a-f]{64}", self.resume_manifest_sha256) is None
+        ):
+            raise ValueError("resume manifest requires DDP training and a full SHA-256")
+        if self.resume_source is not None and self.resume_manifest_sha256 is None:
+            raise ValueError("source-changing resume requires a checkpoint manifest SHA-256")
         if type(self.gpus) is not int or not 1 <= self.gpus <= 8 or (self.gpus > 1) != (self.mode == "ddp"):
             raise ValueError("DDP requires 2..8 GPUs; existing modes require one GPU")
         if type(self.ddp_updates) is not int or self.ddp_updates < 1:
@@ -296,6 +305,8 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         ]
         if request.resume_source is not None:
             argv.extend(("--resume-source", request.resume_source))
+        if request.resume_manifest_sha256 is not None:
+            argv.extend(("--resume-manifest-sha256", request.resume_manifest_sha256))
         if request.measurement:
             argv.append("--measurement")
         else:
@@ -708,6 +719,7 @@ class Args:
     dry_run: bool = False
     resume_learner: str | None = None
     resume_source: str | None = None
+    resume_manifest_sha256: str | None = None
     damage_weight: float | None = None
     stock_weight: float = 120.0
     game_win_weight: float | None = None
@@ -756,6 +768,7 @@ def main(args: Args) -> None:
         else (PILOT_TIMEOUT_SECONDS if args.mode in ("pilot", "ddp") else 1800),
         resume_learner=args.resume_learner,
         resume_source=args.resume_source,
+        resume_manifest_sha256=args.resume_manifest_sha256,
         damage_weight=args.damage_weight if args.damage_weight is not None else (0.1 if args.mode == "ddp" else 1.0),
         stock_weight=args.stock_weight,
         game_win_weight=args.game_win_weight
@@ -875,6 +888,8 @@ def main(args: Args) -> None:
         launch_command.extend(("--resume-learner", args.resume_learner))
     if args.resume_source is not None:
         launch_command.extend(("--resume-source", args.resume_source))
+    if args.resume_manifest_sha256 is not None:
+        launch_command.extend(("--resume-manifest-sha256", args.resume_manifest_sha256))
     launch_command.extend(
         (
             "--damage-weight",

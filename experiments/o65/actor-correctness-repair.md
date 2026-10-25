@@ -90,6 +90,14 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   files in a separate directory instead of overwriting `last-attempt`.
   The historical W&B run remains unchanged: its 44 rows end at update 43,
   while its last published checkpoint is update 32.
+- Source-changing production continuations now require `resume_manifest_sha256`
+  as well as the prior source. The runner checks the selected latest checkpoint
+  against this digest before writing identity, lineage, or metrics and before
+  starting training. The expected digest is an execution constraint, not a change
+  to persisted training settings. The source-transition regression now hashes
+  real fixture bytes instead of replacing every file hash with one constant;
+  an unexpected update-33 manifest is rejected without changing any run file.
+  This binds the restore boundary. It does not supply missing numerical qualification.
 - Compiler-cache identity now includes the effective `triton.enable_pdl` setting.
   Cache format v3 rejects a seed with a different setting before importing artifacts
   or changing cache paths, including an explicitly supplied seed identity. The
@@ -296,6 +304,12 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
 - Compiler-cache regression: the new PDL mismatch case failed on the old code
   because the cache was imported. After adding PDL to cache format v3,
   `pytest -q tests/test_compile_cache.py -ra`: 28 passed, no skips.
+- Checkpoint binding: with the new request field but before the runner enforced it,
+  the source-transition regression failed with `DID NOT RAISE` after an unexpected
+  newer checkpoint appeared. With the hash check in place, `pytest -q
+  tests/test_o65_ddp_launch.py tests/test_o65_modal.py -ra`: 50 passed, no skips.
+  Focused Ruff and type checks of both launch modules passed. This change is
+  separate from the frozen `ac071829` full-suite run.
 - Frozen `c7d2de67`: required format, lint and active type checks passed. The full
   CUDA-enabled suite ended without a final summary or supervisor receipt. The
   kernel log at `2026-10-24T20:41:12-07:00` confirms a global out-of-memory kill of
