@@ -659,7 +659,7 @@ def run_pilot_child(
                     code = None
                 for line in progress:
                     print(line, end="", flush=True)
-                    if line.startswith(("update=", "final_evaluation_started")):
+                    if line.startswith(("update=", "resume_check_started", "final_evaluation_started")):
                         ready = True
                 if code is not None:
                     return code

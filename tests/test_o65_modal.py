@@ -260,8 +260,10 @@ def test_startup_deadline_stops_a_live_training_process(tmp_path: Path, monkeypa
         launcher.os.kill(int(pid_file.read_text()), 0)
 
 
-@pytest.mark.parametrize("progress", ["update=1 warming=1", "final_evaluation_started"])
-def test_training_or_resumed_evaluation_ends_the_startup_deadline(
+@pytest.mark.parametrize(
+    "progress", ["update=1 warming=1", "final_evaluation_started", "resume_check_started prepare=True update=32"]
+)
+def test_training_verification_or_evaluation_ends_the_startup_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, progress: str
 ) -> None:
     monkeypatch.setattr(launcher, "REMOTE_ROOT", tmp_path)
