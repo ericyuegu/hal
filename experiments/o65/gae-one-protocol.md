@@ -16,13 +16,16 @@ The control is the finished W&B run
 that commit. Its only training change is GAE lambda. The resolved run record
 also reports gamma and GAE lambda explicitly.
 
-Restore the same original update-256 learner used by the control:
-`o65-pilot-3d4ad115/pilot/train/checkpoints/update-00000256.json`.
-Use the existing validated learner migration. It restores the actor, critic,
-optimizers, scheduler, RNG states and calibrated KL range, then starts a fresh
-match pool. This is a new treatment, not an exact simulator resume. Preserve
-the restored KL range and skip an additional critic warmup, as the control did.
-The first 256 updates used GAE lambda 0.99 in both branches.
+Start from the original O63 bootstrap30 behavior-cloning checkpoint in
+`pilot-inputs.json`. Do not pass `--resume` or `--resume-learner` for this
+launch. Initialize fresh optimizer, scheduler and RNG states. All 2,000 RL
+updates use GAE lambda 1, including the usual 32-update critic warmup. Warmup
+calibrates the KL range using this run's advantage spread.
+
+The historical control migrated an update-256 learner into a fresh match pool.
+This run starts from BC without that migration. Its restart history and
+calibrated KL range can therefore differ as well as GAE lambda. Report these
+limits when comparing the two runs.
 
 ## Invariant inputs
 
@@ -35,9 +38,9 @@ The first 256 updates used GAE lambda 0.99 in both branches.
   interval, PPO clipping, optimizers, learning rates and actor step size.
 - BF16 decoder; the original locked dependencies and pinned runtime image
   `ghcr.io/ericyuegu/hal@sha256:c9160a7bb2dc0aa3eb6dc583b1c4753ff98d9a40f802512ca402e2b93a3a7413`.
-- The source learner's environment must pass the existing compatibility check:
+- Use the recorded control environment:
   Python 3.14.3, Torch 2.11.0+cu130, NumPy 2.1.3 and CUDA 13.0 on an RTX PRO
-  6000 Blackwell Server Edition. Do not bypass a mismatch.
+  6000 Blackwell Server Edition. Record any environment difference.
 - The hashes in `pilot-inputs.json`, `pilot-sampler.json` and
   `pilot-evaluation.json` remain unchanged.
 
