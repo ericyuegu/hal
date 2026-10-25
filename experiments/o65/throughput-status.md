@@ -125,11 +125,12 @@ On one rollout with fixed weights:
 - One batch against the whole update has cosine 0.255.
 - BF16 against FP32 on the same batch: 0.66 to 0.73, eager or compiled.
 
-So BF16 error is small next to minibatch noise. Each 512-window gradient is mostly noise; signal is
-roughly 3 percent of its squared norm, a noise scale near 15k windows. DDP averages 4096 windows per
-step. The bench used critic warmup 0, so production advantages should be less noisy. Muon takes
-fixed-size steps, so noise matters more than under SGD; fewer, larger steps per update are an
-option for a later run.
+These two batches do not establish whether BF16 error is unbiased or whether it harms learning.
+The estimated signal fraction of roughly 3 percent and noise scale near 15k windows depend on
+assumptions about minibatch noise. DDP averages 4096 windows per step, while this measurement used
+one rank and no critic warmup. Qualification still needs matched comparisons of the actual optimizer
+updates after gradient averaging and Muon's transformation. Learning quality requires matched
+gameplay evaluation. The gradient comparison alone does not qualify BF16 for learning.
 
 ## Approved by the user
 

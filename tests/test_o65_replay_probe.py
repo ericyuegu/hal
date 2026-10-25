@@ -21,27 +21,21 @@ finally:
     sys.path.pop(0)
 
 
-def test_gradient_direction_change_is_reported_without_a_precision_gate() -> None:
+def test_finite_gradient_report_exposes_direction_change() -> None:
     eager = torch.tensor([1.0, 0.0])
     high = torch.tensor([0.0, 1.0])
     candidate = torch.tensor([0.7, 0.7])
     report = compare(candidate, eager, high, eager.clone())
-    assert report["compiled"]["relative_l2"] < 1.5 * report["eager"]["relative_l2"]
-    assert report["cosine"] < 0.8
-    assert report["passed"]
+    assert report["cosine"] == pytest.approx(2**-0.5)
+    assert report["eager_fp32_cosine"] == 0
+    assert report["compiled_fp32_cosine"] == pytest.approx(2**-0.5)
+    assert report["finite"]
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
 def test_precision_diagnostic_rejects_nonfinite_outputs(value: float) -> None:
     eager = torch.ones(2)
-    assert not compare(torch.tensor([value, 1]), eager, eager, eager)["passed"]
-
-
-def test_gradient_gate_accepts_small_error_with_the_same_direction() -> None:
-    eager = torch.tensor([0.0, 1.0])
-    high = torch.tensor([0.001, 1.001])
-    candidate = torch.tensor([0.0001, 1.0001])
-    assert compare(candidate, eager, high, eager.clone())["passed"]
+    assert not compare(torch.tensor([value, 1]), eager, eager, eager)["finite"]
 
 
 def test_history_matches_the_training_boundary_and_input_gradient() -> None:

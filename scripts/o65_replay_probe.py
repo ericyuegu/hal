@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 from typing import TypedDict
@@ -125,7 +126,7 @@ class Comparison(TypedDict):
     eager_fp32_cosine: float
     compiled_fp32_cosine: float
     norms: dict[str, float]
-    passed: bool
+    finite: bool
 
 
 def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor) -> Comparison:
@@ -134,7 +135,7 @@ def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor) -> C
     direct = errors(candidate, eager)
     repeated = errors(repeat, eager)
     cosine = float(torch.nn.functional.cosine_similarity(candidate.float(), eager.float(), dim=0))
-    passed = all(bool(torch.isfinite(value).all()) for value in (candidate, eager, high, repeat))
+    finite = all(bool(torch.isfinite(value).all()) for value in (candidate, eager, high, repeat))
     return {
         "eager": baseline,
         "compiled": candidate_error,
@@ -147,7 +148,7 @@ def compare(candidate: Tensor, eager: Tensor, high: Tensor, repeat: Tensor) -> C
             name: float(value.float().norm())
             for name, value in (("eager", eager), ("compiled", candidate), ("fp32", high))
         },
-        "passed": passed,
+        "finite": finite,
     }
 
 
@@ -173,6 +174,25 @@ def history(trunk: Trunk, tokens: Tensor) -> Tensor:
     """Match the trainer's compiled history boundary, including zero padding."""
     with torch.autocast(tokens.device.type, dtype=torch.bfloat16, enabled=tokens.is_cuda, cache_enabled=False):
         return trunk(tokens, torch.zeros(len(tokens), dtype=torch.long, device=tokens.device))
+
+
+def capture_reference_log_probs(
+    forward: Callable[[ReplaySlots], ReplayOutput], slots: ReplaySlots
+) -> tuple[Tensor, ...]:
+    """Own reference heads before the next compiled call can reuse its output storage."""
+    parts: list[tuple[Tensor, ...]] = []
+    for start in range(0, slots.valid_WK.shape[1], 16):
+        chunk = ReplaySlots(
+            *(
+                getattr(slots, field.name).contiguous()
+                if field.name == "history_starts_WL"
+                else getattr(slots, field.name)[:, start : start + 16].contiguous()
+                for field in dataclasses.fields(slots)
+            )
+        )
+        output = forward(chunk)
+        parts.append(tuple(head_logs.detach().clone() for head_logs in output.log_distributions))
+    return tuple(torch.cat([part[group] for part in parts], 1) for group in range(4))
 
 
 def main(args: Args) -> None:
@@ -233,27 +253,23 @@ def main(args: Args) -> None:
             validate_replay_inputs(current, hidden, observed, replay_slots)
         return operation(current, hidden, observed, replay_slots, grad=True), hidden, tokens
 
-    references = []
+    reference_head_log_probs = []
     for name, current, compiled, fp32 in (
         ("eager reference", reference, False, False),
         ("compiled reference", reference, True, False),
         ("FP32 reference", high_reference, False, True),
     ):
         print(name, flush=True)
-        parts = []
-        for start in range(0, shape[1], min(16, shape[1])):
-            chunk = ReplaySlots(
-                *(
-                    getattr(slots, field.name).contiguous()
-                    if field.name == "history_starts_WL"
-                    else getattr(slots, field.name)[:, start : start + 16].contiguous()
-                    for field in dataclasses.fields(slots)
-                )
-            )
-            output, _, _ = forward(current, compiled=compiled, fp32=fp32, replay_slots=chunk)
-            parts.append(tuple(p.detach() for p in output.distributions))
-            del output
-        references.append(tuple(torch.cat([part[group] for part in parts], 1) for group in range(4)))
+
+        def reference_forward(
+            replay_slots: ReplaySlots,
+            current: SelfPlayTransformer = current,
+            compiled: bool = compiled,
+            fp32: bool = fp32,
+        ) -> ReplayOutput:
+            return forward(current, compiled=compiled, fp32=fp32, replay_slots=replay_slots)[0]
+
+        reference_head_log_probs.append(capture_reference_log_probs(reference_forward, slots))
     quantities = []
     gradient_groups: list[dict[str, Tensor]] = []
     ratios_by_mode: list[dict[str, float]] = []
@@ -276,11 +292,12 @@ def main(args: Args) -> None:
             advantages,
             valid,
             coefficient,
-            references[2],
+            reference_head_log_probs[2],
             mean.float(),
             sigma.float(),
             denominator,
         )
+        validate_actor_targets(output, targets)
         loss = actor_loss(output, targets)
         shared_upstream = torch.autograd.grad(loss.loss, hidden)[0].detach()
         del output, hidden, loss
@@ -300,7 +317,7 @@ def main(args: Args) -> None:
             advantages,
             valid,
             coefficient,
-            references[(0, 0, 1, 2)[index]],
+            reference_head_log_probs[(0, 0, 1, 2)[index]],
             mean.float(),
             sigma.float(),
             denominator,
@@ -366,7 +383,7 @@ def main(args: Args) -> None:
         )
         del output, loss, gradient
     report: dict[str, object] = {
-        "format": "hal.o65.replay-diagnostics.v2",
+        "format": "hal.o65.replay-diagnostics.v3",
         "checkpoint_sha256": checkpoint.checkpoint_sha256,
         "inputs_sha256": sha256(args.inputs),
         "probe_sha256": sha256(Path(__file__)),
@@ -397,7 +414,7 @@ def main(args: Args) -> None:
         "gpu": torch.cuda.get_device_name(device),
         "step_zero_ratios": dict(zip(("eager", "repeat", "compiled", "fp32"), ratios_by_mode, strict=True)),
     }
-    passed = True
+    all_finite = True
     report["gradient_groups"] = {
         name: compare(value, gradient_groups[0][name], gradient_groups[3][name], gradient_groups[1][name])
         for name, value in gradient_groups[2].items()
@@ -405,10 +422,11 @@ def main(args: Args) -> None:
     for name, value in quantities[2].items():
         comparison = compare(value, quantities[0][name], quantities[3][name], quantities[1][name])
         report[name] = comparison
-        passed &= comparison["passed"]
+        all_finite &= comparison["finite"]
+    report["all_finite"] = all_finite
     args.output.write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)
-    if not passed:
+    if not all_finite:
         raise ValueError("replay precision diagnostic contains NaN or infinity")
 
 

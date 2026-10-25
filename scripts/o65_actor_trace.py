@@ -17,11 +17,13 @@ from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.attention import Trunk
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
+from hal.models.replay_actor import validate_actor_targets
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
 from hal.models.window_replay import replay_windows
 from hal.sim import native
 from hal.wire import ACTION_DIM
+from scripts.o65_replay_probe import CapturedCohort
 from scripts.o65_replay_probe import load_cohort
 
 
@@ -64,6 +66,24 @@ def stage_seconds(path: Path) -> dict[str, float]:
     return totals
 
 
+def recorded_actor_targets(
+    saved: CapturedCohort, reference: ReplayOutput, rows: torch.Tensor, selected_WK: torch.Tensor
+) -> ActorTargets:
+    """Gather recorded targets and own the reference logs across subsequent graph calls."""
+    device = reference.log_probs_WKF.device
+    capacity = selected_WK.shape[1]
+    return ActorTargets(
+        behavior_log_probs_WKF=saved["behavior"].to(device)[rows, :capacity],
+        advantages_WK=saved["advantages"].to(device)[rows, :capacity],
+        selected_WK=selected_WK,
+        kl_coefficient_WK=saved["coefficients"].to(device)[rows, :capacity],
+        reference_log_distributions=tuple(head_logs.detach().clone() for head_logs in reference.log_distributions),
+        advantage_mean=saved["advantage_mean"].to(device),
+        advantage_sigma=saved["advantage_sigma"].to(device),
+        denominator=saved["denominator"].to(device),
+    )
+
+
 def main(args: Args) -> None:
     if args.windows < 1:
         raise ValueError("actor trace requires a positive window count")
@@ -93,8 +113,6 @@ def main(args: Args) -> None:
     context = {name: value.to(device)[ids] for name, value in saved["context"].items()}
     observed = saved["observed"].to(device)[ids]
     selected = saved["selected"].to(device)[ids, :capacity] & slots.valid_WK
-    mean = saved["advantage_mean"]
-    sigma = saved["advantage_sigma"]
     trunk = (
         torch.compile(
             actor_history,
@@ -116,16 +134,8 @@ def main(args: Args) -> None:
         tokens = model.context_tokens(context, observed)
         hidden = trunk(model.trunk, tokens)
     reference = decoder(model, hidden, observed, slots, grad=True)
-    targets = ActorTargets(
-        saved["behavior"].to(device)[ids, :capacity],
-        saved["advantages"].to(device)[ids, :capacity],
-        selected,
-        saved["coefficients"].to(device)[ids, :capacity],
-        tuple(p.detach().clone() for p in reference.distributions),
-        mean.to(device).float(),
-        sigma.to(device).float(),
-        saved["denominator"].to(device),
-    )
+    targets = recorded_actor_targets(saved, reference, ids, selected)
+    validate_actor_targets(reference, targets)
     del reference, hidden, tokens
 
     def step() -> None:
