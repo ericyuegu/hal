@@ -85,9 +85,59 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   The historical W&B run remains unchanged: its 44 rows end at update 43,
   while its last published checkpoint is update 32.
 
-The full-model normalization cause, exact-source GPU qualification,
-and performance comparison remain open. No production recovery is qualified by these
-CPU results.
+## Captured full-model failure
+
+The two-B200 diagnostic captured the first actor operation after checkpoint 32
+on original ranks 0 and 1, at source `fdadcd902feeaffa792e64ae7926f1a4a85382ff`.
+It preserved selected checkpoint shard bytes, local simulation state, local shapes,
+model state and rank RNG. Global moments and critic gradient averaging used two
+ranks. It stopped before the actor optimizer step. This is a diagnostic projection,
+not an exact eight-rank continuation.
+
+Modal call `fc-01M5RDGTCMPEQM8AGG8AKGWW2G` completed with return code 0 because
+the capture completed; both ranks' live actor checks failed. The actor snapshots
+are in volume `hal-o65-profile`, under
+`o65-correctness-fdadcd902fee-two-rank/failures/`:
+
+- Rank 0 SHA-256: `8cb08f4fdfbf53d4d593aee00f848adee3516f8d8164ed9750ee6411704cd795`.
+- Rank 1 SHA-256: `50a7dd1d2ee728bd79598d1030d2f32ad4e7d012354e3693fa447ec5a0d3d101`.
+
+Both local downloads match their recorded hashes. Float64 reductions find 1,307
+failed main-stick rows out of 64,390 on rank 0, and 1,328 out of 64,415 on rank 1.
+The worst rows have probability mass `1.5193371585e-5` and `3.5470973536e-6`.
+Independent Python `math.fsum(math.exp(value) ...)` agrees on these rows. This
+establishes that large errors remain; the original first-failure log was not a
+bound on the error. The other actor heads and all reference heads normalize,
+and captured selected-action gathers and execution masks agree exactly.
+
+An isolated one-B200 replay uses the same rank-0 snapshot, model state, RNG and
+inputs at the same source. Modal call `fc-01M5RE268844V8ZEQ67D05F0MF` completed
+all modes. Reports are under `o65-correctness-fdadcd902fee-actor-replay/` in the
+same volume.
+
+| Execution | Observed full-head result |
+| --- | --- |
+| Eager BF16 | All 9 chunks normalize at forward, after loss and after backward. |
+| Compiled BF16 | 3,653 failed rows already at forward; later snapshots preserve the failure. Some rows contain NaNs. |
+| Graphed BF16 | 1,289 failed rows after the unmodified grouped actor operation. |
+| Eager FP32 | All 9 chunks normalize at forward, after loss and after backward. |
+
+The compiled failure affects the main-stick head in the five chunks with capacity
+64. The four chunks with capacity 32 pass. This locates the first observed failure
+before loss construction and backward, without CUDA graph capture.
+Cold-cache call `fc-01M5REGEZG81CDZD52VA6M8Y9N` rebuilt the same source without
+importing the portable cache. Compiled BF16 still failed at forward: 5,022
+main-stick rows failed normalization across the five capacity-64 chunks. The
+capacity-32 chunks passed. Cache import is therefore not necessary for the failure.
+The grouped graph mode passed in this cold-cache run, although the same mode failed
+in the earlier warm-cache run. This single pass is not qualification of the path.
+Copies used for intermediate observation can change timing; the grouped graph run
+retains the normal actor operation. The next controls change decoder compiler
+buffer reuse and reduction settings while preserving the captured inputs and model.
+
+The root cause, repaired-source GPU qualification, eight-rank continuation through
+checkpoint 64, gradient/update comparison and performance measurements remain open.
+The BF16 learning-effect uncertainty remains separate from this normalization defect.
 
 ## Validation log
 
