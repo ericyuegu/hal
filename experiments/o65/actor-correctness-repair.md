@@ -84,6 +84,11 @@ diagnostic namespace. This establishes artifact identity, not numerical validity
   files in a separate directory instead of overwriting `last-attempt`.
   The historical W&B run remains unchanged: its 44 rows end at update 43,
   while its last published checkpoint is update 32.
+- Compiler-cache identity now includes the effective `triton.enable_pdl` setting.
+  Cache format v3 rejects a seed with a different setting before importing artifacts
+  or changing cache paths, including an explicitly supplied seed identity. The
+  regression failed before the repair; all 28 cache tests now pass. Earlier v2
+  artifacts remain historical evidence and cannot qualify this identity.
 
 ## Captured full-model failure
 
@@ -134,6 +139,48 @@ in the earlier warm-cache run. This single pass is not qualification of the path
 Copies used for intermediate observation can change timing; the grouped graph run
 retains the normal actor operation. The next controls change decoder compiler
 buffer reuse and reduction settings while preserving the captured inputs and model.
+
+Call `fc-01M5REVDW5K2WKSWQXHXMXP4DB` then tested decoder compiler options in
+separate processes with a fresh local cache. It left the compiled history path
+unchanged. Every process completed all nine chunks and all three observations;
+none passed normalization.
+
+| Decoder compiler setting | Failed rows at forward |
+| --- | ---: |
+| Production options | 3,765 |
+| `inplace_buffers=False` | 2 |
+| `allow_buffer_reuse=False` | 1,958 |
+| Both buffer options disabled | 2 |
+| `triton.persistent_reductions=False` | 2,956 |
+
+The two residual errors with in-place buffers disabled have probability masses
+`1.0000402035` and `1.0000164871`, confirmed with Python double precision. Disabling
+both buffer options also leaves two errors, with maximum absolute log mass
+`4.30306e-5`. The reduction control additionally fails capacity-32 chunks. These
+results implicate the compiled execution path; they do not yet identify a faulty
+compiler pass or establish a valid workaround. The tolerance remains unchanged.
+
+The attempted native-decoder control, call `fc-01M5RFG1FW41T6A0G4GNRS8W41`, failed
+during the first CUDA graph capture. Eager FlexAttention's math implementation
+constructed a CPU constant that could not be copied during capture. No numerical,
+gradient or performance comparison completed. An attention-only compilation
+prototype passed a small local capture test but has not been selected as a repair.
+
+The eager/compiled comparison also changes attention implementations. It does not
+isolate a compiler defect. Saved arrays fail the normalization check; the point at
+which their values become incorrect remains unidentified.
+
+All preceding B200 diagnostics enabled `TORCHINDUCTOR_ENABLE_PDL=1`, as the DDP
+launcher does. PyTorch 2.11 defaults this optional scheduling optimization to off.
+[Upstream issue 199165](https://github.com/pytorch/pytorch/issues/199165) describes
+a dependency-name mismatch that permits a consumer to read an in-place producer's
+buffer before it finishes writing. The same dependency comparison is present in
+the installed 2.11 source. This is a hypothesis for HAL, not a demonstrated cause.
+The prepared PDL on/off diagnostic keeps the source, captured models, inputs, RNG,
+precision and compiler options fixed, with separate fresh caches. It reuses image
+`im-mNLSZTaONBvkFQESBg3Rp2`; its 720-second bound fits the existing repair reservation.
+The automatic approval review rejected this launch; explicit user approval is
+pending. No PDL control result exists yet.
 
 The root cause, repaired-source GPU qualification, eight-rank continuation through
 checkpoint 64, gradient/update comparison and performance measurements remain open.
@@ -191,5 +238,15 @@ Commands below used `UV_CACHE_DIR=/tmp/hal-uv-cache PYTHONPATH=.` and
 - After retiring the proxy qualifier, collection succeeds with `TMPDIR` unset:
   3018 tests collected, 89 integration tests deselected. The removed helper had
   required that environment variable while collecting an otherwise deselected test.
+- The frozen `cd48e073` full suite ended without a final summary or exit receipt.
+  Its eight initial
+  socket-test failures all pass with a shorter workspace temporary directory:
+  `pytest -q <the eight failed socket node IDs> --basetemp=/home/ericgu/src/hal/.cache/p-netplay -ra`:
+  8 passed in 0.40 seconds. The original long temporary paths exceeded Unix socket
+  path limits. Both logs and the exact node-ID list are preserved under
+  `runs/o65-compile-repair/local-artifacts/`. The full suite remains incomplete.
+- Compiler-cache regression: the new PDL mismatch case failed on the old code
+  because the cache was imported. After adding PDL to cache format v3,
+  `pytest -q tests/test_compile_cache.py -ra`: 28 passed, no skips.
 
 Full required checks and GPU checks remain pending.

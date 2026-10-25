@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch._inductor import config as inductor_config
 from torch._inductor.output_code import CompiledFxGraph
 from torch._inductor.triton_bundler import TritonBundle
 from torch._inductor.triton_bundler import TritonKernelArtifact
@@ -27,7 +28,7 @@ def restore_cache_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def identity() -> compile_cache.CacheIdentity:
-    return compile_cache.CacheIdentity("2.11.0+cu130", "3.6.0", "13.0", "RTX 3060", (8, 6), "a" * 64)
+    return compile_cache.CacheIdentity("2.11.0+cu130", "3.6.0", "13.0", "RTX 3060", (8, 6), "a" * 64, enable_pdl=False)
 
 
 @pytest.mark.parametrize(
@@ -75,6 +76,31 @@ def test_cache_rejects_wrong_identity_before_setting_paths(tmp_path: Path, monke
     with pytest.raises(ValueError, match="identity mismatch"):
         compile_cache.CompileCache(tmp_path, identity())
     assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == "unchanged"
+
+
+def test_cache_rejects_a_different_pdl_setting_before_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "NVIDIA B200")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (10, 0))
+    monkeypatch.setattr(
+        torch.compiler,
+        "save_cache_artifacts",
+        lambda: (b"graphs with PDL", SimpleNamespace(artifacts={"inductor": ["actor"]})),
+    )
+    loaded: list[bytes] = []
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda data: loaded.append(data) or object())
+    with inductor_config.patch({"triton.enable_pdl": True}):
+        enabled = compile_cache.current_identity("a" * 64, torch.device("cuda"))
+    seed = compile_cache.CompileCache(tmp_path / "seed", enabled)
+    assert seed.save()
+    with inductor_config.patch({"triton.enable_pdl": False}):
+        disabled = compile_cache.current_identity("a" * 64, torch.device("cuda"))
+    monkeypatch.setenv("TRITON_CACHE_DIR", "unchanged")
+    with pytest.raises(ValueError, match="identity"):
+        compile_cache.CompileCache(tmp_path / "current", disabled, seed_root=tmp_path / "seed", require_loaded=True)
+    with pytest.raises(ValueError, match="configuration"):
+        compile_cache.CompileCache(tmp_path / "current", disabled, seed_root=tmp_path / "seed", seed_identity=enabled)
+    assert not loaded
+    assert os.environ["TRITON_CACHE_DIR"] == "unchanged"
 
 
 def test_cache_rejects_orphaned_modular_cache(tmp_path: Path) -> None:
@@ -245,7 +271,7 @@ def test_measurement_can_import_an_explicit_same_hardware_source_seed(
     assert seed.save()
     consumer = compile_cache.CompileCache(tmp_path / "new", new, seed_root=tmp_path / "seed", seed_identity=old)
     assert consumer.loaded and consumer.identity == new
-    with pytest.raises(ValueError, match="compiler and hardware"):
+    with pytest.raises(ValueError, match="hardware identity"):
         compile_cache.CompileCache(
             tmp_path / "wrong", new, seed_root=tmp_path / "seed", seed_identity=dataclasses.replace(old, gpu="other")
         )

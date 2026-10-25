@@ -13,6 +13,7 @@ from typing import cast
 
 import torch
 from torch._dynamo.utils import counters
+from torch._inductor import config as inductor_config
 from torch._inductor.output_code import CompiledFxGraph
 from torch._inductor.triton_bundler import TritonBundle
 from torch._inductor.triton_bundler import TritonBundler
@@ -65,7 +66,8 @@ class CacheIdentity:
     gpu: str
     capability: tuple[int, int]
     source_sha256: str
-    format: str = "hal.o65.compile-cache.v2"
+    enable_pdl: bool
+    format: str = "hal.o65.compile-cache.v3"
 
     def encoded(self) -> bytes:
         return json.dumps(dataclasses.asdict(self), sort_keys=True).encode()
@@ -95,6 +97,7 @@ def current_identity(source_sha256: str, device: torch.device) -> CacheIdentity:
         torch.cuda.get_device_name(device),
         torch.cuda.get_device_capability(device),
         source_sha256,
+        inductor_config.triton.enable_pdl,
     )
 
 
@@ -159,7 +162,7 @@ class CompileCache:
         if seed_identity is not None and (
             seed_root is None or dataclasses.replace(seed_identity, source_sha256=identity.source_sha256) != identity
         ):
-            raise ValueError("compiler seed must have the same compiler and hardware identity")
+            raise ValueError("compiler seed must have the same compiler, configuration and hardware identity")
         self.identity = identity
         self.directory = root.resolve() / identity.key
         self.directory.mkdir(parents=True, exist_ok=True)
