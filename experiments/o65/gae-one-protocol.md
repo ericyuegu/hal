@@ -17,8 +17,10 @@ that commit. Its only training change is GAE lambda. The resolved run record
 also reports gamma and GAE lambda explicitly.
 
 Start from the original O63 bootstrap30 behavior-cloning checkpoint in
-`pilot-inputs.json`. Do not pass `--resume` or `--resume-learner` for this
-launch. Initialize fresh optimizer, scheduler and RNG states. All 2,000 RL
+`pilot-inputs.json`. Do not pass `--resume-learner`. Use a new Modal run name
+with no published checkpoint. The launcher's `--resume` flag permits recovery
+of this new run; it does not import an earlier learner. Initialize fresh
+optimizer, scheduler and RNG states. All 2,000 RL
 updates use GAE lambda 1, including the usual 32-update critic warmup. Warmup
 calibrates the KL range using this run's advantage spread.
 
@@ -46,10 +48,11 @@ limits when comparing the two runs.
 
 ## Endpoint and evaluation
 
-Train to update 2,000, with checkpoints every 32 updates. Use one separate GCE
-RTX PRO 6000. Do not use the GPU that serves netplay. Keep the VM allocated
-after training. Bound the training job to 10 hours, including final evaluation;
-this bound stops the job, not the VM.
+Train to update 2,000, with checkpoints every 32 updates. Use one Modal
+RTX PRO 6000, 17 CPU cores and 64 GiB RAM, as in the historical pilot. The user
+selected Modal after GCE allocation failed in nine US zones. Bound the job to
+10 hours, including final evaluation, with the launcher's recorded budget.
+Publish checkpoints to `hal-o65-profile` and R2 through the existing worker.
 
 Use the original 384-game MSL grid against the reference at D8/R4, u=0.95 and
 KL coefficient 1. Use the same game seeds, stages and port orientations.
