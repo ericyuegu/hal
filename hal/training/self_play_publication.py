@@ -15,6 +15,9 @@ import modal
 from hal import r2
 from hal.eval.self_play_checkpoint import read_training_manifest
 
+# A failed R2 backup fails training, so transient R2 errors get retried.
+R2_ATTEMPTS = 8
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Args:
@@ -213,7 +216,7 @@ def publish(args: Args) -> None:
     # Commit the complete resume state even if the subsequent R2 backup fails.
     volume = modal.Volume.from_name(args.volume)
     volume.commit()
-    client, bucket = r2.client(timeout_seconds=60), r2.bucket()
+    client, bucket = r2.client(timeout_seconds=60, attempts=R2_ATTEMPTS), r2.bucket()
     for relative, digest in hashes.items():
         if previous.get(relative) != digest:
             client.upload_file(str(args.destination / relative), bucket, f"{args.r2_prefix}/state/{relative}")

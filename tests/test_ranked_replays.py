@@ -191,7 +191,7 @@ def test_r2_upload_timeout_has_one_bounded_attempt(monkeypatch: pytest.MonkeyPat
     r2.client(timeout_seconds=5)
     config = factory.call_args.kwargs["config"]
     assert config.connect_timeout == config.read_timeout == 5
-    assert config.retries == {"total_max_attempts": 1}
+    assert config.retries == {"total_max_attempts": 1, "mode": "standard"}
     r2.client()
     config = factory.call_args.kwargs["config"]
     assert config.connect_timeout == config.read_timeout == 60

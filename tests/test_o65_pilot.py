@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 import tyro
 
+from hal import r2
 from hal.training import self_play_publication
 
 _SPEC = importlib.util.spec_from_file_location("o65_pilot", Path(__file__).parents[1] / "experiments/o65/pilot.py")
@@ -499,3 +500,33 @@ def test_learner_resume_command_and_metric_history(tmp_path: Path) -> None:
     path.write_text('{"global_step":255}\n')
     with pytest.raises(ValueError, match="metric history"):
         _MODULE.inherit_metrics(path, target, 256)
+
+
+def test_publication_client_retries_a_transient_r2_internal_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from botocore.awsrequest import AWSResponse
+
+    for name in ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(name, "https://r2.invalid" if name == "AWS_ENDPOINT_URL" else "test-value")
+    client = r2.client(timeout_seconds=5, attempts=self_play_publication.R2_ATTEMPTS)
+    # Skip backoff sleeps; the retry decision is what matters.
+    monkeypatch.setattr("botocore.retries.standard.ExponentialBackoff.delay_amount", lambda *_: 0)
+
+    class Body:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def stream(self) -> list[bytes]:
+            return [self.payload]
+
+    sent: list[str] = []
+
+    def respond(request: object, **_: object) -> AWSResponse:
+        sent.append(request.url)  # type: ignore[attr-defined]
+        if len(sent) == 1:
+            error = b"<Error><Code>InternalError</Code><Message>retry</Message></Error>"
+            return AWSResponse(request.url, 500, {}, Body(error))  # type: ignore[attr-defined]
+        return AWSResponse(request.url, 200, {"ETag": '"etag"'}, Body(b""))  # type: ignore[attr-defined]
+
+    client.meta.events.register("before-send.s3.PutObject", respond)
+    client.put_object(Bucket="hal", Key="o65/pilot-results/run/state/file", Body=b"state")
+    assert len(sent) == 2

@@ -55,3 +55,31 @@ uv run python -m scripts.launch_o65_modal --mode pilot --dry-run
 The input files record simulator and checkpoint hashes, sampler counts and the
 final evaluation grid. [The evaluation instructions](../../hal/eval/O65.md)
 describe paired matches and outcome statistics.
+
+## Cleanup before merging to main
+
+The branch adds about 31,000 lines. We plan a cleanup pass before merging.
+These items look cheap:
+
+- Remove the v8 update-256 learner migration. It served the fixed-slot
+  relaunch, which is finished. The migration spans `restore_pilot_learner`,
+  `legacy_pilot_digest`, `PILOT_SOURCE`, `--resume-learner` in `pilot.py` and
+  the launcher, `inherit_metrics`, and their tests.
+- Pick one entry point. Inside the Modal container, `pilot.py` installs
+  inputs, builds MSL, runs `065_selfplay_ppo.py train` as a subprocess,
+  publishes, then runs the held-out evaluation. Folding those steps into the
+  launcher or the trainer would leave a single path to read.
+- Remove the GCE existing-VM launch path: `scripts/launch_o65_existing.py`,
+  `scripts/launch_o65.sh`, `docker/o65-existing.sh` and
+  `tests/test_launch_o65_existing.py`. Modal replaced it.
+- Merge the protocols into `plan.md` and Git history. `pilot-protocol.md`
+  still describes the 54-lane layout and Beta(5,1.3). `gae-one-protocol.md`
+  describes a finished run. `stalls.md` and `performance.md` hold dated
+  measurements.
+- Decide whether to keep the `qualify` and `profile` subcommands and
+  `GpuProfileCli` (about 400 lines). `GpuProfileCli` defaults to CPUs 0-15,
+  so its test fails on hosts with fewer CPUs.
+- Drop the remaining v8 and v9 checkpoint readers once no evaluation needs
+  those actors.
+- Audit the roughly 30 O65 test files for overlap, starting with the
+  qualification and precision fixtures.
