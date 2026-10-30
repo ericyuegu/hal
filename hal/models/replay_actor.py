@@ -1,10 +1,12 @@
-"""Fixed-shape joint PPO and direct KL on recorded window decisions."""
+"""Fixed-shape joint PPO, direct KL and a shared-model value loss on recorded window decisions."""
 
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
+from hal.models.self_play import VALUE_BINS
+from hal.models.self_play import value_cross_entropy
 from hal.models.window_replay import ReplayOutput
 
 
@@ -20,6 +22,9 @@ class ActorTargets:
     advantage_mean: Tensor
     advantage_sigma: Tensor
     denominator: Tensor
+    # Critic targets for the value loss that trains the trunk and decoder.
+    value_targets_WK: Tensor
+    value_coefficient: Tensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +32,7 @@ class ActorLoss:
     loss: Tensor
     policy_loss: Tensor
     kl_loss: Tensor
+    value_loss: Tensor
     joint_ratio_WK: Tensor
     factor_kl_WKF: Tensor
 
@@ -43,6 +49,8 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
         (targets.advantage_mean, (), torch.float32),
         (targets.advantage_sigma, (), torch.float32),
         (targets.denominator, (), torch.float32),
+        (targets.value_targets_WK, shape, torch.float32),
+        (targets.value_coefficient, (), torch.float32),
     )
     for value, expected, dtype in tensors:
         if tuple(value.shape) != expected or value.dtype != dtype or value.device != device:
@@ -56,9 +64,11 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
         raise ValueError("advantage statistics must be finite with positive sigma")
     if not bool(torch.isfinite(targets.denominator) & (targets.denominator > 0)):
         raise ValueError("actor denominator must be finite and positive")
-    for value in (targets.advantages_WK, targets.kl_coefficient_WK):
+    for value in (targets.advantages_WK, targets.kl_coefficient_WK, targets.value_targets_WK):
         if not bool(torch.isfinite(value[selected]).all()):
             raise ValueError("selected actor targets must be finite")
+    if not bool(torch.isfinite(targets.value_coefficient) & (targets.value_coefficient >= 0)):
+        raise ValueError("value coefficient must be finite and nonnegative")
     if bool((targets.kl_coefficient_WK[selected] < 0).any()):
         raise ValueError("KL coefficients must be nonnegative")
     executed = output.factor_mask_WKF & selected[..., None]
@@ -82,14 +92,19 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
             raise ValueError("reference distributions must be normalized on identical support")
 
 
-def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: float = 0.2) -> ActorLoss:
-    """Calculate joint PPO and direct KL from stored behavior and reference probabilities.
+def actor_loss(
+    output: ReplayOutput, value_logits_WKB: Tensor, targets: ActorTargets, *, clip_epsilon: float = 0.2
+) -> ActorLoss:
+    """Calculate joint PPO, direct KL and value cross-entropy for the shared model.
 
     Validate targets before capture. Detach all targets so gradients flow only
-    through the current policy.
+    through the current policy. Callers compute value logits with fixed critic
+    parameters, so the value term moves only the trunk and decoder.
     """
     if not 0 < clip_epsilon < 1:
         raise ValueError("clip epsilon must be finite and between zero and one")
+    if value_logits_WKB.shape != (*targets.selected_WK.shape, VALUE_BINS):
+        raise ValueError("value logits must be [W,K,value bins]")
     selected = targets.selected_WK & output.factor_mask_WKF.any(-1)
     mask = output.factor_mask_WKF & selected[..., None]
     new = torch.where(mask, output.log_probs_WKF, 0)
@@ -115,4 +130,7 @@ def actor_loss(output: ReplayOutput, targets: ActorTargets, *, clip_epsilon: flo
     kl_sum = torch.where(mask, factor_kl, 0).sum(-1)
     coefficient = torch.where(selected, targets.kl_coefficient_WK.detach(), 0)
     kl = (coefficient / targets.advantage_sigma.detach() * kl_sum).sum() / targets.denominator.detach()
-    return ActorLoss(policy + kl, policy, kl, ratio, torch.where(mask, factor_kl, 0))
+    cross_entropy = value_cross_entropy(value_logits_WKB, torch.where(selected, targets.value_targets_WK.detach(), 0))
+    value = torch.where(selected, cross_entropy, 0).sum() / targets.denominator.detach()
+    total = policy + kl + targets.value_coefficient.detach() * value
+    return ActorLoss(total, policy, kl, value, ratio, torch.where(mask, factor_kl, 0))

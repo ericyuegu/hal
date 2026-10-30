@@ -61,9 +61,12 @@ from hal.models.replay_actor import actor_loss
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_decoder_precision
+from hal.models.self_play import value_cross_entropy
+from hal.models.self_play import value_mean
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
+from hal.models.window_replay import replay_critic_logits
 from hal.models.window_replay import replay_windows
 from hal.sim import native
 from hal.sim import native_bridge
@@ -76,7 +79,8 @@ from hal.wire import ACTION_DIM
 
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
 MAX_REPLAN = 4
-GAMMA = 0.99855
+# A 30-second half-life covers about one stock exchange.
+GAMMA = 2 ** (-1 / 1800)
 GAE_LAMBDA = 1.0
 
 
@@ -419,23 +423,19 @@ def _decision_mean(values_J: Tensor, selected_J: Tensor, reduction: DecisionRedu
 
 
 def critic_loss(
-    values_J: Tensor,
+    logits_JB: Tensor,
     targets_J: Tensor,
     selected_J: Tensor,
     *,
-    value_scale: float = 150.0,
     reduction: DecisionReduction | None = None,
 ) -> Tensor:
-    """Fit detached targets at O64 reward scale, including decisions with no executed factors."""
-    if not math.isfinite(value_scale) or value_scale <= 0:
-        raise ValueError("value_scale must be finite and positive")
-    if not values_J.is_floating_point():
-        raise ValueError("critic values must have floating dtype")
-    _check_tensor("targets", targets_J, tuple(values_J.shape), "float", values_J.device)
-    _check_tensor("selection mask", selected_J, tuple(values_J.shape), "bool", values_J.device)
-    values = torch.where(selected_J, _loss_precision(values_J), 0)
+    """Fit HL-Gauss targets, including decisions with no executed factors."""
+    if not logits_JB.is_floating_point() or logits_JB.ndim != 2:
+        raise ValueError("critic logits must be floating [J, value bins]")
+    _check_tensor("targets", targets_J, (len(logits_JB),), "float", logits_JB.device)
+    _check_tensor("selection mask", selected_J, (len(logits_JB),), "bool", logits_JB.device)
     targets = torch.where(selected_J, _loss_precision(targets_J.detach()), 0)
-    return _decision_mean(((values - targets) / value_scale).square(), selected_J, reduction)
+    return _decision_mean(value_cross_entropy(logits_JB, targets), selected_J, reduction)
 
 
 # PPO rows use FACTOR_ORDER. Index codec tensors with DECODE_GROUP_INDICES
@@ -945,6 +945,7 @@ class LoopPolicy(Protocol):
         self, batch: ReplayBatch, targets: ActorTargets, *, clip_epsilon: float
     ) -> tuple[ActorLoss, ReplayOutput]: ...
     def values(self, features: CriticFeatures) -> Tensor: ...
+    def value_logits(self, features: CriticFeatures) -> Tensor: ...
     def device_wire_actions(self, indices: Tensor, *, validate: bool = True) -> Tensor: ...
     def actor_parameters(self) -> tuple[torch.nn.Parameter, ...]: ...
     def critic_parameters(self) -> tuple[torch.nn.Parameter, ...]: ...
@@ -1204,7 +1205,7 @@ class DenseRollout:
                 torch.zeros(capacity, model.cfg.temporal_d_model, device=self.device),
                 torch.zeros(capacity, 4, device=self.device),
                 torch.zeros(capacity, 4, device=self.device),
-                torch.zeros(capacity, model.critic_residual.max_queue, 4, dtype=torch.long, device=self.device),
+                torch.zeros(capacity, model.critic.max_queue, 4, dtype=torch.long, device=self.device),
                 torch.zeros(capacity, dtype=torch.long, device=self.device),
             ),
         )
@@ -1341,7 +1342,7 @@ class TransformerPolicy:
 
     @property
     def max_opponent_queue(self) -> int:
-        return self.model.critic_residual.max_queue
+        return self.model.critic.max_queue
 
     @property
     def condition_ranges(self) -> ConditioningRanges:
@@ -1429,7 +1430,7 @@ class TransformerPolicy:
             percentile=conditions[:, 3].contiguous(),
             validate=False,
         )
-        capacity = self.model.critic_residual.max_queue
+        capacity = self.model.critic.max_queue
         features = CriticFeatures(
             hidden[:, -1].detach(),
             output.decoder_state.detach(),
@@ -1663,7 +1664,7 @@ class TransformerPolicy:
                         output.log_probs_WKF.detach(),
                         tuple(p.detach() for p in output.distributions),
                         output.factor_mask_WKF,
-                        output.features,
+                        output.features.detached(),
                     )
                 )
             batches.append(concatenate_replays(parts, 1))
@@ -1833,13 +1834,13 @@ class TransformerPolicy:
         if self.device.type == "cpu":
             self.model.zero_grad(set_to_none=True)
             output = self.window_forward(inputs, grad=True)
-            result = actor_loss(output, targets, clip_epsilon=clip_epsilon)
+            result = actor_loss(output, self.replay_value_logits(output.features), targets, clip_epsilon=clip_epsilon)
             result.loss.backward()
             detached = ReplayOutput(
                 output.log_probs_WKF.detach(),
                 tuple(value.detach() for value in output.distributions),
                 output.factor_mask_WKF,
-                output.features,
+                output.features.detached(),
             )
             return result, detached
         if self.actor_graph is not None and self.actor_clip_epsilon != clip_epsilon:
@@ -1849,6 +1850,7 @@ class TransformerPolicy:
             with prepared_shape_compilation(64):
                 self.actor_graph = GraphedActorStep(
                     lambda values: self.window_forward(values, grad=True),
+                    self.replay_value_logits,
                     inputs,
                     targets,
                     self.actor_parameters(),
@@ -1857,8 +1859,8 @@ class TransformerPolicy:
             self.actor_clip_epsilon = clip_epsilon
         return self.actor_graph.backward(inputs, targets), self.actor_graph.evaluation()
 
-    def values(self, features: CriticFeatures, *, validate: bool = True) -> Tensor:
-        return self.model.self_play_value(
+    def value_logits(self, features: CriticFeatures, *, validate: bool = True) -> Tensor:
+        return self.model.critic_logits(
             features.trunk,
             features.decoder,
             features.condition,
@@ -1867,6 +1869,13 @@ class TransformerPolicy:
             features.opponent_lengths,
             validate=validate,
         )
+
+    def values(self, features: CriticFeatures, *, validate: bool = True) -> Tensor:
+        return value_mean(self.value_logits(features, validate=validate))
+
+    def replay_value_logits(self, features: ReplayCriticFeatures) -> Tensor:
+        """Score replayed decisions with fixed critic parameters for the shared-model value loss."""
+        return replay_critic_logits(self.model, features, fixed_critic=True, validate=False)
 
     def device_wire_actions(self, indices: Tensor, *, validate: bool = True) -> Tensor:
         if validate:
@@ -2968,7 +2977,9 @@ class TrainConfig:
     decisions_per_window: int = 16
     clip_epsilon: float = 0.2
     gradient_clip: float = 1.0
-    value_scale: float = 150.0
+    # Weight of the critic's HL-Gauss loss in the actor step, which trains the trunk
+    # and decoder; the critic heads train only in critic fitting.
+    value_loss_coefficient: float = 0.1
     warmup_steps: int = 32
     critic_warmup_updates: int = 32
     head_start_frames: int = 0
@@ -3002,7 +3013,7 @@ class TrainConfig:
         if type(self.max_league_size) is not int or self.max_league_size < 5:
             # Eviction protects pi_ref and three milestones and must keep the new entry.
             raise ValueError("league must hold pi_ref, three milestones and one evictable entry")
-        for name in ("pfsp_power", "opponent_weight_power"):
+        for name in ("pfsp_power", "opponent_weight_power", "value_loss_coefficient"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
@@ -3032,7 +3043,6 @@ class TrainConfig:
             "actor_lr",
             "critic_lr",
             "gradient_clip",
-            "value_scale",
             "lambda_spread_multiplier",
         ):
             value = getattr(self, name)
@@ -3827,6 +3837,8 @@ class Trainer:
                 zero.new_zeros(()),
                 zero.new_ones(()),
                 zero.new_ones(()),
+                zero,
+                zero.new_zeros(()),
             )
             self.policy.actor_step(part, targets, clip_epsilon=self.config.clip_epsilon)
             table.reset()
@@ -4259,12 +4271,7 @@ class Trainer:
             selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
             for _ in range(cfg.critic_epochs):
                 self.critic_optimizer.zero_grad(set_to_none=True)
-                loss = critic_loss(
-                    self.policy.values(features),
-                    batch.targets,
-                    selected,
-                    value_scale=cfg.value_scale,
-                )
+                loss = critic_loss(self.policy.value_logits(features), batch.targets, selected)
                 _check_finite("critic loss", loss)
                 loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(
@@ -4286,6 +4293,7 @@ class Trainer:
         started = time.perf_counter()
         policy_losses: list[Tensor] = []
         kl_losses: list[Tensor] = []
+        value_losses: list[Tensor] = []
         ratios: list[Tensor] = []
         old_log_ratios: list[Tensor] = []
         actor_norms: list[Tensor] = []
@@ -4295,6 +4303,9 @@ class Trainer:
         dense_advantage[batch.rollout.ids] = batch.advantages
         dense_weight = torch.ones_like(table.values)
         dense_weight[batch.rollout.ids] = batch.opponent_weights
+        dense_target = torch.zeros_like(table.values)
+        dense_target[batch.rollout.ids] = batch.targets
+        value_coefficient = torch.tensor(cfg.value_loss_coefficient, dtype=torch.float32, device=self.policy.device)
         fixed_sigma = (
             torch.tensor(self.warmup_advantage_sigma(), dtype=torch.float32, device=self.policy.device)
             if cfg.advantage_scale == "warmup"
@@ -4344,6 +4355,8 @@ class Trainer:
                             statistics.mean.float(),
                             sigma,
                             selected.sum().float(),
+                            dense_target[part.rows],
+                            value_coefficient,
                         )
                         parts.append(self.policy.actor_step(part, targets, clip_epsilon=cfg.clip_epsilon))
                         if cfg.actor_microbatches > 1:
@@ -4369,7 +4382,7 @@ class Trainer:
                         "actor loss, KL and joint ratio",
                         torch.cat(
                             (
-                                torch.stack((result.loss, result.policy_loss, result.kl_loss)),
+                                torch.stack((result.loss, result.policy_loss, result.kl_loss, result.value_loss)),
                                 result.factor_kl_WKF.flatten(),
                                 result.joint_ratio_WK[selected],
                             )
@@ -4386,6 +4399,7 @@ class Trainer:
                     self.actor_steps += 1
                     policy_losses.append(result.policy_loss.detach())
                     kl_losses.append(result.kl_loss.detach())
+                    value_losses.append(result.value_loss.detach())
                     ratio = result.joint_ratio_WK[selected].detach()
                     ratios.append(ratio)
                     executed = current.factor_mask_WKF & selected[..., None]
@@ -4414,6 +4428,7 @@ class Trainer:
             {
                 "policy/loss": float(torch.stack(policy_losses).mean()),
                 "policy/kl_loss": float(torch.stack(kl_losses).mean()),
+                "policy/value_loss": float(torch.stack(value_losses).mean()),
                 "policy/clip_fraction": float(((ratio - 1).abs() > cfg.clip_epsilon).float().mean()),
                 "policy/ratio_p01": float(ratio.quantile(0.01)),
                 "policy/ratio_p99": float(ratio.quantile(0.99)),
@@ -4444,13 +4459,20 @@ class Trainer:
             if count < 2:
                 raise ValueError("lambda calibration needs advantages for every timing configuration")
             spreads.append(math.sqrt(max(0.0, squares / count - (total / count) ** 2)))
-        maximum = self.config.lambda_spread_multiplier * max(spreads)
+        spread_maximum = self.config.lambda_spread_multiplier * max(spreads)
         sampler = self.engine.sampler
-        if not sampler.config.lambda_min < maximum <= sampler.config.lambda_max:
-            raise ValueError("calibrated lambda_max is outside the declared conditioner range")
+        if not sampler.config.lambda_min < spread_maximum:
+            raise ValueError("calibrated lambda_max is below the declared conditioner range")
+        # The conditioner was trained only up to its declared maximum.
+        maximum = min(spread_maximum, sampler.config.lambda_max)
         sampler.lambda_max = maximum
         self.warming = False
-        return {"train/warmup_ended": 1.0, "train/warmup_advantage_sigma": self.warmup_advantage_sigma()}
+        return {
+            "train/warmup_ended": 1.0,
+            "train/warmup_advantage_sigma": self.warmup_advantage_sigma(),
+            "train/lambda_spread_maximum": spread_maximum,
+            "train/lambda_max_capped": float(maximum < spread_maximum),
+        }
 
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
         if self.updating:
@@ -5262,7 +5284,12 @@ def run_training(
         "train": dataclasses.asdict(trainer.config),
         "sampler": dataclasses.asdict(trainer.engine.sampler.config),
         "schedule": dataclasses.asdict(trainer.engine.sampler.schedule),
-        "returns": {"gamma_per_frame": GAMMA, "gae_lambda_per_frame": GAE_LAMBDA},
+        "returns": {
+            "reward": "120 per stock and 50 more on the deciding stock; no damage term",
+            "gamma_per_frame": GAMMA,
+            "gae_lambda_per_frame": GAE_LAMBDA,
+            "critic": "HL-Gauss over 120 bins on [-600, 600]; value loss reaches the trunk during PPO",
+        },
         "treatment": (
             "KL-regularized joint PPO with "
             f"{trainer.config.advantage_scale} advantage sigma; "

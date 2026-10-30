@@ -1,4 +1,4 @@
-# O65 proxy: PFSP league against collapse
+# O65 proxy: PFSP league and stock reward against collapse
 
 Status: prepared; not launched.
 
@@ -8,8 +8,10 @@ The GAE lambda 1 run (W&B `o65-debug-84fafaef-5487e230e2`) drifted toward
 smash-attack spam. Its win rate against pi_ref rose to about 70% by update 576,
 where an R2 upload failure stopped it, while play degraded. Most
 student windows came from live self-play, and three snapshot slots were
-overwritten every 256 updates. This treatment changes the opponent mixture and
-the advantage scale together:
+overwritten every 256 updates. Its reward also paid damage permanently, with an
+8-second half-life, so damage in the next few seconds outweighed a stock half a
+minute away. This treatment changes the opponent mixture, the reward, the
+discount, the critic and the advantage scale together:
 
 - Opponent lanes: each 64-lane shard has 16 self-play lanes and 12 lanes for
   each of four anchor slots, so about 40% of student streams are self-play.
@@ -28,6 +30,15 @@ the advantage scale together:
   deviation of critic-warmup advantages, which carry no KL cost, instead of
   each minibatch's spread.
 - Percentile prior: u comes from Beta(15,1.2) instead of Beta(5,1.3).
+- Reward: 120 per stock and 50 more on the deciding stock, with no damage
+  term. A KO always pays more than keeping the opponent alive.
+- Discount: gamma has a 30-second half-life, 2^(-1/1800) per frame, instead of
+  0.99855 (8 seconds).
+- Critic: an HL-Gauss distribution over 120 bins on [-600, 600] replaces the
+  scalar residual critic. Each PPO step adds 0.1 times its cross-entropy, with
+  the critic's parameters held fixed, so the trunk and decoder learn value
+  features. Critic warmup lasts 128 updates instead of 32, and lambda_max is
+  capped at the conditioner's maximum of 100.
 
 [plan.md](plan.md) gives the exact rules. The resolved run record names the
 advantage scale, lane mix, rotation interval and Beta prior.
@@ -41,10 +52,10 @@ a result shows whether the bundle prevents collapse, not which part matters.
 ## Invariant inputs
 
 - O63 bootstrap30 17M checkpoint and reference, as in `pilot-inputs.json`.
-- Reward, gamma, GAE lambda 1, KL range calibration, PPO clipping, optimizers,
-  learning rates, windows per actor step and critic epochs.
+- GAE lambda 1, PPO clipping, optimizers, learning rates, windows per actor
+  step and critic epochs.
 - Seed 65; four groups of 1,024 matches; 256-frame rollouts; D8/R4 and D10/R2.
-- The 32-update critic warmup. It also measures the fixed advantage scale.
+- Critic warmup also measures the fixed advantage scale.
 - `pilot-sampler.json` and `pilot-evaluation.json`. The Beta prior is a code
   default, not a sampler file field.
 - Runtime image and recorded environment from the control.

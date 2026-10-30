@@ -10,6 +10,10 @@ import pytest
 import torch
 from torch import Tensor
 
+from hal.models.self_play import VALUE_BINS
+from hal.models.self_play import value_cross_entropy
+from hal.models.self_play import value_mean
+
 _SPEC = importlib.util.spec_from_file_location(
     "hal_experiment_065_math", Path(__file__).parents[1] / "experiments" / "065_selfplay_ppo.py"
 )
@@ -203,22 +207,26 @@ def test_delayed_actions_receive_unshifted_credit_through_untrained_tail(device:
     assert result.advantages[0] > 0
 
 
-def test_critic_matches_o64_scale_and_includes_decisions_without_executed_factors() -> None:
+def test_critic_fits_hl_gauss_targets_including_decisions_without_executed_factors() -> None:
     decisions = _decisions(3, delay=8, remaining=torch.tensor([10, 8, 8]))
     assert decisions.loss_mask_J.tolist() == [True, False, False]
-    values = torch.tensor([150.0, -300.0, math.nan], requires_grad=True)
-    targets = torch.tensor([0.0, 0.0, math.nan], requires_grad=True)
+    logits = torch.zeros(3, VALUE_BINS, requires_grad=True)
+    targets = torch.tensor([120.0, -170.0, math.nan], requires_grad=True)
     selected = torch.tensor([True, True, False])
-    loss = exp.critic_loss(values, targets, selected)
-    assert loss.item() == pytest.approx(2.5)
+    loss = exp.critic_loss(logits, targets, selected)
+    expected = value_cross_entropy(logits[:2].detach(), targets[:2].detach()).mean()
+    torch.testing.assert_close(loss, expected)
     loss.backward()
-    torch.testing.assert_close(values.grad, torch.tensor([1 / 150, -2 / 150, 0]))
+    assert logits.grad is not None and not bool(logits.grad[2].any())
     assert targets.grad is None
+    # A step down the gradient moves each selected value toward its target.
+    moved = value_mean(logits.detach() - 1000 * logits.grad)
+    assert float(moved[0]) > 0 > float(moved[1])
 
 
 def test_loss_reduction_preserves_float64_precision_for_non_power_of_two_counts() -> None:
-    values = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
-    loss = exp.critic_loss(values, torch.zeros_like(values), torch.ones(3, dtype=torch.bool), value_scale=1)
+    values = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+    loss = exp._decision_mean(values.square(), torch.ones(3, dtype=torch.bool), None)
     torch.testing.assert_close(loss, values.square().mean(), atol=1e-14, rtol=1e-14)
 
 
@@ -234,9 +242,9 @@ def test_constant_advantages_empty_local_rank_and_invalid_normalization() -> Non
         lambda: exp.DecisionReduction(torch.tensor(True)),
         lambda: exp.DecisionReduction(torch.tensor(1), gradient_average_ranks=0),
         lambda: exp.advantage_moments(torch.ones(3, dtype=torch.int64), torch.ones(3, dtype=torch.bool)),
-        lambda: exp.critic_loss(torch.ones(1, dtype=torch.int64), torch.zeros(1), torch.tensor([True])),
-        lambda: exp.critic_loss(torch.zeros(1), torch.zeros(1), torch.tensor([False])),
-        lambda: exp.critic_loss(torch.zeros(1), torch.zeros(1), torch.tensor([True]), value_scale=0),
+        lambda: exp.critic_loss(torch.ones(1, VALUE_BINS, dtype=torch.int64), torch.zeros(1), torch.tensor([True])),
+        lambda: exp.critic_loss(torch.zeros(1, VALUE_BINS), torch.zeros(1), torch.tensor([False])),
+        lambda: exp.critic_loss(torch.zeros(1), torch.zeros(1), torch.tensor([True])),
         lambda: exp.regularized_reward(_decisions(1), torch.zeros(1, 4), torch.zeros(1, 16), gamma=math.nan),
     )
     for call in invalid:

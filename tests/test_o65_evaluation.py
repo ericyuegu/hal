@@ -661,7 +661,7 @@ def test_critic_architecture_does_not_change_policy_identity(tmp_path: Path) -> 
     ).eval()
     tensors = second.state_dict()
     for name, tensor in first.state_dict().items():
-        if not name.startswith(("value_head.", "percentile_head.", "critic_residual.")):
+        if not name.startswith(("value_head.", "percentile_head.", "critic.")):
             tensors[name] = tensor
     second.load_state_dict(tensors)
     provenance: dict[str, object] = {
@@ -770,3 +770,26 @@ def test_bc_loader_rejects_representation_changes_before_loading_weights(
     torch.save({"cfg": config}, path)
     with pytest.raises(ValueError, match="representation or return conditioning"):
         load_evaluation_checkpoint(path, device=torch.device("cpu"))
+
+
+def test_actors_with_the_earlier_residual_critic_still_load_for_evaluation(tmp_path: Path) -> None:
+    model = small_model()
+    provenance: dict[str, object] = {
+        "reference_sha256": "a" * 64,
+        "git_sha": "b" * 40,
+        "update": 1,
+        "data_manifests": {"ranked": "c" * 64},
+    }
+    current, earlier = tmp_path / "current.pt", tmp_path / "earlier.pt"
+    save_evaluation_checkpoint(current, model, stats(), provenance=provenance)
+    raw = torch.load(current, weights_only=False)
+    # Actors from training format v10 and earlier carry a scalar residual critic instead.
+    raw["model"] = {name: value for name, value in raw["model"].items() if not name.startswith("critic.")}
+    raw["model"]["critic_residual.residual.down.weight"] = torch.zeros(1, 16)
+    torch.save(raw, earlier)
+    expected = load_evaluation_checkpoint(current, device=torch.device("cpu"))
+    loaded = load_evaluation_checkpoint(earlier, device=torch.device("cpu"))
+    assert loaded.policy_sha256 == expected.policy_sha256
+    for name, value in expected.model.state_dict().items():
+        if not name.startswith("critic."):
+            torch.testing.assert_close(loaded.model.state_dict()[name], value, rtol=0, atol=0)

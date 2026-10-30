@@ -12,9 +12,11 @@ from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.self_play import value_mean
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
+from hal.models.window_replay import replay_critic_logits
 
 exp = load_control()
 
@@ -93,15 +95,7 @@ def fp32_evaluate(policy: Any, batch: ProxyBatch) -> Any:
 
 
 def values(model: SelfPlayTransformer, output: ReplayOutput) -> Tensor:
-    features = output.features
-    return model.self_play_value(
-        features.trunk_WKd.flatten(0, 1),
-        features.decoder_WKt.flatten(0, 1),
-        features.condition_WK4.flatten(0, 1),
-        features.opponent_condition_WK4.flatten(0, 1),
-        features.opponent_queue_WKQ4.flatten(0, 1),
-        features.opponent_lengths_WK.flatten(0, 1),
-    ).reshape(output.log_probs_WKF.shape[:2])
+    return value_mean(replay_critic_logits(model, output.features.detached(), fixed_critic=False))
 
 
 def targets(output: ReplayOutput, reference: ReplayOutput, behavior: Tensor, batch: ProxyBatch) -> ActorTargets:
@@ -117,6 +111,9 @@ def targets(output: ReplayOutput, reference: ReplayOutput, behavior: Tensor, bat
         advantages[selected].mean(),
         advantages[selected].std(unbiased=False),
         selected.sum().float(),
+        # Precision qualification covers the policy objective, so the value term is off.
+        torch.zeros_like(advantages),
+        advantages.new_zeros(()),
     )
 
 
@@ -145,9 +142,10 @@ def quantities(policy: Any, reference: Any, batch: ProxyBatch, behavior: Tensor,
     ref_output = old_forward(reference, batch, grad=False, fp32=fp32)
     target = targets(output, ref_output, behavior, batch)
     validate_actor_targets(output, target)
-    loss = actor_loss(output, target)
+    logits = replay_critic_logits(policy.model, output.features, fixed_critic=True)
+    loss = actor_loss(output, logits, target)
     actor_gradient = flattened_gradients(loss.loss, policy.model.actor_parameters())
-    diagnostic_kl = actor_loss(output, dataclasses.replace(target, selected_WK=output.factor_mask_WKF.any(-1)))
+    diagnostic_kl = actor_loss(output, logits, dataclasses.replace(target, selected_WK=output.factor_mask_WKF.any(-1)))
     mask = output.factor_mask_WKF
     return {
         "log_probs": output.log_probs_WKF[mask].detach(),

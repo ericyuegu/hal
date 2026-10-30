@@ -17,9 +17,14 @@ from hal.models.action_sequence import ReturnConditioner
 from hal.models.action_sequence import SwiGLU
 from hal.models.action_sequence import TemporalBlock
 from hal.models.conditioning import ConditioningRanges
+from hal.models.self_play import VALUE_LIMIT
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.self_play import validate_executed_offsets
+from hal.models.self_play import value_centers
+from hal.models.self_play import value_cross_entropy
+from hal.models.self_play import value_mean
+from hal.models.self_play import value_targets
 from hal.wire import ACTION_DIM
 
 RANGES = ConditioningRanges((math.log(0.01), math.log(100)), (8, 10), (2, 4))
@@ -93,7 +98,7 @@ def test_widened_conditioner_preserves_learned_bc_modulation() -> None:
 
 
 @pytest.mark.parametrize("dense_offsets", [False, True])
-def test_bc_load_is_strict_and_critic_starts_at_value_head(dense_offsets: bool) -> None:
+def test_bc_load_is_strict_and_critic_trains_only_through_its_inputs(dense_offsets: bool) -> None:
     cfg = (
         replace(config(), sample_chunk_length=30, head_offsets=(*range(1, 25), 27, 30)) if dense_offsets else config()
     )
@@ -105,16 +110,24 @@ def test_bc_load_is_strict_and_critic_starts_at_value_head(dense_offsets: bool) 
     decoder = torch.randn(3, 32, requires_grad=True)
     queue = policy.codec.quantize(torch.rand(3, 14, ACTION_DIM))
     condition = torch.randn(3, 4)
-    value = policy.self_play_value(trunk, decoder, condition, condition, queue, torch.tensor([0, 10, 14]))
-    torch.testing.assert_close(value, policy.estimate_value(trunk[:, None]), rtol=0, atol=0)
-    # A trained residual must still stop both paths into the actor.
-    nn.init.normal_(policy.critic_residual.residual.down.weight)
-    policy.self_play_value(trunk, decoder, condition, condition, queue, torch.tensor([0, 10, 14])).sum().backward()
+    lengths = torch.tensor([0, 10, 14])
+    # A zero output layer gives uniform distributions, whose mean is zero.
+    logits = policy.critic_logits(trunk, decoder, condition, condition, queue, lengths)
+    torch.testing.assert_close(value_mean(logits), torch.zeros(3), rtol=0, atol=1e-4)
+    nn.init.normal_(policy.critic.head.down.weight)
+    # Critic fitting passes detached states, so only critic parameters receive gradients.
+    policy.critic_logits(trunk.detach(), decoder.detach(), condition, condition, queue, lengths).sum().backward()
     assert trunk.grad is decoder.grad is None
     assert all(p.grad is None for p in policy.actor_parameters())
-    assert all(not p.requires_grad for p in policy.percentile_head.parameters())
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.critic.parameters())
+    # The shared-model value loss reaches the states and leaves the critic parameters alone.
+    policy.zero_grad(set_to_none=True)
+    policy.critic_logits(trunk, decoder, condition, condition, queue, lengths, fixed_critic=True).sum().backward()
+    assert trunk.grad is not None and decoder.grad is not None and bool(trunk.grad.any())
+    assert all(p.grad is None for p in policy.critic.parameters())
+    assert all(not p.requires_grad for p in (*policy.percentile_head.parameters(), *policy.value_head.parameters()))
     assert set(map(id, policy.actor_parameters())).isdisjoint(map(id, policy.critic_parameters()))
-    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.critic_residual.parameters())
+    policy.critic_logits(trunk.detach(), decoder.detach(), condition, condition, queue, lengths).sum().backward()
     actor_before = tuple(p.detach().clone() for p in policy.actor_parameters())
     torch.optim.SGD(policy.critic_parameters(), lr=0.01).step()
     for before, after in zip(actor_before, policy.actor_parameters(), strict=True):
@@ -131,28 +144,39 @@ def test_bc_load_is_strict_and_critic_starts_at_value_head(dense_offsets: bool) 
 
 def test_queue_padding_is_invisible_even_for_nan_bytes() -> None:
     policy = model()
-    nn.init.normal_(policy.critic_residual.residual.down.weight)
-    inputs = (torch.randn(2, 32), torch.randn(2, 4), torch.randn(2, 4))
+    nn.init.normal_(policy.critic.head.down.weight)
+    inputs = (torch.randn(2, 32), torch.randn(2, 32), torch.randn(2, 4), torch.randn(2, 4))
     queue = torch.randn(2, 14, 128)
     lengths = torch.tensor([0, 7])
-    expected = policy.critic_residual(*inputs, queue, lengths)
+    expected = policy.critic(*inputs, queue, lengths)
     queue[0] = float("nan")
     queue[1, 7:] = float("nan")
-    torch.testing.assert_close(policy.critic_residual(*inputs, queue, lengths), expected, rtol=0, atol=0)
+    torch.testing.assert_close(policy.critic(*inputs, queue, lengths), expected, rtol=0, atol=0)
 
 
 def test_critic_distinguishes_queued_actions_by_offset() -> None:
     policy = model()
-    nn.init.normal_(policy.critic_residual.residual.down.weight)
-    inputs = (torch.randn(1, 32), torch.randn(1, 4), torch.randn(1, 4))
+    nn.init.normal_(policy.critic.head.down.weight)
+    inputs = (torch.randn(1, 32), torch.randn(1, 32), torch.randn(1, 4), torch.randn(1, 4))
     queue = torch.zeros(1, 14, 128)
     queue[0, 0], queue[0, 5] = torch.randn(128), torch.randn(128)
     swapped = queue.clone()
     swapped[0, 0], swapped[0, 5] = queue[0, 5], queue[0, 0]
     lengths = torch.tensor([6])
-    assert not torch.allclose(
-        policy.critic_residual(*inputs, queue, lengths), policy.critic_residual(*inputs, swapped, lengths)
-    )
+    assert not torch.allclose(policy.critic(*inputs, queue, lengths), policy.critic(*inputs, swapped, lengths))
+
+
+def test_hl_gauss_targets_keep_their_mean_and_clip_to_the_support() -> None:
+    values = torch.tensor([-170.0, 0.0, 33.3, 120.0, 595.0, 2000.0])
+    probabilities = value_targets(values)
+    torch.testing.assert_close(probabilities.sum(-1), torch.ones(6))
+    means = (probabilities * value_centers(probabilities.device)).sum(-1)
+    torch.testing.assert_close(means[:4], values[:4], rtol=0, atol=1e-3)
+    assert float(means[4]) < 595 and float(means[5]) <= VALUE_LIMIT
+    # Logits proportional to log target mass minimize the cross-entropy.
+    best = probabilities.clamp_min(1e-30).log()
+    worse = best.roll(1, -1)
+    assert bool((value_cross_entropy(best, values) < value_cross_entropy(worse, values)).all())
 
 
 def test_executed_offsets_validate_proxy_and_production() -> None:
@@ -190,7 +214,7 @@ def test_mixed_delay_sampling_matches_individual_bc_and_replay() -> None:
     state = {
         name: value
         for name, value in policy.state_dict().items()
-        if not name.startswith(("critic_residual.", "percentile_head."))
+        if not name.startswith(("critic.", "percentile_head."))
     }
     state["temporal.return_conditioner.embedding.weight"] = state["temporal.return_conditioner.embedding.weight"][
         :, :1
@@ -420,7 +444,9 @@ def test_decoder_owns_compute_precision_and_keeps_probabilities_and_critic_in_fp
     condition = RANGES.normalize(log_lambda, delay, replan)
     queue = policy.codec.quantize(torch.zeros(2, 14, ACTION_DIM, device=device))
     with torch.autocast(device, dtype=torch.bfloat16):
-        values = policy.self_play_value(hidden[:, -1], actual.decoder_state, condition, condition, queue, delay)
+        values = value_mean(
+            policy.critic_logits(hidden[:, -1], actual.decoder_state, condition, condition, queue, delay)
+        )
     assert values.dtype == torch.float32
 
 
@@ -560,7 +586,7 @@ def test_bf16_autocast_keeps_decision_compute_and_gradients_in_fp32() -> None:
 def test_critic_rejects_a_time_dimension_that_would_broadcast_values(field: str) -> None:
     policy = model()
     with pytest.raises(ValueError, match=f"{field} state"):
-        policy.self_play_value(
+        policy.critic_logits(
             torch.zeros(2, 1, 32) if field == "trunk" else torch.zeros(2, 32),
             torch.zeros(2, 1, 32) if field == "decoder" else torch.zeros(2, 32),
             torch.zeros(2, 4),
@@ -574,7 +600,7 @@ def test_critic_rejects_a_time_dimension_that_would_broadcast_values(field: str)
 def test_critic_rejects_changed_controller_schema(factors: int, dtype: torch.dtype) -> None:
     policy = model()
     with pytest.raises(ValueError, match="opponent queue"):
-        policy.self_play_value(
+        policy.critic_logits(
             torch.zeros(2, 32),
             torch.zeros(2, 32),
             torch.zeros(2, 4),

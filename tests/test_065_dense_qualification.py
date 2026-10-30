@@ -121,7 +121,7 @@ def qualify(output: Path) -> dict[str, Any]:
     with torch.no_grad():
         for head in model.temporal.outputs.values():
             head.down.bias.add_(torch.linspace(-0.1, 0.1, head.down.out_features, device=policy.device))
-        torch.nn.init.normal_(model.critic_residual.residual.down.weight, std=0.005)
+        torch.nn.init.normal_(model.critic.head.down.weight, std=0.005)
     source = Path(os.environ.get("HAL_MSL_SOURCE", "~/src/melee-sim-light")).expanduser()
     with contextlib.ExitStack() as resources:
         shards = []
@@ -292,10 +292,9 @@ def qualify(output: Path) -> dict[str, Any]:
             destination["rollout_kl"] = exp.factor_kl(mu, flat_ref, mask)[mask].detach().clone()
             destination["rollout_values"] = source_table.values[chosen].detach().clone()
             loss = exp.critic_loss(
-                policy.values(mu.features),
+                policy.value_logits(mu.features),
                 dense_targets[chosen],
                 torch.ones_like(chosen, dtype=torch.bool),
-                value_scale=run.config.value_scale,
             )
             destination["rollout_critic_gradients"] = flattened_gradients(loss, policy.critic_parameters())
         high_mu = exp.window_evaluation(high_output, table.actions[chosen], torch.nonzero(valid.flatten()).flatten())
@@ -307,10 +306,9 @@ def qualify(output: Path) -> dict[str, Any]:
         high["rollout_kl"] = exp.factor_kl(high_mu, high_ref_flat, mask)[mask]
         high["rollout_values"] = values(high_models[0].model, high_output)[valid].detach()
         loss = exp.critic_loss(
-            high_models[0].values(high_mu.features),
+            high_models[0].value_logits(high_mu.features),
             dense_targets[chosen],
             torch.ones_like(chosen, dtype=torch.bool),
-            value_scale=run.config.value_scale,
         )
         high["rollout_critic_gradients"] = flattened_gradients(loss, high_models[0].critic_parameters())
         precision = {}
@@ -346,7 +344,7 @@ def qualify(output: Path) -> dict[str, Any]:
                 "actor_shape": list(valid.shape),
                 "tf32": False,
                 "bias_shift": [-0.1, 0.1],
-                "critic_residual_std": 0.005,
+                "critic_head_std": 0.005,
                 "rollout_control": "recorded student TickLayout with active rows and common teacher-forced actions",
                 "rollout_control_slots": len(student_slots),
             },

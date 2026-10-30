@@ -14,10 +14,12 @@ from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
+from hal.models.self_play import VALUE_BINS
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
+from hal.models.window_replay import replay_critic_logits
 from hal.models.window_replay import replay_windows
 
 
@@ -33,7 +35,18 @@ def targets_for(output: ReplayOutput) -> ActorTargets:
         torch.tensor(0.1, device=device),
         torch.tensor(1.3, device=device),
         output.factor_mask_WKF.any(-1).sum().float(),
+        torch.linspace(-150, 150, shape.numel(), device=device).reshape(shape),
+        torch.tensor(0.2, device=device),
     )
+
+
+def critic(policy: SelfPlayTransformer, output: ReplayOutput) -> Tensor:
+    return replay_critic_logits(policy, output.features, fixed_critic=True)
+
+
+def no_value(output: ReplayOutput) -> Tensor:
+    shape = output.log_probs_WKF.shape[:2]
+    return output.log_probs_WKF.new_zeros(*shape, VALUE_BINS)
 
 
 @pytest.mark.parametrize("estimator", ["exact", "sampled"])
@@ -85,8 +98,10 @@ def test_regularized_chain_gradient_matches_enumerated_return(estimator: str, de
             theta.new_tensor(0.4),
             theta.new_tensor(sigma),
             theta.new_tensor(1),
+            theta.new_zeros(1, 1),
+            theta.new_tensor(0),
         )
-        loss = actor_loss(output, targets)
+        loss = actor_loss(output, no_value(output), targets)
         estimate = estimate + probability.detach() * loss.loss
         score_only = score_only + probability.detach() * loss.policy_loss
     expected = torch.autograd.grad(-objective / sigma, theta, retain_graph=True)[0]
@@ -113,7 +128,7 @@ def test_actor_joint_ratio_masks_and_stop_gradients() -> None:
         getattr(targets, field).requires_grad_(True)
     for p in targets.reference_distributions:
         p.requires_grad_(True)
-    actual = actor_loss(output, targets)
+    actual = actor_loss(output, critic(policy, output), targets)
     count = output.factor_mask_WKF.sum(-1)
     torch.testing.assert_close(actual.joint_ratio_WK, (count * 0.01).exp())
     assert float(actual.kl_loss.detach()) == 0
@@ -157,9 +172,11 @@ def test_actor_ignores_nan_padding_and_matches_enumerated_objective() -> None:
         torch.tensor(0.1),
         torch.tensor(1.4),
         torch.tensor(1.0),
+        torch.zeros(1, 2),
+        torch.tensor(0.0),
     )
     validate_actor_targets(output, targets)
-    loss = actor_loss(output, targets)
+    loss = actor_loss(output, no_value(output), targets)
     actual = torch.autograd.grad(loss.loss, logits, retain_graph=True)[0]
     expected_loss = (
         -(4 * (p[0].log() - old[0, 0, 0])).exp() * (0.7 / 1.4)
@@ -190,8 +207,10 @@ def test_joint_ppo_clips_both_advantage_signs(clip_epsilon: float) -> None:
         torch.tensor(0.0),
         torch.tensor(1.0),
         torch.tensor(6.0),
+        torch.zeros(2, 3),
+        torch.tensor(0.0),
     )
-    loss = actor_loss(output, target, clip_epsilon=clip_epsilon)
+    loss = actor_loss(output, no_value(output), target, clip_epsilon=clip_epsilon)
     torch.testing.assert_close(
         loss.policy_loss, torch.tensor(-((1 + clip_epsilon) + 0.5 - 1.5 - (1 - clip_epsilon)) / 6)
     )
@@ -241,7 +260,7 @@ def test_empty_local_rank_has_zero_loss_and_gradients_with_positive_global_count
     for q in targets.reference_distributions:
         q.fill_(torch.nan)
     validate_actor_targets(output, targets)
-    loss = actor_loss(output, targets)
+    loss = actor_loss(output, critic(policy, output), targets)
     assert float(loss.loss.detach()) == 0
     loss.loss.backward()
     assert all(p.grad is None or not bool(p.grad.any()) for p in policy.parameters())
@@ -257,7 +276,10 @@ def test_fullgraph_capture_has_no_breaks() -> None:
         torch.testing.assert_close(actual.log_probs_WKF, expected.log_probs_WKF)
         targets = targets_for(expected)
         compiled_loss = torch.compile(actor_loss, backend="eager", fullgraph=True)
-        torch.testing.assert_close(compiled_loss(actual, targets).loss, actor_loss(expected, targets).loss)
+        torch.testing.assert_close(
+            compiled_loss(actual, critic(policy, actual), targets).loss,
+            actor_loss(expected, critic(policy, expected), targets).loss,
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -301,15 +323,20 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
         targets = targets_for(output)
         del output
         parameters = policy.actor_parameters()
+
+        def value_logits(features: ReplayCriticFeatures) -> Tensor:
+            return replay_critic_logits(policy, features, fixed_critic=True, validate=False)
+
         with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
-            GraphedActorStep(forward, values, targets, parameters)
-        graph = GraphedActorStep(forward, values, targets, parameters, clip_epsilon=0.07)
+            GraphedActorStep(forward, value_logits, values, targets, parameters)
+        graph = GraphedActorStep(forward, value_logits, values, targets, parameters, clip_epsilon=0.07)
         saved: tuple[Tensor, Tensor] | None = None
         saved_evaluation: tuple[Tensor, Tensor] | None = None
         for step in range(3):
             current = (values[0] + step * 0.05, values[1])
             policy.zero_grad(set_to_none=False)
-            expected = actor_loss(forward(current), targets, clip_epsilon=0.07)
+            replayed = forward(current)
+            expected = actor_loss(replayed, value_logits(replayed.features), targets, clip_epsilon=0.07)
             expected.loss.backward()
             gradients = tuple(p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in parameters)
             actual = graph.backward(current, targets)
@@ -343,9 +370,9 @@ def test_actor_rejects_invalid_clip_before_capture(clip_epsilon: float) -> None:
     output = replay_windows(policy, hidden, observed, slots, grad=False)
     targets = targets_for(output)
     with pytest.raises(ValueError, match="clip epsilon"):
-        actor_loss(output, targets, clip_epsilon=clip_epsilon)
+        actor_loss(output, no_value(output), targets, clip_epsilon=clip_epsilon)
     with pytest.raises(ValueError, match="clip epsilon"):
-        GraphedActorStep(lambda _: output, (), targets, (), clip_epsilon=clip_epsilon)
+        GraphedActorStep(lambda _: output, no_value, (), targets, (), clip_epsilon=clip_epsilon)
 
 
 def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
@@ -356,7 +383,7 @@ def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
     probabilities = output.distributions[0]
     positive = torch.nonzero((probabilities > 0) & output.factor_mask_WKF[..., 0::4, None])[0]
     target.reference_distributions[0][tuple(positive)] = 0
-    assert bool(torch.isinf(actor_loss(output, target).kl_loss))
+    assert bool(torch.isinf(actor_loss(output, no_value(output), target).kl_loss))
 
 
 def test_joint_log_ratio_subtracts_each_factor_before_reduction() -> None:
@@ -371,4 +398,23 @@ def test_joint_log_ratio_subtracts_each_factor_before_reduction() -> None:
     mask = output.factor_mask_WKF & targets.selected_WK[..., None]
     expected = torch.where(mask, new.double() - old.double(), 0).sum(-1).exp()
     assert bool(((new.sum(-1) - old.sum(-1)).exp() == 1).all())
-    torch.testing.assert_close(actor_loss(output, targets).joint_ratio_WK.double(), expected)
+    torch.testing.assert_close(actor_loss(output, no_value(output), targets).joint_ratio_WK.double(), expected)
+
+
+def test_value_loss_trains_the_shared_model_and_not_the_critic() -> None:
+    policy = model()
+    torch.nn.init.normal_(policy.critic.head.down.weight, std=0.05)
+    hidden, observed, slots = inputs(policy)
+    hidden = hidden.clone().requires_grad_(True)
+    output = replay_windows(policy, hidden, observed, slots, grad=True)
+    targets = targets_for(output)
+    loss = actor_loss(output, critic(policy, output), targets)
+    without = actor_loss(
+        output, critic(policy, output), dataclasses.replace(targets, value_coefficient=torch.tensor(0.0))
+    )
+    assert float(loss.value_loss) > 0
+    torch.testing.assert_close(loss.loss, without.loss + 0.2 * loss.value_loss)
+    (gradient,) = torch.autograd.grad(loss.loss - without.loss, hidden, retain_graph=True)
+    assert bool(gradient.any())
+    loss.loss.backward()
+    assert all(p.grad is None for p in policy.critic.parameters())

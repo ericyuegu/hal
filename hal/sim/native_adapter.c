@@ -213,12 +213,6 @@ static void put_float(uint32_t *word, float value) {
   memcpy(word, &value, 4);
 }
 
-static float get_float(const uint32_t *word) {
-  float v;
-  memcpy(&v, word, 4);
-  return v;
-}
-
 static void player_columns(HalFrame *f, int base, const MslObservationPlayer *p, int leader) {
   if (!p->present) {
     memcpy(f->columns + base, hal_masks + base, 11 * 4);
@@ -387,10 +381,6 @@ static int finish_step(HalBatch *b) {
   for (uint32_t i = 0; i < b->count; ++i) {
     HalFrame *f = b->frames + i;
     int old_stock[2] = {f->columns[HAL_COL_P1_STOCK], f->columns[HAL_COL_P2_STOCK]};
-    float old_percent[2] = {
-      get_float(f->columns + HAL_COL_P1_PERCENT),
-      get_float(f->columns + HAL_COL_P2_PERCENT)
-    };
     f->reward[0] = f->reward[1] = 0;
     f->reset = 0;
     if (b->active[i] && (rc = project(b, i)))
@@ -400,24 +390,17 @@ static int finish_step(HalBatch *b) {
     memcpy(f->applied_action, b->actions[i], sizeof(f->applied_action));
     memcpy(f->wire_inputs, b->wire[i], sizeof(f->wire_inputs));
     int stock[2] = {f->columns[HAL_COL_P1_STOCK], f->columns[HAL_COL_P2_STOCK]};
-    float percent[2] = {
-      get_float(f->columns + HAL_COL_P1_PERCENT),
-      get_float(f->columns + HAL_COL_P2_PERCENT)
-    };
     int loss[2];
     int final[2];
-    float damage[2];
     for (int p = 0; p < 2; ++p) {
       loss[p] = stock[p] < old_stock[p] && stock[p] != INT32_MAX && old_stock[p] != INT32_MAX;
       final[p] = loss[p] && stock[p] == 0;
-      damage[p] = percent[p] - old_percent[p];
-      if (!(damage[p] > 0 && isfinite(damage[p])))
-        damage[p] = 0.0f;
     }
-    float difference = damage[1] - damage[0];
+    /* Stocks are the whole reward; damage counts only through the stocks it wins. */
     float base = 120 * (loss[1] - loss[0]) + 50 * (final[1] - final[0]);
-    f->reward[0] = base + difference;
-    f->reward[1] = -base + (damage[0] - damage[1]);
+    f->reward[0] = base;
+    /* Subtracting from zero keeps a zero reward at +0, matching the canonical bytes. */
+    f->reward[1] = 0.0f - base;
     f->terminated = b->terminals[i].stockout != 0;
     f->truncated = b->terminals[i].max_frame_reached != 0 && !f->terminated;
   }

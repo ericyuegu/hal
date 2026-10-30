@@ -45,6 +45,9 @@ class ReplayCriticFeatures:
     opponent_queue_WKQ4: Tensor
     opponent_lengths_WK: Tensor
 
+    def detached(self) -> ReplayCriticFeatures:
+        return ReplayCriticFeatures(*(getattr(self, field.name).detach() for field in fields(self)))
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayOutput:
@@ -81,7 +84,7 @@ def _check_shapes(model: SelfPlayTransformer, hidden: Tensor, observed: Tensor, 
         "replan_WK": shape,
         "condition_WK4": (*shape, 4),
         "opponent_condition_WK4": (*shape, 4),
-        "opponent_queue_WKQ4": (*shape, model.critic_residual.max_queue, 4),
+        "opponent_queue_WKQ4": (*shape, model.critic.max_queue, 4),
         "opponent_lengths_WK": shape,
         "sampled_actions_WK44": (*shape, 4, 4),
         "executed_WKF": (*shape, 16),
@@ -134,7 +137,7 @@ def validate_replay_inputs(
     if not torch.equal(condition[:, 1:3], expected[:, 1:3]):
         raise ValueError("slot delay and replan disagree with policy conditioning")
     opponent_lengths = slots.opponent_lengths_WK[valid]
-    if bool(((opponent_lengths < 0) | (opponent_lengths > model.critic_residual.max_queue)).any()):
+    if bool(((opponent_lengths < 0) | (opponent_lengths > model.critic.max_queue)).any()):
         raise ValueError("opponent queue length exceeds its capacity")
     executed = slots.executed_WKF[valid].reshape(-1, 4, 4)
     frame_executed = executed[..., 0]
@@ -152,7 +155,7 @@ def validate_replay_inputs(
         ],
         slots.sampled_actions_WK44[valid][torch.arange(4, device=delay.device) < replan[:, None]],
         slots.opponent_queue_WKQ4[valid][
-            torch.arange(model.critic_residual.max_queue, device=delay.device) < opponent_lengths[:, None]
+            torch.arange(model.critic.max_queue, device=delay.device) < opponent_lengths[:, None]
         ],
     ):
         if bool(((actions < 0) | (actions >= group_sizes)).any()):
@@ -175,7 +178,8 @@ def replay_windows(
 ) -> ReplayOutput:
     """Replay decisions after encoding each window once.
 
-    Preserve trunk autograd history when grad=True and detach critic features.
+    Preserve trunk autograd history when grad=True. The trunk and decoder critic
+    features keep that history so a value loss can train the shared model.
     For Torch 2.11 CUDA capture, compile with triton.cudagraphs=False and
     emulate_precision_casts=True to meet the proxy FP32-reference limits.
     """
@@ -221,7 +225,7 @@ def replay_windows(
         rows = torch.arange(hidden_WLd.shape[0], device=hidden_WLd.device)[:, None]
         lengths = torch.where(valid, slots.opponent_lengths_WK, 0)
         opponent_queue = torch.where(
-            (torch.arange(model.critic_residual.max_queue, device=hidden_WLd.device) < lengths[..., None])[..., None],
+            (torch.arange(model.critic.max_queue, device=hidden_WLd.device) < lengths[..., None])[..., None],
             slots.opponent_queue_WKQ4,
             0,
         )
@@ -230,11 +234,28 @@ def replay_windows(
             tuple(output.distributions[group] for group in group_order),
             mask,
             ReplayCriticFeatures(
-                torch.where(valid[..., None], hidden_WLd[rows, position], 0).detach(),
-                torch.where(valid[..., None], output.decoder_state, 0).detach(),
+                torch.where(valid[..., None], hidden_WLd[rows, position], 0),
+                torch.where(valid[..., None], output.decoder_state, 0),
                 condition.detach(),
                 opponent_condition.detach(),
                 opponent_queue.detach(),
                 lengths.detach(),
             ),
         )
+
+
+def replay_critic_logits(
+    model: SelfPlayTransformer, features: ReplayCriticFeatures, *, fixed_critic: bool, validate: bool = True
+) -> Tensor:
+    """Score replayed decisions with the critic and return [W,K,value bins] logits."""
+    logits = model.critic_logits(
+        features.trunk_WKd.flatten(0, 1),
+        features.decoder_WKt.flatten(0, 1),
+        features.condition_WK4.flatten(0, 1),
+        features.opponent_condition_WK4.flatten(0, 1),
+        features.opponent_queue_WKQ4.flatten(0, 1),
+        features.opponent_lengths_WK.flatten(),
+        fixed_critic=fixed_critic,
+        validate=validate,
+    )
+    return logits.reshape(*features.opponent_lengths_WK.shape, -1)

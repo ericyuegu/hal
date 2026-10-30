@@ -62,7 +62,9 @@ The branch adds about 31,000 lines. We plan a cleanup pass before merging.
 These items look cheap:
 
 - Remove the v8 update-256 learner migration. It served the fixed-slot
-  relaunch, which is finished. The migration spans `restore_pilot_learner`,
+  relaunch, which is finished, and real v8 checkpoints no longer load: their
+  scalar residual critic differs from the HL-Gauss critic, and their learner
+  trained on the damage reward. The migration spans `restore_pilot_learner`,
   `legacy_pilot_digest`, `PILOT_SOURCE`, `--resume-learner` in `pilot.py` and
   the launcher, `inherit_metrics`, and their tests.
 - Pick one entry point. Inside the Modal container, `pilot.py` installs

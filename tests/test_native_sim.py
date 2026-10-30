@@ -141,7 +141,7 @@ def test_step_quantizes_all_channels_routes_roster_rewards_and_masks(fake_sim: P
             },
             ego="p1",
             opp="p2",
-            damage_shaping=1.0,
+            damage_shaping=0.0,
             win_reward=50.0,
             stock_value=120.0,
         )[1]
@@ -286,7 +286,7 @@ def test_reward_matches_canonical_float32_bytes(
                 },
                 ego="p1",
                 opp="p2",
-                damage_shaping=1.0,
+                damage_shaping=0.0,
                 win_reward=50.0,
                 stock_value=120.0,
             )[1]
@@ -300,7 +300,7 @@ def test_reward_matches_canonical_float32_bytes(
                 },
                 ego="p2",
                 opp="p1",
-                damage_shaping=1.0,
+                damage_shaping=0.0,
                 win_reward=50.0,
                 stock_value=120.0,
             )[1]

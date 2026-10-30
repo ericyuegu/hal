@@ -29,8 +29,9 @@ from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v10"
-TRAINING_VERSION = 10
+CRITIC_PREFIXES = ("critic.", "critic_residual.")
+TRAINING_FORMAT = "hal.o65.training.v11"
+TRAINING_VERSION = 11
 
 
 class CheckpointShard(TypedDict):
@@ -67,6 +68,7 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         raise ValueError("checkpoint manifest schema changed")
     if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
         (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v10", 10),
         ("hal.o65.training.v9", 9),
         ("hal.o65.training.v8", 8),
     ):
@@ -217,8 +219,8 @@ def evaluation_checkpoint_metadata(
         "architecture": asdict(model.cfg),
         "ranges": asdict(model.ranges),
         "decoder_precision": model.decoder_precision,
-        "max_opponent_queue": model.critic_residual.max_queue,
-        "critic_hidden_dim": model.critic_residual.residual.up.out_features // 2,
+        "max_opponent_queue": model.critic.max_queue,
+        "critic_hidden_dim": model.critic.hidden_dim,
         "statistics": {name: asdict(value) for name, value in statistics.items()},
         "provenance": provenance,
     }
@@ -340,6 +342,11 @@ def load_evaluation_checkpoint(
         cfg, ranges, vocabulary, max_opponent_queue=queue, critic_hidden_dim=critic, decoder_precision=precision
     )
     expected = model.state_dict()
+    if not is_bc and not any(name.startswith("critic.") for name in state):
+        # Actors from training format v10 and earlier carry a scalar residual critic.
+        # Evaluation plays only the actor, so a fresh critic replaces it.
+        state = {name: tensor for name, tensor in state.items() if not name.startswith("critic_residual.")}
+        state.update({name: tensor for name, tensor in expected.items() if name.startswith("critic.")})
     for name, tensor in state.items():
         if name not in expected or not isinstance(tensor, torch.Tensor) or tensor.dtype != expected[name].dtype:
             raise ValueError("evaluation tensor dtype or identity changed")
@@ -362,7 +369,7 @@ def load_evaluation_checkpoint(
         ).encode()
     )
     for name, tensor in sorted(model.state_dict().items()):
-        if name.startswith(("value_head.", "critic_residual.", "percentile_head.")):
+        if name.startswith(("value_head.", "percentile_head.", *CRITIC_PREFIXES)):
             continue
         policy_digest.update(name.encode())
         policy_digest.update(tensor.contiguous().view(torch.uint8).numpy().tobytes())

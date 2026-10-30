@@ -104,7 +104,14 @@ def test_window_replay_matches_individual_outputs_features_and_gradients() -> No
         assert (actual is None) == (expected is None)
         if actual is not None and expected is not None:
             torch.testing.assert_close(actual, expected, atol=4e-6, rtol=4e-4)
-    assert all(not getattr(result.features, field.name).requires_grad for field in dataclasses.fields(result.features))
+    # Trunk and decoder features keep their history for the shared-model value loss.
+    features = result.features
+    assert features.trunk_WKd.requires_grad and features.decoder_WKt.requires_grad
+    assert all(
+        not getattr(features, name).requires_grad
+        for name in ("condition_WK4", "opponent_condition_WK4", "opponent_queue_WKQ4", "opponent_lengths_WK")
+    )
+    assert all(not getattr(features.detached(), field.name).requires_grad for field in dataclasses.fields(features))
     assert not replay_windows(policy, hidden, observed, slots, grad=False).log_probs_WKF.requires_grad
     with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
         replay_windows(policy, hidden, observed, slots, grad=True)
@@ -159,7 +166,7 @@ def test_unexecuted_valid_decision_retains_critic_features() -> None:
     assert not bool(output.log_probs_WKF[0, 0].any())
     torch.testing.assert_close(output.features.decoder_WKt[0, 0], expected.features.decoder_WKt[0, 0], rtol=0, atol=0)
     features = output.features
-    value = policy.self_play_value(
+    value = policy.critic_logits(
         features.trunk_WKd[0, :1],
         features.decoder_WKt[0, :1],
         features.condition_WK4[0, :1],

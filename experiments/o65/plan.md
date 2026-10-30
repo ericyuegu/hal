@@ -147,7 +147,7 @@ We maximize discounted task reward minus lambda times KL to pi_ref:
 $$
 \max_\theta\;\mathbb E_{\pi_\theta}\left[\sum_t\gamma^t r_t\right]
 -\lambda\,\mathrm{KL}(\pi_\theta\Vert\pi_{\mathrm{ref}}),
-\qquad \gamma=0.99855.
+\qquad \gamma=2^{-1/1800}\approx0.999615.
 $$
 
 For decision j, with interval duration Delta_j, we calculate:
@@ -161,10 +161,13 @@ $$
 
 Each c_i includes history, the committed prefix, earlier sampled factors and
 the same episode u. We score the reference along the sampled student path.
-Summed conditional KL estimates the chunk KL. We use HAL's canonical float32
-reward: damage dealt minus taken, 120 per stock difference, plus 50 on the
-deciding stock. Both reward and KL accrue per executed frame, so lambda keeps
-its units of reward per nat across cadences.
+Summed conditional KL estimates the chunk KL. The simulator adapter pays only
+for stocks: 120 when the opponent loses a stock, -120 when the student does,
+and 50 more on the stock that ends the game. Damage earns nothing directly; the
+critic learns how damage leads to stocks. A KO therefore always pays more than
+keeping the opponent alive at any percent. The discount has a 30-second
+half-life, about one stock exchange. Both reward and KL accrue per executed
+frame, so lambda keeps its units of reward per nat across cadences.
 
 ### Advantages
 
@@ -247,27 +250,34 @@ We widen the existing conditioner from u alone to u, log(lambda), D and R.
 The new columns start at zero; we rescale the episode settings to [-1,1].
 The frozen percentile head stays in the checkpoint.
 
-We predict value from the existing value head plus a zero-initialized residual
-head. The residual reads detached decoder state immediately before the first
-ego draw, ego conditions, opponent conditions and the opponent's committed
-queue. Both conditions include u, log(lambda), D and R. We embed each queued
-action, zero the padding, append a validity bit and flatten the queue in
-firing order into an MLP, so each action keeps its offset. The queue includes
-the remaining actions of an opponent's current chunk.
+The critic predicts a categorical distribution over 120 evenly spaced returns
+from -600 to 600 and trains with HL-Gauss cross-entropy (Farebrother et al.,
+2024): each target becomes a Gaussian over the bins with a width of 0.75 bins.
+Its value is the distribution's mean. The critic reads the trunk state and the
+decoder state immediately before the first ego draw, ego conditions, opponent
+conditions and the opponent's committed queue. Both conditions include u,
+log(lambda), D and R. We embed each queued action, zero the padding, append a
+validity bit and flatten the queue in firing order into an MLP, so each action
+keeps its offset. The queue includes the remaining actions of an opponent's
+current chunk. Its output layer starts at zero, so every initial value is zero.
+The BC value head stays frozen in the checkpoint and goes unused.
 
-We detach trunk and decoder features so critic fitting cannot move the actor.
-The critic uses its own optimizer, LR 3e-4 and four epochs on cached rollout
-features. HAL's Muon substitutes zero for missing gradients and continues
-momentum updates, so a shared optimizer would move the actor during critic-only
-fitting. We measure explained variance on fresh features before fitting and
+Critic fitting uses detached features, its own optimizer, LR 3e-4 and four
+epochs on cached rollout features. HAL's Muon substitutes zero for missing
+gradients and continues momentum updates, so a shared optimizer would move the
+actor during critic-only fitting. During PPO, each actor step also adds 0.1
+times the critic's cross-entropy on its decisions. That term holds the critic's
+parameters fixed, so its gradient reaches only the trunk and decoder. The KL to
+pi_ref and PPO clipping limit how far that gradient moves the policy. We measure explained variance on fresh features before fitting and
 compare initial values with completed-episode Monte Carlo returns. Truncations
 are excluded from that comparison.
 
 During warmup, only critic heads train. We skip reference replay and zero KL
-terms while the student still equals pi_ref. Warmup lasts exactly 32 updates,
-independent of explained variance and group clocks. We then set lambda_max to
-three times the largest per-cadence advantage spread within the conditioner bounds.
-We record that value before the first PPO update.
+terms while the student still equals pi_ref. The pilot's warmup lasts exactly
+128 updates, independent of explained variance and group clocks. We then set
+lambda_max to three times the largest per-cadence advantage spread, capped at
+the conditioner's maximum of 100, and log both the uncapped value and whether
+the cap applied. We record that value before the first PPO update.
 
 ## Context and simulator execution
 
@@ -396,8 +406,8 @@ set before play.
   cycling, though changing episode conditions limit direct comparisons.
 - Small lambda and large D can increase KL. We monitor advantage scale and KL
   by cadence and lambda bin. Rare characters need separate checks.
-- Damage reward can favor safe damage over a risky stock. An outcome-focused
-  reward comparison remains a separate scientific treatment.
+- A stock-only reward is sparse. Credit for play that leads to a stock reaches
+  earlier rollouts only through the critic, so critic accuracy limits learning.
 - Competitive pressure can reduce identity style. Camping and timed-game
   behavior remain research limits; timeouts currently truncate the task.
 - Privileged opponent inputs enter only the critic. We retain ego history

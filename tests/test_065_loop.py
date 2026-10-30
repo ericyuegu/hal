@@ -18,6 +18,8 @@ import pytest
 import torch
 from numpy.typing import NDArray
 
+from hal.models.self_play import VALUE_BINS
+from hal.models.self_play import value_mean
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.wire import ACTION_DIM
@@ -148,7 +150,7 @@ class ToyModel(torch.nn.Module):
     def __init__(self, device: str) -> None:
         super().__init__()
         self.logits = torch.nn.Parameter(torch.zeros(4, 2, device=device))
-        self.value_head = torch.nn.Linear(1, 1, device=device)
+        self.value_head = torch.nn.Linear(1, VALUE_BINS, device=device)
         torch.nn.init.zeros_(self.value_head.weight)
         torch.nn.init.zeros_(self.value_head.bias)
         self.percentile_head = torch.nn.Linear(1, 1, device=device).requires_grad_(False)
@@ -254,12 +256,14 @@ class ToyPolicy:
         return self.window_output(batch)
 
     def evaluate_values(self, batch: Any) -> torch.Tensor:
-        return self.model.value_head(torch.ones(*batch.slots.valid_WK.shape, 1, device=self.device)).squeeze(-1)
+        return value_mean(self.model.value_head(torch.ones(*batch.slots.valid_WK.shape, 1, device=self.device)))
 
     def actor_step(self, batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
         self.model.zero_grad(set_to_none=True)
         output = self.window_output(batch)
-        loss = exp.actor_loss(output, targets, clip_epsilon=clip_epsilon)
+        # The toy trunk is constant, so its value loss has no shared parameters to train.
+        logits = self.model.value_head(output.features.trunk_WKd).detach()
+        loss = exp.actor_loss(output, logits, targets, clip_epsilon=clip_epsilon)
         loss.loss.backward()
         return loss, dataclasses.replace(
             output,
@@ -267,8 +271,11 @@ class ToyPolicy:
             distributions=tuple(p.detach() for p in output.distributions),
         )
 
+    def value_logits(self, features: Any) -> torch.Tensor:
+        return self.model.value_head(features.trunk.detach())
+
     def values(self, features: Any) -> torch.Tensor:
-        return self.model.value_head(features.trunk.detach()).squeeze(-1)
+        return value_mean(self.value_logits(features))
 
 
 def sampler(*, delay: int = 0, mixed: bool = True) -> Any:
@@ -564,7 +571,7 @@ def test_full_batch_critic_loss_and_gradient_match_shuffled_order(device: str) -
     policy = run.policy
     count = 257
     with torch.no_grad():
-        policy.model.critic_residual.residual.down.weight.fill_(0.03)
+        policy.model.critic.head.down.weight.fill_(0.03)
     features = exp.CriticFeatures(
         torch.randn(count, policy.model.cfg.d_model, device=device),
         torch.randn(count, policy.model.cfg.temporal_d_model, device=device),
@@ -577,11 +584,9 @@ def test_full_batch_critic_loss_and_gradient_match_shuffled_order(device: str) -
     selected = torch.ones(count, dtype=torch.bool, device=device)
     order = sorted(range(count), key=lambda j: run.engine.sampler.rng.uniform("critic_shuffle", j % 2, 0, 0, 0, j))
     at = torch.tensor(order, device=device)
-    loss = exp.critic_loss(policy.values(features), targets, selected, value_scale=run.config.value_scale)
+    loss = exp.critic_loss(policy.value_logits(features), targets, selected)
     gradients = torch.autograd.grad(loss, policy.critic_parameters())
-    shuffled_loss = exp.critic_loss(
-        policy.values(exp._take_features(features, at)), targets[at], selected[at], value_scale=run.config.value_scale
-    )
+    shuffled_loss = exp.critic_loss(policy.value_logits(exp._take_features(features, at)), targets[at], selected[at])
     shuffled_gradients = torch.autograd.grad(shuffled_loss, policy.critic_parameters())
     torch.testing.assert_close(loss, shuffled_loss, rtol=1e-6, atol=1e-7)
     for actual, expected in zip(gradients, shuffled_gradients, strict=True):
@@ -598,6 +603,16 @@ def test_masked_deployment_rate_is_total_masked_rate() -> None:
     assert 0.20 < masked / 6000 < 0.25
 
 
+def test_lambda_calibration_caps_at_the_conditioner_maximum() -> None:
+    run = trainer(groups=1, warmup=1)
+    run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=0.05)
+    run.engine.sampler.lambda_max = 0.05
+    _, metrics = run.run_update()
+    assert metrics["train/lambda_spread_maximum"] > 0.05
+    assert metrics["train/lambda_max_capped"] == 1
+    assert run.engine.sampler.lambda_max == 0.05
+
+
 def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
     run = trainer(groups=1, warmup=1)
     run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
@@ -607,7 +622,7 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
     expected = 3 * max(
         float(batch.advantages[batch.decisions.replan_J == replan].double().std(unbiased=False)) for replan in (2, 4)
     )
-    assert run.engine.sampler.lambda_max == pytest.approx(expected)
+    assert run.engine.sampler.lambda_max == pytest.approx(min(expected, 100))
     assert not run.warming
     assert run.actor_steps == 0
     assert batch.reference is None
@@ -660,7 +675,8 @@ def test_warmup_ends_after_32_updates_with_calibrated_lambda() -> None:
         assert run.warming == (update < 32)
         assert ("train/warmup_ended" in metrics) == (update == 32)
     expected = 3 * max(float(torch.cat(parts).std(unbiased=False)) for parts in advantages.values())
-    assert metrics["train/lambda_max"] == pytest.approx(expected)
+    assert metrics["train/lambda_spread_maximum"] == pytest.approx(expected)
+    assert metrics["train/lambda_max"] == pytest.approx(min(expected, 100))
     torch.testing.assert_close(before, run.policy.model.logits, rtol=0, atol=0)
     batch, metrics = run.run_update()
     assert run.update == 33 and run.actor_steps > 0 and batch.reference is not None
@@ -1135,9 +1151,11 @@ def test_resume_comparison_rejects_overflow_in_error_statistics() -> None:
 def test_trainer_rejects_critic_loss_sum_overflow_before_optimizer_step() -> None:
     run = trainer(groups=1)
     with torch.no_grad():
-        run.policy.model.value_head.weight.fill_(2e21)
+        # Each row's cross-entropy stays finite near 1e38, but their sum overflows.
+        run.policy.model.value_head.weight[0::2].fill_(1e38)
+        run.policy.model.value_head.weight[1::2].fill_(-1e38)
     batch = run.prepare(run.engine.collect(0))
-    loss = exp.critic_loss(run.policy.values(batch.old.features), batch.targets, torch.ones_like(batch.selected))
+    loss = exp.critic_loss(run.policy.value_logits(batch.old.features), batch.targets, torch.ones_like(batch.selected))
     assert bool(torch.isinf(loss))
     before = tuple(p.detach().clone() for p in run.policy.critic_parameters())
     with pytest.raises(ValueError, match="critic loss must be finite"):

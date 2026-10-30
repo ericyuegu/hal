@@ -15,6 +15,8 @@ from hal.models.replay_actor import validate_actor_targets
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 
+type ValueLogits = Callable[[ReplayCriticFeatures], Tensor]
+
 
 def _target_tensors(targets: ActorTargets) -> tuple[Tensor, ...]:
     return (
@@ -26,12 +28,23 @@ def _target_tensors(targets: ActorTargets) -> tuple[Tensor, ...]:
         targets.advantage_mean,
         targets.advantage_sigma,
         targets.denominator,
+        targets.value_targets_WK,
+        targets.value_coefficient,
     )
 
 
 def _targets(tensors: tuple[Tensor, ...]) -> ActorTargets:
     return ActorTargets(
-        tensors[0], tensors[1], tensors[2], tensors[3], tensors[4:8], tensors[8], tensors[9], tensors[10]
+        tensors[0],
+        tensors[1],
+        tensors[2],
+        tensors[3],
+        tensors[4:8],
+        tensors[8],
+        tensors[9],
+        tensors[10],
+        tensors[11],
+        tensors[12],
     )
 
 
@@ -48,6 +61,7 @@ class GraphedActorStep:
     def __init__(
         self,
         forward: Callable[[tuple[Tensor, ...]], ReplayOutput],
+        value_logits: ValueLogits,
         inputs: tuple[Tensor, ...],
         targets: ActorTargets,
         parameters: tuple[nn.Parameter, ...],
@@ -82,13 +96,18 @@ class GraphedActorStep:
                 gradient.zero_()
             with torch.enable_grad():
                 output = forward(static[: self.input_count])
-                result = actor_loss(output, _targets(static[self.input_count :]), clip_epsilon=clip_epsilon)
+                result = actor_loss(
+                    output,
+                    value_logits(output.features),
+                    _targets(static[self.input_count :]),
+                    clip_epsilon=clip_epsilon,
+                )
                 result.loss.backward()
             detached = ReplayOutput(
                 output.log_probs_WKF.detach(),
                 tuple(p.detach() for p in output.distributions),
                 output.factor_mask_WKF,
-                output.features,
+                output.features.detached(),
             )
             return ActorLoss(*(getattr(result, field.name).detach() for field in fields(result))), detached
 

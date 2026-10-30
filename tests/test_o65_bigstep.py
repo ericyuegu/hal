@@ -168,6 +168,8 @@ def test_partial_512_window_step_uses_every_window_once_and_masks_padding() -> N
             torch.tensor(0.0),
             torch.tensor(1.0),
             selected.sum().float(),
+            torch.zeros_like(advantages),
+            torch.tensor(0.0),
         )
         run.policy.actor_step(current, targets, clip_epsilon=0.2)
         gradients.append(run.policy.model.logits.grad.clone())
@@ -210,11 +212,11 @@ def test_episode_u_reaches_rollout_reference_replay_and_both_critic_inputs() -> 
     torch.testing.assert_close(features.condition[:, 3], 2 * expected - 1)
     torch.testing.assert_close(features.opponent_condition[:, 3], 2 * table.conditions[ids, 3] - 1)
     assert len(expected.unique()) > 1
-    head = run.policy.model.critic_residual
-    torch.nn.init.normal_(head.residual.down.weight)
+    head = run.policy.model.critic
+    torch.nn.init.normal_(head.head.down.weight)
     ego = features.condition.clone().requires_grad_()
     opponent = features.opponent_condition.clone().requires_grad_()
-    value = run.policy.model.self_play_value(
+    value = run.policy.model.critic_logits(
         features.trunk, features.decoder, ego, opponent, features.opponent_queue, features.opponent_lengths
     )
     value.sum().backward()
