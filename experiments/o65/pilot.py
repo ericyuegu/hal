@@ -23,6 +23,46 @@ from hal.eval.self_play_checkpoint import read_training_manifest
 from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
+ArmName = Literal["old", "reward", "critic", "scale", "matchup"]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Arm:
+    name: ArmName
+    lane_layout: Literal["self_play_heavy", "anchor_heavy"] = "self_play_heavy"
+    league_selection: Literal["latest", "pfsp"] = "latest"
+    snapshot_interval: int = 256
+    opponent_weight_power: float = 0
+    gamma: float = 0.99855
+    damage_reward: float = 1
+    critic: Literal["residual_scalar", "hl_gauss"] = "residual_scalar"
+    critic_hidden_dim: int = 128
+    critic_depth: int = 0
+    advantage_scale: Literal["batch", "warmup"] = "batch"
+
+
+OLD = Arm("old")
+ARMS = (
+    OLD,
+    dataclasses.replace(OLD, name="reward", gamma=2 ** (-1 / 1800), damage_reward=0),
+    dataclasses.replace(OLD, name="critic", critic="hl_gauss", critic_hidden_dim=512, critic_depth=3),
+    dataclasses.replace(OLD, name="scale", advantage_scale="warmup"),
+    dataclasses.replace(
+        OLD,
+        name="matchup",
+        lane_layout="anchor_heavy",
+        league_selection="pfsp",
+        snapshot_interval=64,
+        opponent_weight_power=1,
+    ),
+)
+
+
+def get_arm(name: str) -> Arm:
+    for arm in ARMS:
+        if arm.name == name:
+            return arm
+    raise ValueError(f"unknown ablation arm: {name}")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -39,6 +79,16 @@ class Args:
     publish_directory: Path | None = None
     publish_volume: str | None = None
     r2_prefix: str | None = None
+    arm: ArmName | None = None
+    sweep: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.arm is not None:
+            get_arm(self.arm)
+            if self.tiny or self.resume_learner is not None:
+                raise ValueError("ablation arms require full training from the fixed bootstrap")
+        elif self.sweep is not None:
+            raise ValueError("a sweep requires an ablation arm")
 
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
@@ -59,7 +109,13 @@ def training_command(
     warmup: int,
     compile_cache: Path | None = None,
     resume_learner: Path | None = None,
+    arm: ArmName | None = None,
 ) -> list[str]:
+    treatment = get_arm(arm) if arm is not None else None
+    if treatment is not None and (matches, groups, updates, checkpoint_every, warmup) != (64, 4, 672, 32, 32):
+        raise ValueError(
+            "ablation arms require four groups of 1024 matches, 672 updates and 32-update checkpoints/warmup"
+        )
     command = [
         sys.executable,
         str(ROOT / "experiments/065_selfplay_ppo.py"),
@@ -90,12 +146,43 @@ def training_command(
         str(warmup),
         # The fixed advantage scale is measured during critic warmup.
         "--training.advantage-scale",
-        "warmup" if warmup else "batch",
+        treatment.advantage_scale if treatment is not None else ("warmup" if warmup else "batch"),
         "--training.head-start-frames",
         "1200",
         "--training.checkpoint-interval",
         str(checkpoint_every),
     ]
+    if treatment is not None:
+        command.extend(
+            (
+                "--training.lane-layout",
+                treatment.lane_layout,
+                "--training.league-selection",
+                treatment.league_selection,
+                "--training.snapshot-interval",
+                str(treatment.snapshot_interval),
+                "--training.opponent-weight-power",
+                str(treatment.opponent_weight_power),
+                "--training.gamma",
+                str(treatment.gamma),
+                "--training.damage-reward",
+                str(treatment.damage_reward),
+                "--training.critic",
+                treatment.critic,
+                "--training.critic-hidden-dim",
+                str(treatment.critic_hidden_dim),
+                "--training.critic-depth",
+                str(treatment.critic_depth),
+                "--training.value-loss-coefficient",
+                "0",
+                "--percentile-alpha",
+                "5",
+                "--percentile-beta",
+                "1.3",
+                "--trace-matches",
+                "4",
+            )
+        )
     if resume_learner is not None:
         command.extend(("--resume-learner", str(resume_learner)))
     if compile_cache is not None:
@@ -204,6 +291,26 @@ def publish(args: Args, output: Path) -> None:
     )
 
 
+def publication_arguments(args: Args, output: Path) -> list[str]:
+    values = (args.publish_directory, args.publish_volume, args.r2_prefix)
+    if all(value is None for value in values):
+        return []
+    if any(value is None for value in values):
+        raise ValueError("pilot publication requires directory, volume and R2 prefix")
+    return [
+        "publication:args",
+        "--publication.source",
+        str(output),
+        "--publication.destination",
+        str(args.publish_directory),
+        "--publication.volume",
+        str(args.publish_volume),
+        "--publication.r2-prefix",
+        str(args.r2_prefix),
+        "--publication.compact" if args.checkpoint_retention == "compact" else "--publication.no-compact",
+    ]
+
+
 def trim_interrupted_metrics(path: Path, update: int) -> None:
     if not path.is_file():
         return
@@ -255,8 +362,10 @@ def consume_held_out(output: Path, update: int, protocol: Path) -> Path:
     return consumed
 
 
-def bind_pilot_identity(output: Path, git_sha: str, *, tiny: bool) -> None:
-    record = {
+def bind_pilot_identity(
+    output: Path, git_sha: str, *, tiny: bool, arm: ArmName | None = None, sweep: str | None = None
+) -> None:
+    record: dict[str, object] = {
         "format": "hal.o65.pilot-identity.v1",
         "git_sha": git_sha,
         "tiny": tiny,
@@ -265,6 +374,8 @@ def bind_pilot_identity(output: Path, git_sha: str, *, tiny: bool) -> None:
             for name in ("pilot-inputs.json", "pilot-sampler.json", "pilot-evaluation.json")
         },
     }
+    if arm is not None:
+        record.update(format="hal.o65.pilot-identity.v2", arm=dataclasses.asdict(get_arm(arm)), sweep=sweep)
     path = output / "pilot-identity.json"
     if path.is_file():
         if json.loads(path.read_text()) != record:
@@ -283,7 +394,7 @@ def main(args: Args) -> None:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=args.resume)
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    bind_pilot_identity(output, sha, tiny=args.tiny)
+    bind_pilot_identity(output, sha, tiny=args.tiny, arm=args.arm, sweep=args.sweep)
     available = tuple(sorted(os.sched_getaffinity(0)))
     cpus = args.cpus or available[: 2 if args.tiny else 16]
     if len(cpus) != (2 if args.tiny else 16) or len(set(cpus)) != len(cpus) or set(cpus) - set(available):
@@ -320,7 +431,7 @@ def main(args: Args) -> None:
     execute(["bash", str(ROOT / "docker/o65-build-msl.sh"), str(delivery)], output / "build.log", environment)
     protocol = ROOT / "experiments/o65/pilot-evaluation.json"
     run = output / "train"
-    updates = 4 if args.tiny else 2000
+    updates = 672 if args.arm is not None else (4 if args.tiny else 2000)
     checkpoint_every = 1 if args.tiny else 32
     command = training_command(
         delivery,
@@ -330,12 +441,17 @@ def main(args: Args) -> None:
         groups=2 if args.tiny else 4,
         updates=updates,
         checkpoint_every=checkpoint_every,
-        warmup=0 if args.tiny else 128,
+        warmup=32 if args.arm is not None else (0 if args.tiny else 128),
         compile_cache=args.compile_cache,
+        arm=args.arm,
     )
     if args.wandb:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
         environment.update(WANDB_RUN_ID=f"o65-debug-{sha[:8]}-{identity}", WANDB_RESUME="allow")
+        if args.arm is not None:
+            environment.update(
+                WANDB_RUN_GROUP=args.sweep or output.name, WANDB_NAME=f"{args.sweep or output.name}-{args.arm}"
+            )
         command.extend(("--wandb-project", "hal-o65"))
     previous = latest_checkpoint(run / "checkpoints") if args.resume else None
     if previous is None and args.resume_learner is not None:
@@ -365,24 +481,7 @@ def main(args: Args) -> None:
     if previous is not None:
         trim_interrupted_metrics(run / "metrics.jsonl", restored_update)
         command.extend(("--resume", str(previous)))
-    publication = (args.publish_directory, args.publish_volume, args.r2_prefix)
-    if any(value is not None for value in publication):
-        if any(value is None for value in publication):
-            raise ValueError("pilot publication requires directory, volume and R2 prefix")
-        command.extend(
-            (
-                "publication:args",
-                "--publication.source",
-                str(output),
-                "--publication.destination",
-                str(args.publish_directory),
-                "--publication.volume",
-                str(args.publish_volume),
-                "--publication.r2-prefix",
-                str(args.r2_prefix),
-                "--publication.compact" if args.checkpoint_retention == "compact" else "--publication.no-compact",
-            )
-        )
+    command.extend(publication_arguments(args, output))
     publish(args, output)
     if restored_update < updates:
         execute(command, output / "train.log", environment)
@@ -392,7 +491,9 @@ def main(args: Args) -> None:
     last = next(row for row in reversed(metrics) if "train/warming" in row)
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):
         raise RuntimeError("pilot ended without calibrated PPO training; inspect warmup before extending")
-    if not args.tiny and not (output / "held-out/results.json").is_file():
+    if args.arm is not None and last["global_step"] != updates:
+        raise RuntimeError("ablation ended before its 640 PPO updates after warmup")
+    if args.arm is None and not args.tiny and not (output / "held-out/results.json").is_file():
         consume_held_out(output, updates, protocol)
         publish(args, output)
         execute(
