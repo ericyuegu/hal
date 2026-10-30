@@ -22,7 +22,7 @@ class ActorTargets:
     advantage_mean: Tensor
     advantage_sigma: Tensor
     denominator: Tensor
-    # Critic targets for the value loss that trains the trunk and decoder.
+    # Critic targets for the value loss that trains the trunk.
     value_targets_WK: Tensor
     value_coefficient: Tensor
 
@@ -99,7 +99,7 @@ def actor_loss(
 
     Validate targets before capture. Detach all targets so gradients flow only
     through the current policy. Callers compute value logits with fixed critic
-    parameters, so the value term moves only the trunk and decoder.
+    parameters and a detached decoder state, so the value term moves only the trunk.
     """
     if not 0 < clip_epsilon < 1:
         raise ValueError("clip epsilon must be finite and between zero and one")

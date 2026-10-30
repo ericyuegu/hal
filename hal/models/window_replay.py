@@ -178,8 +178,9 @@ def replay_windows(
 ) -> ReplayOutput:
     """Replay decisions after encoding each window once.
 
-    Preserve trunk autograd history when grad=True. The trunk and decoder critic
-    features keep that history so a value loss can train the shared model.
+    Preserve trunk autograd history when grad=True. The trunk critic feature keeps
+    that history so a value loss can train the trunk. The decoder critic feature is
+    detached, because the decoder and its conditioner produce the action logits.
     For Torch 2.11 CUDA capture, compile with triton.cudagraphs=False and
     emulate_precision_casts=True to meet the proxy FP32-reference limits.
     """
@@ -235,7 +236,7 @@ def replay_windows(
             mask,
             ReplayCriticFeatures(
                 torch.where(valid[..., None], hidden_WLd[rows, position], 0),
-                torch.where(valid[..., None], output.decoder_state, 0),
+                torch.where(valid[..., None], output.decoder_state, 0).detach(),
                 condition.detach(),
                 opponent_condition.detach(),
                 opponent_queue.detach(),

@@ -2977,8 +2977,8 @@ class TrainConfig:
     decisions_per_window: int = 16
     clip_epsilon: float = 0.2
     gradient_clip: float = 1.0
-    # Weight of the critic's HL-Gauss loss in the actor step, which trains the trunk
-    # and decoder; the critic heads train only in critic fitting.
+    # Weight of the critic's HL-Gauss loss in the actor step, which trains the trunk;
+    # the critic heads train only in critic fitting.
     value_loss_coefficient: float = 0.1
     warmup_steps: int = 32
     critic_warmup_updates: int = 32

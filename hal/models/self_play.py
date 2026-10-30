@@ -188,10 +188,11 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         fixed_critic: bool = False,
         validate: bool = True,
     ) -> Tensor:
-        """Return value logits; gradients reach the trunk and decoder through their states.
+        """Return value logits; gradients reach the policy network through the given states.
 
-        Callers detach the states for critic fitting. With fixed_critic, the critic's
-        own parameters receive no gradient, so a value loss trains only the shared model.
+        Callers detach both states for critic fitting and the decoder state for the
+        actor's value loss. With fixed_critic, the critic's own parameters receive no
+        gradient, so that value loss trains only the trunk.
         """
         if trunk_state.ndim != 2 or trunk_state.shape[1] != self.cfg.d_model:
             raise ValueError("critic trunk state must be [B, d_model]")

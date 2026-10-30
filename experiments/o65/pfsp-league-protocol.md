@@ -36,8 +36,8 @@ discount, the critic and the advantage scale together:
   0.99855 (8 seconds).
 - Critic: an HL-Gauss distribution over 120 bins on [-600, 600] replaces the
   scalar residual critic. Each PPO step adds 0.1 times its cross-entropy, with
-  the critic's parameters held fixed, so the trunk and decoder learn value
-  features. Critic warmup lasts 128 updates instead of 32, and lambda_max is
+  the critic's parameters and the decoder state held fixed, so only the trunk
+  learns value features. Critic warmup lasts 128 updates instead of 32, and lambda_max is
   capped at the conditioner's maximum of 100.
 
 [plan.md](plan.md) gives the exact rules. The resolved run record names the

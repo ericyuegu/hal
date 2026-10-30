@@ -267,8 +267,10 @@ epochs on cached rollout features. HAL's Muon substitutes zero for missing
 gradients and continues momentum updates, so a shared optimizer would move the
 actor during critic-only fitting. During PPO, each actor step also adds 0.1
 times the critic's cross-entropy on its decisions. That term holds the critic's
-parameters fixed, so its gradient reaches only the trunk and decoder. The KL to
-pi_ref and PPO clipping limit how far that gradient moves the policy. We measure explained variance on fresh features before fitting and
+parameters fixed and detaches the decoder state, so its gradient reaches only
+the trunk. The decoder and its conditioner produce the action logits, so we keep
+value gradients out of them. The KL to pi_ref limits how far the trunk gradient
+moves the policy. We measure explained variance on fresh features before fitting and
 compare initial values with completed-episode Monte Carlo returns. Truncations
 are excluded from that comparison.
 

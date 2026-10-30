@@ -401,7 +401,7 @@ def test_joint_log_ratio_subtracts_each_factor_before_reduction() -> None:
     torch.testing.assert_close(actor_loss(output, no_value(output), targets).joint_ratio_WK.double(), expected)
 
 
-def test_value_loss_trains_the_shared_model_and_not_the_critic() -> None:
+def test_value_loss_trains_the_trunk_and_not_the_decoder_or_critic() -> None:
     policy = model()
     torch.nn.init.normal_(policy.critic.head.down.weight, std=0.05)
     hidden, observed, slots = inputs(policy)
@@ -416,5 +416,8 @@ def test_value_loss_trains_the_shared_model_and_not_the_critic() -> None:
     torch.testing.assert_close(loss.loss, without.loss + 0.2 * loss.value_loss)
     (gradient,) = torch.autograd.grad(loss.loss - without.loss, hidden, retain_graph=True)
     assert bool(gradient.any())
+    # The decoder and its conditioner produce the action logits, so the value loss leaves them alone.
+    decoder = tuple(policy.temporal.parameters())
+    assert all(g is None for g in torch.autograd.grad(loss.value_loss, decoder, retain_graph=True, allow_unused=True))
     loss.loss.backward()
     assert all(p.grad is None for p in policy.critic.parameters())
