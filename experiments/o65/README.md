@@ -3,6 +3,8 @@
 O65 collects MSL rollouts, fits a separate critic, then trains the actor with
 joint PPO and a direct KL loss. Read [plan.md](plan.md) for the math and
 [pilot-protocol.md](pilot-protocol.md) for the 17M proxy pilot.
+[pfsp-league-protocol.md](pfsp-league-protocol.md) states the current
+anti-collapse treatment.
 
 Build MSL and the adapter with [the native instructions](../../hal/sim/NATIVE.md).
 A local functional run can use smaller actor steps to fit the RTX 3060:
@@ -15,11 +17,12 @@ uv run python experiments/065_selfplay_ppo.py train \
   --data-dir "$HOME/src/melee-sim-light/data" --output runs/native-check \
   --cpus 0 1 --groups 1 --matches-per-shard 8 --updates 3 \
   --training.windows-per-step 32 --training.critic-warmup-updates 0 \
-  --training.checkpoint-interval 3 --verify-resume
+  --training.advantage-scale batch --training.checkpoint-interval 3 --verify-resume
 ```
 
-This run bypasses critic warmup. The hardware pilot uses 512 windows per actor
-step and calibrates lambda_max during warmup. A short local run checks execution;
+This run bypasses critic warmup, so it scales advantages by each minibatch's
+spread. The hardware pilot uses 512 windows per actor step and calibrates
+lambda_max and the fixed advantage scale during warmup. A short local run checks execution;
 use the fixed final evaluation to assess learning.
 
 Training uses graphs for rollout, reference replay and actor backward. The
@@ -31,8 +34,9 @@ and the pilot projections.
 
 Each update prints a compact, flushed progress line and appends metrics to
 `metrics.jsonl`. Checkpoint lines report capture, worker and wait seconds;
-snapshot lines report promotion time. The fixed-lane pilot warms preallocated
-snapshot policies before use and copies weights into them at promotion.
+snapshot lines report league rotation time. The fixed-lane pilot warms
+preallocated slot policies before use and loads banked weights into them at
+rotation.
 The trainer records resolved
 settings, environment and input hashes in `resolved.json`. It publishes
 checkpoint manifests after writing their referenced files. `--resume` restores

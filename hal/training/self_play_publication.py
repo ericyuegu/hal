@@ -29,7 +29,7 @@ def compact_checkpoints(directory: Path, latest: int) -> None:
     """Keep complete resume state for the latest update.
 
     Retain every actor and move retired manifests into a separate history
-    directory before removing their unreferenced training and simulator files.
+    directory before removing their unreferenced training, simulator and league files.
     Call only at a checkpoint boundary, before the next save starts.
     """
     retained: set[str] = set()
@@ -49,7 +49,7 @@ def compact_checkpoints(directory: Path, latest: int) -> None:
             retired.mkdir(exist_ok=True)
             target = retired / path.name
             path.rename(target)
-    for pattern in ("*.rank0.pt", "*.sim.zlib"):
+    for pattern in ("*.rank0.pt", "*.sim.zlib", "*.league.pt"):
         for path in directory.glob(pattern):
             if path.name not in retained:
                 path.unlink()

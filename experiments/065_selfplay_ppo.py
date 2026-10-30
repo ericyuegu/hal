@@ -526,8 +526,9 @@ class SamplerConfig:
     lambda_max: float = 100.0
     stocks: tuple[int, ...] = (1, 2, 3, 4)
     percents: tuple[float, ...] = (0.0,)
-    percentile_alpha: float = 5.0
-    percentile_beta: float = 1.3
+    # High-u prior: low-percentile conditioning anchors pi_ref to weaker human play.
+    percentile_alpha: float = 15.0
+    percentile_beta: float = 1.2
 
     def __post_init__(self) -> None:
         if (
@@ -1980,14 +1981,19 @@ class PoolSnapshot:
 
 
 def opponent_slots(lanes: int) -> tuple[int | None, ...]:
-    """Spread 4:2:2:2 anchors over 64 lanes; sub-four test shards use self-play."""
+    """Spread 12:12:12:12 anchors over 64 lanes; sub-four test shards use self-play.
+
+    Self-play lanes train both players, so 16 self-play and 48 anchor lanes give
+    the student 40% self-play and 60% anchor decisions. Shards above four lanes
+    keep at least one self-play lane; a four-lane shard holds one lane per slot.
+    """
     if type(lanes) is not int or lanes < 1:
         raise ValueError("shard lanes must be positive")
-    counts = (max(1, round(lanes / 16)), *(max(1, round(lanes / 32)) for _ in range(3)))
     if lanes < 4:
         return (None,) * lanes
+    count = max(1, min((lanes - 1) // 4, round(lanes * 3 / 16)))
     roles: list[int | None] = [None] * lanes
-    anchors = [slot for slot, count in enumerate(counts) for _ in range(count)]
+    anchors = [slot for _ in range(count) for slot in range(4)]
     for index, slot in enumerate(anchors):
         roles[(2 * index + 1) * lanes // (2 * len(anchors))] = slot
     return tuple(roles)
@@ -2967,14 +2973,37 @@ class TrainConfig:
     critic_warmup_updates: int = 32
     head_start_frames: int = 0
     lambda_spread_multiplier: float = 3.0
-    snapshot_interval: int = 256
+    # "warmup" divides PPO and direct KL by the pooled advantage spread measured
+    # during critic warmup, where KL is zero. "batch" uses each step's spread of
+    # KL-regularized advantages, which grows with KL and weakens the KL term.
+    advantage_scale: Literal["warmup", "batch"] = "warmup"
+    snapshot_interval: int = 64
     snapshot_capacity: int = 3
+    max_league_size: int = 32
+    # Rotated slots sample league entries with weight max(0.05, 1 - win rate)^power.
+    pfsp_power: float = 2.0
+    win_rate_ema_alpha: float = 0.1
+    # Anchor advantages scale by clip((2 * (1 - win rate))^power, 0.25, 1.75); zero disables.
+    opponent_weight_power: float = 1.0
     checkpoint_interval: int = 32
     deterministic: bool = False
 
     def __post_init__(self) -> None:
         if type(self.snapshot_capacity) is not int or self.snapshot_capacity != 3:
             raise ValueError("fixed opponent layout requires exactly three snapshot slots")
+        if self.advantage_scale not in ("warmup", "batch"):
+            raise ValueError("unsupported advantage scale")
+        if self.advantage_scale == "warmup" and self.critic_warmup_updates == 0:
+            raise ValueError("warmup advantage scale requires critic warmup updates")
+        if type(self.max_league_size) is not int or self.max_league_size < 5:
+            # Eviction protects pi_ref and three milestones and must keep the new entry.
+            raise ValueError("league must hold pi_ref, three milestones and one evictable entry")
+        for name in ("pfsp_power", "opponent_weight_power"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not 0 < self.win_rate_ema_alpha <= 1:
+            raise ValueError("win-rate EMA alpha must be in (0, 1]")
         for name in (
             "critic_epochs",
             "windows_per_step",
@@ -3109,6 +3138,8 @@ class PreparedUpdate:
     metrics: dict[str, float]
     windows: ReplayBatch
     placement: WindowPlacement
+    # Scales centered actor advantages by opponent difficulty; self-play is one.
+    opponent_weights: Tensor
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -3524,6 +3555,46 @@ def percentile_bin(u: float) -> int:
     return sum(u > edge for edge in (0.5, 0.75, 0.9, 0.97))
 
 
+LEAGUE_FORMAT = "hal.o65.league.v1"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class LeagueEntry:
+    """Hold an immutable host copy of opponent weights; sha256 names its checkpoint shard."""
+
+    entry_id: int
+    update: int
+    weights: dict[str, Tensor]
+    sha256: str
+
+
+def league_payload(entry_id: int, update: int, weights: dict[str, Tensor]) -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    torch.save({"format": LEAGUE_FORMAT, "entry_id": entry_id, "update": update, "weights": weights}, buffer)
+    return buffer.getvalue()
+
+
+def league_entry(entry_id: int, update: int, state: dict[str, Tensor]) -> LeagueEntry:
+    weights = {name: value.detach().to(device="cpu", copy=True) for name, value in state.items()}
+    digest = hashlib.sha256(league_payload(entry_id, update, weights)).hexdigest()
+    return LeagueEntry(entry_id, update, weights, digest)
+
+
+def load_league_entry(path: Path, entry_id: int, update: int, digest: str, names: set[str]) -> LeagueEntry:
+    raw = torch.load(path, map_location="cpu", weights_only=False)
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"format", "entry_id", "update", "weights"}
+        or (raw["format"], raw["entry_id"], raw["update"]) != (LEAGUE_FORMAT, entry_id, update)
+        or not isinstance(raw["weights"], dict)
+        or set(raw["weights"]) != names
+    ):
+        raise ValueError("league shard identity or schema mismatch")
+    return LeagueEntry(entry_id, update, raw["weights"], digest)
+
+
 class Trainer:
     def __init__(self, engine: RolloutEngine, config: TrainConfig) -> None:
         if torch.are_deterministic_algorithms_enabled() != config.deterministic:
@@ -3554,7 +3625,10 @@ class Trainer:
             raise ValueError("fresh trainer requires only pi_ref")
         self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
-        self.slot_updates = {1: 0, 2: 0, 3: 0}
+        # Entry 0 is pi_ref. Slot 0 always holds it; slots 1..3 hold PFSP draws.
+        self.league = [league_entry(0, 0, self.reference.model.state_dict())]
+        self.league_win_rates = {0: 0.5}
+        self.slot_entries = {0: 0, 1: 0, 2: 0, 3: 0}
         self.compilation_counter: CompilationStartCounter | None = None
         self.startup_seconds = 0.0
         self.evaluation_cursor = 0
@@ -3562,6 +3636,102 @@ class Trainer:
         self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self.partial_episodes: set[tuple[int, int]] = set()
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
+
+    @property
+    def slot_updates(self) -> dict[int, int]:
+        updates = {entry.entry_id: entry.update for entry in self.league}
+        return {slot: updates[self.slot_entries[slot]] for slot in (1, 2, 3)}
+
+    def warmup_advantage_sigma(self) -> float:
+        """Pool critic-warmup advantages, which carry no KL cost, over timing configurations."""
+        count = sum(value[0] for value in self.warmup_moments.values())
+        if count < 2:
+            raise ValueError("warmup advantage scale needs calibrated warmup moments")
+        mean = sum(value[1] for value in self.warmup_moments.values()) / count
+        variance = sum(value[2] for value in self.warmup_moments.values()) / count - mean**2
+        sigma = math.sqrt(max(0.0, variance))
+        if not math.isfinite(sigma) or sigma <= 0:
+            raise ValueError("warmup advantage spread must be finite and positive")
+        return sigma
+
+    def opponent_weights(self) -> Tensor:
+        """Return advantage weights for anchor slots 0..3 from the student's win-rate EMA."""
+        rates = torch.tensor(
+            [self.league_win_rates[self.slot_entries[slot]] for slot in range(4)], dtype=torch.float64
+        )
+        return (2 * (1 - rates)).pow(self.config.opponent_weight_power).clamp(0.25, 1.75)
+
+    def record_anchor_results(self, rollout: Rollout) -> None:
+        """Update win-rate EMAs, which set the next PFSP draws and advantage weights."""
+        for result in rollout.results:
+            if result.timeout:
+                continue
+            for side_index, player in enumerate(result.episode.players):
+                if player.anchor is None:
+                    continue
+                if result.stocks is None:
+                    raise ValueError("completed anchor match is missing stocks")
+                won = result.stocks[1 - side_index] > result.stocks[side_index]
+                # Rotation truncates a slot's episodes without results, so the
+                # slot's current entry played every completed match.
+                entry = self.slot_entries[player.anchor]
+                rate = self.league_win_rates[entry]
+                self.league_win_rates[entry] = rate + self.config.win_rate_ema_alpha * (float(won) - rate)
+
+    def rotate_league(self) -> tuple[int, ...]:
+        """Bank the student, evict the easiest entry, and load PFSP draws into changed slots.
+
+        Slots 1..3 always include the new entry. Entries already loaded keep their
+        slots, so only changed slots truncate their episodes.
+        """
+        # The newest entry is never evicted, so the last entry holds the largest id.
+        entry = league_entry(self.league[-1].entry_id + 1, self.update, self.policy.model.state_dict())
+        self.league.append(entry)
+        self.league_win_rates[entry.entry_id] = 0.5
+        if len(self.league) > self.config.max_league_size:
+            # Keep pi_ref and the earliest milestones; evict the entry the student beats most.
+            candidates = [row.entry_id for row in self.league[4:] if row is not entry]
+            evicted = max(candidates, key=lambda entry_id: (self.league_win_rates[entry_id], -entry_id))
+            self.league = [row for row in self.league if row.entry_id != evicted]
+            del self.league_win_rates[evicted]
+        others = [row.entry_id for row in self.league if row is not entry]
+        targets = [entry.entry_id]
+        pool = list(others)
+        for draw in range(2):
+            if not pool:
+                pool = list(others)
+            weights = [max(0.05, 1 - self.league_win_rates[entry_id]) ** self.config.pfsp_power for entry_id in pool]
+            targets.append(pool.pop(self.engine.sampler.rng.choice(weights, "league", self.update, draw, 0)))
+        changed = []
+        updates = {row.entry_id: row.update for row in self.league}
+        # Keep the newest loaded weights first, so duplicates replace the oldest slot.
+        for slot in sorted((1, 2, 3), key=lambda slot: (updates.get(self.slot_entries[slot], -1), slot), reverse=True):
+            if self.slot_entries[slot] in targets:
+                targets.remove(self.slot_entries[slot])
+            else:
+                changed.append(slot)
+        changed.sort()
+        weights_by_id = {row.entry_id: row.weights for row in self.league}
+        for slot, entry_id in zip(changed, targets, strict=True):
+            for match, number in self.engine.truncate_slot(slot):
+                for side in (0, 1):
+                    self.episode_metrics.pop((2 * match + side, number), None)
+                    self.partial_episodes.discard((2 * match + side, number))
+            self.engine.anchors[slot].model.load_state_dict(weights_by_id[entry_id], strict=True)
+            self.slot_entries[slot] = entry_id
+            # Rolling win counts must not combine different weights in one slot.
+            for row in self.anchor_win_history:
+                row.pop(slot, None)
+        return tuple(changed)
+
+    def league_metrics(self) -> dict[str, float]:
+        weights = self.opponent_weights().tolist()
+        metrics = {"league/size": float(len(self.league)), "league/newest_entry": float(self.league[-1].entry_id)}
+        for slot in range(4):
+            metrics[f"league/slot{slot}_entry"] = float(self.slot_entries[slot])
+            metrics[f"league/slot{slot}_win_rate_ema"] = self.league_win_rates[self.slot_entries[slot]]
+            metrics[f"league/slot{slot}_advantage_weight"] = weights[slot]
+        return metrics
 
     @torch.no_grad()
     def capture_startup(self) -> None:
@@ -3710,11 +3880,9 @@ class Trainer:
                     continue
                 if result.stocks is None:
                     raise ValueError("completed anchor match is missing stocks")
+                won = result.stocks[1 - side_index] > result.stocks[side_index]
                 wins, count = completed.get(player.anchor, (0, 0))
-                completed[player.anchor] = (
-                    wins + int(result.stocks[1 - side_index] > result.stocks[side_index]),
-                    count + 1,
-                )
+                completed[player.anchor] = (wins + int(won), count + 1)
         self.anchor_win_history.append(completed)
         self.anchor_win_history = self.anchor_win_history[-32:]
         anchors = sorted(
@@ -3923,7 +4091,11 @@ class Trainer:
         selected = placement.selected.flatten()[compact]
         steps = tuple(placement.windows.unbind(0))
         executed = decisions.executed_factors_JF
+        opponents = table.opponent_anchor[ids]
+        slot_weights = self.opponent_weights().to(device=device, dtype=advantages.dtype)
+        opponent_weights = torch.where(opponents >= 0, slot_weights[opponents.clamp_min(0)], 1)
         metrics = {
+            "policy/opponent_weight_mean": float(opponent_weights.mean()),
             "critic/explained_variance": explained_variance(values, targets),
             "policy/kl_per_frame": float(torch.where(executed, kl, 0).sum() / executed[:, ::4].sum().clamp_min(1)),
             "return/interval_reward": float(frame_rewards.sum(-1).mean()),
@@ -4040,6 +4212,7 @@ class Trainer:
             metrics,
             windows,
             placement,
+            opponent_weights,
         )
 
     def fit(self, batch: PreparedUpdate) -> dict[str, float]:
@@ -4095,6 +4268,14 @@ class Trainer:
         table = batch.rollout.table
         dense_advantage = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
+        dense_weight = torch.ones_like(table.values)
+        dense_weight[batch.rollout.ids] = batch.opponent_weights
+        fixed_sigma = (
+            torch.tensor(self.warmup_advantage_sigma(), dtype=torch.float32, device=self.policy.device)
+            if cfg.advantage_scale == "warmup"
+            else None
+        )
+        batch_sigmas: list[Tensor] = []
         reference_dense = tuple(
             value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions
         )
@@ -4115,6 +4296,12 @@ class Trainer:
                     )
                     advantages = dense_advantage[windows.rows]
                     statistics = advantage_statistics(advantage_moments(advantages.flatten(), selected.flatten()))
+                    batch_sigmas.append(statistics.sigma)
+                    mean = statistics.mean.to(advantages.dtype)
+                    # actor_loss subtracts the mean, so this scales each centered advantage.
+                    weight = dense_weight[windows.rows]
+                    advantages = torch.where(weight == 1, advantages, mean + weight * (advantages - mean))
+                    sigma = statistics.sigma.float() if fixed_sigma is None else fixed_sigma
                     # Chunks share the step's statistics and denominator, so their
                     # gradients sum to the gradient of the whole step.
                     chunk = cfg.windows_per_step // cfg.actor_microbatches
@@ -4130,7 +4317,7 @@ class Trainer:
                             table.coefficients[part.rows],
                             tuple(value[part.rows] for value in reference_dense),
                             statistics.mean.float(),
-                            statistics.sigma.float(),
+                            sigma,
                             selected.sum().float(),
                         )
                         parts.append(self.policy.actor_step(part, targets, clip_epsilon=cfg.clip_epsilon))
@@ -4206,6 +4393,10 @@ class Trainer:
                 "policy/ratio_p01": float(ratio.quantile(0.01)),
                 "policy/ratio_p99": float(ratio.quantile(0.99)),
                 "policy/old_log_ratio_p99": float(torch.cat(old_log_ratios).abs().quantile(0.99)),
+                "policy/batch_advantage_sigma": float(torch.stack(batch_sigmas).mean()),
+                "policy/advantage_sigma": float(
+                    torch.stack(batch_sigmas).mean() if fixed_sigma is None else fixed_sigma
+                ),
                 "systems/actor_seconds": time.perf_counter() - started,
             }
         )
@@ -4234,7 +4425,7 @@ class Trainer:
             raise ValueError("calibrated lambda_max is outside the declared conditioner range")
         sampler.lambda_max = maximum
         self.warming = False
-        return {"train/warmup_ended": 1.0}
+        return {"train/warmup_ended": 1.0, "train/warmup_advantage_sigma": self.warmup_advantage_sigma()}
 
     def run_update(self) -> tuple[PreparedUpdate, dict[str, float]]:
         if self.updating:
@@ -4267,6 +4458,7 @@ class Trainer:
         with self.memory.phase("optimization"):
             metrics = self.fit(batch)
         metrics.update(self.completed_metrics(rollout, batch.kl))
+        self.record_anchor_results(rollout)
         metrics.update(self.anchor_metrics(rollout))
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True
@@ -4287,24 +4479,18 @@ class Trainer:
         )
         if not self.warming and self.update % self.config.snapshot_interval == 0:
             snapshot_started = time.perf_counter()
-            promoted = min(self.slot_updates, key=lambda slot: (self.slot_updates[slot], slot))
-            truncated = self.engine.truncate_slot(promoted)
-            for match, number in truncated:
-                for side in (0, 1):
-                    self.episode_metrics.pop((2 * match + side, number), None)
-                    self.partial_episodes.discard((2 * match + side, number))
-            self.engine.anchors[promoted].model.load_state_dict(self.policy.model.state_dict(), strict=True)
-            self.slot_updates[promoted] = self.update
-            # Rolling win counts must not combine different weights in one slot.
-            for row in self.anchor_win_history:
-                row.pop(promoted, None)
+            rotated = self.rotate_league()
             if self.policy.device.type == "cuda":
                 torch.cuda.synchronize(self.policy.device)
             metrics["systems/snapshot_seconds"] = time.perf_counter() - snapshot_started
+            metrics["league/rotated_slots"] = float(len(rotated))
             print(
-                f"snapshot update={self.update} anchor={promoted} seconds={metrics['systems/snapshot_seconds']:.3f}",
+                f"snapshot update={self.update} entry={self.league[-1].entry_id} rotated={list(rotated)} "
+                f"slots={[self.slot_entries[slot] for slot in (1, 2, 3)]} "
+                f"seconds={metrics['systems/snapshot_seconds']:.3f}",
                 flush=True,
             )
+        metrics.update(self.league_metrics())
         if self.policy.device.type == "cuda":
             torch.cuda.synchronize(self.policy.device)
             metrics["systems/peak_allocated_bytes"] = float(
@@ -4399,7 +4585,7 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
         "episode_reset": "shared_stocks_block_wait_v1",
         "rollout_storage": "dense_windows_v6",
         "selection_rng": "integer_counter_v3",
-        "opponent_layout": "fixed_opponent_slots_v2",
+        "opponent_layout": "pfsp_league_slots_v1",
         "lane_roles": sorted(engine.lane_roles.items()),
     }
     if isinstance(trainer.policy, TransformerPolicy):
@@ -4423,6 +4609,8 @@ class CheckpointSnapshot:
     simulators: tuple[tuple[str, bytes | NativePoolSnapshot], ...]
     actor: dict[str, object] | None
     manifest: dict[str, object]
+    # League entries are immutable, so snapshots share them instead of copying.
+    league: tuple[LeagueEntry, ...]
 
 
 def _checkpoint_tensors(value: object) -> Iterator[Tensor]:
@@ -4454,7 +4642,6 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
     if set(provenance) != required or any(not value for value in provenance.values()):
         raise ValueError("checkpoint provenance must identify source, BC checkpoint, data, simulator, and adapter")
     engine = trainer.engine
-    anchors = {key: value.model.state_dict() for key, value in engine.anchors.items()}
     state: dict[str, object] = {
         "version": CHECKPOINT_VERSION,
         "execution": {
@@ -4465,9 +4652,13 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "actor_optimizer": trainer.actor_optimizer.state_dict(),
         "critic_optimizer": trainer.critic_optimizer.state_dict(),
         "scheduler": trainer.scheduler.state_dict(),
-        "reference": anchors[0],
-        "anchors": anchors,
-        "slot_updates": trainer.slot_updates,
+        "reference": trainer.reference.model.state_dict(),
+        # Slot weights are stored once, in the league shards named by slot_entries.
+        "league": [
+            {"entry_id": entry.entry_id, "update": entry.update, "sha256": entry.sha256} for entry in trainer.league
+        ],
+        "league_win_rates": dict(trainer.league_win_rates),
+        "slot_entries": dict(trainer.slot_entries),
         "pool": engine.snapshot(),
         "clocks": engine.clocks,
         "cursor": engine.cursor,
@@ -4536,7 +4727,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "environment": _environment(),
         "provenance": dict(provenance),
     }
-    return CheckpointSnapshot(trainer.update, state, tuple(simulators), actor, manifest)
+    return CheckpointSnapshot(trainer.update, state, tuple(simulators), actor, manifest, tuple(trainer.league))
 
 
 def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
@@ -4557,6 +4748,16 @@ def write_checkpoint(snapshot: CheckpointSnapshot, directory: Path) -> Path:
         torch.save(snapshot.actor, buffer)
         name, digest = _durable_file(directory, buffer.getvalue(), "actor.pt")
         shards.append({"name": name, "sha256": digest, "role": "actor"})
+    for entry in snapshot.league:
+        name = f"{entry.sha256}.league.pt"
+        # Content-addressed entries persist once; later checkpoints refer to the same file.
+        if not (directory / name).exists():
+            _, digest = _durable_file(
+                directory, league_payload(entry.entry_id, entry.update, entry.weights), "league.pt"
+            )
+            if digest != entry.sha256:
+                raise ValueError("league entry serialization changed after it was banked")
+        shards.append({"name": name, "sha256": entry.sha256, "role": f"league_{entry.entry_id}"})
     manifest = {**snapshot.manifest, "shards": shards}
     temporary = directory / f".manifest-{snapshot.update}-{os.getpid()}.partial"
     target = directory / f"update-{snapshot.update:08d}.json"
@@ -4648,6 +4849,62 @@ class CheckpointWorker:
             self.executor.shutdown(wait=True)
 
 
+def restore_league(trainer: Trainer, saved: dict[str, object], paths: dict[str, Path]) -> list[LeagueEntry]:
+    """Validate league metadata against hash-verified shards before loading any weights."""
+    rows = saved.get("league")
+    if (
+        not isinstance(rows, list)
+        or not 1 <= len(rows) <= trainer.config.max_league_size
+        or any(not isinstance(row, dict) or set(row) != {"entry_id", "update", "sha256"} for row in rows)
+    ):
+        raise ValueError("invalid checkpoint league metadata")
+    rows = cast(list[dict[str, object]], rows)
+    update = saved["update"]
+    ids = [row["entry_id"] for row in rows]
+    updates = [row["update"] for row in rows]
+    hashes = [row["sha256"] for row in rows]
+    if (
+        type(update) is not int
+        or not all(type(entry_id) is int for entry_id in ids)
+        or not all(type(value) is int for value in updates)
+        or not all(isinstance(digest, str) for digest in hashes)
+    ):
+        raise ValueError("invalid checkpoint league metadata")
+    ids, updates, hashes = cast(list[int], ids), cast(list[int], updates), cast(list[str], hashes)
+    if (
+        ids != sorted(set(ids))
+        or ids[0] != 0
+        or updates[0] != 0
+        or any(not 0 <= value <= update for value in updates)
+        or {role for role in paths if role.startswith("league_")} != {f"league_{entry_id}" for entry_id in ids}
+        or any(
+            paths[f"league_{entry_id}"].name != f"{digest}.league.pt"
+            for entry_id, digest in zip(ids, hashes, strict=True)
+        )
+    ):
+        raise ValueError("checkpoint league entries disagree with their shards")
+    rates, slots = saved.get("league_win_rates"), saved.get("slot_entries")
+    if (
+        not isinstance(rates, dict)
+        or set(rates) != set(ids)
+        or any(type(rate) is not float or not 0 <= rate <= 1 for rate in rates.values())
+        or not isinstance(slots, dict)
+        or set(slots) != {0, 1, 2, 3}
+        or cast(dict[int, object], slots)[0] != 0
+        or any(entry_id not in ids for entry_id in slots.values())
+    ):
+        raise ValueError("invalid checkpoint league state")
+    names = set(trainer.policy.model.state_dict())
+    league = [
+        load_league_entry(paths[f"league_{entry_id}"], entry_id, value, digest, names)
+        for entry_id, value, digest in zip(ids, updates, hashes, strict=True)
+    ]
+    reference = cast(dict[str, Tensor], saved["reference"])
+    if any(not torch.equal(value, reference[name]) for name, value in league[0].weights.items()):
+        raise ValueError("checkpoint league entry zero is not pi_ref")
+    return league
+
+
 def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
     manifest = read_training_manifest(manifest_path)
     if manifest["version"] != CHECKPOINT_VERSION:
@@ -4668,7 +4925,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if isinstance(trainer.policy, TransformerPolicy):
         expected_roles.add("actor")
         evaluation_actor_path(manifest_path)
-    if set(paths) != expected_roles:
+    if {role for role in paths if not role.startswith("league_")} != expected_roles:
         raise ValueError("checkpoint simulator topology mismatch")
     saved = torch.load(paths["training"], map_location="cpu", weights_only=False)
     if (
@@ -4678,6 +4935,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         or saved["update"] != manifest["update"]
     ):
         raise ValueError("checkpoint shard identity mismatch")
+    league = restore_league(trainer, saved, paths)
     groups = len(trainer.engine.groups)
     frames = trainer.engine.sampler.schedule.rollout_frames
     initial_clock = math.ceil(trainer.config.head_start_frames / frames) * frames
@@ -4756,16 +5014,11 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.critic_optimizer.load_state_dict(saved["critic_optimizer"])
     trainer.scheduler.load_state_dict(saved["scheduler"])
     engine = trainer.engine
-    if set(saved["anchors"]) != {0, 1, 2, 3} or set(saved["slot_updates"]) != {1, 2, 3}:
-        raise ValueError("checkpoint fixed snapshot slot mismatch")
-    if any(type(update) is not int or not 0 <= update <= saved["update"] for update in saved["slot_updates"].values()):
-        raise ValueError("invalid checkpoint slot weight update")
+    weights = {entry.entry_id: entry.weights for entry in league}
     reference = trainer.reference
     engine.anchors.clear()
-    slots = iter(trainer.snapshot_slots)
-    for key, tensors in saved["anchors"].items():
-        policy = reference if key == 0 else next(slots)
-        policy.model.load_state_dict(tensors, strict=True)
+    for key, policy in enumerate((reference, *trainer.snapshot_slots)):
+        policy.model.load_state_dict(weights[saved["slot_entries"][key]], strict=True)
         engine.anchors[key] = policy
     engine.layout_anchors = [() for _ in engine.groups]
     trainer.reference = engine.anchors[0]
@@ -4778,7 +5031,9 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     engine.restore_pool(saved["pool"])
     engine.clocks = saved["clocks"]
     engine.cursor = saved["cursor"]
-    trainer.slot_updates = saved["slot_updates"]
+    trainer.league = league
+    trainer.league_win_rates = saved["league_win_rates"]
+    trainer.slot_entries = saved["slot_entries"]
     engine.sampler.cursor = saved["sampler_cursor"]
     engine.sampler.lambda_max = saved["lambda_max"]
     engine._initialized = True
@@ -4805,9 +5060,29 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
 PILOT_SOURCE = "3d4ad115881857d0c6c1ba039e41225bd7df3fe8"
 
 
+LEAGUE_TRAIN_FIELDS = (
+    "advantage_scale",
+    "max_league_size",
+    "pfsp_power",
+    "win_rate_ema_alpha",
+    "opponent_weight_power",
+)
+
+
 def legacy_pilot_digest(trainer: Trainer) -> str:
+    """Rebuild the stopped pilot's identity; the league treatment's own settings are not compared."""
     identity = _configuration_identity(trainer)
-    identity["sampler"] = {**dataclasses.asdict(trainer.engine.sampler.config), "anchor_rate": 0.15}
+    training = cast(dict[str, object], identity["train"])
+    identity["train"] = {
+        **{key: value for key, value in training.items() if key not in LEAGUE_TRAIN_FIELDS},
+        "snapshot_interval": 256,
+    }
+    identity["sampler"] = {
+        **dataclasses.asdict(trainer.engine.sampler.config),
+        "anchor_rate": 0.15,
+        "percentile_alpha": 5.0,
+        "percentile_beta": 1.3,
+    }
     identity["opponent_layout"] = "fixed_anchor_ranges_v1"
     del identity["lane_roles"]
     if isinstance(trainer.policy, TransformerPolicy):
@@ -4888,12 +5163,15 @@ def restore_pilot_learner(trainer: Trainer, manifest_path: Path, provenance: dic
     trainer.actor_optimizer.load_state_dict(saved["actor_optimizer"])
     trainer.critic_optimizer.load_state_dict(saved["critic_optimizer"])
     trainer.scheduler.load_state_dict(saved["scheduler"])
-    trainer.engine.anchors[1].model.load_state_dict(saved["anchors"][1], strict=True)
+    entry = league_entry(1, 256, saved["anchors"][1])
+    trainer.engine.anchors[1].model.load_state_dict(entry.weights, strict=True)
     # Head-start episodes used pi_ref, so end slot 1 before its first learned-weight tick.
     for match, number in trainer.engine.truncate_slot(1):
         for side in (0, 1):
             trainer.partial_episodes.discard((2 * match + side, number))
-    trainer.slot_updates = {1: 256, 2: 0, 3: 0}
+    trainer.league.append(entry)
+    trainer.league_win_rates[1] = 0.5
+    trainer.slot_entries[1] = 1
     trainer.update = trainer.pool_start_update = 256
     trainer.engine.completed_update = 255
     trainer.actor_steps = saved["actor_steps"]
@@ -4959,7 +5237,14 @@ def run_training(
         "sampler": dataclasses.asdict(trainer.engine.sampler.config),
         "schedule": dataclasses.asdict(trainer.engine.sampler.schedule),
         "returns": {"gamma_per_frame": GAMMA, "gae_lambda_per_frame": GAE_LAMBDA},
-        "treatment": "KL-regularized joint PPO; independent per-player clipped Beta(5,1.3) u",
+        "treatment": (
+            "KL-regularized joint PPO with "
+            f"{trainer.config.advantage_scale} advantage sigma; "
+            f"40% self-play and 60% anchor student streams; PFSP league rotation every "
+            f"{trainer.config.snapshot_interval} updates with win-rate advantage weights; independent per-player clipped "
+            f"Beta({trainer.engine.sampler.config.percentile_alpha:g},"
+            f"{trainer.engine.sampler.config.percentile_beta:g}) u"
+        ),
         "control": "frozen pi_ref with matched sampling, starts, episode u, and schedules",
         "invariants": "BC checkpoint, representation, data, simulator, adapter, reward, evaluation seeds",
         "run": run_configuration,
@@ -5843,7 +6128,7 @@ class GpuProfileCli:
             updates=self.warm_updates + 2,
             groups=self.groups,
             matches_per_shard=self.matches_per_shard,
-            training=TrainConfig(critic_warmup_updates=0, windows_per_step=32),
+            training=TrainConfig(critic_warmup_updates=0, advantage_scale="batch", windows_per_step=32),
             profiling=ProfileConfig(self.warm_updates, self.nsys),
             compile_cache=self.compile_cache,
             decoder_precision=self.decoder_precision,
@@ -5914,6 +6199,7 @@ def _batch_hash(batch: PreparedUpdate) -> str:
                 store.flags[frames],
             ),
             "episodes": tuple(dataclasses.asdict(result) for result in batch.rollout.results),
+            "opponent_weights": batch.opponent_weights,
         }
     )
 
@@ -5941,11 +6227,18 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
         "sampler": _state_hash((engine.sampler.cursor, engine.sampler.lambda_max, engine.sampler.rng)),
         "rng": _rng_hash(),
         "anchors": _state_hash({key: policy.model.state_dict() for key, policy in engine.anchors.items()}),
+        # Entry hashes cover the banked weights without rehashing them.
+        "league": _state_hash(
+            (
+                [(entry.entry_id, entry.update, entry.sha256) for entry in trainer.league],
+                trainer.league_win_rates,
+                trainer.slot_entries,
+            )
+        ),
         "progress": _state_hash(
             (
                 engine.clocks,
                 engine.cursor,
-                trainer.slot_updates,
                 trainer.update,
                 trainer.actor_steps,
                 trainer.pool_start_update,

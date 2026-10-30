@@ -129,8 +129,9 @@ def test_episode_sampling_matches_character_prior_identity_counts_and_beta() -> 
     assert 0.08 < counts["masked"] / 8000 < 0.12
     assert all(0.14 < value / 4000 < 0.19 for value in stages.values())
     u = torch.tensor(draws).reshape(-1, 2)
-    assert 0.81 < float(u.median()) < 0.85
-    assert 0.035 < float((u < 0.5).float().mean()) < 0.075
+    # Beta(15, 1.2) has median 0.943 and puts 5% of its mass below 0.8.
+    assert 0.93 < float(u.median()) < 0.955
+    assert 0.035 < float((u < 0.8).float().mean()) < 0.065
     assert abs(float(torch.corrcoef(u.T)[0, 1])) < 0.06
 
 
@@ -248,7 +249,6 @@ def test_resume_preserves_u_and_episode_metric_totals(tmp_path: Path) -> None:
 
 def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -> None:
     run = trainer(groups=1)
-    run.engine.anchors[7] = run.policy.frozen_copy()
     store = exp.FrameStore(16, 2, torch.device("cpu"))
     table = exp.DenseRollout(64, store)
     records = np.zeros((16, 2), dtype=exp.native.FRAME_DTYPE)
@@ -267,7 +267,7 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
     table.integers[:4, exp.START] = torch.tensor([0, 3, 0, 0])
     table.integers[:4, exp.LENGTH] = 1
     table.duration[:4] = torch.tensor([2, 1, 3, 3])
-    table.opponent_anchor[:4] = torch.tensor([0, 7, 0, -1])
+    table.opponent_anchor[:4] = torch.tensor([0, 3, 0, -1])
     episode = run.engine.sampler.sample(0, 0, None)
 
     def completed(anchor: int, anchor_side: int, *, timeout: bool = False):
@@ -278,7 +278,7 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
         return exp.EpisodeResult(0, dataclasses.replace(episode, players=players), 300, (0.0, 0.0), timeout, (1, 0))
 
     rollout = exp.Rollout(
-        table, torch.arange(4), 0, 0, 6, 1, 1, 0.0, (completed(0, 1), completed(7, 0), completed(0, 0, timeout=True))
+        table, torch.arange(4), 0, 0, 6, 1, 1, 0.0, (completed(0, 1), completed(3, 0), completed(0, 0, timeout=True))
     )
     assert exp.reward_component_metrics(rollout) == {
         "return/damage_positive": 6.75,
@@ -292,12 +292,16 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
         "return/win_reward": 0.0,
     }
     metrics = run.anchor_metrics(rollout)
+    assert run.league_win_rates == {0: 0.5}
+    run.record_anchor_results(rollout)
     assert metrics["gameplay/pi_ref_net_stocks_per_min"] == pytest.approx(720)
     assert metrics["gameplay/pi_ref_net_damage_per_min"] == pytest.approx(4320)
-    assert metrics["gameplay/anchor7_net_stocks_per_min"] == pytest.approx(3600)
-    assert metrics["gameplay/anchor7_net_damage_per_min"] == pytest.approx(-32400)
+    assert metrics["gameplay/anchor3_net_stocks_per_min"] == pytest.approx(3600)
+    assert metrics["gameplay/anchor3_net_damage_per_min"] == pytest.approx(-32400)
     assert metrics["gameplay/pi_ref_count"] == metrics["gameplay/pi_ref_win_rate"] == 1
-    assert metrics["gameplay/anchor7_count"] == 1 and metrics["gameplay/anchor7_win_rate"] == 0
+    assert metrics["gameplay/anchor3_count"] == 1 and metrics["gameplay/anchor3_win_rate"] == 0
+    # Slot 3 still holds pi_ref, so the win then the loss update one EMA; timeouts are skipped.
+    assert run.league_win_rates == {0: pytest.approx(0.495)}
     second = dataclasses.replace(rollout, results=(completed(0, 0), completed(0, 0)))
     metrics = run.anchor_metrics(second)
     assert metrics["gameplay/pi_ref_win_rate_32_updates"] == pytest.approx(1 / 3)

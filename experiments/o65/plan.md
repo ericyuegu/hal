@@ -57,26 +57,44 @@ For each player, we independently draw:
   count with tempering 1.0 and floor 1. We mask 10% of draws and use deployment
   rate 0. The proxy uses ranked training ids. For O64, we also count professional
   ids through the identity sidecar. Validation and test rows contribute no counts.
-- Percentile u from Beta(5.0,1.3), clipped to [0.1,0.999]. The student and
-  reference receive the same u when scoring a conditional action path.
+- Percentile u from Beta(15,1.2), clipped to [0.1,0.999]. The median is about
+  0.94 and 5% of draws fall below 0.8, so RL mostly trains the high-skill
+  conditions used at deployment. The student and reference receive the same u
+  when scoring a conditional action path.
 - log(lambda) uniformly from log(0.01) through log(lambda_max), plus an admitted
   (D,R) pair. Critic warmup calibrates lambda_max within the conditioner bounds.
 
-Each shard has fixed opponent roles. Of its 64 lanes, 54 use student self-play,
-four use pi_ref and two use each of three snapshot slots. We spread the ten
-anchor lanes across the shard. The anchor port is random at each episode reset;
-matchups, stages and player conditions keep the distributions above. Only
-student players contribute training windows. There is no per-episode anchor
-share or anchor-policy draw. A 16-lane development shard uses one lane per
-anchor slot and twelve self-play lanes.
+Each shard has fixed opponent roles. Of its 64 lanes, 16 use student self-play
+and 12 use each of four anchor slots: pi_ref in slot 0 and league slots 1-3.
+Self-play lanes give the student two training rows; anchor lanes give one, so
+about 40% of student windows come from self-play. We spread the anchor lanes
+across the shard. The anchor port is random at each episode reset; matchups,
+stages and player conditions keep the distributions above. Only student
+players contribute training windows. There is no per-episode anchor share or
+anchor-policy draw. A 16-lane development shard uses three lanes per anchor
+slot and four self-play lanes; a shard with fewer than four lanes uses only
+self-play.
 
-We create pi_ref and all three snapshot policy objects once. Snapshot slots
-start with pi_ref weights. Promotion selects the slot with the oldest weight
-update, breaking ties by slot number, and copies student weights in place.
-Before copying, we truncate all live episodes on that slot's lanes, across all
-groups. Their preceding rollouts already have nonterminal boundary bootstraps;
-truncations add no wins or full-episode critic diagnostics. Each lane resets
-before it next steps. No episode uses two sets of opponent weights.
+We create pi_ref and all three league slot policy objects once. A CPU league
+bank holds pi_ref as entry 0 plus frozen student copies, up to 32 entries.
+Every 64 updates we bank the student and give it a win-rate EMA of 0.5. If the
+bank is full, we evict the entry with the highest student win-rate EMA,
+excluding the first four entries and the new one. The new entry always loads
+into a league slot. Two more slot entries come from prioritized fictitious
+self-play: we draw entries with weight max(0.05, 1-w)^2 from counter domain
+"league", where w is the student's win-rate EMA against that entry. The two
+draws exclude the new entry and are without replacement unless only one other
+entry exists; then both draws return it. A slot whose entry is a target keeps
+it. If one entry fills two slots, the slot with older weights is reassigned
+first. Remaining targets fill the other slots in slot order. Each completed,
+non-timeout anchor match updates the EMA with alpha 0.1. Timeouts and
+truncations do not update it.
+
+Before loading new weights into a slot, we truncate all live episodes on that
+slot's lanes, across all groups. Unchanged slots keep their episodes. Their
+preceding rollouts already have nonterminal boundary bootstraps; truncations
+add no wins or full-episode critic diagnostics. Each lane resets before it next
+steps. No episode uses two sets of opponent weights.
 
 Before critic warmup, the pilot draws an independent integer head start from
 0 through 1,200 frames per match using a separate counter domain. Both players
@@ -137,7 +155,7 @@ its units of reward per nat across cadences.
 
 ### Advantages
 
-We use lambda_gae=0.99 per frame:
+We use lambda_gae=1 per frame:
 
 $$
 \delta_j=r_j+\gamma^{\Delta_j}b_jV'_{j+1}-V_j,
@@ -174,8 +192,18 @@ L_\pi=-\frac1J\sum_j\min(\rho_j\tilde A_j,
 \operatorname{clip}(\rho_j,1-\epsilon,1+\epsilon)\tilde A_j).
 $$
 
-We subtract per factor before summing the joint log-ratio. We normalize
-advantages per minibatch using the global mean and standard deviation sigma_A.
+We subtract per factor before summing the joint log-ratio. We center
+advantages per minibatch with the global mean. We divide by a fixed sigma_A:
+the standard deviation of critic-warmup advantages, pooled over timing
+configurations. Warmup advantages carry no KL cost, so sigma_A does not grow
+with KL and weaken the direct KL term below. The batch standard deviation is
+logged for diagnosis. The `advantage_scale="batch"` setting restores
+per-minibatch normalization and is the only option when warmup is disabled.
+
+Before scaling, we multiply each anchor-lane centered advantage by
+clip((2(1-w))^p, 0.25, 1.75), with p=1 and w the student's win-rate EMA
+against that slot's entry. Self-play advantages keep weight 1. Opponents the
+student already beats contribute less gradient.
 Clipping starts at epsilon=0.2. We uniformly select up to 16 eligible decisions
 per window, use each window in one step, spread a match's windows across steps.
 Padding contributes to neither normalization nor loss.
@@ -257,9 +285,13 @@ replay the reference, calculate KL and GAE, fit the critic, then run one PPO
 epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
-Training format v9 retains pool snapshot v4. It records the three slot weight
-updates and the update at which a fresh pool started. Exact resume rejects v8;
-evaluation can still read its actor. It records partial episodes from head starts
+Training format v10 retains pool snapshot v4. It records league metadata
+(entry ids, updates and weight hashes), win-rate EMAs, the entry in each slot,
+the next entry id and the update at which a fresh pool started. Each league
+entry's weights are written once as a content-addressed `league_N` shard and
+reused by later checkpoints. Resume checks every shard hash and that each slot's
+loaded weights match its entry. Exact resume rejects v9 and v8; evaluation can
+still read their actors. It records partial episodes from head starts
 and validates group progress from the initial pool clock. A checkpoint records model,
 optimizers, scheduler, compressed simulator states, the last 129 frame records,
 committed queues, group clocks, episode conditions and ids, pool position,
@@ -295,8 +327,9 @@ resume. Its sole source is the v8 update-256 checkpoint from commit
 `3d4ad115881857d0c6c1ba039e41225bd7df3fe8`. It validates source, input hashes,
 environment, configuration, all shard hashes and actor/reference agreement.
 It restores student weights, both optimizers, scheduler, calibrated lambda_max,
-RNGs, actor-step and update counters, and rolling anchor wins. The saved snapshot
-goes into slot 1 with weight update 256; slots 2 and 3 retain pi_ref. The new
+RNGs, actor-step and update counters, warmup advantage moments, and rolling
+anchor wins. The saved snapshot becomes league entry 1 with weight update 256
+and loads into slot 1; slots 2 and 3 retain pi_ref. The new
 pool samples with restored lambda_max, captures graphs and runs the usual
 pi_ref head start. Slot 1's head-start episodes truncate before its saved
 weights take effect. Simulator state, queues and partial-episode accumulators
@@ -327,8 +360,10 @@ The proxy pilot logs each training anchor separately: net stocks and damage
 per active minute, completed stockout wins/counts, pooled last-32-update
 wins/counts. Reset waits contribute no exposure; truncations contribute no wins.
 We preserve these counts through resume. Snapshot metrics use stable slot ids
-and record the update of the weights used for that rollout. Promotion clears
-that slot's rolling win counts before it next plays. We log KL by cadence and lambda bin,
+and record the update of the weights used for that rollout. Loading new
+weights into a slot clears its rolling win counts before it next plays. We log
+league size, each slot's entry, win-rate EMA and advantage weight, the fixed
+and batch advantage scales, and the mean opponent weight. We log KL by cadence and lambda bin,
 entropy, clipping, ratio quantiles, gradient norms, parameter movement,
 episode-age/u coverage, timing and memory. W&B uses global_step as data and
 metric step, with one slash per metric key.

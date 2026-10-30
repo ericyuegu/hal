@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,9 @@ from test_065_loop import ToyPolicy
 from test_065_loop import exp
 
 
-def fixed_trainer(*, length: int = 67, groups: int = 1, initialize: bool = True, shards: int = 1) -> Any:
+def fixed_trainer(
+    *, length: int = 67, groups: int = 1, initialize: bool = True, shards: int = 1, warmup: int = 0
+) -> Any:
     torch.manual_seed(19)
     policy = ToyPolicy()
     config = exp.SamplerConfig((exp.IdentityCount(1, 1, 100),), (exp.Matchup((1, 1), 1),), (25,), lambda_max=0.02)
@@ -36,7 +39,8 @@ def fixed_trainer(*, length: int = 67, groups: int = 1, initialize: bool = True,
         engine,
         exp.TrainConfig(
             actor_optimizer="adam",
-            critic_warmup_updates=0,
+            critic_warmup_updates=warmup,
+            advantage_scale="warmup" if warmup else "batch",
             windows_per_step=32,
             critic_epochs=1,
             snapshot_interval=1,
@@ -50,9 +54,17 @@ def fixed_trainer(*, length: int = 67, groups: int = 1, initialize: bool = True,
 
 def test_layout_has_exact_counts_and_spreads_anchors() -> None:
     roles = exp.opponent_slots(64)
-    assert [roles.count(slot) for slot in (None, 0, 1, 2, 3)] == [54, 4, 2, 2, 2]
-    assert [exp.opponent_slots(16).count(slot) for slot in (None, 0, 1, 2, 3)] == [12, 1, 1, 1, 1]
-    assert all(any(role is not None for role in roles[start : start + 8]) for start in range(0, 64, 8))
+    assert [roles.count(slot) for slot in (None, 0, 1, 2, 3)] == [16, 12, 12, 12, 12]
+    assert [exp.opponent_slots(16).count(slot) for slot in (None, 0, 1, 2, 3)] == [4, 3, 3, 3, 3]
+    # Both self-play ports train, so 32 of 80 student streams are self-play.
+    assert 2 * roles.count(None) / (2 * roles.count(None) + 48) == 0.4
+    assert all(
+        [roles[start : start + 16].count(slot) for slot in (None, 0, 1, 2, 3)] == [4, 3, 3, 3, 3]
+        for start in range(0, 64, 16)
+    )
+    assert all(roles[start : start + 8].count(None) == 2 for start in range(0, 64, 8))
+    assert exp.opponent_slots(4) == (0, 1, 2, 3) and exp.opponent_slots(3) == (None,) * 3
+    assert [exp.opponent_slots(8).count(slot) for slot in (None, 0, 1, 2, 3)] == [4, 1, 1, 1, 1]
     with pytest.raises(ValueError):
         exp.opponent_slots(0)
     with pytest.raises(TypeError):
@@ -83,7 +95,12 @@ def test_resets_and_promotions_keep_layouts_and_policy_addresses() -> None:
                 if engine.lane_roles[match] is not None
                 else all(p.anchor is None for p in state.episode.players)
             )
-    assert sorted(run.slot_updates.values()) == [3, 4, 5]
+    assert [entry.entry_id for entry in run.league] == list(range(6))
+    assert 5 in run.slot_entries.values() and run.slot_entries[0] == 0
+    weights = {entry.entry_id: entry.weights for entry in run.league}
+    for slot, entry_id in run.slot_entries.items():
+        for name, value in engine.anchors[slot].model.state_dict().items():
+            torch.testing.assert_close(value, weights[entry_id][name], rtol=0, atol=0)
 
 
 def test_promotion_truncates_only_its_slot_and_preserves_boundary_bootstrap() -> None:
@@ -97,7 +114,9 @@ def test_promotion_truncates_only_its_slot_and_preserves_boundary_bootstrap() ->
     table = batch.rollout.table
     rows = batch.rollout.ids
     selected = rows[(table.opponent_anchor[rows] == 1) & table.boundary[rows]]
-    assert len(selected) == 1
+    assert len(selected) == sum(
+        role == 1 and engine.locations[match][0] == batch.rollout.group for match, role in engine.lane_roles.items()
+    )
     assert not table.terminal[selected].any()
     assert table.bootstrap[table.following[selected]].all()
     assert metrics["gameplay/anchor1_count"] == 0
@@ -133,6 +152,147 @@ def test_fixed_slot_checkpoint_restores_slot_versions_and_next_update(tmp_path: 
         torch.testing.assert_close(value, other, rtol=0, atol=0)
 
 
+def record_actor_targets(run: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    seen: list[Any] = []
+    original = run.policy.actor_step
+
+    def record(batch: Any, targets: Any, *, clip_epsilon: float) -> Any:
+        seen.append(targets)
+        return original(batch, targets, clip_epsilon=clip_epsilon)
+
+    monkeypatch.setattr(run.policy, "actor_step", record)
+    return seen
+
+
+def test_warmup_advantage_scale_is_the_pooled_kl_free_spread(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = fixed_trainer(length=1000000, warmup=2)
+    run.engine.sampler.config = dataclasses.replace(run.engine.sampler.config, lambda_max=100)
+    run.engine.sampler.lambda_max = 100
+    first, _ = run.run_update()
+    second, metrics = run.run_update()
+    assert first.reference is None and second.reference is None and not run.warming
+    # The scale pools every warmup update, not only the last one.
+    expected = float(torch.cat((first.advantages, second.advantages)).double().std(unbiased=False))
+    assert expected != pytest.approx(float(second.advantages.double().std(unbiased=False)))
+    assert run.warmup_advantage_sigma() == pytest.approx(expected)
+    assert metrics["train/warmup_advantage_sigma"] == pytest.approx(expected)
+    seen = record_actor_targets(run, monkeypatch)
+    # Larger KL coefficients widen the regularized spread but must not shrink the KL term.
+    run.engine.sampler.lambda_max = 50
+    _, metrics = run.run_update()
+    assert seen and all(float(targets.advantage_sigma) == pytest.approx(expected) for targets in seen)
+    assert metrics["policy/advantage_sigma"] == pytest.approx(expected)
+    assert metrics["policy/batch_advantage_sigma"] != pytest.approx(expected)
+    with pytest.raises(ValueError, match="warmup advantage scale"):
+        exp.TrainConfig(critic_warmup_updates=0)
+
+
+def test_opponent_weights_scale_only_centered_anchor_advantages(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs, records = [], []
+    # Distinct per-slot rates give weights 0.5, 1.5, 1 and 1.75 for slots 0..3.
+    rates = {0: 0.75, 1: 0.25, 2: 0.5, 3: 0.0}
+    for treated in (False, True):
+        run = fixed_trainer(length=1000000)
+        if treated:
+            for slot in (1, 2, 3):
+                run.league.append(exp.league_entry(slot, 0, run.reference.model.state_dict()))
+                run.slot_entries[slot] = slot
+            run.league_win_rates.update(rates)
+        records.append(record_actor_targets(run, monkeypatch))
+        runs.append(run.run_update()[0])
+    control, treatment = runs
+    opponents = control.rollout.table.opponent_anchor[control.rollout.ids]
+    assert set(opponents.tolist()) == {-1, 0, 1, 2, 3}
+    slot_weights = torch.tensor([0.5, 1.5, 1.0, 1.75])
+    expected = torch.where(opponents >= 0, slot_weights[opponents.clamp_min(0)], 1.0)
+    torch.testing.assert_close(treatment.opponent_weights, expected.to(treatment.opponent_weights.dtype))
+    torch.testing.assert_close(control.opponent_weights, torch.ones_like(control.opponent_weights))
+    ratios = []
+    for base, weighted in zip(*records, strict=True):
+        assert float(base.advantage_mean) == float(weighted.advantage_mean)
+        assert float(base.advantage_sigma) == float(weighted.advantage_sigma)
+        selected = base.selected_WK & ((base.advantages_WK - base.advantage_mean).abs() > 1e-2)
+        ratios.append(
+            ((weighted.advantages_WK - weighted.advantage_mean) / (base.advantages_WK - base.advantage_mean))[selected]
+        )
+    ratio = torch.cat(ratios)
+    matches = [(ratio - weight).abs() < 1e-3 for weight in (0.5, 1.0, 1.5, 1.75)]
+    assert all(bool(match.any()) for match in matches)
+    assert bool(torch.stack(matches).any(0).all())
+
+
+def test_opponent_weight_formula_clips_and_power_zero_disables() -> None:
+    run = fixed_trainer(initialize=False)
+    run.league_win_rates.update({1: 0.3, 2: 1.0, 3: 0.0})
+    run.league_win_rates[0] = 0.75
+    run.slot_entries.update({1: 1, 2: 2, 3: 3})
+    torch.testing.assert_close(run.opponent_weights(), torch.tensor([0.5, 1.4, 0.25, 1.75], dtype=torch.float64))
+    run.config = dataclasses.replace(run.config, opponent_weight_power=0.0)
+    torch.testing.assert_close(run.opponent_weights(), torch.ones(4, dtype=torch.float64))
+
+
+def test_pfsp_rotation_prefers_hard_entries_and_evicts_the_easiest() -> None:
+    run = fixed_trainer(length=1000000)
+    run.update = 1
+    assert run.rotate_league() == (1,)
+    assert run.slot_entries == {0: 0, 1: 1, 2: 0, 3: 0}
+    hard = 1
+    for update in range(2, 22):
+        for entry in run.league:
+            run.league_win_rates[entry.entry_id] = 0.0 if entry.entry_id == hard else 0.95
+        run.update = update
+        run.rotate_league()
+        slots = [run.slot_entries[slot] for slot in (1, 2, 3)]
+        assert run.league[-1].entry_id == update and update in slots and hard in slots
+    run = fixed_trainer(length=1000000)
+    run.config = dataclasses.replace(run.config, max_league_size=6)
+    for update in range(1, 6):
+        run.update = update
+        run.rotate_league()
+    run.league_win_rates.update({1: 0.99, 2: 0.99, 3: 0.99, 4: 0.6, 5: 0.9})
+    run.update = 6
+    run.rotate_league()
+    # Entries 0..3 are protected; entry 5 is the easiest unprotected one.
+    assert [entry.entry_id for entry in run.league] == [0, 1, 2, 3, 4, 6]
+    assert set(run.league_win_rates) == {0, 1, 2, 3, 4, 6}
+    assert 5 not in run.slot_entries.values() and 6 in run.slot_entries.values()
+    # Equal win rates evict the oldest unprotected entry.
+    run.league_win_rates.update({4: 0.8, 6: 0.8})
+    run.update = 7
+    run.rotate_league()
+    assert [entry.entry_id for entry in run.league] == [0, 1, 2, 3, 6, 7]
+
+
+def test_league_checkpoint_reuses_shards_and_restores_win_rates(tmp_path: Path) -> None:
+    run = fixed_trainer(length=1000000)
+    run.run_update()
+    run.league_win_rates[0] = 0.7
+    checkpoint = exp.save_checkpoint(run, tmp_path, PROVENANCE)
+    assert len(list(tmp_path.glob("*.league.pt"))) == 2
+    slot_weights = {slot: copy.deepcopy(policy.model.state_dict()) for slot, policy in run.engine.anchors.items()}
+    expected, _ = run.run_update()
+    restored = fixed_trainer(length=1000000)
+    exp.restore_checkpoint(restored, checkpoint, PROVENANCE)
+    assert restored.league_win_rates == {0: 0.7, 1: 0.5}
+    assert restored.slot_entries == {0: 0, 1: 1, 2: 0, 3: 0}
+    for slot, policy in restored.engine.anchors.items():
+        for name, value in policy.model.state_dict().items():
+            torch.testing.assert_close(value, slot_weights[slot][name], rtol=0, atol=0)
+    assert [(e.entry_id, e.update, e.sha256) for e in restored.league] == [
+        (e.entry_id, e.update, e.sha256) for e in run.league[:2]
+    ]
+    actual, _ = restored.run_update()
+    assert exp._batch_hash(expected) == exp._batch_hash(actual)
+    # A later checkpoint writes only the new entry and refers to the banked ones.
+    exp.save_checkpoint(restored, tmp_path, PROVENANCE)
+    assert len(list(tmp_path.glob("*.league.pt"))) == 3
+    manifest = json.loads(checkpoint.read_text())
+    manifest["shards"] = [shard for shard in manifest["shards"] if shard["role"] != "league_1"]
+    checkpoint.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="league"):
+        exp.restore_checkpoint(fixed_trainer(length=1000000), checkpoint, PROVENANCE)
+
+
 def test_capture_guard_names_missing_graph_key() -> None:
     policy = object.__new__(exp.TransformerPolicy)
     policy.startup_finished = True
@@ -163,16 +323,15 @@ def legacy_checkpoint(run: Any, directory: Path) -> Path:
     run.engine.completed_update = 255
     snapshot = exp.capture_checkpoint(run, PROVENANCE)
     state = copy.deepcopy(snapshot.state)
-    state.update(
-        version=8, anchors={key: state["anchors"][key] for key in (0, 1)}, anchor_candidates=(0, 1), next_anchor=2
-    )
+    anchors = {key: copy.deepcopy(run.engine.anchors[key].model.state_dict()) for key in (0, 1)}
+    state.update(version=8, anchors=anchors, anchor_candidates=(0, 1), next_anchor=2)
     groups = len(run.engine.groups)
     frames = run.engine.sampler.schedule.rollout_frames
     initial = ((run.config.head_start_frames + frames - 1) // frames) * frames
     state["clocks"] = [initial + ((256 + groups - 1 - group) // groups) * frames for group in range(groups)]
     state["cursor"] = 256 % groups
-    state.pop("slot_updates")
-    state.pop("pool_start_update")
+    for name in ("league", "league_win_rates", "slot_entries", "pool_start_update"):
+        state.pop(name)
     provenance = {**PROVENANCE, "git_sha": exp.PILOT_SOURCE}
     manifest = {
         **snapshot.manifest,
@@ -193,13 +352,17 @@ def legacy_checkpoint(run: Any, directory: Path) -> Path:
         },
     }
     # Toy policies do not publish actors; this envelope exercises the same migration validator.
-    return exp.write_checkpoint(dataclasses.replace(snapshot, state=state, manifest=manifest, actor=actor), directory)
+    return exp.write_checkpoint(
+        dataclasses.replace(snapshot, state=state, manifest=manifest, actor=actor, league=()), directory
+    )
 
 
 def test_learner_migration_preserves_optimizers_history_and_fresh_pool(tmp_path: Path) -> None:
     source = fixed_trainer(length=1000000)
     source.run_update()
     source.anchor_win_history = [{0: (1, 2), 1: (0, 1)}]
+    timing = source.engine.sampler.schedule.configurations[0]
+    source.warmup_moments = {timing: (4, 2.0, 5.0)}
     path = legacy_checkpoint(source, tmp_path)
     target = fixed_trainer(length=1000000, initialize=False)
     target.config = dataclasses.replace(target.config, snapshot_interval=256)
@@ -216,6 +379,9 @@ def test_learner_migration_preserves_optimizers_history_and_fresh_pool(tmp_path:
     assert all(state.episode.number == 0 for state in target.engine.matches.values())
     assert not target.episode_metrics
     assert target.slot_updates == {1: 256, 2: 0, 3: 0}
+    # The fixed advantage scale after migration comes from the pilot's warmup.
+    assert target.warmup_moments == source.warmup_moments
+    assert target.warmup_advantage_sigma() == pytest.approx(1.0)
     target.run_update()
     assert target.update == 257
     resumed = exp.save_checkpoint(target, tmp_path / "new", PROVENANCE)
@@ -279,6 +445,7 @@ def test_short_gpu_run_has_no_compiles_or_captures_after_startup() -> None:
         max_frame=0,
         training=exp.TrainConfig(
             critic_warmup_updates=0,
+            advantage_scale="batch",
             head_start_frames=16,
             windows_per_step=32,
             snapshot_interval=1,
@@ -304,3 +471,34 @@ def test_short_gpu_run_has_no_compiles_or_captures_after_startup() -> None:
             indent=2,
         )
     )
+
+
+def test_legacy_pilot_digest_ignores_only_the_league_treatment() -> None:
+    run = fixed_trainer(initialize=False, warmup=2)
+    baseline = exp.legacy_pilot_digest(run)
+    treated = fixed_trainer(initialize=False, warmup=2)
+    treated.config = dataclasses.replace(
+        treated.config,
+        advantage_scale="batch",
+        snapshot_interval=7,
+        max_league_size=9,
+        pfsp_power=3.0,
+        win_rate_ema_alpha=0.2,
+        opponent_weight_power=2.0,
+    )
+    treated.engine.sampler.config = dataclasses.replace(
+        treated.engine.sampler.config, percentile_alpha=2.0, percentile_beta=3.0
+    )
+    assert exp.legacy_pilot_digest(treated) == baseline
+    assert set(exp.LEAGUE_TRAIN_FIELDS) <= set(exp._configuration_identity(run)["train"])
+    changed = fixed_trainer(initialize=False, warmup=2)
+    changed.config = dataclasses.replace(changed.config, actor_lr=2 * changed.config.actor_lr)
+    assert exp.legacy_pilot_digest(changed) != baseline
+
+
+@pytest.mark.skipif(not hasattr(os, "sched_getaffinity"), reason="NativeCli validates Linux CPU affinity")
+def test_profile_and_zero_warmup_configs_use_batch_advantage_scale() -> None:
+    native = exp.GpuProfileCli(Path("checkpoint.pt"), Path("data"), Path("output")).native()
+    assert native.training.critic_warmup_updates == 0 and native.training.advantage_scale == "batch"
+    with pytest.raises(ValueError, match="warmup advantage scale"):
+        exp.TrainConfig(critic_warmup_updates=0)

@@ -88,6 +88,9 @@ def training_command(
         "65",
         "--training.critic-warmup-updates",
         str(warmup),
+        # The fixed advantage scale is measured during critic warmup.
+        "--training.advantage-scale",
+        "warmup" if warmup else "batch",
         "--training.head-start-frames",
         "1200",
         "--training.checkpoint-interval",

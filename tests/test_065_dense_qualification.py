@@ -136,7 +136,9 @@ def qualify(output: Path) -> dict[str, Any]:
         )
         engine = exp.RolloutEngine((tuple(shards),), policy, sampling, {0: reference})
         engine.initialize()
-        run = exp.Trainer(engine, exp.TrainConfig(critic_warmup_updates=0, windows_per_step=32))
+        run = exp.Trainer(
+            engine, exp.TrainConfig(critic_warmup_updates=0, advantage_scale="batch", windows_per_step=32)
+        )
         print("dense precision: rollout", flush=True)
         rollout = engine.collect(0)
         print("dense precision: prepare", flush=True)

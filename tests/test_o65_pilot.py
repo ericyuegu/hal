@@ -123,6 +123,23 @@ def test_compact_checkpoints_keeps_latest_actors_and_shared_shards(tmp_path: Pat
     assert len(list(directory.glob("*.actor.pt"))) == 5
 
 
+def test_compact_checkpoints_removes_evicted_league_shards(tmp_path: Path) -> None:
+    directory = tmp_path / "checkpoints"
+    names = {}
+    for update, entries in ((64, ("kept", "evicted")), (128, ("kept",))):
+        path = write_boundary(directory, update)
+        manifest = json.loads(path.read_text())
+        for index, content in enumerate(entries):
+            digest = hashlib.sha256(content.encode()).hexdigest()
+            names[content] = f"{digest}.league.pt"
+            (directory / names[content]).write_bytes(content.encode())
+            manifest["shards"].append({"name": names[content], "sha256": digest, "role": f"league_{index}"})
+        path.write_text(json.dumps(manifest))
+    _MODULE.compact_checkpoints(directory, 128)
+    assert (directory / names["kept"]).is_file()
+    assert not (directory / names["evicted"]).exists()
+
+
 def test_compact_checkpoints_validates_before_removing_files(tmp_path: Path) -> None:
     directory = tmp_path / "checkpoints"
     old = write_boundary(directory, 32)
@@ -478,6 +495,7 @@ def test_learner_resume_command_and_metric_history(tmp_path: Path) -> None:
         resume_learner=tmp_path / "source/checkpoints/update-00000256.json",
     )
     assert command[command.index("--resume-learner") + 1] == str(tmp_path / "source/checkpoints/update-00000256.json")
+    assert command[command.index("--training.advantage-scale") + 1] == "warmup"
     path.write_text('{"global_step":255}\n')
     with pytest.raises(ValueError, match="metric history"):
         _MODULE.inherit_metrics(path, target, 256)

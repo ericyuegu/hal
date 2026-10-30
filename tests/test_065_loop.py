@@ -317,6 +317,7 @@ def trainer(
         critic_lr=0.01,
         critic_epochs=2,
         critic_warmup_updates=warmup,
+        advantage_scale="batch",
         warmup_steps=0,
         windows_per_step=2,
         snapshot_interval=2,
@@ -400,6 +401,7 @@ def transformer_trainer(
         critic_epochs=1,
         windows_per_step=4,
         critic_warmup_updates=0,
+        advantage_scale="batch",
         warmup_steps=0,
         snapshot_interval=100,
     )
@@ -1313,6 +1315,7 @@ def test_native_background_checkpoint_matches_synchronous_next_update(
             exp.TrainConfig(
                 actor_optimizer="adam",
                 critic_warmup_updates=0,
+                advantage_scale="batch",
                 windows_per_step=4,
                 critic_epochs=1,
                 snapshot_interval=100,

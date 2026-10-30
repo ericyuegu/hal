@@ -1,0 +1,63 @@
+# O65 proxy: PFSP league against collapse
+
+Status: prepared; not launched.
+
+## Treatment and control
+
+The GAE lambda 1 run collapsed toward smash-attack spam. Its win rate against
+pi_ref rose above 70% within about 2,000 updates while play degraded. Most
+student windows came from live self-play, and three snapshot slots were
+overwritten every 256 updates. This treatment changes the opponent mixture and
+the advantage scale together:
+
+- Opponent lanes: each 64-lane shard has 16 self-play lanes and 12 lanes for
+  each of four anchor slots, so about 40% of student streams are self-play.
+  The previous layout had 54 self-play lanes and 4:2:2:2 anchor lanes.
+- League: every 64 updates, a CPU bank of up to 32 frozen students gains the
+  current student. Slot 0 stays pi_ref. Slots 1-3 hold the new entry and two
+  prioritized fictitious self-play draws with weight max(0.05, 1-w)^2. Eviction
+  removes the entry the student beats most, sparing pi_ref and the first three
+  banked students.
+- Advantage weights: anchor-lane centered advantages are multiplied by
+  clip(2(1-w), 0.25, 1.75); self-play keeps weight 1. Here w is the student's
+  win-rate EMA (alpha 0.1) against the slot's entry.
+- Advantage scale: centered advantages are divided by the pooled standard
+  deviation of critic-warmup advantages, which carry no KL cost, instead of
+  each minibatch's spread.
+- Percentile prior: u comes from Beta(15,1.2) instead of Beta(5,1.3).
+
+[plan.md](plan.md) gives the exact rules. The resolved run record names the
+advantage scale, lane mix, rotation interval and Beta prior.
+
+The control is the GAE lambda 1 run in [gae-one-protocol.md](gae-one-protocol.md),
+launched from commit `84fafaef`. Record its W&B run id here before comparing.
+The treatment keeps GAE lambda 1. Because it changes several settings at once,
+a result shows whether the bundle prevents collapse, not which part matters.
+
+## Invariant inputs
+
+- O63 bootstrap30 17M checkpoint and reference, as in `pilot-inputs.json`.
+- Reward, gamma, GAE lambda 1, KL range calibration, PPO clipping, optimizers,
+  learning rates, windows per actor step and critic epochs.
+- Seed 65; four groups of 1,024 matches; 256-frame rollouts; D8/R4 and D10/R2.
+- The 32-update critic warmup. It also measures the fixed advantage scale.
+- `pilot-sampler.json` and `pilot-evaluation.json`. The Beta prior is a code
+  default, not a sampler file field.
+- Runtime image and recorded environment from the control.
+
+The new layout gives about 2,560 student windows per update instead of about
+3,776, or roughly five actor steps instead of 7.4. Compare runs at matched
+updates and report this difference.
+
+## Endpoint and evaluation
+
+Train from BC to update 2,000 without `--resume-learner`, with checkpoints
+every 32 updates. Evaluate the final checkpoint on the original 384-game MSL
+grid at D8/R4, u=0.95 and KL coefficient 1, as in the control. Report win rate
+and net stocks per minute against pi_ref with uncertainty, plus training-time
+anchor win rates, league slot win-rate EMAs, conditional KL, entropy and action
+counts. Do not select an intermediate checkpoint by offline metrics.
+
+Record the treatment Git SHA, resolved configuration, environment, input
+hashes, W&B run URL, training command, final actor hash and evaluation results
+before drawing a conclusion.

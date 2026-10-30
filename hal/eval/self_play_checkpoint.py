@@ -29,8 +29,8 @@ from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
 EVALUATION_FORMAT = "hal.o65.evaluation.v3"
-TRAINING_FORMAT = "hal.o65.training.v9"
-TRAINING_VERSION = 9
+TRAINING_FORMAT = "hal.o65.training.v10"
+TRAINING_VERSION = 10
 
 
 class CheckpointShard(TypedDict):
@@ -67,6 +67,7 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         raise ValueError("checkpoint manifest schema changed")
     if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
         (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v9", 9),
         ("hal.o65.training.v8", 8),
     ):
         raise ValueError("unsupported checkpoint identity")
@@ -119,6 +120,8 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         suffix = {"training": "rank0.pt", "actor": "actor.pt"}.get(role)
         if suffix is None and re.fullmatch(r"simulator_[0-9]+_[0-9]+", role):
             suffix = "sim.zlib"
+        if suffix is None and re.fullmatch(r"league_[0-9]+", role):
+            suffix = "league.pt"
         if suffix is None or shard["name"] != f"{shard['sha256']}.{suffix}":
             raise ValueError("invalid checkpoint shard role or filename")
         roles.add(shard["role"])

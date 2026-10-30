@@ -212,6 +212,8 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
                 "1",
                 "--training.critic-warmup-updates",
                 "0",
+                "--training.advantage-scale",
+                "batch",
                 "--training.windows-per-step",
                 "32",
             )
