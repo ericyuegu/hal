@@ -378,7 +378,8 @@ def load_evaluation_checkpoint(
             name not in expected
             or not isinstance(tensor, torch.Tensor)
             or tensor.dtype != expected[name].dtype
-            or tensor.shape != expected[name].shape
+            # BC conditioners widen from one column in load_bc_state_dict, which checks that shape.
+            or (not is_bc and tensor.shape != expected[name].shape)
         ):
             raise ValueError("evaluation tensor shape, dtype or identity changed")
         if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):

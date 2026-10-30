@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 import torch
 
+from hal.eval.self_play_checkpoint import load_evaluation_checkpoint
 from hal.inference.decision_decoder import DecisionDecoder
 from hal.inference.kv_cache import BlockRestartCache
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.action_sequence import ActionSequenceTransformer
 from hal.models.conditioning import ConditioningRanges
+from hal.models.self_play import CriticKind
 from hal.models.self_play import SelfPlayTransformer
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 from hal.wire import ACTION_DIM
@@ -169,3 +171,21 @@ def test_real_bootstrap30_checkpoint_conditioning_and_cache_parity(dtype: torch.
             }
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "width", "depth"), [("hl_gauss", 128, 0), ("residual_scalar", 128, 0), ("hl_gauss", 512, 3)]
+)
+def test_real_bootstrap30_checkpoint_loads_with_each_ablation_critic(kind: CriticKind, width: int, depth: int) -> None:
+    source = os.environ.get("HAL_O65_PROXY_CHECKPOINT")
+    if source is None:
+        pytest.skip("set HAL_O65_PROXY_CHECKPOINT to the O63 bootstrap30 final.pt")
+    loaded = load_evaluation_checkpoint(
+        Path(source), device=torch.device("cpu"), critic_kind=kind, critic_hidden_dim=width, critic_depth=depth
+    )
+    assert (loaded.model.critic_kind, loaded.model.critic.hidden_dim, loaded.model.critic.depth) == (
+        kind,
+        width,
+        depth,
+    )
+    assert loaded.model.temporal.return_conditioner.embedding.weight.shape[1] == 4
