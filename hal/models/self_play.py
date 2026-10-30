@@ -17,6 +17,8 @@ from hal.models.conditioning import ConditioningRanges
 from hal.models.controller_codec import CONTROLLER_GROUP_COUNT
 from hal.representation.player_identity import PlayerVocabulary
 
+type CriticKind = Literal["hl_gauss", "residual_scalar"]
+
 type DecoderPrecision = Literal["bf16", "fp32"]
 
 
@@ -26,6 +28,18 @@ def validate_decoder_precision(value: str) -> DecoderPrecision:
     if value == "fp32":
         return "fp32"
     raise ValueError("decoder precision must be bf16 or fp32")
+
+
+def validate_critic(kind: str, hidden_dim: int, depth: int) -> CriticKind:
+    if kind not in ("hl_gauss", "residual_scalar"):
+        raise ValueError("critic must be hl_gauss or residual_scalar")
+    if type(hidden_dim) is not int or hidden_dim < 1:
+        raise ValueError("critic hidden width must be a positive integer")
+    if type(depth) is not int or depth < 0:
+        raise ValueError("critic depth must be a nonnegative integer")
+    if kind == "residual_scalar" and depth != 0:
+        raise ValueError("residual scalar critic requires depth 0")
+    return "hl_gauss" if kind == "hl_gauss" else "residual_scalar"
 
 
 # The critic predicts a categorical distribution over evenly spaced returns and
@@ -70,8 +84,8 @@ def value_cross_entropy(logits: Tensor, values: Tensor) -> Tensor:
     return -(value_targets(values) * logits.float().log_softmax(-1)).sum(-1)
 
 
-class QueueCritic(nn.Module):
-    """Predict a value distribution from trunk and decoder state before the ego draw."""
+class QueueResidualHead(nn.Module):
+    """Predict a residual baseline from detached features before the ego draw."""
 
     def __init__(self, cfg: ActionSequenceConfig, max_queue: int, hidden_dim: int) -> None:
         super().__init__()
@@ -79,15 +93,77 @@ class QueueCritic(nn.Module):
             raise ValueError("critic queue capacity and hidden width must be positive")
         self.max_queue = max_queue
         self.hidden_dim = hidden_dim
+        self.depth = 0
         # The encoder reads the whole queue in order, so each action keeps its
         # firing offset; a pooled mean would keep only the set of actions.
         self.queue_encoder = SwiGLU(max_queue * (4 * cfg.action_embed_dim + 1), hidden_dim, hidden_dim)
-        self.head = SwiGLU(
-            cfg.d_model + cfg.temporal_d_model + 8 + hidden_dim, hidden_dim, VALUE_BINS, output_bias=True
-        )
-        # Uniform initial distributions predict a value of zero.
-        nn.init.zeros_(self.head.down.weight)
-        nn.init.zeros_(self.head.down.bias)
+        self.residual = SwiGLU(cfg.temporal_d_model + 8 + hidden_dim, hidden_dim, 1, output_bias=True)
+        nn.init.zeros_(self.residual.down.weight)
+        nn.init.zeros_(self.residual.down.bias)
+
+    def forward(
+        self,
+        decoder_state: Tensor,
+        condition: Tensor,
+        opponent_condition: Tensor,
+        queue_embeddings: Tensor,
+        queue_lengths: Tensor,
+        *,
+        validate: bool = True,
+    ) -> Tensor:
+        batch = decoder_state.shape[0]
+        if condition.shape != (batch, 4) or opponent_condition.shape != condition.shape:
+            raise ValueError("critic conditions must be [B, 4]")
+        if queue_embeddings.ndim != 3 or queue_embeddings.shape[:2] != (batch, self.max_queue):
+            raise ValueError("opponent queue must match the critic capacity")
+        if queue_lengths.shape != (batch,) or queue_lengths.dtype not in (torch.int32, torch.int64):
+            raise ValueError("opponent queue lengths must be integer [B]")
+        if (
+            validate
+            and not torch.compiler.is_compiling()
+            and bool(((queue_lengths < 0) | (queue_lengths > self.max_queue)).any())
+        ):
+            raise ValueError("opponent queue length is outside its capacity")
+        offsets = torch.arange(self.max_queue, device=decoder_state.device)
+        valid = (offsets[None] < queue_lengths[:, None])[..., None]
+        frames = torch.cat((torch.where(valid, queue_embeddings.detach(), 0), valid.to(queue_embeddings.dtype)), -1)
+        queue = self.queue_encoder(frames.flatten(1))
+        inputs = torch.cat((decoder_state.detach(), condition, opponent_condition, queue), dim=-1)
+        return self.residual(inputs).squeeze(-1).float()
+
+
+class QueueCritic(nn.Module):
+    """Predict a value distribution from trunk and decoder state before the ego draw."""
+
+    def __init__(self, cfg: ActionSequenceConfig, max_queue: int, hidden_dim: int, depth: int = 0) -> None:
+        super().__init__()
+        validate_critic("hl_gauss", hidden_dim, depth)
+        if max_queue < 1:
+            raise ValueError("critic queue capacity must be positive")
+        self.max_queue = max_queue
+        self.hidden_dim = hidden_dim
+        self.depth = depth
+        # Preserve firing offsets by encoding the whole queue in order.
+        self.queue_encoder = SwiGLU(max_queue * (4 * cfg.action_embed_dim + 1), hidden_dim, hidden_dim)
+        input_dim = cfg.d_model + cfg.temporal_d_model + 8 + hidden_dim
+        if depth == 0:
+            # These names and shapes are the v11 checkpoint contract.
+            self.head = SwiGLU(input_dim, hidden_dim, VALUE_BINS, output_bias=True)
+            nn.init.zeros_(self.head.down.weight)
+            nn.init.zeros_(self.head.down.bias)
+        else:
+            self.input_norms = nn.ModuleList(
+                nn.RMSNorm(width, eps=1e-6) for width in (cfg.d_model, cfg.temporal_d_model, 8, hidden_dim)
+            )
+            self.input_projection = nn.Linear(input_dim, hidden_dim)
+            self.blocks = nn.ModuleList(
+                nn.Sequential(nn.RMSNorm(hidden_dim, eps=1e-6), SwiGLU(hidden_dim, 2 * hidden_dim, hidden_dim))
+                for _ in range(depth)
+            )
+            self.output_norm = nn.RMSNorm(hidden_dim, eps=1e-6)
+            self.output = nn.Linear(hidden_dim, VALUE_BINS)
+            nn.init.zeros_(self.output.weight)
+            nn.init.zeros_(self.output.bias)
 
     def forward(
         self,
@@ -117,8 +193,15 @@ class QueueCritic(nn.Module):
         valid = (offsets[None] < queue_lengths[:, None])[..., None]
         frames = torch.cat((torch.where(valid, queue_embeddings, 0), valid.to(queue_embeddings.dtype)), -1)
         queue = self.queue_encoder(frames.flatten(1))
-        inputs = torch.cat((trunk_state, decoder_state, condition, opponent_condition, queue), dim=-1)
-        return self.head(inputs).float()
+        if self.depth == 0:
+            inputs = torch.cat((trunk_state, decoder_state, condition, opponent_condition, queue), dim=-1)
+            return self.head(inputs).float()
+        groups = (trunk_state, decoder_state, torch.cat((condition, opponent_condition), -1), queue)
+        inputs = torch.cat(tuple(norm(group) for norm, group in zip(self.input_norms, groups, strict=True)), -1)
+        hidden = self.input_projection(inputs)
+        for block in self.blocks:
+            hidden = hidden + block(hidden)
+        return self.output(self.output_norm(hidden)).float()
 
 
 class SelfPlayTransformer(ActionSequenceTransformer):
@@ -130,19 +213,27 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         *,
         max_opponent_queue: int,
         critic_hidden_dim: int,
+        critic_kind: CriticKind = "hl_gauss",
+        critic_depth: int = 0,
         decoder_precision: DecoderPrecision = "bf16",
     ) -> None:
         precision = validate_decoder_precision(decoder_precision)
+        kind = validate_critic(critic_kind, critic_hidden_dim, critic_depth)
         super().__init__(cfg, vocabulary, live_horizons=())
         self._decoder_precision = precision
         self.ranges = ranges
+        self.critic_kind = kind
         with torch.random.fork_rng(devices=[]):
             self.temporal.return_conditioner = ReturnConditioner(cfg, ranges)
             self.percentile_head = SwiGLU(cfg.d_model, cfg.value_hidden_dim, 65, output_bias=True)
-            self.critic = QueueCritic(cfg, max_opponent_queue, critic_hidden_dim)
+            self.critic = (
+                QueueCritic(cfg, max_opponent_queue, critic_hidden_dim, critic_depth)
+                if kind == "hl_gauss"
+                else QueueResidualHead(cfg, max_opponent_queue, critic_hidden_dim)
+            )
         self.percentile_head.requires_grad_(False)
-        # The BC value head predicts the BC reward; the self-play critic replaces it.
-        self.value_head.requires_grad_(False)
+        # The residual critic retains and trains the BC baseline.
+        self.value_head.requires_grad_(kind == "residual_scalar")
 
     @property
     def decoder_precision(self) -> DecoderPrecision:
@@ -168,6 +259,8 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         self.load_state_dict(converted, strict=True)
 
     def critic_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self.critic_kind == "residual_scalar":
+            return (*self.value_head.parameters(), *self.critic.parameters())
         return tuple(self.critic.parameters())
 
     def actor_parameters(self) -> tuple[nn.Parameter, ...]:
@@ -194,6 +287,8 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         actor's value loss. With fixed_critic, the critic's own parameters receive no
         gradient, so that value loss trains only the trunk.
         """
+        if not isinstance(self.critic, QueueCritic):
+            raise ValueError("value logits require an HL-Gauss critic")
         if trunk_state.ndim != 2 or trunk_state.shape[1] != self.cfg.d_model:
             raise ValueError("critic trunk state must be [B, d_model]")
         if decoder_state.shape != (trunk_state.shape[0], self.cfg.temporal_d_model):
@@ -203,7 +298,7 @@ class SelfPlayTransformer(ActionSequenceTransformer):
         if opponent_queue.dtype not in (torch.int32, torch.int64):
             raise ValueError("opponent queue must contain integer controller factors")
         with torch.autocast(device_type=trunk_state.device.type, enabled=False):
-            dtype = self.critic.head.up.weight.dtype
+            dtype = self.critic.queue_encoder.up.weight.dtype
             inputs = (
                 decoder_rmsnorm(trunk_state.float()).to(dtype),
                 decoder_state.to(dtype),
@@ -216,6 +311,51 @@ class SelfPlayTransformer(ActionSequenceTransformer):
                 return self.critic(*inputs, validate=validate)
             parameters = {name: value.detach() for name, value in self.critic.named_parameters()}
             return torch.func.functional_call(self.critic, parameters, inputs, {"validate": validate})
+
+    def self_play_value(
+        self,
+        trunk_state: Tensor,
+        decoder_state: Tensor,
+        condition: Tensor,
+        opponent_condition: Tensor,
+        opponent_queue: Tensor,
+        opponent_queue_lengths: Tensor,
+        *,
+        validate: bool = True,
+    ) -> Tensor:
+        if not isinstance(self.critic, QueueResidualHead):
+            return value_mean(
+                self.critic_logits(
+                    trunk_state,
+                    decoder_state,
+                    condition,
+                    opponent_condition,
+                    opponent_queue,
+                    opponent_queue_lengths,
+                    validate=validate,
+                )
+            )
+        if trunk_state.ndim != 2 or trunk_state.shape[1] != self.cfg.d_model:
+            raise ValueError("critic trunk state must be [B, d_model]")
+        if decoder_state.shape != (trunk_state.shape[0], self.cfg.temporal_d_model):
+            raise ValueError("critic decoder state must be [B, temporal_d_model]")
+        if opponent_queue.shape != (trunk_state.shape[0], self.critic.max_queue, CONTROLLER_GROUP_COUNT):
+            raise ValueError("opponent queue must be [B, max_queue, controller_groups]")
+        if opponent_queue.dtype not in (torch.int32, torch.int64):
+            raise ValueError("opponent queue must contain integer controller factors")
+        with torch.autocast(device_type=trunk_state.device.type, enabled=False):
+            features = decoder_rmsnorm(trunk_state.detach()).to(self.value_head.up.weight.dtype)
+            base = self.value_head(features).squeeze(-1).float()
+            queue = self.codec.embed_frame(opponent_queue).detach().to(features.dtype)
+            residual = self.critic(
+                decoder_state.detach().to(features.dtype),
+                condition.to(features.dtype),
+                opponent_condition.to(features.dtype),
+                queue,
+                opponent_queue_lengths,
+                validate=validate,
+            )
+        return base + residual
 
 
 def validate_executed_offsets(

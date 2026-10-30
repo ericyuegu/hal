@@ -15,7 +15,7 @@ from hal.models.replay_actor import validate_actor_targets
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 
-type ValueLogits = Callable[[ReplayCriticFeatures], Tensor]
+type ValueLogits = Callable[[ReplayCriticFeatures], Tensor | None]
 
 
 def _target_tensors(targets: ActorTargets) -> tuple[Tensor, ...]:

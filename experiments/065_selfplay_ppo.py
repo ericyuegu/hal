@@ -58,11 +58,12 @@ from hal.models.controller_codec import CONTROLLER_GROUP_NAMES
 from hal.models.replay_actor import ActorLoss
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
+from hal.models.self_play import CriticKind
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.self_play import validate_critic
 from hal.models.self_play import validate_decoder_precision
 from hal.models.self_play import value_cross_entropy
-from hal.models.self_play import value_mean
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
 from hal.models.window_replay import ReplaySlots
@@ -428,8 +429,22 @@ def critic_loss(
     selected_J: Tensor,
     *,
     reduction: DecisionReduction | None = None,
+    critic: CriticKind = "hl_gauss",
+    value_scale: float = 150.0,
 ) -> Tensor:
-    """Fit HL-Gauss targets, including decisions with no executed factors."""
+    """Fit scalar squared error or HL-Gauss targets, including decisions with no executed factors."""
+    if critic == "residual_scalar":
+        if not math.isfinite(value_scale) or value_scale <= 0:
+            raise ValueError("value_scale must be finite and positive")
+        if not logits_JB.is_floating_point():
+            raise ValueError("critic values must have floating dtype")
+        _check_tensor("targets", targets_J, tuple(logits_JB.shape), "float", logits_JB.device)
+        _check_tensor("selection mask", selected_J, tuple(logits_JB.shape), "bool", logits_JB.device)
+        values = torch.where(selected_J, _loss_precision(logits_JB), 0)
+        targets = torch.where(selected_J, _loss_precision(targets_J.detach()), 0)
+        return _decision_mean(((values - targets) / value_scale).square(), selected_J, reduction)
+    if critic != "hl_gauss":
+        raise ValueError("unsupported critic")
     if not logits_JB.is_floating_point() or logits_JB.ndim != 2:
         raise ValueError("critic logits must be floating [J, value bins]")
     _check_tensor("targets", targets_J, (len(logits_JB),), "float", logits_JB.device)
@@ -1871,10 +1886,20 @@ class TransformerPolicy:
         )
 
     def values(self, features: CriticFeatures, *, validate: bool = True) -> Tensor:
-        return value_mean(self.value_logits(features, validate=validate))
+        return self.model.self_play_value(
+            features.trunk,
+            features.decoder,
+            features.condition,
+            features.opponent_condition,
+            features.opponent_queue,
+            features.opponent_lengths,
+            validate=validate,
+        )
 
-    def replay_value_logits(self, features: ReplayCriticFeatures) -> Tensor:
-        """Score replayed decisions with fixed critic parameters for the shared-model value loss."""
+    def replay_value_logits(self, features: ReplayCriticFeatures) -> Tensor | None:
+        """Score HL-Gauss decisions for the shared-model value loss."""
+        if self.model.critic_kind == "residual_scalar":
+            return None
         return replay_critic_logits(self.model, features, fixed_critic=True, validate=False)
 
     def device_wire_actions(self, indices: Tensor, *, validate: bool = True) -> Tensor:
@@ -2969,6 +2994,9 @@ class TrainConfig:
     actor_optimizer: Literal["muon", "adam"] = "muon"
     actor_lr: float = 1e-5
     critic_lr: float = 3e-4
+    critic: CriticKind = "hl_gauss"
+    critic_hidden_dim: int = 128
+    critic_depth: int = 0
     critic_epochs: int = 4
     windows_per_step: int = 512
     # Each actor step and the reference pass run in this many window chunks,
@@ -3004,6 +3032,9 @@ class TrainConfig:
     deterministic: bool = False
 
     def __post_init__(self) -> None:
+        validate_critic(self.critic, self.critic_hidden_dim, self.critic_depth)
+        if self.critic == "residual_scalar" and self.value_loss_coefficient != 0:
+            raise ValueError("residual scalar critic requires value_loss_coefficient 0")
         if type(self.snapshot_capacity) is not int or self.snapshot_capacity != 3:
             raise ValueError("fixed opponent layout requires exactly three snapshot slots")
         if self.advantage_scale not in ("warmup", "batch"):
@@ -4271,7 +4302,12 @@ class Trainer:
             selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
             for _ in range(cfg.critic_epochs):
                 self.critic_optimizer.zero_grad(set_to_none=True)
-                loss = critic_loss(self.policy.value_logits(features), batch.targets, selected)
+                predictions = (
+                    self.policy.values(features)
+                    if cfg.critic == "residual_scalar"
+                    else self.policy.value_logits(features)
+                )
+                loss = critic_loss(predictions, batch.targets, selected, critic=cfg.critic)
                 _check_finite("critic loss", loss)
                 loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(
@@ -4645,8 +4681,24 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
     return identity
 
 
-def _configuration_digest(trainer: Trainer) -> str:
-    return hashlib.sha256(json.dumps(_configuration_identity(trainer), sort_keys=True).encode()).hexdigest()
+def _configuration_digest(trainer: Trainer, *, legacy_critic: bool = False) -> str:
+    identity = _configuration_identity(trainer)
+    if legacy_critic:
+        training = cast(dict[str, object], identity["train"])
+        for name in ("critic", "critic_hidden_dim", "critic_depth"):
+            del training[name]
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def critic_metadata(trainer: Trainer) -> dict[str, str | int]:
+    if isinstance(trainer.policy, TransformerPolicy):
+        model = trainer.policy.model
+        return {"kind": model.critic_kind, "hidden_dim": model.critic.hidden_dim, "depth": model.critic.depth}
+    return {
+        "kind": trainer.config.critic,
+        "hidden_dim": trainer.config.critic_hidden_dim,
+        "depth": trainer.config.critic_depth,
+    }
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4691,6 +4743,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
     engine = trainer.engine
     state: dict[str, object] = {
         "version": CHECKPOINT_VERSION,
+        "critic": critic_metadata(trainer),
         "execution": {
             "deterministic": trainer.config.deterministic,
             "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
@@ -4954,9 +5007,16 @@ def restore_league(trainer: Trainer, saved: dict[str, object], paths: dict[str, 
 
 def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
     manifest = read_training_manifest(manifest_path)
-    if manifest["version"] != CHECKPOINT_VERSION:
+    legacy_critic = manifest["version"] == 11
+    if manifest["version"] not in (11, CHECKPOINT_VERSION):
         raise ValueError("exact resume requires the fixed-slot checkpoint format")
-    if manifest["configuration_sha256"] != _configuration_digest(trainer):
+    if legacy_critic and (trainer.config.critic, trainer.config.critic_hidden_dim, trainer.config.critic_depth) != (
+        "hl_gauss",
+        128,
+        0,
+    ):
+        raise ValueError("resume critic mismatch")
+    if manifest["configuration_sha256"] != _configuration_digest(trainer, legacy_critic=legacy_critic):
         raise ValueError("resume configuration mismatch")
     if manifest["environment"] != _environment() or manifest["provenance"] != provenance:
         raise ValueError("resume environment or checkpoint mismatch")
@@ -4978,10 +5038,12 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if (
         type(saved["version"]) is not int
         or type(saved["update"]) is not int
-        or saved["version"] != CHECKPOINT_VERSION
+        or saved["version"] != manifest["version"]
         or saved["update"] != manifest["update"]
     ):
         raise ValueError("checkpoint shard identity mismatch")
+    if not legacy_critic and saved.get("critic") != critic_metadata(trainer):
+        raise ValueError("resume critic metadata mismatch")
     league = restore_league(trainer, saved, paths)
     groups = len(trainer.engine.groups)
     frames = trainer.engine.sampler.schedule.rollout_frames
@@ -5042,10 +5104,18 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     if "actor" in paths:
         published = torch.load(paths["actor"], map_location="cpu", weights_only=False)
         if (
-            published.get("format") != EVALUATION_FORMAT
+            published.get("format") != ("hal.o65.evaluation.v3" if legacy_critic else EVALUATION_FORMAT)
             or published.get("decoder_precision") != trainer.policy.model.decoder_precision
         ):
             raise ValueError("checkpoint evaluation actor precision or format mismatch")
+        if not legacy_critic and isinstance(trainer.policy, TransformerPolicy):
+            model = trainer.policy.model
+            if (published.get("critic_kind"), published.get("critic_hidden_dim"), published.get("critic_depth")) != (
+                model.critic_kind,
+                model.critic.hidden_dim,
+                model.critic.depth,
+            ):
+                raise ValueError("checkpoint evaluation actor critic mismatch")
         actor = published["model"]
         if actor.keys() != saved["model"].keys() or any(
             not torch.equal(value, saved["model"][name]) for name, value in actor.items()
@@ -5108,6 +5178,9 @@ PILOT_SOURCE = "3d4ad115881857d0c6c1ba039e41225bd7df3fe8"
 
 
 LEAGUE_TRAIN_FIELDS = (
+    "critic",
+    "critic_hidden_dim",
+    "critic_depth",
     "advantage_scale",
     "max_league_size",
     "pfsp_power",
@@ -5288,7 +5361,7 @@ def run_training(
             "reward": "120 per stock and 50 more on the deciding stock; no damage term",
             "gamma_per_frame": GAMMA,
             "gae_lambda_per_frame": GAE_LAMBDA,
-            "critic": "HL-Gauss over 120 bins on [-600, 600]; value loss reaches the trunk during PPO",
+            "critic": critic_metadata(trainer),
         },
         "treatment": (
             "KL-regularized joint PPO with "
@@ -5494,7 +5567,12 @@ def train_native(config: NativeCli) -> None:
     cache_load_seconds = time.perf_counter() - cache_started
     torch.manual_seed(config.training.seed)
     checkpoint = load_evaluation_checkpoint(
-        config.checkpoint, device=torch.device(config.device), decoder_precision=config.decoder_precision
+        config.checkpoint,
+        device=torch.device(config.device),
+        decoder_precision=config.decoder_precision,
+        critic_kind=config.training.critic,
+        critic_hidden_dim=config.training.critic_hidden_dim,
+        critic_depth=config.training.critic_depth,
     )
     checkpoint.model.requires_grad_(True)
     checkpoint.model.percentile_head.requires_grad_(False)

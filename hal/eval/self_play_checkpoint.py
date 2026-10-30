@@ -22,16 +22,18 @@ from hal.data.schema import SCHEMA_VERSION
 from hal.inference.action_sequence_artifact import source_stats_paths
 from hal.models.action_sequence import ActionSequenceConfig
 from hal.models.conditioning import ConditioningRanges
+from hal.models.self_play import CriticKind
 from hal.models.self_play import DecoderPrecision
 from hal.models.self_play import SelfPlayTransformer
+from hal.models.self_play import validate_critic
 from hal.models.self_play import validate_decoder_precision
 from hal.representation.player_identity import vocabulary_from_checkpoint_buffer
 
 PROXY_SHA256 = "65e7e43e5cbb18a365a005922ec1cfd026ad807c045eae13b331f487b4ec82e6"
-EVALUATION_FORMAT = "hal.o65.evaluation.v3"
+EVALUATION_FORMAT = "hal.o65.evaluation.v4"
 CRITIC_PREFIXES = ("critic.", "critic_residual.")
-TRAINING_FORMAT = "hal.o65.training.v11"
-TRAINING_VERSION = 11
+TRAINING_FORMAT = "hal.o65.training.v12"
+TRAINING_VERSION = 12
 
 
 class CheckpointShard(TypedDict):
@@ -68,6 +70,7 @@ def read_training_manifest(manifest_path: Path) -> TrainingManifest:
         raise ValueError("checkpoint manifest schema changed")
     if manifest["experiment"] != "065_selfplay_ppo" or (manifest["format"], manifest["version"]) not in (
         (TRAINING_FORMAT, TRAINING_VERSION),
+        ("hal.o65.training.v11", 11),
         ("hal.o65.training.v10", 10),
         ("hal.o65.training.v9", 9),
         ("hal.o65.training.v8", 8),
@@ -221,6 +224,8 @@ def evaluation_checkpoint_metadata(
         "decoder_precision": model.decoder_precision,
         "max_opponent_queue": model.critic.max_queue,
         "critic_hidden_dim": model.critic.hidden_dim,
+        "critic_kind": model.critic_kind,
+        "critic_depth": model.critic.depth,
         "statistics": {name: asdict(value) for name, value in statistics.items()},
         "provenance": provenance,
     }
@@ -247,7 +252,13 @@ def _validate_provenance(value: dict[str, object]) -> None:
 
 
 def load_evaluation_checkpoint(
-    path: Path, *, device: torch.device, decoder_precision: DecoderPrecision | None = None
+    path: Path,
+    *,
+    device: torch.device,
+    decoder_precision: DecoderPrecision | None = None,
+    critic_kind: CriticKind | None = None,
+    critic_hidden_dim: int | None = None,
+    critic_depth: int | None = None,
 ) -> EvaluationCheckpoint:
     """Read saved O65 precision, or select precision when converting BC weights."""
     if decoder_precision is not None:
@@ -296,23 +307,24 @@ def load_evaluation_checkpoint(
             "data_manifests": raw["provenance"]["source_manifest_sha256"],
             "statistics_sha256": statistics_digest,
         }
-        queue, critic = 14, 128
+        queue = 14
+        kind = "hl_gauss" if critic_kind is None else critic_kind
+        width = 128 if critic_hidden_dim is None else critic_hidden_dim
+        depth = 0 if critic_depth is None else critic_depth
     else:
-        if (
-            set(raw)
-            != {
-                "format",
-                "architecture",
-                "ranges",
-                "decoder_precision",
-                "max_opponent_queue",
-                "critic_hidden_dim",
-                "model",
-                "statistics",
-                "provenance",
-            }
-            or raw["format"] != EVALUATION_FORMAT
-        ):
+        legacy = raw.get("format") == "hal.o65.evaluation.v3"
+        critic_fields = set() if legacy else {"critic_kind", "critic_depth"}
+        if set(raw) != critic_fields | {
+            "format",
+            "architecture",
+            "ranges",
+            "decoder_precision",
+            "max_opponent_queue",
+            "critic_hidden_dim",
+            "model",
+            "statistics",
+            "provenance",
+        } or raw["format"] not in (EVALUATION_FORMAT, "hal.o65.evaluation.v3"):
             raise ValueError("unsupported checkpoint; export an O65 evaluation snapshot at an update boundary")
         architecture = raw["architecture"]
         if not isinstance(architecture, dict) or set(architecture) != {
@@ -327,10 +339,17 @@ def load_evaluation_checkpoint(
         precision = validate_decoder_precision(raw["decoder_precision"])
         if decoder_precision is not None and decoder_precision != precision:
             raise ValueError("decoder precision differs from the evaluation checkpoint")
-        queue, critic = raw["max_opponent_queue"], raw["critic_hidden_dim"]
+        queue, width = raw["max_opponent_queue"], raw["critic_hidden_dim"]
+        kind, depth = ("hl_gauss", 0) if legacy else (raw["critic_kind"], raw["critic_depth"])
+        if any(
+            requested is not None and requested != saved
+            for requested, saved in ((critic_kind, kind), (critic_hidden_dim, width), (critic_depth, depth))
+        ):
+            raise ValueError("critic differs from the evaluation checkpoint")
         stats = {name: FeatureStats(**value) for name, value in raw["statistics"].items()}
         provenance = raw["provenance"]
         _validate_provenance(provenance)
+    kind = validate_critic(kind, width, depth)
     for value in stats.values():
         if not all(math.isfinite(x) for x in asdict(value).values()) or value.std < 0 or value.min > value.max:
             raise ValueError("invalid evaluation feature statistics")
@@ -339,7 +358,14 @@ def load_evaluation_checkpoint(
     state = raw["model"]
     vocabulary = vocabulary_from_checkpoint_buffer(state["player_code_bytes"].numpy())
     model = SelfPlayTransformer(
-        cfg, ranges, vocabulary, max_opponent_queue=queue, critic_hidden_dim=critic, decoder_precision=precision
+        cfg,
+        ranges,
+        vocabulary,
+        max_opponent_queue=queue,
+        critic_hidden_dim=width,
+        critic_kind=kind,
+        critic_depth=depth,
+        decoder_precision=precision,
     )
     expected = model.state_dict()
     if not is_bc and not any(name.startswith("critic.") for name in state):
@@ -348,8 +374,13 @@ def load_evaluation_checkpoint(
         state = {name: tensor for name, tensor in state.items() if not name.startswith("critic_residual.")}
         state.update({name: tensor for name, tensor in expected.items() if name.startswith("critic.")})
     for name, tensor in state.items():
-        if name not in expected or not isinstance(tensor, torch.Tensor) or tensor.dtype != expected[name].dtype:
-            raise ValueError("evaluation tensor dtype or identity changed")
+        if (
+            name not in expected
+            or not isinstance(tensor, torch.Tensor)
+            or tensor.dtype != expected[name].dtype
+            or tensor.shape != expected[name].shape
+        ):
+            raise ValueError("evaluation tensor shape, dtype or identity changed")
         if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
             raise ValueError("evaluation tensors must be finite")
     if is_bc:
