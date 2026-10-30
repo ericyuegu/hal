@@ -2980,10 +2980,14 @@ class TrainConfig:
     snapshot_interval: int = 64
     snapshot_capacity: int = 3
     max_league_size: int = 32
-    # Rotated slots sample league entries with weight max(0.05, 1 - win rate)^power.
+    # Rotated slots sample league entries with weight max(0.05, 1 - stock share)^power,
+    # mixed with this uniform fraction so entries with stale shares return to play.
     pfsp_power: float = 2.0
-    win_rate_ema_alpha: float = 0.1
-    # Anchor advantages scale by clip((2 * (1 - win rate))^power, 0.25, 1.75); zero disables.
+    pfsp_uniform: float = 0.2
+    # Per-update EMA of stocks taken / (taken + lost) against each entry. Stocks count
+    # within any rollout, so the share needs no completed match.
+    stock_share_ema_alpha: float = 0.2
+    # Anchor advantages scale by clip((2 * (1 - stock share))^power, 0.25, 1.75); zero disables.
     opponent_weight_power: float = 1.0
     checkpoint_interval: int = 32
     deterministic: bool = False
@@ -3002,8 +3006,10 @@ class TrainConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
-        if not 0 < self.win_rate_ema_alpha <= 1:
-            raise ValueError("win-rate EMA alpha must be in (0, 1]")
+        if not 0 < self.stock_share_ema_alpha <= 1:
+            raise ValueError("stock-share EMA alpha must be in (0, 1]")
+        if not 0 <= self.pfsp_uniform <= 1:
+            raise ValueError("PFSP uniform fraction must be in [0, 1]")
         for name in (
             "critic_epochs",
             "windows_per_step",
@@ -3627,7 +3633,7 @@ class Trainer:
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
         # Entry 0 is pi_ref. Slot 0 always holds it; slots 1..3 hold PFSP draws.
         self.league = [league_entry(0, 0, self.reference.model.state_dict())]
-        self.league_win_rates = {0: 0.5}
+        self.league_stock_shares = {0: 0.5}
         self.slot_entries = {0: 0, 1: 0, 2: 0, 3: 0}
         self.compilation_counter: CompilationStartCounter | None = None
         self.startup_seconds = 0.0
@@ -3655,53 +3661,76 @@ class Trainer:
         return sigma
 
     def opponent_weights(self) -> Tensor:
-        """Return advantage weights for anchor slots 0..3 from the student's win-rate EMA."""
-        rates = torch.tensor(
-            [self.league_win_rates[self.slot_entries[slot]] for slot in range(4)], dtype=torch.float64
+        """Return advantage weights for anchor slots 0..3 from the student's stock-share EMA."""
+        shares = torch.tensor(
+            [self.league_stock_shares[self.slot_entries[slot]] for slot in range(4)], dtype=torch.float64
         )
-        return (2 * (1 - rates)).pow(self.config.opponent_weight_power).clamp(0.25, 1.75)
+        return (2 * (1 - shares)).pow(self.config.opponent_weight_power).clamp(0.25, 1.75)
 
-    def record_anchor_results(self, rollout: Rollout) -> None:
-        """Update win-rate EMAs, which set the next PFSP draws and advantage weights."""
-        for result in rollout.results:
-            if result.timeout:
-                continue
-            for side_index, player in enumerate(result.episode.players):
-                if player.anchor is None:
-                    continue
-                if result.stocks is None:
-                    raise ValueError("completed anchor match is missing stocks")
-                won = result.stocks[1 - side_index] > result.stocks[side_index]
-                # Rotation truncates a slot's episodes without results, so the
-                # slot's current entry played every completed match.
-                entry = self.slot_entries[player.anchor]
-                rate = self.league_win_rates[entry]
-                self.league_win_rates[entry] = rate + self.config.win_rate_ema_alpha * (float(won) - rate)
+    @torch.no_grad()
+    def record_league_results(self, rollout: Rollout) -> None:
+        """Update stock-share EMAs, which set the next PFSP draws and advantage weights.
+
+        Rotation swaps slot weights between rollouts without ending episodes, so each
+        stock counts against the entry that held its slot during this rollout.
+        """
+        table, ids = rollout.table, rollout.ids
+        ids = ids[table.opponent_anchor[ids] >= 0]
+        side = table.integers[ids, SIDE]
+        frames = torch.arange(4, device=ids.device)[None]
+        valid = frames < table.duration[ids, None]
+        losses, _, _ = frame_components(table, ids)
+        rows = torch.arange(len(ids), device=ids.device)[:, None]
+        stocks = torch.stack(
+            [
+                torch.where(valid, losses[rows, frames, player], 0).sum(1)
+                for player in (1 - side[:, None], side[:, None])
+            ],
+            -1,
+        )
+        by_slot = torch.zeros(4, 2, dtype=torch.float64, device=ids.device)
+        by_slot.index_add_(0, table.opponent_anchor[ids], stocks.double())
+        by_entry: dict[int, tuple[float, float]] = {}
+        for slot, (taken, lost) in enumerate(by_slot.tolist()):
+            previous = by_entry.get(self.slot_entries[slot], (0.0, 0.0))
+            by_entry[self.slot_entries[slot]] = (previous[0] + taken, previous[1] + lost)
+        for entry, (taken, lost) in by_entry.items():
+            if taken + lost:
+                share = self.league_stock_shares[entry]
+                self.league_stock_shares[entry] = share + self.config.stock_share_ema_alpha * (
+                    taken / (taken + lost) - share
+                )
 
     def rotate_league(self) -> tuple[int, ...]:
         """Bank the student, evict the easiest entry, and load PFSP draws into changed slots.
 
         Slots 1..3 always include the new entry. Entries already loaded keep their
-        slots, so only changed slots truncate their episodes.
+        slots. Changed slots receive new weights between rollouts while their episodes
+        continue, as self-play lanes do after every update; the next rollout re-encodes
+        history with the new weights.
         """
         # The newest entry is never evicted, so the last entry holds the largest id.
         entry = league_entry(self.league[-1].entry_id + 1, self.update, self.policy.model.state_dict())
         self.league.append(entry)
-        self.league_win_rates[entry.entry_id] = 0.5
+        self.league_stock_shares[entry.entry_id] = 0.5
         if len(self.league) > self.config.max_league_size:
             # Keep pi_ref and the earliest milestones; evict the entry the student beats most.
             candidates = [row.entry_id for row in self.league[4:] if row is not entry]
-            evicted = max(candidates, key=lambda entry_id: (self.league_win_rates[entry_id], -entry_id))
+            evicted = max(candidates, key=lambda entry_id: (self.league_stock_shares[entry_id], -entry_id))
             self.league = [row for row in self.league if row.entry_id != evicted]
-            del self.league_win_rates[evicted]
+            del self.league_stock_shares[evicted]
         others = [row.entry_id for row in self.league if row is not entry]
         targets = [entry.entry_id]
         pool = list(others)
         for draw in range(2):
             if not pool:
                 pool = list(others)
-            weights = [max(0.05, 1 - self.league_win_rates[entry_id]) ** self.config.pfsp_power for entry_id in pool]
-            targets.append(pool.pop(self.engine.sampler.rng.choice(weights, "league", self.update, draw, 0)))
+            weights = [
+                max(0.05, 1 - self.league_stock_shares[entry_id]) ** self.config.pfsp_power for entry_id in pool
+            ]
+            uniform = self.config.pfsp_uniform
+            mixed = [(1 - uniform) * weight / sum(weights) + uniform / len(pool) for weight in weights]
+            targets.append(pool.pop(self.engine.sampler.rng.choice(mixed, "league", self.update, draw, 0)))
         changed = []
         updates = {row.entry_id: row.update for row in self.league}
         # Keep the newest loaded weights first, so duplicates replace the oldest slot.
@@ -3713,13 +3742,9 @@ class Trainer:
         changed.sort()
         weights_by_id = {row.entry_id: row.weights for row in self.league}
         for slot, entry_id in zip(changed, targets, strict=True):
-            for match, number in self.engine.truncate_slot(slot):
-                for side in (0, 1):
-                    self.episode_metrics.pop((2 * match + side, number), None)
-                    self.partial_episodes.discard((2 * match + side, number))
             self.engine.anchors[slot].model.load_state_dict(weights_by_id[entry_id], strict=True)
             self.slot_entries[slot] = entry_id
-            # Rolling win counts must not combine different weights in one slot.
+            # Rolling win counts restart with each new entry in a slot.
             for row in self.anchor_win_history:
                 row.pop(slot, None)
         return tuple(changed)
@@ -3729,7 +3754,7 @@ class Trainer:
         metrics = {"league/size": float(len(self.league)), "league/newest_entry": float(self.league[-1].entry_id)}
         for slot in range(4):
             metrics[f"league/slot{slot}_entry"] = float(self.slot_entries[slot])
-            metrics[f"league/slot{slot}_win_rate_ema"] = self.league_win_rates[self.slot_entries[slot]]
+            metrics[f"league/slot{slot}_stock_share_ema"] = self.league_stock_shares[self.slot_entries[slot]]
             metrics[f"league/slot{slot}_advantage_weight"] = weights[slot]
         return metrics
 
@@ -4458,7 +4483,7 @@ class Trainer:
         with self.memory.phase("optimization"):
             metrics = self.fit(batch)
         metrics.update(self.completed_metrics(rollout, batch.kl))
-        self.record_anchor_results(rollout)
+        self.record_league_results(rollout)
         metrics.update(self.anchor_metrics(rollout))
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True
@@ -4657,7 +4682,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "league": [
             {"entry_id": entry.entry_id, "update": entry.update, "sha256": entry.sha256} for entry in trainer.league
         ],
-        "league_win_rates": dict(trainer.league_win_rates),
+        "league_stock_shares": dict(trainer.league_stock_shares),
         "slot_entries": dict(trainer.slot_entries),
         "pool": engine.snapshot(),
         "clocks": engine.clocks,
@@ -4883,11 +4908,11 @@ def restore_league(trainer: Trainer, saved: dict[str, object], paths: dict[str, 
         )
     ):
         raise ValueError("checkpoint league entries disagree with their shards")
-    rates, slots = saved.get("league_win_rates"), saved.get("slot_entries")
+    shares, slots = saved.get("league_stock_shares"), saved.get("slot_entries")
     if (
-        not isinstance(rates, dict)
-        or set(rates) != set(ids)
-        or any(type(rate) is not float or not 0 <= rate <= 1 for rate in rates.values())
+        not isinstance(shares, dict)
+        or set(shares) != set(ids)
+        or any(type(share) is not float or not 0 <= share <= 1 for share in shares.values())
         or not isinstance(slots, dict)
         or set(slots) != {0, 1, 2, 3}
         or cast(dict[int, object], slots)[0] != 0
@@ -5032,7 +5057,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     engine.clocks = saved["clocks"]
     engine.cursor = saved["cursor"]
     trainer.league = league
-    trainer.league_win_rates = saved["league_win_rates"]
+    trainer.league_stock_shares = saved["league_stock_shares"]
     trainer.slot_entries = saved["slot_entries"]
     engine.sampler.cursor = saved["sampler_cursor"]
     engine.sampler.lambda_max = saved["lambda_max"]
@@ -5064,7 +5089,8 @@ LEAGUE_TRAIN_FIELDS = (
     "advantage_scale",
     "max_league_size",
     "pfsp_power",
-    "win_rate_ema_alpha",
+    "pfsp_uniform",
+    "stock_share_ema_alpha",
     "opponent_weight_power",
 )
 
@@ -5170,7 +5196,7 @@ def restore_pilot_learner(trainer: Trainer, manifest_path: Path, provenance: dic
         for side in (0, 1):
             trainer.partial_episodes.discard((2 * match + side, number))
     trainer.league.append(entry)
-    trainer.league_win_rates[1] = 0.5
+    trainer.league_stock_shares[1] = 0.5
     trainer.slot_entries[1] = 1
     trainer.update = trainer.pool_start_update = 256
     trainer.engine.completed_update = 255
@@ -6231,7 +6257,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
         "league": _state_hash(
             (
                 [(entry.entry_id, entry.update, entry.sha256) for entry in trainer.league],
-                trainer.league_win_rates,
+                trainer.league_stock_shares,
                 trainer.slot_entries,
             )
         ),

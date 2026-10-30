@@ -4,8 +4,9 @@ Status: prepared; not launched.
 
 ## Treatment and control
 
-The GAE lambda 1 run collapsed toward smash-attack spam. Its win rate against
-pi_ref rose above 70% within about 2,000 updates while play degraded. Most
+The GAE lambda 1 run (W&B `o65-debug-84fafaef-5487e230e2`) drifted toward
+smash-attack spam. Its win rate against pi_ref rose to about 70% by update 576,
+where an R2 upload failure stopped it, while play degraded. Most
 student windows came from live self-play, and three snapshot slots were
 overwritten every 256 updates. This treatment changes the opponent mixture and
 the advantage scale together:
@@ -15,12 +16,14 @@ the advantage scale together:
   The previous layout had 54 self-play lanes and 4:2:2:2 anchor lanes.
 - League: every 64 updates, a CPU bank of up to 32 frozen students gains the
   current student. Slot 0 stays pi_ref. Slots 1-3 hold the new entry and two
-  prioritized fictitious self-play draws with weight max(0.05, 1-w)^2. Eviction
-  removes the entry the student beats most, sparing pi_ref and the first three
-  banked students.
+  prioritized fictitious self-play draws. Each draw mixes weight
+  max(0.05, 1-s)^2 with 20% uniform probability. Eviction removes the entry the
+  student beats most, sparing pi_ref and the first three banked students. New
+  weights load between rollouts while the slot's games continue.
 - Advantage weights: anchor-lane centered advantages are multiplied by
-  clip(2(1-w), 0.25, 1.75); self-play keeps weight 1. Here w is the student's
-  win-rate EMA (alpha 0.1) against the slot's entry.
+  clip(2(1-s), 0.25, 1.75); self-play keeps weight 1. Here s is the student's
+  stock share against the slot's entry: stocks taken over stocks taken and
+  lost, as a per-update EMA with alpha 0.2.
 - Advantage scale: centered advantages are divided by the pooled standard
   deviation of critic-warmup advantages, which carry no KL cost, instead of
   each minibatch's spread.
@@ -30,7 +33,8 @@ the advantage scale together:
 advantage scale, lane mix, rotation interval and Beta prior.
 
 The control is the GAE lambda 1 run in [gae-one-protocol.md](gae-one-protocol.md),
-launched from commit `84fafaef`. Record its W&B run id here before comparing.
+launched from commit `84fafaef`. It stopped at update 576, so we compare the
+two runs only through update 576 and report the treatment's endpoint alone.
 The treatment keeps GAE lambda 1. Because it changes several settings at once,
 a result shows whether the bundle prevents collapse, not which part matters.
 
@@ -53,9 +57,9 @@ updates and report this difference.
 
 Train from BC to update 2,000 without `--resume-learner`, with checkpoints
 every 32 updates. Evaluate the final checkpoint on the original 384-game MSL
-grid at D8/R4, u=0.95 and KL coefficient 1, as in the control. Report win rate
+grid at D8/R4, u=0.95 and KL coefficient 1, as the control protocol specified. Report win rate
 and net stocks per minute against pi_ref with uncertainty, plus training-time
-anchor win rates, league slot win-rate EMAs, conditional KL, entropy and action
+anchor win rates, league slot stock-share EMAs, conditional KL, entropy and action
 counts. Do not select an intermediate checkpoint by offline metrics.
 
 Record the treatment Git SHA, resolved configuration, environment, input

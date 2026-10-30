@@ -292,16 +292,17 @@ def test_anchor_monitor_counts_active_frames_ports_resets_and_completed_wins() -
         "return/win_reward": 0.0,
     }
     metrics = run.anchor_metrics(rollout)
-    assert run.league_win_rates == {0: 0.5}
-    run.record_anchor_results(rollout)
+    assert run.league_stock_shares == {0: 0.5}
+    run.record_league_results(rollout)
     assert metrics["gameplay/pi_ref_net_stocks_per_min"] == pytest.approx(720)
     assert metrics["gameplay/pi_ref_net_damage_per_min"] == pytest.approx(4320)
     assert metrics["gameplay/anchor3_net_stocks_per_min"] == pytest.approx(3600)
     assert metrics["gameplay/anchor3_net_damage_per_min"] == pytest.approx(-32400)
     assert metrics["gameplay/pi_ref_count"] == metrics["gameplay/pi_ref_win_rate"] == 1
     assert metrics["gameplay/anchor3_count"] == 1 and metrics["gameplay/anchor3_win_rate"] == 0
-    # Slot 3 still holds pi_ref, so the win then the loss update one EMA; timeouts are skipped.
-    assert run.league_win_rates == {0: pytest.approx(0.495)}
+    # Slots 0 and 3 both hold pi_ref: the student takes 3 stocks and loses 1, a 0.75
+    # share, and one EMA step moves 0.5 toward it. Self-play rows do not count.
+    assert run.league_stock_shares == {0: pytest.approx(0.55)}
     second = dataclasses.replace(rollout, results=(completed(0, 0), completed(0, 0)))
     metrics = run.anchor_metrics(second)
     assert metrics["gameplay/pi_ref_win_rate_32_updates"] == pytest.approx(1 / 3)

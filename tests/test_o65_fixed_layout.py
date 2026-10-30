@@ -103,38 +103,21 @@ def test_resets_and_promotions_keep_layouts_and_policy_addresses() -> None:
             torch.testing.assert_close(value, weights[entry_id][name], rtol=0, atol=0)
 
 
-def test_promotion_truncates_only_its_slot_and_preserves_boundary_bootstrap() -> None:
+def test_rotation_swaps_slot_weights_without_ending_episodes() -> None:
     run = fixed_trainer(length=1000000, groups=2)
-    batch, metrics = run.run_update()
+    run.run_update()
     engine = run.engine
-    for match, state in engine.matches.items():
-        group, lane = engine.locations[match]
-        assert (state.end_clock is not None) == (engine.lane_roles[match] == 1)
-        assert bool(engine.active[group][lane]) == (state.end_clock is None)
-    table = batch.rollout.table
-    rows = batch.rollout.ids
-    selected = rows[(table.opponent_anchor[rows] == 1) & table.boundary[rows]]
-    assert len(selected) == sum(
-        role == 1 and engine.locations[match][0] == batch.rollout.group for match, role in engine.lane_roles.items()
-    )
-    assert not table.terminal[selected].any()
-    assert table.bootstrap[table.following[selected]].all()
-    assert metrics["gameplay/anchor1_count"] == 0
-    assert not any(
-        2 * match + side == stream
-        for match, role in engine.lane_roles.items()
-        if role == 1
-        for side in (0, 1)
-        for stream, _ in run.episode_metrics
-    )
+    assert run.slot_entries[1] == 1
+    assert all(state.end_clock is None for state in engine.matches.values())
+    assert all(engine.active[group][lane] for group, lane in engine.locations.values())
     for name, value in engine.anchors[1].model.state_dict().items():
         torch.testing.assert_close(value, run.policy.model.state_dict()[name], rtol=0, atol=0)
-    run.run_update()
-    assert all(
-        engine.matches[match].episode.number == int(engine.locations[match][0] == 1)
-        for match, role in engine.lane_roles.items()
-        if role == 1
-    )
+    batch, _ = run.run_update()
+    # Slot 1 lanes of the next group continue their first episode against the new weights.
+    assert batch.rollout.group == 1 and batch.rollout.resets == 0
+    assert all(state.episode.number == 0 for state in engine.matches.values())
+    table, rows = batch.rollout.table, batch.rollout.ids
+    assert bool((table.opponent_anchor[rows] == 1).any())
 
 
 def test_fixed_slot_checkpoint_restores_slot_versions_and_next_update(tmp_path: Path) -> None:
@@ -197,7 +180,7 @@ def test_opponent_weights_scale_only_centered_anchor_advantages(monkeypatch: pyt
             for slot in (1, 2, 3):
                 run.league.append(exp.league_entry(slot, 0, run.reference.model.state_dict()))
                 run.slot_entries[slot] = slot
-            run.league_win_rates.update(rates)
+            run.league_stock_shares.update(rates)
         records.append(record_actor_targets(run, monkeypatch))
         runs.append(run.run_update()[0])
     control, treatment = runs
@@ -223,8 +206,8 @@ def test_opponent_weights_scale_only_centered_anchor_advantages(monkeypatch: pyt
 
 def test_opponent_weight_formula_clips_and_power_zero_disables() -> None:
     run = fixed_trainer(initialize=False)
-    run.league_win_rates.update({1: 0.3, 2: 1.0, 3: 0.0})
-    run.league_win_rates[0] = 0.75
+    run.league_stock_shares.update({1: 0.3, 2: 1.0, 3: 0.0})
+    run.league_stock_shares[0] = 0.75
     run.slot_entries.update({1: 1, 2: 2, 3: 3})
     torch.testing.assert_close(run.opponent_weights(), torch.tensor([0.5, 1.4, 0.25, 1.75], dtype=torch.float64))
     run.config = dataclasses.replace(run.config, opponent_weight_power=0.0)
@@ -233,13 +216,14 @@ def test_opponent_weight_formula_clips_and_power_zero_disables() -> None:
 
 def test_pfsp_rotation_prefers_hard_entries_and_evicts_the_easiest() -> None:
     run = fixed_trainer(length=1000000)
+    run.config = dataclasses.replace(run.config, pfsp_uniform=0.0)
     run.update = 1
     assert run.rotate_league() == (1,)
     assert run.slot_entries == {0: 0, 1: 1, 2: 0, 3: 0}
     hard = 1
     for update in range(2, 22):
         for entry in run.league:
-            run.league_win_rates[entry.entry_id] = 0.0 if entry.entry_id == hard else 0.95
+            run.league_stock_shares[entry.entry_id] = 0.0 if entry.entry_id == hard else 0.95
         run.update = update
         run.rotate_league()
         slots = [run.slot_entries[slot] for slot in (1, 2, 3)]
@@ -249,31 +233,31 @@ def test_pfsp_rotation_prefers_hard_entries_and_evicts_the_easiest() -> None:
     for update in range(1, 6):
         run.update = update
         run.rotate_league()
-    run.league_win_rates.update({1: 0.99, 2: 0.99, 3: 0.99, 4: 0.6, 5: 0.9})
+    run.league_stock_shares.update({1: 0.99, 2: 0.99, 3: 0.99, 4: 0.6, 5: 0.9})
     run.update = 6
     run.rotate_league()
     # Entries 0..3 are protected; entry 5 is the easiest unprotected one.
     assert [entry.entry_id for entry in run.league] == [0, 1, 2, 3, 4, 6]
-    assert set(run.league_win_rates) == {0, 1, 2, 3, 4, 6}
+    assert set(run.league_stock_shares) == {0, 1, 2, 3, 4, 6}
     assert 5 not in run.slot_entries.values() and 6 in run.slot_entries.values()
     # Equal win rates evict the oldest unprotected entry.
-    run.league_win_rates.update({4: 0.8, 6: 0.8})
+    run.league_stock_shares.update({4: 0.8, 6: 0.8})
     run.update = 7
     run.rotate_league()
     assert [entry.entry_id for entry in run.league] == [0, 1, 2, 3, 6, 7]
 
 
-def test_league_checkpoint_reuses_shards_and_restores_win_rates(tmp_path: Path) -> None:
+def test_league_checkpoint_reuses_shards_and_restores_stock_shares(tmp_path: Path) -> None:
     run = fixed_trainer(length=1000000)
     run.run_update()
-    run.league_win_rates[0] = 0.7
+    run.league_stock_shares[0] = 0.7
     checkpoint = exp.save_checkpoint(run, tmp_path, PROVENANCE)
     assert len(list(tmp_path.glob("*.league.pt"))) == 2
     slot_weights = {slot: copy.deepcopy(policy.model.state_dict()) for slot, policy in run.engine.anchors.items()}
     expected, _ = run.run_update()
     restored = fixed_trainer(length=1000000)
     exp.restore_checkpoint(restored, checkpoint, PROVENANCE)
-    assert restored.league_win_rates == {0: 0.7, 1: 0.5}
+    assert restored.league_stock_shares == {0: 0.7, 1: 0.5}
     assert restored.slot_entries == {0: 0, 1: 1, 2: 0, 3: 0}
     for slot, policy in restored.engine.anchors.items():
         for name, value in policy.model.state_dict().items():
@@ -330,7 +314,7 @@ def legacy_checkpoint(run: Any, directory: Path) -> Path:
     initial = ((run.config.head_start_frames + frames - 1) // frames) * frames
     state["clocks"] = [initial + ((256 + groups - 1 - group) // groups) * frames for group in range(groups)]
     state["cursor"] = 256 % groups
-    for name in ("league", "league_win_rates", "slot_entries", "pool_start_update"):
+    for name in ("league", "league_stock_shares", "slot_entries", "pool_start_update"):
         state.pop(name)
     provenance = {**PROVENANCE, "git_sha": exp.PILOT_SOURCE}
     manifest = {
@@ -483,7 +467,8 @@ def test_legacy_pilot_digest_ignores_only_the_league_treatment() -> None:
         snapshot_interval=7,
         max_league_size=9,
         pfsp_power=3.0,
-        win_rate_ema_alpha=0.2,
+        stock_share_ema_alpha=0.3,
+        pfsp_uniform=0.5,
         opponent_weight_power=2.0,
     )
     treated.engine.sampler.config = dataclasses.replace(
@@ -502,3 +487,22 @@ def test_profile_and_zero_warmup_configs_use_batch_advantage_scale() -> None:
     assert native.training.critic_warmup_updates == 0 and native.training.advantage_scale == "batch"
     with pytest.raises(ValueError, match="warmup advantage scale"):
         exp.TrainConfig(critic_warmup_updates=0)
+
+
+def test_pfsp_uniform_fraction_keeps_easy_entries_drawable() -> None:
+    def easy_draws(uniform: float) -> int:
+        run = fixed_trainer(initialize=False)
+        run.config = dataclasses.replace(run.config, pfsp_uniform=uniform, max_league_size=40)
+        count = 0
+        for update in range(1, 33):
+            run.update = update
+            # Entry 1 looks fully beaten, so plain PFSP gives it 0.0025 of a hard entry's weight.
+            run.league_stock_shares.update({entry.entry_id: 0.0 for entry in run.league})
+            run.league_stock_shares[1] = 1.0
+            run.rotate_league()
+            # Two draws from fewer than three other entries take every entry.
+            count += 1 in [run.slot_entries[slot] for slot in (1, 2, 3)] and update > 2
+        return count
+
+    assert easy_draws(0.0) == 0
+    assert easy_draws(1.0) > 2

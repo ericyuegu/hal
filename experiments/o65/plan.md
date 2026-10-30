@@ -77,24 +77,37 @@ self-play.
 
 We create pi_ref and all three league slot policy objects once. A CPU league
 bank holds pi_ref as entry 0 plus frozen student copies, up to 32 entries.
-Every 64 updates we bank the student and give it a win-rate EMA of 0.5. If the
-bank is full, we evict the entry with the highest student win-rate EMA,
+Every 64 updates we bank the student and give it a stock share of 0.5. If the
+bank is full, we evict the entry with the highest student stock share,
 excluding the first four entries and the new one. The new entry always loads
 into a league slot. Two more slot entries come from prioritized fictitious
-self-play: we draw entries with weight max(0.05, 1-w)^2 from counter domain
-"league", where w is the student's win-rate EMA against that entry. The two
-draws exclude the new entry and are without replacement unless only one other
-entry exists; then both draws return it. A slot whose entry is a target keeps
-it. If one entry fills two slots, the slot with older weights is reassigned
-first. Remaining targets fill the other slots in slot order. Each completed,
-non-timeout anchor match updates the EMA with alpha 0.1. Timeouts and
-truncations do not update it.
+self-play. We draw entries from counter domain "league" with probability
 
-Before loading new weights into a slot, we truncate all live episodes on that
-slot's lanes, across all groups. Unchanged slots keep their episodes. Their
-preceding rollouts already have nonterminal boundary bootstraps; truncations
-add no wins or full-episode critic diagnostics. Each lane resets before it next
-steps. No episode uses two sets of opponent weights.
+$$
+p_k=0.8\,\frac{\max(0.05,1-s_k)^2}{\sum_m\max(0.05,1-s_m)^2}+\frac{0.2}{n},
+$$
+
+where s_k is the student's stock share against entry k and n counts the
+candidates. The uniform part returns entries whose shares went stale while they
+sat outside the slots. The two draws exclude the new entry and are without
+replacement unless only one other entry exists; then both draws return it. A
+slot whose entry is a target keeps it. If one entry fills two slots, the slot
+with older weights is reassigned first. Remaining targets fill the other slots
+in slot order.
+
+The stock share is the stocks the student takes divided by the stocks it takes
+and loses. After each update, we sum both counts over the anchor lanes of each
+slot, credit them to the slot's entry, and move that entry's EMA toward the
+update's share with alpha 0.2. An update without stock changes leaves the EMA
+alone. Stocks fall throughout a game, so the share needs no completed match:
+a typical match lasts about 160 updates, and a slot changes entries every 64.
+
+We load new weights into a slot between rollouts and leave its episodes
+running, as self-play lanes do after every student update. Each rollout starts
+on a block boundary and re-encodes its history with the current weights, so no
+cached feature from the old entry survives. Actions the old entry committed
+still execute. Win counts from completed matches stay diagnostics; one match
+can span several entries.
 
 Before critic warmup, the pilot draws an independent integer head start from
 0 through 1,200 frames per match using a separate counter domain. Both players
@@ -201,7 +214,7 @@ logged for diagnosis. The `advantage_scale="batch"` setting restores
 per-minibatch normalization and is the only option when warmup is disabled.
 
 Before scaling, we multiply each anchor-lane centered advantage by
-clip((2(1-w))^p, 0.25, 1.75), with p=1 and w the student's win-rate EMA
+clip((2(1-s))^p, 0.25, 1.75), with p=1 and s the student's stock-share EMA
 against that slot's entry. Self-play advantages keep weight 1. Opponents the
 student already beats contribute less gradient.
 Clipping starts at epsilon=0.2. We uniformly select up to 16 eligible decisions
@@ -286,7 +299,7 @@ epoch. After updating, we can publish a checkpoint at the decision boundary.
 We omit caches because the next rollout starts with a prefill.
 
 Training format v10 retains pool snapshot v4. It records league metadata
-(entry ids, updates and weight hashes), win-rate EMAs, the entry in each slot,
+(entry ids, updates and weight hashes), stock-share EMAs, the entry in each slot,
 the next entry id and the update at which a fresh pool started. Each league
 entry's weights are written once as a content-addressed `league_N` shard and
 reused by later checkpoints. Resume checks every shard hash and that each slot's
@@ -362,7 +375,7 @@ wins/counts. Reset waits contribute no exposure; truncations contribute no wins.
 We preserve these counts through resume. Snapshot metrics use stable slot ids
 and record the update of the weights used for that rollout. Loading new
 weights into a slot clears its rolling win counts before it next plays. We log
-league size, each slot's entry, win-rate EMA and advantage weight, the fixed
+league size, each slot's entry, stock-share EMA and advantage weight, the fixed
 and batch advantage scales, and the mean opponent weight. We log KL by cadence and lambda bin,
 entropy, clipping, ratio quantiles, gradient norms, parameter movement,
 episode-age/u coverage, timing and memory. W&B uses global_step as data and
