@@ -136,7 +136,8 @@ def test_reward_discounts_actual_interval_and_scales_sum_kl_by_ego_lambda() -> N
     assert not result.requires_grad
 
 
-def test_gae_terminal_timeout_and_rollout_end_are_distinct() -> None:
+@pytest.mark.parametrize("gamma", [exp.TrainConfig().gamma, 0.99855, 0.8])
+def test_gae_terminal_timeout_and_rollout_end_are_distinct(gamma: float) -> None:
     # Columns are parallel streams: terminal/reset, timeout/reset, ongoing.
     rewards = torch.tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]], dtype=torch.float64, requires_grad=True)
     values = torch.tensor([[3.0, 3.0, 3.0], [4.0, 4.0, 4.0]], dtype=torch.float64, requires_grad=True)
@@ -144,8 +145,10 @@ def test_gae_terminal_timeout_and_rollout_end_are_distinct() -> None:
     durations = torch.tensor([[1, 1, 4], [2, 2, 2]])
     bootstrap = torch.tensor([[False, True, True], [True, True, True]])
     trace = torch.tensor([[False, False, True], [False, False, False]])
-    result = exp.dense_advantages(rewards, values, next_values, durations, bootstrap, trace, torch.ones_like(trace))
-    gamma, gae = exp.GAMMA, exp.GAE_LAMBDA
+    result = exp.dense_advantages(
+        rewards, values, next_values, durations, bootstrap, trace, torch.ones_like(trace), gamma=gamma
+    )
+    gae = exp.GAE_LAMBDA
     tail = 2 + gamma**2 * 5 - 4
     expected = values.new_tensor(
         [[-2, 1 + gamma * 10 - 3, 1 + gamma**4 * 4 - 3 + (gamma * gae) ** 4 * tail], [tail] * 3]
@@ -163,9 +166,9 @@ def test_gae_one_matches_returns_without_intermediate_critic_predictions(bootstr
     bootstrap = torch.tensor([True, False, True, bootstrap_tail])
     trace = torch.tensor([True, False, True, False])
     boundary_value = 17.0 if bootstrap_tail else math.nan
-    tail_return = 5 + (exp.GAMMA * boundary_value if bootstrap_tail else 0)
-    middle_return = -3 + exp.GAMMA**4 * tail_return
-    first_return = 1 + exp.GAMMA**2 * middle_return
+    tail_return = 5 + (exp.TrainConfig().gamma * boundary_value if bootstrap_tail else 0)
+    middle_return = -3 + exp.TrainConfig().gamma ** 4 * tail_return
+    first_return = 1 + exp.TrainConfig().gamma ** 2 * middle_return
     expected = rewards.new_tensor([first_return, 0, middle_return, tail_return])
 
     for baseline in ([13.0, math.nan, -7.0, 41.0], [-23.0, math.nan, 101.0, -61.0]):
@@ -185,7 +188,9 @@ def test_delayed_actions_receive_unshifted_credit_through_untrained_tail(device:
     rewards = torch.tensor(
         [[0, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.float64, device=device
     )
-    interval = exp.regularized_reward(decisions, rewards, torch.zeros(4, 16, device=device), gamma=exp.GAMMA)
+    interval = exp.regularized_reward(
+        decisions, rewards, torch.zeros(4, 16, device=device), gamma=exp.TrainConfig().gamma
+    )
     values = torch.tensor([0.0, 0.3, 0.7, 1.0], dtype=torch.float64, device=device)
     bootstrap = torch.tensor([True, True, True, False], device=device)
     trace = torch.tensor([True, True, True, False], device=device)
@@ -198,8 +203,8 @@ def test_delayed_actions_receive_unshifted_credit_through_untrained_tail(device:
         trace,
         torch.ones_like(trace),
     )
-    discount = exp.GAMMA**2
-    trace_discount = (exp.GAMMA * exp.GAE_LAMBDA) ** 2
+    discount = exp.TrainConfig().gamma ** 2
+    trace_discount = (exp.TrainConfig().gamma * exp.GAE_LAMBDA) ** 2
     last = 0.3 + discount - trace_discount
     middle = 0.7 * discount - 0.3 + trace_discount * last
     expected = values.new_tensor([0.3 * discount + trace_discount * middle, middle, last, -1])

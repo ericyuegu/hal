@@ -170,9 +170,9 @@ def test_dense_gae_matches_decision_grid_with_mixed_cadences_and_boundaries() ->
             tick = at[index]
             next_value = following[tick, player] if bootstrap[tick, player] else 0
             frames = int(duration[tick, player])
-            delta = rewards[tick, player] + exp.GAMMA**frames * next_value - values[tick, player]
+            delta = rewards[tick, player] + exp.TrainConfig().gamma ** frames * next_value - values[tick, player]
             continuation = tail if trace[tick, player] else 0
-            tail = delta + (exp.GAMMA * exp.GAE_LAMBDA) ** frames * continuation
+            tail = delta + (exp.TrainConfig().gamma * exp.GAE_LAMBDA) ** frames * continuation
             expected[index] = tail
         torch.testing.assert_close(result.advantages[at, player], expected)
         torch.testing.assert_close(result.value_targets[at, player], expected + values[at, player])
@@ -446,7 +446,7 @@ def test_buffer_acceptance_matches_serial_shards_with_staggered_ends(device: str
             for actions in inputs.detach().cpu().numpy():
                 self.trace.append(actions.copy())
                 self.ticks += active
-                rewards = actions[..., 6].copy()
+                rewards = self.stock_rewards(actions, active)
                 self.returns += np.where(active[:, None], rewards, 0)
                 end = self.ticks >= np.array([13, 16])
                 rows.append(self._frames(actions, rewards, np.zeros_like(end), end))

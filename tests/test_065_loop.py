@@ -102,12 +102,21 @@ class FakeShard:
             np.zeros(n, dtype=np.bool_),
         )
 
+    def stock_rewards(self, actions: NDArray[np.float32], active: NDArray[np.bool_]) -> NDArray[np.float32]:
+        """Make action 1 win stocks so loop fixtures satisfy the native reward contract."""
+        old = self.stocks.copy()
+        lost = (actions[:, ::-1, 6] > actions[:, :, 6]) & active[:, None]
+        self.stocks[:] = np.where(lost, np.where(old > 1, old - 1, 4), old)
+        loss = (self.stocks < old).astype(np.float32)
+        reward = 120 * (loss[:, 1] - loss[:, 0])
+        return np.stack((reward, -reward), -1)
+
     def step(self, inputs: torch.Tensor, active: NDArray[np.bool_]) -> tuple[Any, ...]:
         rows = []
         for frame in inputs.detach().cpu().numpy():
             self.trace.append(frame.copy())
             self.ticks += active
-            rewards = frame[..., 6].copy()
+            rewards = self.stock_rewards(frame, active)
             self.returns += np.where(active[:, None], rewards, 0)
             end = self.ticks >= self.length
             rows.append(self._frames(frame, rewards, end & ~np.bool_(self.timeout), end & np.bool_(self.timeout)))
@@ -657,8 +666,9 @@ def test_lambda_calibration_uses_every_timing_and_preserves_actor() -> None:
         ~table.boundary[:size].reshape_as(zeros),
         table.valid[:size].reshape_as(zeros),
     ).advantages.flatten()[ids]
-    torch.testing.assert_close(following.advantages, unregularized.advantages + effect)
-    torch.testing.assert_close(following.targets, unregularized.targets + effect)
+    # At 120 per stock, independently summed float32 traces round at the millipoint scale.
+    torch.testing.assert_close(following.advantages, unregularized.advantages + effect, atol=0.003, rtol=1.3e-6)
+    torch.testing.assert_close(following.targets, unregularized.targets + effect, atol=0.003, rtol=1.3e-6)
 
 
 def test_warmup_ends_after_32_updates_with_calibrated_lambda() -> None:

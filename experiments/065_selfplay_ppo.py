@@ -79,8 +79,10 @@ from hal.wire import ACTION_DIM
 
 FACTOR_ORDER = ("c_stick", "main_stick", "triggers", "buttons")
 MAX_REPLAN = 4
-# A 30-second half-life covers about one stock exchange.
-GAMMA = 2 ** (-1 / 1800)
+# libmelee 0.47.0 Action: five forward-smash angles, up smash, down smash.
+# Charge uses these same states; the enum has no separate smash-charge states.
+SMASH_ACTION_STATES = (58, 59, 60, 61, 62, 63, 64)
+ACTION_STATE_COUNT = 512
 GAE_LAMBDA = 1.0
 
 
@@ -298,7 +300,7 @@ def _factor_sum(values_JF: Tensor, executed_JF: Tensor) -> Tensor:
 
 @torch.no_grad()
 def regularized_reward(
-    decisions: DecisionBatch, frame_rewards_JR: Tensor, factor_kl_JF: Tensor, *, gamma: float = GAMMA
+    decisions: DecisionBatch, frame_rewards_JR: Tensor, factor_kl_JF: Tensor, *, gamma: float = 2 ** (-1 / 1800)
 ) -> Tensor:
     """Discount unshifted interval rewards and subtract lambda times old-policy KL."""
     _check_discount("gamma", gamma)
@@ -327,8 +329,11 @@ def dense_advantages(
     bootstrap_TP: Tensor,
     trace_TP: Tensor,
     decided_TP: Tensor,
+    *,
+    gamma: float = 2 ** (-1 / 1800),
 ) -> AdvantageTargets:
     """Empty ticks preserve the next decision's trace without adding a discount."""
+    _check_discount("gamma", gamma)
     _check_finite("decision rewards", rewards_TP[decided_TP])
     _check_finite("decision values", values_TP[decided_TP])
     _check_finite("decision bootstrap values", next_values_TP[decided_TP & bootstrap_TP])
@@ -336,8 +341,8 @@ def dense_advantages(
     next_values = torch.where(decided_TP & bootstrap_TP, next_values_TP, 0)
     rewards = torch.where(decided_TP, rewards_TP, 0)
     duration = duration_TP.to(values.dtype)
-    delta = rewards + GAMMA**duration * next_values - values
-    discount = (GAMMA * GAE_LAMBDA) ** duration
+    delta = rewards + gamma**duration * next_values - values
+    discount = (gamma * GAE_LAMBDA) ** duration
     advantages = torch.zeros_like(delta)
     tail = torch.zeros_like(delta[-1])
     for tick in range(len(delta) - 1, -1, -1):
@@ -2008,6 +2013,20 @@ def opponent_slots(lanes: int) -> tuple[int | None, ...]:
     return tuple(roles)
 
 
+def self_play_heavy_opponent_slots(lanes: int) -> tuple[int | None, ...]:
+    """Spread the historical 4:2:2:2 anchors over 64 lanes."""
+    if type(lanes) is not int or lanes < 1:
+        raise ValueError("shard lanes must be positive")
+    counts = (max(1, round(lanes / 16)), *(max(1, round(lanes / 32)) for _ in range(3)))
+    if lanes < 4:
+        return (None,) * lanes
+    roles: list[int | None] = [None] * lanes
+    anchors = [slot for slot, count in enumerate(counts) for _ in range(count)]
+    for index, slot in enumerate(anchors):
+        roles[(2 * index + 1) * lanes // (2 * len(anchors))] = slot
+    return tuple(roles)
+
+
 class RolloutEngine:
     def __init__(
         self,
@@ -2015,6 +2034,8 @@ class RolloutEngine:
         policy: LoopPolicy,
         sampler: EpisodeSampler,
         anchors: dict[int, LoopPolicy],
+        *,
+        lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy",
     ) -> None:
         if not groups or any(not group or any(not shard.match_ids for shard in group) for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
@@ -2050,11 +2071,15 @@ class RolloutEngine:
         self.rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
         for ring in self.rings:
             ring.controllers.copy_(policy.device_wire_actions(ring.values))
+        if lane_layout not in ("anchor_heavy", "self_play_heavy"):
+            raise ValueError("unsupported lane layout")
+        self.lane_layout = lane_layout
+        layout = opponent_slots if lane_layout == "anchor_heavy" else self_play_heavy_opponent_slots
         self.lane_roles = {
             match: role
             for group in groups
             for shard in group
-            for match, role in zip(shard.match_ids, opponent_slots(len(shard.match_ids)), strict=True)
+            for match, role in zip(shard.match_ids, layout(len(shard.match_ids)), strict=True)
         }
         self.locations = {
             match: (group, lane)
@@ -2966,6 +2991,11 @@ def concatenate_shard_frames(frames: Sequence[ShardFrames]) -> ShardFrames:
 @dataclasses.dataclass(frozen=True, slots=True)
 class TrainConfig:
     seed: int = 65
+    # A 30-second half-life covers about one stock exchange.
+    gamma: float = 2 ** (-1 / 1800)
+    damage_reward: float = 0.0
+    lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy"
+    league_selection: Literal["pfsp", "latest"] = "pfsp"
     actor_optimizer: Literal["muon", "adam"] = "muon"
     actor_lr: float = 1e-5
     critic_lr: float = 3e-4
@@ -3004,6 +3034,11 @@ class TrainConfig:
     deterministic: bool = False
 
     def __post_init__(self) -> None:
+        _check_discount("gamma", self.gamma)
+        if self.lane_layout not in ("anchor_heavy", "self_play_heavy"):
+            raise ValueError("unsupported lane layout")
+        if self.league_selection not in ("pfsp", "latest"):
+            raise ValueError("unsupported league selection")
         if type(self.snapshot_capacity) is not int or self.snapshot_capacity != 3:
             raise ValueError("fixed opponent layout requires exactly three snapshot slots")
         if self.advantage_scale not in ("warmup", "batch"):
@@ -3013,7 +3048,7 @@ class TrainConfig:
         if type(self.max_league_size) is not int or self.max_league_size < 5:
             # Eviction protects pi_ref and three milestones and must keep the new entry.
             raise ValueError("league must hold pi_ref, three milestones and one evictable entry")
-        for name in ("pfsp_power", "opponent_weight_power", "value_loss_coefficient"):
+        for name in ("pfsp_power", "opponent_weight_power", "value_loss_coefficient", "damage_reward"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
@@ -3451,10 +3486,76 @@ def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, 
     percent = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_percent"][0]] for s in (1, 2)], -1).view(
         torch.float32
     )
-    losses = (stock[:, 1:] < stock[:, :-1]).float()
-    damage = (percent[:, 1:] - percent[:, :-1]).clamp_min(0)
+    present = (stock[:, 1:] != torch.iinfo(torch.int32).max) & (stock[:, :-1] != torch.iinfo(torch.int32).max)
+    losses = ((stock[:, 1:] < stock[:, :-1]) & present).float()
+    increase = percent[:, 1:] - percent[:, :-1]
+    damage = torch.where((increase > 0) & torch.isfinite(increase), increase, 0)
     wins = losses * (stock[:, 1:] == 0)
     return losses, damage, wins
+
+
+@torch.no_grad()
+def training_frame_rewards(table: DenseRollout, ids: Tensor, damage_weight: float) -> Tensor:
+    """Check the adapter's stock-only reward before adding experiment shaping."""
+    losses, damage, wins = frame_components(table, ids)
+    side = table.integers[ids, SIDE, None, None].expand(-1, 4, 1)
+    stock = 120 * losses + 50 * wins
+    expected = stock.gather(-1, 1 - side).squeeze(-1) - stock.gather(-1, side).squeeze(-1)
+    valid = torch.arange(4, device=ids.device)[None] < table.duration[ids, None]
+    stored = table.rewards[ids]
+    if bool((valid & (stored != expected)).any()):
+        raise ValueError("stored stock reward disagrees with stock columns and student side")
+    net_damage = damage.gather(-1, 1 - side).squeeze(-1) - damage.gather(-1, side).squeeze(-1)
+    return torch.where(valid, stored + damage_weight * net_damage, 0)
+
+
+@torch.no_grad()
+def action_state_histogram(table: DenseRollout, ids: Tensor) -> Tensor:
+    """Count post-step states once per frame on the student's side of slot 0."""
+    ids = ids[table.opponent_anchor[ids] == 0]
+    meta = table.integers[ids]
+    frames = torch.arange(4, device=ids.device)[None]
+    valid = frames < table.duration[ids, None]
+    positions = meta[:, START, None] + meta[:, LENGTH, None] + frames
+    positions = positions.clamp_max(len(table.store.records) - 1)
+    records = table.store.records[positions, meta[:, LANE, None]]
+    columns = records[..., : 4 * len(native.OBSERVATION_FIELDS)].contiguous().view(torch.int32)
+    states = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_action"][0]] for s in (1, 2)], -1)
+    side = meta[:, SIDE, None, None].expand(-1, 4, 1)
+    actions = states.gather(-1, side).squeeze(-1)[valid].long()
+    if bool(((actions < 0) | (actions >= ACTION_STATE_COUNT)).any()):
+        raise ValueError("unsupported native action state in collapse histogram")
+    return torch.bincount(actions, minlength=ACTION_STATE_COUNT)
+
+
+@torch.no_grad()
+def collapse_statistics(histogram: Tensor, baseline: Tensor) -> dict[str, float]:
+    total, baseline_total = int(histogram.sum()), int(baseline.sum())
+    fraction = float(histogram[list(SMASH_ACTION_STATES)].sum()) / total if total else math.nan
+    baseline_fraction = (
+        float(baseline[list(SMASH_ACTION_STATES)].sum()) / baseline_total if baseline_total else math.nan
+    )
+    divergence = math.nan
+    if total and baseline_total:
+        p = histogram.double() / total
+        q = baseline.double() / baseline_total
+        middle = (p + q) / 2
+        divergence = float(
+            (p[p > 0] * (p[p > 0] / middle[p > 0]).log()).sum() / 2
+            + (q[q > 0] * (q[q > 0] / middle[q > 0]).log()).sum() / 2
+        )
+    # A missing warmup baseline is explicit for zero-warmup runs and legacy resumes.
+    ratio = math.nan
+    if total and baseline_total:
+        ratio = fraction / baseline_fraction if baseline_fraction else (math.inf if fraction else math.nan)
+    return {
+        "collapse/smash_fraction": fraction,
+        "collapse/smash_ratio": ratio,
+        "collapse/action_js": divergence,
+        "collapse/baseline_frames": float(baseline_total),
+        "collapse/baseline_smash_fraction": baseline_fraction,
+        "collapse/frames": float(total),
+    }
 
 
 @torch.no_grad()
@@ -3615,6 +3716,8 @@ class Trainer:
     def __init__(self, engine: RolloutEngine, config: TrainConfig) -> None:
         if torch.are_deterministic_algorithms_enabled() != config.deterministic:
             raise ValueError("trainer determinism differs from the configured execution mode")
+        if engine.lane_layout != config.lane_layout:
+            raise ValueError("trainer and rollout lane layouts must agree")
         if engine.sampler.rng.seed != config.seed:
             raise ValueError("trainer and counter RNG seeds must agree")
         self.profile: UpdateProfile | None = None
@@ -3637,11 +3740,12 @@ class Trainer:
         self.pool_start_update = 0
         self.warming = config.critic_warmup_updates > 0
         self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
+        self.warmup_action_histogram = torch.zeros(ACTION_STATE_COUNT, dtype=torch.int64, device=self.policy.device)
         if set(engine.anchors) != {0}:
             raise ValueError("fresh trainer requires only pi_ref")
         self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
-        # Entry 0 is pi_ref. Slot 0 always holds it; slots 1..3 hold PFSP draws.
+        # Entry 0 is pi_ref. Slot 0 always holds it.
         self.league = [league_entry(0, 0, self.reference.model.state_dict())]
         self.league_stock_shares = {0: 0.5}
         self.slot_entries = {0: 0, 1: 0, 2: 0, 3: 0}
@@ -3712,23 +3816,41 @@ class Trainer:
                 )
 
     def rotate_league(self) -> tuple[int, ...]:
-        """Bank the student, evict the easiest entry, and load PFSP draws into changed slots.
+        """Bank the student and replace slots by PFSP or oldest-slot promotion.
 
-        Slots 1..3 always include the new entry. Entries already loaded keep their
-        slots. Changed slots receive new weights between rollouts while their episodes
-        continue, as self-play lanes do after every update; the next rollout re-encodes
-        history with the new weights.
+        PFSP preserves continuing episodes and loaded entries when possible. Latest
+        selection ends episodes in the oldest slot before replacing its weights.
         """
         # The newest entry is never evicted, so the last entry holds the largest id.
         entry = league_entry(self.league[-1].entry_id + 1, self.update, self.policy.model.state_dict())
         self.league.append(entry)
         self.league_stock_shares[entry.entry_id] = 0.5
+        promoted = min(self.slot_updates, key=lambda slot: (self.slot_updates[slot], slot))
         if len(self.league) > self.config.max_league_size:
             # Keep pi_ref and the earliest milestones; evict the entry the student beats most.
             candidates = [row.entry_id for row in self.league[4:] if row is not entry]
-            evicted = max(candidates, key=lambda entry_id: (self.league_stock_shares[entry_id], -entry_id))
+            if self.config.league_selection == "latest":
+                # This slot is about to change; all other loaded entries must survive.
+                retained = {value for slot, value in self.slot_entries.items() if slot != promoted}
+                candidates = [
+                    row.entry_id for row in self.league[1:] if row is not entry and row.entry_id not in retained
+                ]
+                evicted = min(candidates)
+            else:
+                evicted = max(candidates, key=lambda entry_id: (self.league_stock_shares[entry_id], -entry_id))
             self.league = [row for row in self.league if row.entry_id != evicted]
             del self.league_stock_shares[evicted]
+        if self.config.league_selection == "latest":
+            # Match 84fafaef: end episodes before replacing the oldest snapshot slot.
+            for match, number in self.engine.truncate_slot(promoted):
+                for side in (0, 1):
+                    self.episode_metrics.pop((2 * match + side, number), None)
+                    self.partial_episodes.discard((2 * match + side, number))
+            self.engine.anchors[promoted].model.load_state_dict(entry.weights, strict=True)
+            self.slot_entries[promoted] = entry.entry_id
+            for row in self.anchor_win_history:
+                row.pop(promoted, None)
+            return (promoted,)
         others = [row.entry_id for row in self.league if row is not entry]
         targets = [entry.entry_id]
         pool = list(others)
@@ -3970,12 +4092,12 @@ class Trainer:
         first = torch.full((count,), len(ids), device=ids.device, dtype=torch.long)
         first.scatter_reduce_(0, inverse, torch.arange(len(ids), device=ids.device), reduce="amin")
         frames = torch.arange(4, device=ids.device)
-        rewards = torch.where(frames < table.duration[ids, None], table.rewards[ids], 0)
-        discounted = (rewards * GAMMA ** (age[:, None] + frames)).sum(-1)
+        rewards = training_frame_rewards(table, ids, self.config.damage_reward)
+        discounted = (rewards * self.config.gamma ** (age[:, None] + frames)).sum(-1)
         costs = torch.where(decision_batch(rollout).executed_factors_JF, kl, 0).sum(-1) * table.coefficients[ids]
         totals = torch.zeros(count, 3, device=ids.device)
         totals.scatter_add_(
-            0, inverse[:, None].expand(-1, 3), torch.stack((discounted, costs, costs * GAMMA**age), -1)
+            0, inverse[:, None].expand(-1, 3), torch.stack((discounted, costs, costs * self.config.gamma**age), -1)
         )
         packed = torch.cat((totals, table.values[ids[first], None], age[first, None]), -1).cpu().tolist()
         for key, row in zip(pairs.cpu().tolist(), packed, strict=True):
@@ -4033,6 +4155,14 @@ class Trainer:
         return metrics
 
     @torch.no_grad()
+    def collapse_metrics(self, rollout: Rollout) -> dict[str, float]:
+        histogram = action_state_histogram(rollout.table, rollout.ids)
+        if self.warming:
+            self.warmup_action_histogram.add_(histogram)
+            return {}
+        return collapse_statistics(histogram, self.warmup_action_histogram)
+
+    @torch.no_grad()
     def prepare(self, rollout: Rollout) -> PreparedUpdate:
         started = time.perf_counter()
         device = self.policy.device
@@ -4077,8 +4207,8 @@ class Trainer:
             if reference is None
             else factor_kl(old, reference, decisions.executed_factors_JF)
         )
-        frame_rewards = table.rewards[ids]
-        rewards = regularized_reward(decisions, frame_rewards, kl)
+        frame_rewards = training_frame_rewards(table, ids, self.config.damage_reward)
+        rewards = regularized_reward(decisions, frame_rewards, kl, gamma=self.config.gamma)
         values = table.values[ids]
         following = table.following[ids]
         terminal = table.terminal[ids]
@@ -4122,6 +4252,7 @@ class Trainer:
             ~table.terminal[:size].reshape(ticks, players),
             ~table.boundary[:size].reshape(ticks, players),
             table.valid[:size].reshape(ticks, players),
+            gamma=self.config.gamma,
         )
         advantages = result.advantages.flatten()[ids]
         targets = result.value_targets.flatten()[ids]
@@ -4152,6 +4283,11 @@ class Trainer:
             "data/decisions": float(len(ids)),
             "data/trained_decisions": float(selected.sum()),
         }
+        for label, mask in (("self_play", opponents < 0), ("anchor", opponents >= 0)):
+            metrics[f"critic/explained_variance_{label}"] = (
+                explained_variance(values[mask], targets[mask]) if bool(mask.any()) else math.nan
+            )
+        metrics.update(self.collapse_metrics(rollout))
         log_min = math.log(self.engine.sampler.config.lambda_min)
         log_max = math.log(self.engine.sampler.config.lambda_max)
         log_values = decisions.kl_coefficient_J.log()
@@ -4617,6 +4753,9 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
     schema = [(name, tuple(value.shape), str(value.dtype)) for name, value in model.state_dict().items()]
     training = dataclasses.asdict(trainer.config)
     del training["deterministic"]
+    for name in ("gamma", "damage_reward", "lane_layout", "league_selection"):
+        if training[name] == getattr(TrainConfig(), name):
+            del training[name]
     identity: dict[str, object] = {
         "train": training,
         "sampler": dataclasses.asdict(engine.sampler.config),
@@ -4716,6 +4855,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "pool_start_update": trainer.pool_start_update,
         "warming": trainer.warming,
         "warmup_moments": trainer.warmup_moments,
+        "warmup_action_histogram": trainer.warmup_action_histogram,
         "episode_metrics": trainer.episode_metrics,
         "partial_episodes": sorted(trainer.partial_episodes),
         "anchor_win_history": trainer.anchor_win_history,
@@ -4982,6 +5122,15 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
         or saved["update"] != manifest["update"]
     ):
         raise ValueError("checkpoint shard identity mismatch")
+    # Checkpoints written before collapse instrumentation have no baseline.
+    histogram = saved.get("warmup_action_histogram", torch.zeros(ACTION_STATE_COUNT, dtype=torch.int64))
+    if (
+        not isinstance(histogram, Tensor)
+        or histogram.shape != (ACTION_STATE_COUNT,)
+        or histogram.dtype != torch.int64
+        or bool((histogram < 0).any())
+    ):
+        raise ValueError("invalid checkpoint warmup action histogram")
     league = restore_league(trainer, saved, paths)
     groups = len(trainer.engine.groups)
     frames = trainer.engine.sampler.schedule.rollout_frames
@@ -5091,6 +5240,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.pool_start_update = saved["pool_start_update"]
     trainer.warming = saved["warming"]
     trainer.warmup_moments = saved["warmup_moments"]
+    trainer.warmup_action_histogram.copy_(histogram)
     trainer.episode_metrics = saved["episode_metrics"]
     trainer.partial_episodes = set(cast(list[tuple[int, int]], partial))
     trainer.anchor_win_history = saved["anchor_win_history"]
@@ -5285,16 +5435,20 @@ def run_training(
         "sampler": dataclasses.asdict(trainer.engine.sampler.config),
         "schedule": dataclasses.asdict(trainer.engine.sampler.schedule),
         "returns": {
-            "reward": "120 per stock and 50 more on the deciding stock; no damage term",
-            "gamma_per_frame": GAMMA,
+            "reward": (
+                "120 per stock and 50 more on the deciding stock; "
+                f"damage weight {trainer.config.damage_reward:g} times (percent dealt minus percent taken)"
+            ),
+            "gamma_per_frame": trainer.config.gamma,
             "gae_lambda_per_frame": GAE_LAMBDA,
             "critic": "HL-Gauss over 120 bins on [-600, 600]; value loss reaches the trunk during PPO",
         },
         "treatment": (
             "KL-regularized joint PPO with "
             f"{trainer.config.advantage_scale} advantage sigma; "
-            f"40% self-play and 60% anchor student streams; PFSP league rotation every "
-            f"{trainer.config.snapshot_interval} updates with win-rate advantage weights; independent per-player clipped "
+            f"{trainer.config.lane_layout} lanes; {trainer.config.league_selection} league rotation every "
+            f"{trainer.config.snapshot_interval} updates with opponent weight power {trainer.config.opponent_weight_power:g}; "
+            "independent per-player clipped "
             f"Beta({trainer.engine.sampler.config.percentile_alpha:g},"
             f"{trainer.engine.sampler.config.percentile_beta:g}) u"
         ),
@@ -5304,6 +5458,7 @@ def run_training(
     }
     if isinstance(trainer.policy, TransformerPolicy):
         resolved["decoder_precision"] = trainer.policy.model.decoder_precision
+    resolved["warmup_action_histogram"] = trainer.warmup_action_histogram.tolist()
     (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
     with wandb.init(project=wandb_project, mode="disabled" if wandb_project is None else "online", config=resolved):
         wandb.define_metric("global_step")
@@ -5334,6 +5489,7 @@ def run_training(
                         f"lambda_max={trainer.engine.sampler.lambda_max:.6g}",
                         flush=True,
                     )
+                resolved["warmup_action_histogram"] = trainer.warmup_action_histogram.tolist()
                 resolved["calibrated_lambda_max"] = trainer.engine.sampler.lambda_max
                 (output / "resolved.json").write_text(json.dumps(resolved, indent=2, sort_keys=True))
                 wandb.log(metrics)
@@ -5374,8 +5530,12 @@ class NativeCli:
     decoder_precision: DecoderPrecision = "bf16"
     compile_cache: Path | None = None
     publication: self_play_publication.Args | None = None
+    percentile_alpha: float = 15.0
+    percentile_beta: float = 1.2
 
     def __post_init__(self) -> None:
+        if any(not math.isfinite(value) or value <= 0 for value in (self.percentile_alpha, self.percentile_beta)):
+            raise ValueError("percentile Beta parameters must be finite and positive")
         validate_decoder_precision(self.decoder_precision)
         if self.resume_learner is not None and (
             self.resume is not None or self.verify_resume or self.profiling is not None
@@ -5418,7 +5578,7 @@ class NativeCli:
             raise ValueError("profiling must warm every group and run exactly two measured updates")
 
 
-def read_native_sampler(path: Path) -> SamplerConfig:
+def read_native_sampler(path: Path, *, percentile_alpha: float = 15.0, percentile_beta: float = 1.2) -> SamplerConfig:
     raw = json.loads(path.read_text())
     if (
         not isinstance(raw, dict)
@@ -5459,6 +5619,8 @@ def read_native_sampler(path: Path) -> SamplerConfig:
         tempering=raw["tempering"],
         masked_rate=raw["masked_rate"],
         deployment_rate=raw["deployment_rate"],
+        percentile_alpha=percentile_alpha,
+        percentile_beta=percentile_beta,
     )
 
 
@@ -5500,7 +5662,9 @@ def train_native(config: NativeCli) -> None:
     checkpoint.model.percentile_head.requires_grad_(False)
     schedule = development_config(checkpoint.model.head_offsets)
     policy = TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics)
-    sampling = read_native_sampler(config.sampler)
+    sampling = read_native_sampler(
+        config.sampler, percentile_alpha=config.percentile_alpha, percentile_beta=config.percentile_beta
+    )
     for row in sampling.identities:
         if row.identity >= policy.model.cfg.player_vocab_size:
             raise ValueError("sampler identity is outside the checkpoint vocabulary")
@@ -5540,6 +5704,7 @@ def train_native(config: NativeCli) -> None:
             policy,
             EpisodeSampler(sampling, schedule, CounterRng(config.training.seed)),
             {0: policy.frozen_copy()},
+            lane_layout=config.training.lane_layout,
         )
         trainer = Trainer(engine, config.training)
         head_start = None
@@ -6297,6 +6462,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.pool_start_update,
                 trainer.warming,
                 trainer.warmup_moments,
+                trainer.warmup_action_histogram,
                 trainer.evaluation_cursor,
                 trainer.episode_metrics,
                 sorted(trainer.partial_episodes),

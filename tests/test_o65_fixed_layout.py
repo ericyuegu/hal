@@ -483,7 +483,9 @@ def test_legacy_pilot_digest_ignores_only_the_league_treatment() -> None:
 
 @pytest.mark.skipif(not hasattr(os, "sched_getaffinity"), reason="NativeCli validates Linux CPU affinity")
 def test_profile_and_zero_warmup_configs_use_batch_advantage_scale() -> None:
-    native = exp.GpuProfileCli(Path("checkpoint.pt"), Path("data"), Path("output")).native()
+    native = exp.GpuProfileCli(
+        Path("checkpoint.pt"), Path("data"), Path("output"), cpus=tuple(sorted(os.sched_getaffinity(0)))[:16]
+    ).native()
     assert native.training.critic_warmup_updates == 0 and native.training.advantage_scale == "batch"
     with pytest.raises(ValueError, match="warmup advantage scale"):
         exp.TrainConfig(critic_warmup_updates=0)
