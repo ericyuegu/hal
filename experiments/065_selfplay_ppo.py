@@ -2077,6 +2077,7 @@ class RolloutEngine:
                 raise ValueError("anchors must be frozen and have independent parameters")
         self.profile: UpdateProfile | None = None
         self.groups = groups
+        self.match_tracer: MatchTracer | None = None
         self.policy = policy
         self.sampler = sampler
         self.configurations = sampler.schedule.configurations
@@ -2358,6 +2359,8 @@ class RolloutEngine:
         ring.controllers[at].copy_(self.policy.device_wire_actions(ring.values[at]))
         self.matches[match] = MatchState(episode, clock)
         self._publish_episode(group, at, match, position, episode, clock)
+        if self.match_tracer is not None:
+            self.match_tracer.reset(match, episode, clock, frame, lane)
 
     def _publish_episode(
         self, group: int, lane: int, match: int, position: int, episode: Episode, episode_start: int
@@ -2700,6 +2703,11 @@ class RolloutEngine:
         slots = (2 * lanes[:, None] + torch.arange(2, device=self.policy.device)[None]).flatten()
         timeouts = 0
         active_host = self.live_host[group][host_lanes]
+        if self.match_tracer is not None and group == 0:
+            for match in self.match_tracer.recordings:
+                sources = np.flatnonzero(host_lanes == self.locations[match][1])
+                if len(sources) and active_host[sources[0]]:
+                    self.match_tracer.frame(match, end_clock, frames, int(sources[0]))
         active = self.active[group][lanes]
         positions = self.stops[group][lanes]
         rewards = table.store.write(positions, lanes, frames, torch.arange(len(lanes), device=lanes.device))
@@ -2826,6 +2834,8 @@ class RolloutEngine:
         started = time.perf_counter()
         self.results = []
         group_id = self.cursor
+        if self.match_tracer is not None:
+            self.match_tracer.update = update
         shards = self.groups[group_id]
         self.transfer_timings.clear()
         for shard in shards:
@@ -3743,6 +3753,185 @@ def load_league_entry(path: Path, entry_id: int, update: int, digest: str, names
     return LeagueEntry(entry_id, update, raw["weights"], digest)
 
 
+@dataclasses.dataclass(slots=True)
+class _TracedMatch:
+    episode: Episode
+    start: int
+    update: int
+    frames: list[int] = dataclasses.field(default_factory=list)
+    columns: list[NDArray[np.uint32]] = dataclasses.field(default_factory=list)
+    actions: list[NDArray[np.float32]] = dataclasses.field(default_factory=list)
+    rewards: list[NDArray[np.float32]] = dataclasses.field(default_factory=list)
+    terminal: list[bool] = dataclasses.field(default_factory=list)
+    timeout: list[bool] = dataclasses.field(default_factory=list)
+    decisions: list[dict[str, NDArray]] = dataclasses.field(default_factory=list)
+    ended: bool = False
+
+
+class MatchTracer:
+    """Record the first complete post-start episode on fixed group-zero lanes.
+
+    The initial reset observation is frame zero, with zero applied inputs and
+    rewards. ``rewards`` are native stock rewards; ``decision_frame_rewards``
+    are the frame rewards used by GAE, including any trainer reward shaping.
+    Decision frames are relative to the reset. Untrained joint ratios are NaN.
+    During critic warmup no reference evaluation exists, so its logs are NaN.
+    """
+
+    def __init__(self, engine: RolloutEngine, count: int, output: Path, resolved: dict[str, object]) -> None:
+        if type(count) is not int or count < 1:
+            raise ValueError("trace matches must be a positive integer")
+        rng = np.random.default_rng(engine.sampler.rng.seed)
+        chosen = []
+        for role, number in ((0, (count + 1) // 2), (None, count // 2)):
+            pool = [match for match in engine.group_matches[0] if engine.lane_roles[match] == role]
+            if number > len(pool):
+                raise ValueError("trace matches exceed group-zero pi_ref or self-play lanes")
+            chosen.extend(int(match) for match in rng.choice(pool, number, replace=False))
+        self.matches = tuple(chosen)
+        self.roles = {match: engine.lane_roles[match] for match in chosen}
+        self.output = output
+        self.resolved = resolved
+        self.update = 0
+        self.recordings: dict[int, _TracedMatch] = {}
+        self.written: set[int] = set()
+        self.current: dict[int, tuple[dict[str, NDArray], int]] = {}
+        self.current_rows = torch.empty(0, dtype=torch.long, device=engine.policy.device)
+
+    def reset(self, match: int, episode: Episode, clock: int, frames: ShardFrames, lane: int) -> None:
+        if match not in self.matches or match in self.recordings or match in self.written:
+            return
+        self.recordings[match] = _TracedMatch(episode, clock, self.update)
+        self.frame(match, clock, frames, lane)
+
+    def frame(self, match: int, clock: int, frames: ShardFrames, lane: int) -> None:
+        recording = self.recordings.get(match)
+        if recording is None or recording.ended:
+            return
+        relative = clock - recording.start
+        if relative != len(recording.frames):
+            raise ValueError("match trace has a missing or duplicate frame")
+        recording.frames.append(relative)
+        recording.columns.append(frames.columns[lane].copy())
+        recording.actions.append(frames.host_actions[lane].copy())
+        recording.rewards.append(frames.rewards[lane].copy())
+        recording.terminal.append(bool(frames.terminal[lane]))
+        recording.timeout.append(bool(frames.timeout[lane]))
+        recording.ended = bool(frames.terminal[lane] or frames.timeout[lane])
+
+    def prepare(self, batch: PreparedUpdate, rewards: Tensor) -> None:
+        self.current.clear()
+        if batch.rollout.group != 0 or not self.recordings:
+            self.current_rows = self.current_rows[:0]
+            return
+        table, ids = batch.rollout.table, batch.rollout.ids
+        meta = table.integers[ids]
+        for match, recording in self.recordings.items():
+            at = torch.nonzero((meta[:, MATCH] == match) & (meta[:, EPISODE] == recording.episode.number)).flatten()
+            if not len(at):
+                continue
+            rows = ids[at]
+            # Read raw applied inputs in one batch. Host actions are controller
+            # readback, which has already applied stick deadzones and clipping.
+            offsets = torch.arange(4, device=ids.device)[None]
+            valid = offsets < table.duration[rows, None]
+            positions = meta[at, START, None] + meta[at, LENGTH, None] + offsets
+            lanes = meta[at, LANE, None].expand_as(positions)
+            packed = table.store.records[positions[valid], lanes[valid]].detach().cpu().numpy().copy()
+            native_frames = packed.reshape(-1).view(native.FRAME_DTYPE)
+            relative = meta[at, CLOCK, None] - recording.start + 1 + offsets
+            for frame, actions in zip(relative[valid].cpu().tolist(), native_frames["applied_action"], strict=True):
+                recording.actions[int(frame)] = actions.copy()
+            decisions = batch.decisions
+            reference = (
+                batch.reference.log_probs
+                if batch.reference is not None
+                else torch.full_like(batch.old.log_probs, torch.nan)
+            )
+            fields: dict[str, Tensor] = {
+                "frame": meta[:, CLOCK] - recording.start,
+                "side": meta[:, SIDE],
+                "update": meta[:, UPDATE],
+                "D": decisions.delay_J,
+                "R": decisions.replan_J,
+                "u": table.conditions[ids, 2],
+                "lambda": decisions.kl_coefficient_J,
+                "sampled_factors": decisions.sampled_indices_JF,
+                "executed_factors": decisions.executed_factors_JF,
+                "behavior_log_probs": decisions.behavior_log_probs_JF,
+                "reference_log_probs": reference,
+                "value_mean": batch.values,
+                "regularized_reward": rewards,
+                "advantage": batch.advantages,
+                "value_target": batch.targets,
+                "opponent_weight": batch.opponent_weights,
+                "kl": torch.where(decisions.executed_factors_JF, batch.kl, 0).sum(-1),
+                "duration": decisions.duration_J,
+                "frame_rewards": table.rewards[ids],
+                "selected": batch.selected,
+            }
+            part = {name: value[at].detach().cpu().numpy().copy() for name, value in fields.items()}
+            part["trained"] = np.zeros(len(at), dtype=np.bool_)
+            part["joint_ratio"] = np.full(len(at), np.nan, dtype=np.float32)
+            part["actor_step"] = np.full(len(at), -1, dtype=np.int64)
+            recording.decisions.append(part)
+            for offset, row in enumerate(rows.cpu().tolist()):
+                self.current[int(row)] = (part, offset)
+        self.current_rows = torch.tensor(tuple(self.current), dtype=torch.long, device=ids.device)
+
+    def actor_step(self, rows: Tensor, selected: Tensor, ratios: Tensor, step: int) -> None:
+        if not self.current:
+            return
+        mask = selected & torch.isin(rows, self.current_rows)
+        for row, ratio in zip(rows[mask].cpu().tolist(), ratios.detach()[mask].cpu().tolist(), strict=True):
+            part, offset = self.current[int(row)]
+            if part["trained"][offset]:
+                raise ValueError("match trace decision trained more than once")
+            part["trained"][offset] = True
+            part["joint_ratio"][offset] = ratio
+            part["actor_step"][offset] = step
+
+    def flush(self) -> None:
+        """Write ended matches only after the final rollout's actor steps finish."""
+        self.current.clear()
+        self.current_rows = self.current_rows[:0]
+        for match, recording in tuple(self.recordings.items()):
+            if not recording.ended:
+                continue
+            if not recording.decisions:
+                raise ValueError("completed match trace has no student decisions")
+            header = {
+                "format": "hal.o65.match-trace.v1",
+                "match": match,
+                "episode": dataclasses.asdict(recording.episode),
+                "opponent_slot": self.roles[match],
+                "start_clock": recording.start,
+                "start_update": recording.update,
+                "resolved": self.resolved,
+                "factor_order": FACTOR_ORDER,
+                "native_columns": native.OBSERVATION_FIELDS,
+                "reward": "native stock reward; decision_frame_rewards include trainer shaping",
+                "missing": "NaN reference logs during critic warmup; NaN joint ratio if untrained",
+            }
+            arrays: dict[str, NDArray] = {
+                "header": np.asarray(json.dumps(header, sort_keys=True)),
+                "frame": np.asarray(recording.frames, dtype=np.int64),
+                "columns": np.stack(recording.columns),
+                "applied_actions": np.stack(recording.actions),
+                "rewards": np.stack(recording.rewards),
+                "terminal": np.asarray(recording.terminal, dtype=np.bool_),
+                "timeout": np.asarray(recording.timeout, dtype=np.bool_),
+            }
+            for name in recording.decisions[0]:
+                arrays[f"decision_{name}"] = np.concatenate([part[name] for part in recording.decisions])
+            self.output.mkdir(parents=True, exist_ok=True)
+            path = self.output / f"match-{match:06d}-episode-{recording.episode.number:06d}.npz"
+            with path.open("xb") as stream:
+                np.savez_compressed(stream, **arrays)
+            self.written.add(match)
+            del self.recordings[match]
+
+
 class Trainer:
     def __init__(self, engine: RolloutEngine, config: TrainConfig) -> None:
         if torch.are_deterministic_algorithms_enabled() != config.deterministic:
@@ -4402,7 +4591,7 @@ class Trainer:
                     torch.where(executed & mask[:, None], kl, 0).sum() / frames.sum()
                 )
                 metrics[f"policy/entropy_u{index}"] = float(entropy[frames].mean())
-        return PreparedUpdate(
+        prepared = PreparedUpdate(
             rollout,
             decisions,
             old,
@@ -4418,6 +4607,9 @@ class Trainer:
             placement,
             opponent_weights,
         )
+        if self.engine.match_tracer is not None:
+            self.engine.match_tracer.prepare(prepared, rewards)
+        return prepared
 
     def fit(self, batch: PreparedUpdate) -> dict[str, float]:
         if not self.warming and batch.reference is None:
@@ -4560,6 +4752,8 @@ class Trainer:
                             )
                         ),
                     )
+                    if self.engine.match_tracer is not None:
+                        self.engine.match_tracer.actor_step(windows.rows, selected, result.joint_ratio_WK, step)
                     noise.add(int(live.sum()), int(selected.sum()))
                     norm = torch.nn.utils.clip_grad_norm_(
                         self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
@@ -4676,6 +4870,8 @@ class Trainer:
             batch = self.prepare(rollout)
         with self.memory.phase("optimization"):
             metrics = self.fit(batch)
+        if self.engine.match_tracer is not None:
+            self.engine.match_tracer.flush()
         metrics.update(self.completed_metrics(rollout, batch.kl))
         self.record_league_results(rollout)
         metrics.update(self.anchor_metrics(rollout))
@@ -5493,9 +5689,12 @@ def run_training(
     run_configuration: dict[str, object] | None = None,
     publisher: self_play_publication.CheckpointPublisher | None = None,
     head_start: HeadStart | None = None,
+    trace_matches: int = 0,
 ) -> None:
     import wandb
 
+    if type(trace_matches) is not int or trace_matches < 0:
+        raise ValueError("trace matches must be a nonnegative integer")
     if updates <= trainer.update:
         raise ValueError("updates must exceed the restored update cursor")
     output.mkdir(parents=True, exist_ok=True)
@@ -5529,6 +5728,9 @@ def run_training(
         "invariants": "BC checkpoint, representation, data, simulator, adapter, reward, evaluation seeds",
         "run": run_configuration,
     }
+    resolved["trace_matches"] = trace_matches
+    if trace_matches:
+        trainer.engine.match_tracer = MatchTracer(trainer.engine, trace_matches, output / "traces", resolved)
     if isinstance(trainer.policy, TransformerPolicy):
         resolved["decoder_precision"] = trainer.policy.model.decoder_precision
     resolved["warmup_action_histogram"] = trainer.warmup_action_histogram.tolist()
@@ -5570,6 +5772,7 @@ def run_training(
                 log.flush()
                 if trainer.update % trainer.config.checkpoint_interval == 0 or trainer.update == updates:
                     checkpoints.submit(trainer)
+    trainer.engine.match_tracer = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -5591,6 +5794,7 @@ class NativeCli:
     updates: int
     groups: int = 4
     matches_per_shard: int = 16
+    trace_matches: int = 0
     device: str = "cuda"
     max_frame: int = 28800
     resume: Path | None = None
@@ -5610,6 +5814,10 @@ class NativeCli:
         if any(not math.isfinite(value) or value <= 0 for value in (self.percentile_alpha, self.percentile_beta)):
             raise ValueError("percentile Beta parameters must be finite and positive")
         validate_decoder_precision(self.decoder_precision)
+        if type(self.trace_matches) is not int or self.trace_matches < 0:
+            raise ValueError("trace matches must be a nonnegative integer")
+        if self.trace_matches and (self.profiling is not None or self.verify_only):
+            raise ValueError("match tracing requires a training run")
         if self.resume_learner is not None and (
             self.resume is not None or self.verify_resume or self.profiling is not None
         ):
@@ -5833,6 +6041,7 @@ def train_native(config: NativeCli) -> None:
             run_configuration=native_config,
             publisher=publisher,
             head_start=head_start,
+            trace_matches=config.trace_matches,
         )
         if config.verify_resume:
             verify_checkpoint_resume(trainer, config.output, provenance)
