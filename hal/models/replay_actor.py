@@ -93,7 +93,7 @@ def validate_actor_targets(output: ReplayOutput, targets: ActorTargets) -> None:
 
 
 def actor_loss(
-    output: ReplayOutput, value_logits_WKB: Tensor, targets: ActorTargets, *, clip_epsilon: float = 0.2
+    output: ReplayOutput, value_logits_WKB: Tensor | None, targets: ActorTargets, *, clip_epsilon: float = 0.2
 ) -> ActorLoss:
     """Calculate joint PPO, direct KL and value cross-entropy for the shared model.
 
@@ -103,7 +103,7 @@ def actor_loss(
     """
     if not 0 < clip_epsilon < 1:
         raise ValueError("clip epsilon must be finite and between zero and one")
-    if value_logits_WKB.shape != (*targets.selected_WK.shape, VALUE_BINS):
+    if value_logits_WKB is not None and value_logits_WKB.shape != (*targets.selected_WK.shape, VALUE_BINS):
         raise ValueError("value logits must be [W,K,value bins]")
     selected = targets.selected_WK & output.factor_mask_WKF.any(-1)
     mask = output.factor_mask_WKF & selected[..., None]
@@ -130,7 +130,12 @@ def actor_loss(
     kl_sum = torch.where(mask, factor_kl, 0).sum(-1)
     coefficient = torch.where(selected, targets.kl_coefficient_WK.detach(), 0)
     kl = (coefficient / targets.advantage_sigma.detach() * kl_sum).sum() / targets.denominator.detach()
-    cross_entropy = value_cross_entropy(value_logits_WKB, torch.where(selected, targets.value_targets_WK.detach(), 0))
-    value = torch.where(selected, cross_entropy, 0).sum() / targets.denominator.detach()
+    if value_logits_WKB is None:
+        value = policy.new_zeros(())
+    else:
+        cross_entropy = value_cross_entropy(
+            value_logits_WKB, torch.where(selected, targets.value_targets_WK.detach(), 0)
+        )
+        value = torch.where(selected, cross_entropy, 0).sum() / targets.denominator.detach()
     total = policy + kl + targets.value_coefficient.detach() * value
     return ActorLoss(total, policy, kl, value, ratio, torch.where(mask, factor_kl, 0))
