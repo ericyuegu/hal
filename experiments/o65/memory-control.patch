@@ -1,0 +1,34 @@
+--- a/experiments/065_selfplay_ppo.py
++++ b/experiments/065_selfplay_ppo.py
+@@ -47,0 +48 @@
++from hal.inference.cuda_graph import CapturePool
+@@ -1310,0 +1312 @@
++        self.training_pool: CapturePool | None = None
+@@ -1386,0 +1389 @@
++        self.training_pool = None
+@@ -1690,0 +1694,3 @@
++                # The retained scores are detached; release this decoder graph
++                # before constructing the next slot chunk.
++                del output
+@@ -1770,0 +1777 @@
++                            pool=self.training_pool,
+@@ -1843 +1850,3 @@
+-                captured = CapturedCall(lambda: self.value_forward(static), static, device=self.device)
++                captured = CapturedCall(
++                    lambda: self.value_forward(static), static, device=self.device, pool=self.training_pool
++                )
+@@ -1878,0 +1888 @@
++                    pool=self.training_pool,
+@@ -4122,0 +4133,6 @@
++        # Training graph outputs are copied or consumed before the next replay.
++        # Rollout graphs run on two streams and keep their own pools.
++        pool = CapturePool(self.policy.device)
++        self.policy.training_pool = pool
++        assert isinstance(self.reference, TransformerPolicy)
++        self.reference.training_pool = pool
+@@ -4166 +4181,0 @@
+-            self.reference.evaluate_reference(batch, positions, order)
+@@ -4186,0 +4202 @@
++            self.reference.evaluate_reference(batch, positions, order)
+@@ -4187,0 +4204 @@
++        pool.capture_all()
