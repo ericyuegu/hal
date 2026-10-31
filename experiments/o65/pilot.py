@@ -45,7 +45,7 @@ OLD = Arm("old")
 ARMS = (
     OLD,
     dataclasses.replace(OLD, name="reward", gamma=2 ** (-1 / 1800), damage_reward=0),
-    dataclasses.replace(OLD, name="critic", critic="hl_gauss", critic_hidden_dim=512, critic_depth=3),
+    dataclasses.replace(OLD, name="critic", critic_hidden_dim=512, critic_depth=3),
     dataclasses.replace(OLD, name="scale", advantage_scale="warmup"),
     dataclasses.replace(
         OLD,

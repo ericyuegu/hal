@@ -116,15 +116,17 @@ def test_deep_critic_starts_uniform_and_learns() -> None:
         loss.backward()
         optimizer.step()
     assert value_cross_entropy(critic(*inputs), targets).mean() < before * 0.9
-    assert len(critic.blocks) == 3
-    block = critic.blocks[0]
+    assert len(critic.deep.blocks) == 3
+    block = critic.deep.blocks[0]
     assert isinstance(block, torch.nn.Sequential)
     projection = block[1]
     assert isinstance(projection, SwiGLU)
     assert projection.up.out_features == 4 * critic.hidden_dim
 
 
-@pytest.mark.parametrize("kind,depth", [("hl_gauss", 0), ("hl_gauss", 3), ("residual_scalar", 0)])
+@pytest.mark.parametrize(
+    "kind,depth", [("hl_gauss", 0), ("hl_gauss", 3), ("residual_scalar", 0), ("residual_scalar", 3)]
+)
 def test_bc_weights_load_for_each_critic(kind: CriticKind, depth: int) -> None:
     cfg = config()
     bc = ActionSequenceTransformer(cfg)
@@ -170,7 +172,7 @@ def critic_trainer(kind: CriticKind, depth: int = 0) -> Any:
     return exp.Trainer(engine, cfg)
 
 
-@pytest.mark.parametrize("kind,depth", [("hl_gauss", 3), ("residual_scalar", 0)])
+@pytest.mark.parametrize("kind,depth", [("hl_gauss", 3), ("residual_scalar", 0), ("residual_scalar", 3)])
 def test_cpu_trainer_update_and_exact_resume(tmp_path: Path, kind: CriticKind, depth: int) -> None:
     run = critic_trainer(kind, depth)
     actor_before = tuple(p.detach().clone() for p in run.policy.actor_parameters())
@@ -213,7 +215,7 @@ def test_resume_rejects_changed_critic_metadata(tmp_path: Path) -> None:
         exp.restore_checkpoint(run, path, PROVENANCE)
 
 
-@pytest.mark.parametrize("kind,depth", [("hl_gauss", 3), ("residual_scalar", 0)])
+@pytest.mark.parametrize("kind,depth", [("hl_gauss", 3), ("residual_scalar", 0), ("residual_scalar", 3)])
 def test_evaluation_loads_each_critic_and_rejects_mismatches(tmp_path: Path, kind: CriticKind, depth: int) -> None:
     base = small_model()
     model = SelfPlayTransformer(
@@ -249,7 +251,9 @@ def test_evaluation_loads_each_critic_and_rejects_mismatches(tmp_path: Path, kin
         load_evaluation_checkpoint(path, device=torch.device("cpu"), critic_depth=depth + 1)
 
 
-@pytest.mark.parametrize("kind,depth", [("hl_gauss", 0), ("hl_gauss", 3), ("residual_scalar", 0)])
+@pytest.mark.parametrize(
+    "kind,depth", [("hl_gauss", 0), ("hl_gauss", 3), ("residual_scalar", 0), ("residual_scalar", 3)]
+)
 def test_replay_keeps_decoder_state_detached(kind: CriticKind, depth: int) -> None:
     model = SelfPlayTransformer(
         config(),
@@ -345,3 +349,31 @@ def test_actor_rejects_metadata_that_disagrees_with_tensors(tmp_path: Path, fiel
     torch.save(raw, path)
     with pytest.raises(ValueError):
         load_evaluation_checkpoint(path, device=torch.device("cpu"))
+
+
+def test_deep_residual_starts_at_the_bc_baseline_and_fits_from_trunk_state() -> None:
+    torch.manual_seed(65)
+    policy = SelfPlayTransformer(
+        config(), RANGES, max_opponent_queue=14, critic_hidden_dim=32, critic_kind="residual_scalar", critic_depth=3
+    )
+    assert isinstance(policy.critic, QueueResidualHead)
+    trunk = torch.randn(64, policy.cfg.d_model)
+    decoder = torch.randn(64, policy.cfg.temporal_d_model)
+    condition, opponent_condition = torch.zeros(64, 4), torch.zeros(64, 4)
+    queue = policy.codec.quantize(torch.rand(64, 14, ACTION_DIM))
+    lengths = torch.zeros(64, dtype=torch.long)
+    base = policy.value_head(decoder_rmsnorm(trunk).to(policy.value_head.up.weight.dtype)).squeeze(-1).float()
+    values = policy.self_play_value(trunk, decoder, condition, opponent_condition, queue, lengths)
+    torch.testing.assert_close(values, base.detach(), rtol=0, atol=0)
+    # A target that depends only on the trunk state needs the deep head's trunk input.
+    target = base.detach() + 40 * trunk[:, 0]
+    optimizer = torch.optim.Adam(policy.critic.parameters(), lr=1e-3)
+    losses = []
+    for _ in range(40):
+        optimizer.zero_grad()
+        values = policy.self_play_value(trunk, decoder, condition, opponent_condition, queue, lengths)
+        loss = (values - target).square().mean()
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss))
+    assert losses[-1] < 0.5 * losses[0]

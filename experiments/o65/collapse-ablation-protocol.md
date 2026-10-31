@@ -23,11 +23,15 @@ The `old` arm reproduces the collapsed run:
 |---|---|---|---|
 | Opponents | 54 self-play lanes, anchors 4:2:2:2; slots 1-3 take the latest snapshots every 256 updates; unweighted anchor advantages | 16 self-play lanes, anchors 12:12:12:12; PFSP league every 64 updates; anchor weights clip(2(1-s), 0.25, 1.75) | `matchup` |
 | Reward | stocks plus 1 per percent dealt and -1 per percent taken; gamma 0.99855 (8 s half-life) | stocks only; gamma 2^(-1/1800) (30 s half-life) | `reward` |
-| Critic | BC value head plus a residual SwiGLU over the decoder state, width 128, scalar squared error | HL-Gauss over 120 bins; normalized inputs, width 512, three residual SwiGLU blocks | `critic` |
+| Critic | BC value head plus a residual SwiGLU over the decoder state, width 128 | BC value head plus a deeper residual over normalized trunk state, decoder state, conditions and queue: width 512, three residual SwiGLU blocks | `critic` |
 | Advantage scale | each minibatch's spread | spread measured in critic warmup | `scale` |
 
-All arms keep 32 critic warmup updates and no value loss in the actor step,
-so the `critic` arm changes only what the critic can represent. They also
+All arms keep 32 critic warmup updates, the scalar squared-error critic loss
+and no value loss in the actor step, so the `critic` arm changes only what the
+critic can represent. Its residual starts at zero, so it begins at the same
+values as `old`. A fresh HL-Gauss critic failed this comparison in local runs:
+its explained variance stayed near zero through 32 warmup updates, while the
+pretrained BC value head gave `old` about 0.25 from the start. They also
 keep the lambda_max cap of 100 and the detached decoder state from the branch,
 which the collapsed run lacked. The `old` arm therefore checks that the
 collapse survives those changes.
@@ -43,8 +47,7 @@ value of its setting.
 - `reward` healthy: the policy was farming per-percent damage that an 8 s
   horizon overweights. One follow-up run with only the damage term removed
   separates the damage term from the half-life.
-- `critic` healthy: a critic with too little capacity or a poor output form
-  biased the advantages. With GAE lambda 1, each 256-frame rollout bootstraps
+- `critic` healthy: a critic with too little capacity biased the advantages. With GAE lambda 1, each 256-frame rollout bootstraps
   from the value of its final state with weight 0.69 to 1 at an 8 s half-life,
   so critic bias reaches every advantage.
 - `scale` healthy: dividing by the minibatch spread weakened the KL term as
@@ -55,7 +58,8 @@ value of its setting.
 
 The `critic` arm calibrates lambda_max from its own warmup advantages. A more
 accurate critic shrinks that spread, so we report each arm's lambda_max and
-treat a difference above 20% from `old` as a confound.
+treat a difference above 20% from `old` as a confound. Locally, both arms
+calibrated to the cap of 100.
 
 ## Collapse rule
 

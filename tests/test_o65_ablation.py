@@ -70,7 +70,7 @@ def test_old_arm_matches_the_collapsed_configuration() -> None:
         ("reward", {"--training.gamma": str(2 ** (-1 / 1800)), "--training.damage-reward": "0"}),
         (
             "critic",
-            {"--training.critic": "hl_gauss", "--training.critic-hidden-dim": "512", "--training.critic-depth": "3"},
+            {"--training.critic-hidden-dim": "512", "--training.critic-depth": "3"},
         ),
         ("scale", {"--training.advantage-scale": "warmup"}),
         (

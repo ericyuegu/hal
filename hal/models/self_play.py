@@ -37,8 +37,6 @@ def validate_critic(kind: str, hidden_dim: int, depth: int) -> CriticKind:
         raise ValueError("critic hidden width must be a positive integer")
     if type(depth) is not int or depth < 0:
         raise ValueError("critic depth must be a nonnegative integer")
-    if kind == "residual_scalar" and depth != 0:
-        raise ValueError("residual scalar critic requires depth 0")
     return "hl_gauss" if kind == "hl_gauss" else "residual_scalar"
 
 
@@ -84,25 +82,68 @@ def value_cross_entropy(logits: Tensor, values: Tensor) -> Tensor:
     return -(value_targets(values) * logits.float().log_softmax(-1)).sum(-1)
 
 
-class QueueResidualHead(nn.Module):
-    """Predict a residual baseline from detached features before the ego draw."""
+# Deep residual heads predict in units of the scalar critic loss's value scale, so
+# Adam's per-step change in the output layer moves values by useful amounts.
+RESIDUAL_VALUE_SCALE = 150.0
 
-    def __init__(self, cfg: ActionSequenceConfig, max_queue: int, hidden_dim: int) -> None:
+
+class DeepHead(nn.Module):
+    """Normalize each input group, then apply pre-norm residual SwiGLU blocks.
+
+    The output layer starts at zero, so a new head adds nothing until it trains.
+    """
+
+    def __init__(self, input_widths: tuple[int, ...], hidden_dim: int, depth: int, output_dim: int) -> None:
+        super().__init__()
+        if depth < 1:
+            raise ValueError("deep critic heads need at least one block")
+        self.input_norms = nn.ModuleList(nn.RMSNorm(width, eps=1e-6) for width in input_widths)
+        self.input_projection = nn.Linear(sum(input_widths), hidden_dim)
+        self.blocks = nn.ModuleList(
+            nn.Sequential(nn.RMSNorm(hidden_dim, eps=1e-6), SwiGLU(hidden_dim, 2 * hidden_dim, hidden_dim))
+            for _ in range(depth)
+        )
+        self.output_norm = nn.RMSNorm(hidden_dim, eps=1e-6)
+        self.output = nn.Linear(hidden_dim, output_dim)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, groups: tuple[Tensor, ...]) -> Tensor:
+        inputs = torch.cat(tuple(norm(group) for norm, group in zip(self.input_norms, groups, strict=True)), -1)
+        hidden = self.input_projection(inputs)
+        for block in self.blocks:
+            hidden = hidden + block(hidden)
+        return self.output(self.output_norm(hidden))
+
+
+class QueueResidualHead(nn.Module):
+    """Predict a residual baseline from detached features before the ego draw.
+
+    Depth 0 is the residual that run 84fafaef trained, which reads no trunk state.
+    Deeper heads also read the normalized trunk state.
+    """
+
+    def __init__(self, cfg: ActionSequenceConfig, max_queue: int, hidden_dim: int, depth: int = 0) -> None:
         super().__init__()
         if max_queue < 1 or hidden_dim < 1:
             raise ValueError("critic queue capacity and hidden width must be positive")
+        validate_critic("residual_scalar", hidden_dim, depth)
         self.max_queue = max_queue
         self.hidden_dim = hidden_dim
-        self.depth = 0
+        self.depth = depth
         # The encoder reads the whole queue in order, so each action keeps its
         # firing offset; a pooled mean would keep only the set of actions.
         self.queue_encoder = SwiGLU(max_queue * (4 * cfg.action_embed_dim + 1), hidden_dim, hidden_dim)
-        self.residual = SwiGLU(cfg.temporal_d_model + 8 + hidden_dim, hidden_dim, 1, output_bias=True)
-        nn.init.zeros_(self.residual.down.weight)
-        nn.init.zeros_(self.residual.down.bias)
+        if depth == 0:
+            self.residual = SwiGLU(cfg.temporal_d_model + 8 + hidden_dim, hidden_dim, 1, output_bias=True)
+            nn.init.zeros_(self.residual.down.weight)
+            nn.init.zeros_(self.residual.down.bias)
+        else:
+            self.deep = DeepHead((cfg.d_model, cfg.temporal_d_model, 8, hidden_dim), hidden_dim, depth, 1)
 
     def forward(
         self,
+        trunk_state: Tensor,
         decoder_state: Tensor,
         condition: Tensor,
         opponent_condition: Tensor,
@@ -128,8 +169,11 @@ class QueueResidualHead(nn.Module):
         valid = (offsets[None] < queue_lengths[:, None])[..., None]
         frames = torch.cat((torch.where(valid, queue_embeddings.detach(), 0), valid.to(queue_embeddings.dtype)), -1)
         queue = self.queue_encoder(frames.flatten(1))
-        inputs = torch.cat((decoder_state.detach(), condition, opponent_condition, queue), dim=-1)
-        return self.residual(inputs).squeeze(-1).float()
+        if self.depth == 0:
+            inputs = torch.cat((decoder_state.detach(), condition, opponent_condition, queue), dim=-1)
+            return self.residual(inputs).squeeze(-1).float()
+        groups = (trunk_state.detach(), decoder_state.detach(), torch.cat((condition, opponent_condition), -1), queue)
+        return RESIDUAL_VALUE_SCALE * self.deep(groups).squeeze(-1).float()
 
 
 class QueueCritic(nn.Module):
@@ -152,18 +196,7 @@ class QueueCritic(nn.Module):
             nn.init.zeros_(self.head.down.weight)
             nn.init.zeros_(self.head.down.bias)
         else:
-            self.input_norms = nn.ModuleList(
-                nn.RMSNorm(width, eps=1e-6) for width in (cfg.d_model, cfg.temporal_d_model, 8, hidden_dim)
-            )
-            self.input_projection = nn.Linear(input_dim, hidden_dim)
-            self.blocks = nn.ModuleList(
-                nn.Sequential(nn.RMSNorm(hidden_dim, eps=1e-6), SwiGLU(hidden_dim, 2 * hidden_dim, hidden_dim))
-                for _ in range(depth)
-            )
-            self.output_norm = nn.RMSNorm(hidden_dim, eps=1e-6)
-            self.output = nn.Linear(hidden_dim, VALUE_BINS)
-            nn.init.zeros_(self.output.weight)
-            nn.init.zeros_(self.output.bias)
+            self.deep = DeepHead((cfg.d_model, cfg.temporal_d_model, 8, hidden_dim), hidden_dim, depth, VALUE_BINS)
 
     def forward(
         self,
@@ -197,11 +230,7 @@ class QueueCritic(nn.Module):
             inputs = torch.cat((trunk_state, decoder_state, condition, opponent_condition, queue), dim=-1)
             return self.head(inputs).float()
         groups = (trunk_state, decoder_state, torch.cat((condition, opponent_condition), -1), queue)
-        inputs = torch.cat(tuple(norm(group) for norm, group in zip(self.input_norms, groups, strict=True)), -1)
-        hidden = self.input_projection(inputs)
-        for block in self.blocks:
-            hidden = hidden + block(hidden)
-        return self.output(self.output_norm(hidden)).float()
+        return self.deep(groups).float()
 
 
 class SelfPlayTransformer(ActionSequenceTransformer):
@@ -229,7 +258,7 @@ class SelfPlayTransformer(ActionSequenceTransformer):
             self.critic = (
                 QueueCritic(cfg, max_opponent_queue, critic_hidden_dim, critic_depth)
                 if kind == "hl_gauss"
-                else QueueResidualHead(cfg, max_opponent_queue, critic_hidden_dim)
+                else QueueResidualHead(cfg, max_opponent_queue, critic_hidden_dim, critic_depth)
             )
         self.percentile_head.requires_grad_(False)
         # The residual critic retains and trains the BC baseline.
@@ -348,6 +377,7 @@ class SelfPlayTransformer(ActionSequenceTransformer):
             base = self.value_head(features).squeeze(-1).float()
             queue = self.codec.embed_frame(opponent_queue).detach().to(features.dtype)
             residual = self.critic(
+                features,
                 decoder_state.detach().to(features.dtype),
                 condition.to(features.dtype),
                 opponent_condition.to(features.dtype),
