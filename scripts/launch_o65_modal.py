@@ -218,7 +218,7 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             "--cpus",
             *(str(cpu) for cpu in cpus),
             "--compile-cache",
-            str(RESULTS / request.name / "compile-cache" if request.mode == "ablation" else RESULTS / "compile-cache"),
+            str(ablation_compile_cache(request.name) if request.mode == "ablation" else RESULTS / "compile-cache"),
             "--resume",
             "--checkpoint-retention",
             "compact",
@@ -297,7 +297,7 @@ def run_remote(request: Request) -> int:
         if request.mode in ("pilot", "ablation") and (output / "pilot").is_dir():
             stage_results(output / "pilot", local / "pilot")
         if request.mode == "ablation":
-            seed_compile_cache(RESULTS / "compile-cache", output / "compile-cache")
+            seed_compile_cache(RESULTS / "compile-cache", ablation_compile_cache(request.name))
         code = run_child(request, local, deadline_start)
         return code
     finally:
@@ -319,6 +319,13 @@ def run_remote(request: Request) -> int:
             )
         )
         modal.Volume.from_name(VOLUME).commit()
+
+
+def ablation_compile_cache(name: str) -> Path:
+    # The shared cache holds about 50,000 files, and the volume's inode limit cannot
+    # hold a copy per arm, so each arm keeps its copy on container disk beside its
+    # work directory, which result staging does not copy back.
+    return WORK / f"{name}-compile-cache"
 
 
 def seed_compile_cache(shared: Path, own: Path) -> None:
@@ -758,7 +765,7 @@ def launch_ablation(args: Args, budget: Path) -> None:
             updates=672,
             checkpoint_every=32,
             warmup=32,
-            compile_cache=RESULTS / request.name / "compile-cache",
+            compile_cache=ablation_compile_cache(request.name),
             arm=request.arm,
         )
         trainer_argv[0:2] = ["/opt/venv/bin/python", str(REMOTE_ROOT / "experiments/065_selfplay_ppo.py")]

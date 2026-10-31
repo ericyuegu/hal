@@ -82,7 +82,7 @@ def test_compile_cache_is_seeded_once_and_writes_stay_in_the_arm(tmp_path: Path)
     for request in requests():
         argv = launcher.command(request, tuple(range(16)))
         args = tyro.cli(pilot.Args, args=argv[2:])
-        assert args.compile_cache == launcher.RESULTS / request.name / "compile-cache"
+        assert args.compile_cache == launcher.WORK / f"{request.name}-compile-cache"
         assert args.publish_directory == launcher.RESULTS / request.name / "pilot"
         assert args.r2_prefix == f"o65/pilot-results/{request.name}"
         assert args.arm == request.arm and args.sweep == "collapse"
