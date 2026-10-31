@@ -377,3 +377,21 @@ def test_deep_residual_starts_at_the_bc_baseline_and_fits_from_trunk_state() -> 
         optimizer.step()
         losses.append(float(loss))
     assert losses[-1] < 0.5 * losses[0]
+
+
+@pytest.mark.parametrize("kind,depth", [("hl_gauss", 0), ("residual_scalar", 0)])
+def test_chunked_critic_fit_matches_one_full_batch(
+    monkeypatch: pytest.MonkeyPatch, kind: CriticKind, depth: int
+) -> None:
+    states = []
+    losses = []
+    for chunk in (1 << 30, 3):
+        monkeypatch.setattr(exp, "CRITIC_FIT_CHUNK", chunk)
+        torch.manual_seed(65)
+        run = critic_trainer(kind, depth)
+        _, metrics = run.run_update()
+        states.append(tuple(p.detach().clone() for p in run.policy.critic_parameters()))
+        losses.append(metrics["critic/loss"])
+    for full, chunked in zip(*states, strict=True):
+        torch.testing.assert_close(chunked, full, rtol=1e-5, atol=1e-6)
+    assert losses[1] == pytest.approx(losses[0], rel=1e-5)

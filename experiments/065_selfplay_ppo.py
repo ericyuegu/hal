@@ -931,6 +931,7 @@ class CriticFeatures:
 
 
 CRITIC_FEATURE_NAMES = ("trunk", "decoder", "condition", "opponent_condition", "opponent_queue", "opponent_lengths")
+CRITIC_FIT_CHUNK = 16384
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -4628,16 +4629,26 @@ class Trainer:
             features = batch.old.features.detached()
             count = len(batch.values)
             selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
+            reduction = DecisionReduction(selected.sum())
             for _ in range(cfg.critic_epochs):
                 self.critic_optimizer.zero_grad(set_to_none=True)
-                predictions = (
-                    self.policy.values(features)
-                    if cfg.critic == "residual_scalar"
-                    else self.policy.value_logits(features)
-                )
-                loss = critic_loss(predictions, batch.targets, selected, critic=cfg.critic)
-                _check_finite("critic loss", loss)
-                loss.backward()
+                loss = torch.zeros((), device=self.policy.device)
+                # Chunks accumulate one full-batch gradient. A whole-batch pass over the
+                # anchor-heavy layout ran out of memory on a 95 GiB RTX PRO 6000.
+                for start in range(0, count, CRITIC_FIT_CHUNK):
+                    rows = slice(start, start + CRITIC_FIT_CHUNK)
+                    chunk = CriticFeatures(*(getattr(features, name)[rows] for name in CRITIC_FEATURE_NAMES))
+                    predictions = (
+                        self.policy.values(chunk)
+                        if cfg.critic == "residual_scalar"
+                        else self.policy.value_logits(chunk)
+                    )
+                    part = critic_loss(
+                        predictions, batch.targets[rows], selected[rows], reduction=reduction, critic=cfg.critic
+                    )
+                    _check_finite("critic loss", part)
+                    part.backward()
+                    loss = loss + part.detach()
                 norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                 )
