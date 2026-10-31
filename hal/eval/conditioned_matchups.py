@@ -185,6 +185,10 @@ class EvaluationMatch:
     initial_rng: int | None
 
 
+# Forward, up and down smash action states, including charge.
+SMASH_ACTION_STATES = tuple(range(melee.Action.FSMASH_HIGH.value, melee.Action.DOWNSMASH.value + 1))
+
+
 def score_match(
     trajectory: Trajectory,
     *,
@@ -198,7 +202,12 @@ def score_match(
     replay: Path | None = None,
 ) -> EvaluationMatch:
     initial_rng = int(trajectory.random_seed[0]) if len(trajectory) else None
-    active = trajectory.frame_id >= 0
+    # Dolphin trajectories end with menu-transition frames whose port fields are NaN.
+    active = (
+        (trajectory.frame_id >= 0)
+        & np.isfinite(trajectory.post[1]["stock"])
+        & np.isfinite(trajectory.post[2]["stock"])
+    )
     if not active.any():
         raise ValueError("evaluation match contains no active frames")
     keep = np.flatnonzero(active)
@@ -249,6 +258,7 @@ def score_match(
         )
         events[f"{role}_techs_per_min"] = len(onsets(np.isin(columns["action"], tech_states))) / minutes
         events[f"{role}_offstage_fraction"] = float((np.abs(columns["position_x"]) > edge).mean())
+        events[f"{role}_smash_fraction"] = float(np.isin(actions, SMASH_ACTION_STATES).mean())
         damage = summary.p1_damage_taken if port == 1 else summary.p2_damage_taken
         events[f"{role}_damage_taken_per_min"] = damage / minutes
     events["timeout"] = float(stop_reason == "timeout")
@@ -848,6 +858,7 @@ def evaluate(
             "intervals": "two-sided 95% normal intervals over paired units; fewer than two units gives null bounds",
             "net_stock_lcb": "one-sided 95% normal lower bound over paired units",
             "offstage": "fraction of active frames past the walkable stage edge",
+            "smash_fraction": "fraction of active frames in forward, up or down smash action states, including charge",
             "zero_damage_self_destruct_rate": "proxy: fraction of lost stocks with zero damage since respawn; no KO-credit field is available",
             "deaths_blast_zone": "onsets of death action states: bottom=0, left=1, right=2, top=3..10; animation-based classification",
             "wall_seconds": "batch wall time divided equally among its matches; summed shares measure throughput",

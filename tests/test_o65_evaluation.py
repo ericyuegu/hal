@@ -793,3 +793,39 @@ def test_actors_with_the_earlier_residual_critic_still_load_for_evaluation(tmp_p
     for name, value in expected.model.state_dict().items():
         if not name.startswith("critic."):
             torch.testing.assert_close(loaded.model.state_dict()[name], value, rtol=0, atol=0)
+
+
+def test_dolphin_menu_transition_frames_do_not_enter_events() -> None:
+    def column(values: list[float]) -> np.ndarray:
+        return np.array(values, dtype=np.float64)
+
+    post = {
+        1: {
+            "stock": column([4, 4, 4, math.nan]),
+            "percent": column([0, 5, 9, math.nan]),
+            "action": column([14, 60, 61, math.nan]),
+            "position_x": column([0, 0, 0, math.nan]),
+        },
+        2: {
+            "stock": column([1, 1, 0, math.nan]),
+            "percent": column([50, 70, 0, math.nan]),
+            "action": column([14, 14, 0, math.nan]),
+            "position_x": column([0, 0, 0, math.nan]),
+        },
+    }
+    trajectory = Trajectory(np.arange(4), post, np.zeros(4, dtype=np.uint32))
+    scored = score_match(
+        trajectory,
+        simulator="dolphin",
+        pair="a",
+        seed=17,
+        start=EvaluationStart("fd", 25, (1, 22)),
+        focal_port=1,
+        stop_reason="terminal",
+        wall_seconds=1,
+    )
+    assert scored.active_frames == 3 and scored.won is True
+    assert all(math.isfinite(value) for value in scored.events.values())
+    assert scored.events["opp_deaths_per_min"] == pytest.approx(3600 / 3)
+    assert scored.events["ego_smash_fraction"] == pytest.approx(2 / 3)
+    json.dumps(scored.events, allow_nan=False)
