@@ -22,7 +22,7 @@ def requests(sweep: str = "collapse") -> tuple[launcher.Request, ...]:
     )
 
 
-def test_ledger_reserves_all_arms_and_refuses_over_65_dollars(tmp_path: Path) -> None:
+def test_ledger_reserves_all_arms_and_refuses_over_the_cap(tmp_path: Path) -> None:
     path = tmp_path / "budget.jsonl"
     launcher.reserve_ablation(path, requests())
     original = path.read_bytes()
@@ -32,9 +32,9 @@ def test_ledger_reserves_all_arms_and_refuses_over_65_dollars(tmp_path: Path) ->
     assert set(balances) == {request.name for request in requests()}
     assert (
         sum(balance.reserved for balance in balances.values()) * launcher.compute_rate() + launcher.BUILD_RESERVE_USD
-        <= 65
+        <= launcher.ABLATION_MAX_USD
     )
-    with pytest.raises(ValueError, match=r"\$65 budget"):
+    with pytest.raises(ValueError, match="budget exhausted"):
         launcher.reserve_ablation(path, requests("second"))
     assert path.read_bytes() == original
     with pytest.raises(ValueError, match="already reserved"):

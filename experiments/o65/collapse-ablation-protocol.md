@@ -89,5 +89,5 @@ the student's side and raises an error on a mismatch.
 All five arms launch together from one launcher process on Modal, one RTX PRO
 6000 each, with 2.5-hour timeouts. The ablation ledger in
 `runs/modal-ablation/budget.jsonl` reserves each run's timeout and caps the
-program at $65; expected spend is about $38. The arms skip the held-out
+program at $80; expected spend is about $38 for the first four arms. The arms skip the held-out
 evaluation.

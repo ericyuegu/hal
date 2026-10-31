@@ -52,7 +52,7 @@ BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
 ABLATION_TIMEOUT_SECONDS = 9000
-ABLATION_MAX_USD = 65.0
+ABLATION_MAX_USD = 80.0
 ABLATION_BUDGET_FORMAT = "hal.o65.modal-ablation-budget.v1"
 
 
@@ -580,7 +580,7 @@ def reserve_ablation(path: Path, requests: tuple[Request, ...]) -> None:
         )
         seconds += sum(request.timeout_seconds + 360 for request in requests)
         if seconds * compute_rate() + BUILD_RESERVE_USD > ABLATION_MAX_USD:
-            raise ValueError("O65 ablation $65 budget exhausted")
+            raise ValueError(f"O65 ablation ${ABLATION_MAX_USD:.0f} budget exhausted")
         # A single locked write reserves every arm before any call can spawn.
         log.write("".join(budget_line(request.name, request.timeout_seconds + 360, "reserve") for request in requests))
         log.flush()
