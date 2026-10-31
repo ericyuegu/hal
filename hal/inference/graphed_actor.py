@@ -8,6 +8,7 @@ from torch import Tensor
 from torch import nn
 
 from hal.inference.cuda_graph import CapturedCall
+from hal.inference.cuda_graph import CapturePool
 from hal.models.replay_actor import ActorLoss
 from hal.models.replay_actor import ActorTargets
 from hal.models.replay_actor import actor_loss
@@ -67,6 +68,7 @@ class GraphedActorStep:
         parameters: tuple[nn.Parameter, ...],
         *,
         clip_epsilon: float = 0.2,
+        pool: CapturePool | None = None,
     ) -> None:
         if not 0 < clip_epsilon < 1:
             raise ValueError("clip epsilon must be finite and between zero and one")
@@ -113,7 +115,7 @@ class GraphedActorStep:
 
         ready = False
         try:
-            self.captured = CapturedCall(backward, static, device=device)
+            self.captured = CapturedCall(backward, static, device=device, pool=pool)
             ready = True
         finally:
             if not ready:

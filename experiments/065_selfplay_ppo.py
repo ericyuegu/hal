@@ -45,6 +45,7 @@ from hal.eval.self_play_checkpoint import sha256
 from hal.inference import compile_cache
 from hal.inference.column_context import PackedColumnContextBuilder
 from hal.inference.cuda_graph import CapturedCall
+from hal.inference.cuda_graph import CapturePool
 from hal.inference.cuda_graph import CompilationStartCounter
 from hal.inference.cuda_graph import count_compilation_starts
 from hal.inference.cuda_graph import prepared_shape_compilation
@@ -1306,8 +1307,10 @@ class TransformerPolicy:
         self.tick_caches: dict[tuple[ActionRing, tuple[int, ...]], BlockRestartCache] = {}
         self.tick_graphs: dict[tuple[tuple[ActionRing, tuple[int, ...]], int, int], CapturedCall[None]] = {}
         self.current_layouts: dict[tuple[ActionRing, int], TickLayout] = {}
+        self.tick_pools: dict[int, CapturePool] = {}
         self.reference_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[ReplayOutput]] = {}
         self.reference_forward_model: SelfPlayTransformer | None = None
+        self.training_pool: CapturePool | None = None
         self.value_graphs: dict[tuple[tuple[int, ...], ...], CapturedCall[Tensor]] = {}
         self.queue_replay = (
             torch.compile(
@@ -1379,11 +1382,13 @@ class TransformerPolicy:
         self.startup_finished = False
         self.tick_caches.clear()
         self.tick_graphs.clear()
+        self.tick_pools.clear()
         self.current_layouts.clear()
         self.value_graphs.clear()
         self.reference_graphs.clear()
         self.reference_forward_model = None
         self.actor_graph = None
+        self.training_pool = None
 
     def frozen_copy(self) -> LoopPolicy:
         model = copy.deepcopy(self.model).requires_grad_(False)
@@ -1613,6 +1618,7 @@ class TransformerPolicy:
                                 ring.length_device,
                             ),
                             device=self.device,
+                            pool=self.tick_pools.get(layout.buffer),
                         )
                     self.tick_graphs[graph_key] = captured
                 else:
@@ -1688,6 +1694,9 @@ class TransformerPolicy:
                         output.features.detached(),
                     )
                 )
+                # The retained scores are detached; release this decoder graph
+                # before constructing the next slot chunk.
+                del output
             batches.append(concatenate_replays(parts, 1))
         return concatenate_replays(batches, 0)
 
@@ -1727,7 +1736,7 @@ class TransformerPolicy:
         order = torch.cat((order, tail))
         live = order >= 0
         window_inverse = torch.empty(windows, device=self.device, dtype=torch.long)
-        window_inverse[order[live]] = torch.arange(len(order), device=self.device)[live]
+        window_inverse[order[live]] = torch.arange(windows, device=self.device)
         priority = (torch.arange(slots, device=self.device)[None] + count).expand(windows, -1).clone()
         priority.scatter_(1, positions, torch.arange(count, device=self.device)[None].expand_as(positions))
         permutation = priority.argsort(-1)
@@ -1753,7 +1762,7 @@ class TransformerPolicy:
             self.reference_forward_model = copy.deepcopy(self.model).requires_grad_(True)
             self.reference_forward_model.percentile_head.requires_grad_(False)
         if self.device.type == "cpu":
-            output = self.reference_forward(inputs, windows_per_step, count)
+            output = take_replay_windows(self.reference_forward(inputs, windows_per_step, count), live)
         else:
             chunks = []
             for start in range(0, padded_windows, windows_per_step):
@@ -1768,10 +1777,12 @@ class TransformerPolicy:
                             lambda static=static: self.reference_forward(static, windows_per_step, count),
                             static,
                             device=self.device,
+                            pool=self.training_pool,
                         )
                     self.reference_graphs[key] = captured
-                # Each replay reuses output storage; retain this chunk before the next.
-                chunks.append(concatenate_replays((captured(part),), 0))
+                # Keep real windows before replay reuses its output storage.
+                # Actor-step padding can otherwise dominate the retained scores.
+                chunks.append(take_replay_windows(captured(part), live[start : start + windows_per_step]))
             output = concatenate_replays(chunks, 0)
         if self.profile is not None:
             phase_name = self.profile.phase_name
@@ -1840,7 +1851,9 @@ class TransformerPolicy:
             self.admit_capture(("value", key))
             static = tuple(value.clone() for value in inputs)
             with prepared_shape_compilation(64):
-                captured = CapturedCall(lambda: self.value_forward(static), static, device=self.device)
+                captured = CapturedCall(
+                    lambda: self.value_forward(static), static, device=self.device, pool=self.training_pool
+                )
             self.value_graphs[key] = captured
         return captured(inputs)
 
@@ -1876,6 +1889,7 @@ class TransformerPolicy:
                     targets,
                     self.actor_parameters(),
                     clip_epsilon=clip_epsilon,
+                    pool=self.training_pool,
                 )
             self.actor_clip_epsilon = clip_epsilon
         return self.actor_graph.backward(inputs, targets), self.actor_graph.evaluation()
@@ -2123,6 +2137,9 @@ class RolloutEngine:
         self.staging: dict[int, BufferStaging] = {}
         self.transfer_timings: list[BufferTiming] = []
         buffers: list[tuple[RolloutBuffer, ...]] = []
+        # Groups collect sequentially. Their eager prefill caches can use the
+        # same two streams instead of reserving separate caches for every group.
+        streams: dict[int, torch.cuda.Stream | None] = {}
         for shards in groups:
             split = (len(shards) + 1) // 2
             prepared: list[RolloutBuffer] = []
@@ -2131,7 +2148,9 @@ class RolloutEngine:
                     continue
                 lanes = np.concatenate([self.shard_lanes[id(shard)] for shard in half])
                 lanes.flags.writeable = False
-                stream = torch.cuda.Stream(device=policy.device) if policy.device.type == "cuda" else None
+                if index not in streams:
+                    streams[index] = torch.cuda.Stream(device=policy.device) if policy.device.type == "cuda" else None
+                stream = streams[index]
                 buffer = RolloutBuffer(index, half, lanes, stream)
                 prepared.append(buffer)
                 if all(isinstance(shard, NativeSimulatorShard) for shard in half):
@@ -3281,6 +3300,17 @@ class ReplayBatch:
         )
 
 
+def take_replay_windows(output: ReplayOutput, windows: Tensor) -> ReplayOutput:
+    return ReplayOutput(
+        output.log_probs_WKF[windows],
+        tuple(value[windows] for value in output.distributions),
+        output.factor_mask_WKF[windows],
+        ReplayCriticFeatures(
+            *(getattr(output.features, field.name)[windows] for field in dataclasses.fields(output.features))
+        ),
+    )
+
+
 def concatenate_replays(outputs: Sequence[ReplayOutput], dimension: int) -> ReplayOutput:
     return ReplayOutput(
         torch.cat([output.log_probs_WKF for output in outputs], dimension),
@@ -4120,6 +4150,27 @@ class Trainer:
             raise ValueError("startup capture requires unsealed transformer policies")
         started = time.perf_counter()
         engine = self.engine
+        # Training outputs are copied or consumed before the next replay.
+        # Each rollout stream shares scratch across its policies and groups.
+        pool = CapturePool(self.policy.device)
+        self.policy.training_pool = pool
+        assert isinstance(self.reference, TransformerPolicy)
+        self.reference.training_pool = pool
+        tick_pools: dict[int, CapturePool] = {}
+        for buffers in engine.buffers:
+            for buffer in buffers:
+                if buffer.stream is None:
+                    raise ValueError("CUDA rollout buffers require a stream")
+                if buffer.index not in tick_pools:
+                    with torch.cuda.stream(buffer.stream):
+                        tick_pools[buffer.index] = CapturePool(self.policy.device)
+                elif buffer.stream != tick_pools[buffer.index].replay_stream:
+                    raise ValueError("rollout groups must share each buffer's stream")
+        for policy in policies:
+            assert isinstance(policy, TransformerPolicy)
+            policy.model.trunk.resolve_attention(policy.device.type)
+            policy.tick_pools = tick_pools.copy()
+        default_stream = torch.cuda.current_stream(self.policy.device)
         cursor = engine.cursor
         frames = engine.sampler.schedule.rollout_frames
         print(
@@ -4150,7 +4201,13 @@ class Trainer:
                 ids = engine._stage_tick(clock, self.update, table, pending)
                 table.active[ids] = False
                 for buffer in engine.buffers[group]:
-                    engine._sample_buffer(buffer, clock, table, ids)
+                    stream = tick_pools[buffer.index].replay_stream
+                    stream.wait_stream(default_stream)
+                    with torch.cuda.stream(stream):
+                        engine._sample_buffer(buffer, clock, table, ids)
+                    # Preparation saves and restores the whole ring. Serialize
+                    # those copies across buffers before sampling the next one.
+                    default_stream.wait_stream(stream)
             # Bootstrap and context-gap graphs have fixed player/diagnostic row counts.
             for count in {2 * len(matches), min(32, 2 * len(matches))}:
                 rows = torch.zeros(count, 1, dtype=torch.long, device=self.policy.device)
@@ -4163,7 +4220,6 @@ class Trainer:
                 chunk, -1
             )
             order = torch.arange(chunk, device=self.policy.device)[None]
-            self.reference.evaluate_reference(batch, positions, order)
             part = batch.take(
                 order.flatten(), positions, torch.ones(chunk, dtype=torch.bool, device=self.policy.device)
             )
@@ -4184,7 +4240,12 @@ class Trainer:
                 zero.new_zeros(()),
             )
             self.policy.actor_step(part, targets, clip_epsilon=self.config.clip_epsilon)
+            self.reference.evaluate_reference(batch, positions, order)
             table.reset()
+        for tick_pool in tick_pools.values():
+            with torch.cuda.stream(tick_pool.replay_stream):
+                tick_pool.capture_all()
+        pool.capture_all()
         engine.cursor = cursor
         engine.tick_layouts = engine.group_layouts[cursor]
         torch.cuda.synchronize(self.policy.device)

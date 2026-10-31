@@ -9,6 +9,8 @@ from test_self_play_model import model
 from test_window_replay_model import inputs
 from torch import Tensor
 
+from hal.inference.cuda_graph import CapturedCall
+from hal.inference.cuda_graph import CapturePool
 from hal.inference.cuda_graph import prepared_shape_compilation
 from hal.inference.graphed_actor import GraphedActorStep
 from hal.models.replay_actor import ActorTargets
@@ -16,6 +18,7 @@ from hal.models.replay_actor import actor_loss
 from hal.models.replay_actor import validate_actor_targets
 from hal.models.self_play import VALUE_BINS
 from hal.models.self_play import DecoderPrecision
+from hal.models.self_play import QueueCritic
 from hal.models.self_play import SelfPlayTransformer
 from hal.models.window_replay import ReplayCriticFeatures
 from hal.models.window_replay import ReplayOutput
@@ -85,7 +88,9 @@ def test_regularized_chain_gradient_matches_enumerated_return(estimator: str, de
         probability = logs[:2].sum().exp()
         reward = float(2 * first - second + 3 * first * second)
         sampled_kl = logs[:2].sum() - reference_logs.sum()
-        path_kl = sum((log_p[row].exp() * (log_p[row] - log_q[row])).sum() for row in (0, 1 + first))
+        path_kl = sum(
+            ((log_p[row].exp() * (log_p[row] - log_q[row])).sum() for row in (0, 1 + first)), theta.new_zeros(())
+        )
         objective = objective + probability * (reward - coefficient * sampled_kl)
         advantage = (reward - coefficient * (path_kl if estimator == "exact" else sampled_kl)).detach()
         output = ReplayOutput(logs.reshape(1, 1, 16), tuple(distributions), mask, features)
@@ -284,7 +289,10 @@ def test_fullgraph_capture_has_no_breaks() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("precision", ["fp32", "bf16"])
-def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precision: DecoderPrecision) -> None:
+@pytest.mark.parametrize("shared_pool", [False, True])
+def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(
+    precision: DecoderPrecision, shared_pool: bool
+) -> None:
     with prepared_shape_compilation(64):
         torch.manual_seed(8)
         base = model()
@@ -329,7 +337,13 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
 
         with torch.inference_mode(), pytest.raises(ValueError, match="inference_mode"):
             GraphedActorStep(forward, value_logits, values, targets, parameters)
-        graph = GraphedActorStep(forward, value_logits, values, targets, parameters, clip_epsilon=0.07)
+        pool = CapturePool(hidden.device) if shared_pool else None
+        graph = GraphedActorStep(forward, value_logits, values, targets, parameters, clip_epsilon=0.07, pool=pool)
+        other = (
+            CapturedCall(lambda: hidden.sin().sum(), (), device=hidden.device, pool=pool) if pool is not None else None
+        )
+        if pool is not None:
+            pool.capture_all()
         saved: tuple[Tensor, Tensor] | None = None
         saved_evaluation: tuple[Tensor, Tensor] | None = None
         for step in range(3):
@@ -341,6 +355,8 @@ def test_graphed_actor_matches_eager_and_reads_updated_inputs_and_weights(precis
             gradients = tuple(p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in parameters)
             actual = graph.backward(current, targets)
             evaluated = graph.evaluation()
+            if other is not None:
+                other(())
             torch.testing.assert_close(
                 evaluated.log_probs_WKF, forward(current).log_probs_WKF.detach(), atol=2e-6, rtol=2e-5
             )
@@ -372,7 +388,7 @@ def test_actor_rejects_invalid_clip_before_capture(clip_epsilon: float) -> None:
     with pytest.raises(ValueError, match="clip epsilon"):
         actor_loss(output, no_value(output), targets, clip_epsilon=clip_epsilon)
     with pytest.raises(ValueError, match="clip epsilon"):
-        GraphedActorStep(lambda _: output, no_value, (), targets, (), clip_epsilon=clip_epsilon)
+        GraphedActorStep(lambda _: output, lambda _: None, (), targets, (), clip_epsilon=clip_epsilon)
 
 
 def test_actor_does_not_drop_new_mass_outside_reference_support() -> None:
@@ -403,6 +419,7 @@ def test_joint_log_ratio_subtracts_each_factor_before_reduction() -> None:
 
 def test_value_loss_trains_the_trunk_and_not_the_decoder_or_critic() -> None:
     policy = model()
+    assert isinstance(policy.critic, QueueCritic)
     torch.nn.init.normal_(policy.critic.head.down.weight, std=0.05)
     hidden, observed, slots = inputs(policy)
     hidden = hidden.clone().requires_grad_(True)
