@@ -69,16 +69,7 @@ def test_deadline_starts_in_the_container_and_survives_rescheduling(tmp_path: Pa
         launcher.first_start(dataclasses.replace(request, git_sha="b" * 40), tmp_path, 21000)
 
 
-def test_compile_cache_is_seeded_once_and_writes_stay_in_the_arm(tmp_path: Path) -> None:
-    shared, old, reward = (tmp_path / name for name in ("shared", "old", "reward"))
-    shared.mkdir()
-    (shared / "artifact").write_bytes(b"shared seed")
-    launcher.seed_compile_cache(shared, old)
-    launcher.seed_compile_cache(shared, reward)
-    (old / "artifact").write_bytes(b"old artifact")
-    launcher.seed_compile_cache(shared, old)
-    assert (old / "artifact").read_bytes() == b"old artifact"
-    assert (reward / "artifact").read_bytes() == (shared / "artifact").read_bytes() == b"shared seed"
+def test_each_arm_compiles_into_its_own_container_cache() -> None:
     for request in requests():
         argv = launcher.command(request, tuple(range(16)))
         args = tyro.cli(pilot.Args, args=argv[2:])
@@ -111,28 +102,6 @@ def test_ablation_dry_run_prints_and_writes_all_full_argv_without_modal(
         assert argv[argv.index("--trace-matches") + 1] == "4"
         assert argv[argv.index("--publication.r2-prefix") + 1] == f"o65/pilot-results/{entry['request']['name']}"
     assert not list(tmp_path.glob("*-call.json"))
-
-
-def test_interrupted_cache_copy_leaves_no_partial_arm_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    shared, own = tmp_path / "shared", tmp_path / "old"
-    shared.mkdir()
-    (shared / "seed").write_bytes(b"shared")
-    original = launcher.shutil.copytree
-
-    def interrupt(source: Path, destination: Path) -> None:
-        destination.mkdir()
-        (destination / "partial").write_bytes(b"unfinished")
-        raise InterruptedError("copy interrupted")
-
-    monkeypatch.setattr(launcher.shutil, "copytree", interrupt)
-    with pytest.raises(InterruptedError):
-        launcher.seed_compile_cache(shared, own)
-    assert not own.exists()
-    assert not own.with_name(f".{own.name}.partial").exists()
-    assert (shared / "seed").read_bytes() == b"shared"
-    monkeypatch.setattr(launcher.shutil, "copytree", original)
-    launcher.seed_compile_cache(shared, own)
-    assert (own / "seed").read_bytes() == b"shared"
 
 
 def test_unknown_arm_is_rejected_before_any_modal_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

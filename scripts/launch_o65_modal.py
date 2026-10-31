@@ -297,7 +297,7 @@ def run_remote(request: Request) -> int:
         if request.mode in ("pilot", "ablation") and (output / "pilot").is_dir():
             stage_results(output / "pilot", local / "pilot")
         if request.mode == "ablation":
-            seed_compile_cache(RESULTS / "compile-cache", ablation_compile_cache(request.name))
+            ablation_compile_cache(request.name).mkdir()
         code = run_child(request, local, deadline_start)
         return code
     finally:
@@ -322,29 +322,10 @@ def run_remote(request: Request) -> int:
 
 
 def ablation_compile_cache(name: str) -> Path:
-    # The shared cache holds about 50,000 files, and the volume's inode limit cannot
-    # hold a copy per arm, so each arm keeps its copy on container disk beside its
-    # work directory, which result staging does not copy back.
+    # Each arm compiles into an empty cache on container disk. Copying the shared
+    # volume cache (about 50,000 files) took hours, and arms that shared one volume
+    # directory would race on its commits. Result staging skips this directory.
     return WORK / f"{name}-compile-cache"
-
-
-def seed_compile_cache(shared: Path, own: Path) -> None:
-    if own.is_dir():
-        return
-    if own.exists() or (shared.exists() and not shared.is_dir()):
-        raise ValueError("compile cache must be a directory")
-    if not shared.exists():
-        own.mkdir()
-        return
-    temporary = own.with_name(f".{own.name}.partial")
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    try:
-        shutil.copytree(shared, temporary)
-        temporary.replace(own)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
 
 
 def copy_result(source: str, destination: str) -> str:
