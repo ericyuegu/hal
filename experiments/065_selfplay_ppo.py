@@ -3294,6 +3294,14 @@ class PreparedUpdate:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ActorStaging:
+    advantage: Tensor
+    weight: Tensor
+    target: Tensor
+    reference_rows: Tensor
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class ReplayBatch:
     records: Tensor
     applied_actions: Tensor
@@ -4088,6 +4096,8 @@ class Trainer:
         self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
         self.exploiters: tuple[Learner, ...] = ()
+        self.actor_staging: ActorStaging | None = None
+        self.training_weights: dict[str, Tensor] = {}
         if config.league_selection == "exploiters":
             if any(slot not in engine.lane_roles.values() for slot in (1, 2)):
                 raise ValueError("exploiters require lanes for both learner slots")
@@ -4231,7 +4241,12 @@ class Trainer:
     def student_training_weights(self, learner: Learner) -> Iterator[LoopPolicy]:
         # Captures bind parameter addresses. Copy weights, never replace Parameters
         # or gradient storage. The student's optimizer and tick caches stay in place.
-        saved = {name: value.detach().clone() for name, value in self.policy.model.state_dict().items()}
+        state = self.policy.model.state_dict()
+        if not self.training_weights:
+            self.training_weights = {name: torch.empty_like(value) for name, value in state.items()}
+        saved = self.training_weights
+        for name, value in state.items():
+            saved[name].copy_(value)
         try:
             self.policy.model.load_state_dict(learner.policy.model.state_dict(), strict=True)
             yield self.policy
@@ -4252,10 +4267,9 @@ class Trainer:
                 for target, source in zip(learner.policy.actor_parameters(), policy.actor_parameters(), strict=True):
                     if source.grad is None:
                         raise ValueError("captured actor parameter is missing its gradient")
-                    if target.grad is None:
-                        target.grad = source.grad.detach().clone()
-                    else:
-                        target.grad.copy_(source.grad)
+                    # Learners step in sequence. Borrow the captured gradient
+                    # buffers too; the next graph replay clears their contents.
+                    target.grad = source.grad
             return result
 
     def bank_policy(self, policy: LoopPolicy, student_share: float) -> LeagueEntry:
@@ -4272,7 +4286,7 @@ class Trainer:
         return entry
 
     def reset_exploiter(self, learner: Learner) -> None:
-        learner.policy.model.load_state_dict(self.reference.model.state_dict(), strict=True)
+        learner.policy.model.load_state_dict(self.league[0].weights, strict=True)
         learner.policy.model.zero_grad(set_to_none=True)
         learner.actor_optimizer.state.clear()
         learner.critic_optimizer.state.clear()
@@ -4740,7 +4754,7 @@ class Trainer:
         if ids is None:
             ids = rollout.ids[table.owner[rollout.ids] == learner.owner]
         if bool((~table.valid[ids] | (table.owner[ids] != learner.owner)).any()):
-            raise ValueError("learner rows must be valid and owned by the learner")
+            raise ValueError("decision transition rows must be valid and owned by the learner")
         rollout = dataclasses.replace(rollout, ids=ids)
         started = time.perf_counter()
         device = policy.device
@@ -5049,11 +5063,26 @@ class Trainer:
         actor_norms: list[Tensor] = []
         noise = GradientNoise(policy.actor_parameters())
         table = batch.rollout.table
-        dense_advantage = torch.zeros_like(table.values)
+        if self.exploiters:
+            if self.actor_staging is None:
+                self.actor_staging = ActorStaging(
+                    torch.empty_like(table.values),
+                    torch.empty_like(table.values),
+                    torch.empty_like(table.values),
+                    torch.empty_like(table.owner),
+                )
+            staging = self.actor_staging
+            if staging.advantage.shape != table.values.shape:
+                raise ValueError("actor staging requires equal rollout table shapes across groups")
+            dense_advantage = staging.advantage.zero_()
+            dense_weight = staging.weight.fill_(1)
+            dense_target = staging.target.zero_()
+        else:
+            dense_advantage = torch.zeros_like(table.values)
+            dense_weight = torch.ones_like(table.values)
+            dense_target = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
-        dense_weight = torch.ones_like(table.values)
         dense_weight[batch.rollout.ids] = batch.opponent_weights
-        dense_target = torch.zeros_like(table.values)
         dense_target[batch.rollout.ids] = batch.targets
         value_coefficient = torch.tensor(cfg.value_loss_coefficient, dtype=torch.float32, device=policy.device)
         fixed_sigma = (
@@ -5062,11 +5091,16 @@ class Trainer:
             else None
         )
         batch_sigmas: list[Tensor] = []
-        reference_dense = tuple(
-            value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions
-        )
-        for target, value in zip(reference_dense, batch.reference.distributions, strict=True):
-            target[batch.rollout.ids] = value
+        reference_dense: tuple[Tensor, ...] = ()
+        if self.actor_staging is not None:
+            reference_rows = self.actor_staging.reference_rows.fill_(-1)
+            reference_rows[batch.rollout.ids] = torch.arange(len(batch.rollout.ids), device=policy.device)
+        else:
+            reference_dense = tuple(
+                value.new_zeros(len(table.values), *value.shape[1:]) for value in batch.reference.distributions
+            )
+            for target, value in zip(reference_dense, batch.reference.distributions, strict=True):
+                target[batch.rollout.ids] = value
         with self.memory.phase("actor"), phase(self.profile, "actor"):
             for step, window_ids in enumerate(batch.steps):
                 with sample(
@@ -5096,12 +5130,22 @@ class Trainer:
                     for start in range(0, cfg.windows_per_step, chunk):
                         ids = window_ids[start : start + chunk]
                         part = batch.windows.take(ids, batch.placement.positions, ids >= 0)
+                        if self.actor_staging is None:
+                            reference_distributions = tuple(value[part.rows] for value in reference_dense)
+                        else:
+                            reference_rows = self.actor_staging.reference_rows[part.rows]
+                            reference_distributions = tuple(
+                                torch.where(
+                                    (reference_rows >= 0)[..., None, None], value[reference_rows.clamp_min(0)], 0
+                                )
+                                for value in batch.reference.distributions
+                            )
                         targets = ActorTargets(
                             table.behavior[part.rows],
                             advantages[start : start + chunk],
                             selected[start : start + chunk],
                             table.coefficients[part.rows],
-                            tuple(value[part.rows] for value in reference_dense),
+                            reference_distributions,
                             statistics.mean.float(),
                             sigma,
                             selected.sum().float(),
@@ -5271,12 +5315,12 @@ class Trainer:
             if not learner.started:
                 continue
             was_warming = learner.warming
-            prepared = self.prepare(rollout, learner)
-            fitted = self.fit(prepared, learner)
+            fitted = self.fit_exploiter(rollout, learner)
             learner.age += 1
             learner.training_updates += int(not was_warming)
             metrics.update({f"exploiter/{learner.owner}/{key}": value for key, value in fitted.items()})
-            del prepared
+        self.actor_staging = None
+        self.training_weights.clear()
         if self.engine.match_tracer is not None:
             self.engine.match_tracer.flush()
         metrics.update(self.completed_metrics(student_rollout, batch.kl))
@@ -5357,6 +5401,14 @@ class Trainer:
         metrics["systems/match_frames_per_second"] = rollout.frames / metrics["systems/update_seconds"]
         self.updating = False
         return batch, metrics
+
+    def fit_exploiter(self, rollout: Rollout, learner: Learner) -> dict[str, float]:
+        # End replay/reference lifetimes before the next learner starts. Only the
+        # student's captured actor needs gradients to keep their fixed addresses.
+        try:
+            return self.fit(self.prepare(rollout, learner), learner)
+        finally:
+            learner.policy.model.zero_grad(set_to_none=True)
 
 
 def _durable_file(directory: Path, payload: bytes, suffix: str) -> tuple[str, str]:
@@ -7404,7 +7456,7 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
 
     Each control repeats the uninterrupted next update from the same boundary.
     Restoring between controls rewinds their inputs. A third update tests resume
-    with the same training graphs and execution mode. Batch hashes are evidence;
+    with the same training shapes and execution mode. Batch hashes are evidence;
     floating-point noise can change categorical choices, so they need not match.
     """
     manifest = save_checkpoint(trainer, output / "checkpoints", provenance)
@@ -7418,6 +7470,7 @@ def verify_checkpoint_resume(trainer: Trainer, output: Path, provenance: dict[st
     try:
         for _ in range(3):
             _clear_execution_caches(trainer)
+            trainer.capture_startup()
             batch, measured = trainer.run_update()
             batches.append(_batch_hash(batch))
             metrics.append(measured)
