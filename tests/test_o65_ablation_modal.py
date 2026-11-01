@@ -92,7 +92,7 @@ def test_ablation_dry_run_prints_and_writes_all_full_argv_without_modal(
     plan = json.loads((tmp_path / "collapse-dry-run.json").read_text())
     assert len(plan["arms"]) == len(pilot.ARMS)
     for entry in plan["arms"]:
-        assert entry["request"]["timeout_seconds"] == 9000
+        assert entry["request"]["timeout_seconds"] == launcher.ABLATION_TIMEOUT_SECONDS
         argv = entry["trainer_argv"]
         assert shlex.join(argv) in output
         assert argv[:3] == ["/opt/venv/bin/python", "/opt/o65-hal/experiments/065_selfplay_ppo.py", "train"]
@@ -153,7 +153,10 @@ def test_launch_builds_one_image_detaches_and_reserves_before_every_spawn(
         return Mock(object_id="fc-" + request.name)
 
     worker.spawn.side_effect = spawn
-    launcher.launch_ablation(launcher.Args(mode="ablation", sweep="collapse", output=output), budget)
+    # Six arms at the full timeout exceed the cap, so this launch reserves 9,000 s each.
+    launcher.launch_ablation(
+        launcher.Args(mode="ablation", sweep="collapse", output=output, timeout_seconds=9000), budget
+    )
     builds.assert_called_once_with(sha, secret)
     app.run.assert_called_once_with(detach=True)
     assert app.function.call_args.kwargs["max_containers"] == len(pilot.ARMS)
