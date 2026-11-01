@@ -74,6 +74,19 @@ def test_old_arm_matches_the_collapsed_configuration() -> None:
         ),
         ("scale", {"--training.advantage-scale": "warmup"}),
         (
+            "exploiters",
+            {
+                "--training.critic-hidden-dim": "512",
+                "--training.critic-depth": "3",
+                "--training.gamma": str(2 ** (-1 / 1800)),
+                "--training.damage-reward": "0.25",
+                "--training.lane-layout": "anchor_heavy",
+                "--training.league-selection": "exploiters",
+                "--training.snapshot-interval": "64",
+                "--training.opponent-weight-power": "1",
+            },
+        ),
+        (
             "matchup",
             {
                 "--training.lane-layout": "anchor_heavy",

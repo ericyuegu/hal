@@ -23,14 +23,14 @@ from hal.eval.self_play_checkpoint import read_training_manifest
 from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
-ArmName = Literal["old", "reward", "critic", "scale", "matchup"]
+ArmName = Literal["old", "reward", "critic", "scale", "matchup", "exploiters"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Arm:
     name: ArmName
     lane_layout: Literal["self_play_heavy", "anchor_heavy"] = "self_play_heavy"
-    league_selection: Literal["latest", "pfsp"] = "latest"
+    league_selection: Literal["latest", "pfsp", "exploiters"] = "latest"
     snapshot_interval: int = 256
     opponent_weight_power: float = 0
     gamma: float = 0.99855
@@ -52,6 +52,18 @@ ARMS = (
         name="matchup",
         lane_layout="anchor_heavy",
         league_selection="pfsp",
+        snapshot_interval=64,
+        opponent_weight_power=1,
+    ),
+    dataclasses.replace(
+        OLD,
+        name="exploiters",
+        critic_hidden_dim=512,
+        critic_depth=3,
+        gamma=2 ** (-1 / 1800),
+        damage_reward=0.25,
+        lane_layout="anchor_heavy",
+        league_selection="exploiters",
         snapshot_interval=64,
         opponent_weight_power=1,
     ),

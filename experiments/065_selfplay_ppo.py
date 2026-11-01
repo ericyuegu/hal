@@ -1195,6 +1195,7 @@ class DenseRollout:
         self.conditions = torch.zeros(capacity, 4, device=self.device)
         self.coefficients = torch.zeros(capacity, device=self.device)
         self.age = torch.zeros(capacity, dtype=torch.long, device=self.device)
+        self.owner = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.opponent_anchor = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.prefix = torch.zeros(capacity, 24, 4, dtype=torch.long, device=self.device)
         self.opponent = torch.zeros_like(self.prefix)
@@ -2076,6 +2077,7 @@ class RolloutEngine:
         anchors: dict[int, LoopPolicy],
         *,
         lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy",
+        learner_slots: tuple[int, ...] = (),
     ) -> None:
         if not groups or any(not group or any(not shard.match_ids for shard in group) for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
@@ -2085,10 +2087,13 @@ class RolloutEngine:
         if 0 not in anchors:
             raise ValueError("anchor zero must be the frozen reference")
         student_parameters = {id(parameter) for parameter in policy.model.parameters()}
-        for anchor in anchors.values():
-            if any(parameter.requires_grad for parameter in anchor.model.parameters()) or any(
-                id(parameter) in student_parameters for parameter in anchor.model.parameters()
-            ):
+        if len(set(learner_slots)) != len(learner_slots) or any(slot not in (1, 2) for slot in learner_slots):
+            raise ValueError("learner slots must be distinct exploiter slots 1 and 2")
+        self.learner_slots = learner_slots
+        for slot, anchor in anchors.items():
+            if (
+                slot not in learner_slots and any(parameter.requires_grad for parameter in anchor.model.parameters())
+            ) or any(id(parameter) in student_parameters for parameter in anchor.model.parameters()):
                 raise ValueError("anchors must be frozen and have independent parameters")
         self.profile: UpdateProfile | None = None
         self.groups = groups
@@ -2479,12 +2484,16 @@ class RolloutEngine:
         due = active & (clock % meta[:, REPLAN] == 0)
         table.queue_error.logical_or_((due & (ring.length_device.flatten() != meta[:, DELAY])).any())
         assignments = self.assignments[group]
-        student = self.owners[group] < 0
-        table.valid[at] = due & student
+        owners = self.owners[group]
+        table.owner[at] = owners
+        learner = owners < 0
+        for slot in self.learner_slots:
+            learner = learner | (owners == slot)
+        table.valid[at] = due & learner
         previous = torch.where(pending >= 0, pending, torch.arange(players, device=self.policy.device))
-        continuing = due & student & (pending >= 0)
+        continuing = due & learner & (pending >= 0)
         table.following[previous] = torch.where(continuing, at, table.following[previous])
-        pending.copy_(torch.where(due & student, at, pending))
+        pending.copy_(torch.where(due & learner, at, pending))
         anchor_ids = tuple(self.anchors)
         if clock % 128 == 0 and (
             not np.array_equal(assignments, self.layout_assignments[group]) or self.layout_anchors[group] != anchor_ids
@@ -2797,6 +2806,7 @@ class RolloutEngine:
     def _write_bootstrap(self, table: DenseRollout, ids: Tensor, slots: Tensor, clock: int, update: int) -> None:
         meta = self._dense_metadata(clock, update, bootstrap=True)[slots]
         table.bootstrap[ids] = True
+        table.owner[ids] = self.owners[self.cursor][slots]
         table.integers[ids] = meta
         table.conditions[ids] = self.dense_logs[self.cursor][slots]
         ring = self.rings[self.cursor]
@@ -3050,7 +3060,15 @@ class TrainConfig:
     gamma: float = 2 ** (-1 / 1800)
     damage_reward: float = 0.0
     lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy"
-    league_selection: Literal["pfsp", "latest"] = "pfsp"
+    league_selection: Literal["pfsp", "latest", "exploiters"] = "pfsp"
+    exploiter_count: int = 2
+    exploiter_stagger: int = 64
+    exploiter_retire_share: float = 0.7
+    exploiter_min_updates: int = 16
+    exploiter_max_updates: int = 192
+    exploiter_bank_share: float = 0.55
+    exploiter_critic_warmup: int = 8
+    exploiter_warmup_steps: int = 8
     actor_optimizer: Literal["muon", "adam"] = "muon"
     actor_lr: float = 1e-5
     critic_lr: float = 3e-4
@@ -3095,8 +3113,29 @@ class TrainConfig:
         _check_discount("gamma", self.gamma)
         if self.lane_layout not in ("anchor_heavy", "self_play_heavy"):
             raise ValueError("unsupported lane layout")
-        if self.league_selection not in ("pfsp", "latest"):
+        if self.league_selection not in ("pfsp", "latest", "exploiters"):
             raise ValueError("unsupported league selection")
+        if type(self.exploiter_count) is not int or self.exploiter_count != 2:
+            raise ValueError("the fixed league requires exactly two exploiters")
+        if self.league_selection == "exploiters" and self.lane_layout != "anchor_heavy":
+            raise ValueError("exploiters require anchor_heavy lanes")
+        if (
+            self.league_selection == "exploiters"
+            and self.advantage_scale == "warmup"
+            and self.exploiter_critic_warmup == 0
+        ):
+            raise ValueError("exploiter warmup advantage scale requires critic warmup")
+        for name in ("exploiter_stagger", "exploiter_critic_warmup", "exploiter_warmup_steps"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if not 1 <= self.exploiter_min_updates <= self.exploiter_max_updates or any(
+            type(value) is not int for value in (self.exploiter_min_updates, self.exploiter_max_updates)
+        ):
+            raise ValueError("exploiter training ages must be positive and ordered")
+        for name in ("exploiter_retire_share", "exploiter_bank_share"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0, 1]")
         validate_critic(self.critic, self.critic_hidden_dim, self.critic_depth)
         if self.critic == "residual_scalar" and self.value_loss_coefficient != 0:
             raise ValueError("residual scalar critic requires value_loss_coefficient 0")
@@ -3582,9 +3621,9 @@ def training_frame_rewards(table: DenseRollout, ids: Tensor, damage_weight: floa
 
 
 @torch.no_grad()
-def action_state_histogram(table: DenseRollout, ids: Tensor) -> Tensor:
-    """Count post-step states once per frame on the student's side of slot 0."""
-    ids = ids[table.opponent_anchor[ids] == 0]
+def action_state_histogram(table: DenseRollout, ids: Tensor, slot: int = 0) -> Tensor:
+    """Count post-step states once per frame on the student's side of a slot."""
+    ids = ids[(table.owner[ids] < 0) & (table.opponent_anchor[ids] == slot)]
     meta = table.integers[ids]
     frames = torch.arange(4, device=ids.device)[None]
     valid = frames < table.duration[ids, None]
@@ -3650,7 +3689,13 @@ def reward_component_metrics(rollout: Rollout) -> dict[str, float]:
 
 
 def place_windows(
-    batch: ReplayBatch, rng: CounterRng, update: int, count: int, windows_per_step: int
+    batch: ReplayBatch,
+    rng: CounterRng,
+    update: int,
+    count: int,
+    windows_per_step: int,
+    *,
+    separate_matches: bool = True,
 ) -> WindowPlacement:
     if not 1 <= count <= batch.rows.shape[1] or windows_per_step < 1:
         raise ValueError("invalid decision/window selection shape")
@@ -3669,7 +3714,9 @@ def place_windows(
     matches, inverse = torch.unique(meta[:, 0, MATCH], return_inverse=True)
     sizes = torch.zeros(len(matches), dtype=torch.long, device=meta.device)
     sizes.scatter_add_(0, inverse, live.long())
-    steps = max(int(sizes.max()), math.ceil(total / windows_per_step))
+    steps = math.ceil(total / windows_per_step)
+    if separate_matches:
+        steps = max(int(sizes.max()), steps)
     match_order = torch.argsort(
         rng.tensor_uniform(2, matches, torch.zeros_like(matches), torch.full_like(matches, update)), stable=True
     )
@@ -3963,6 +4010,42 @@ class MatchTracer:
             del self.recordings[match]
 
 
+@dataclasses.dataclass(slots=True)
+class Learner:
+    policy: LoopPolicy
+    actor_optimizer: torch.optim.Optimizer
+    critic_optimizer: torch.optim.Optimizer
+    scheduler: torch.optim.lr_scheduler.LambdaLR
+    warming: bool
+    warmup_moments: dict[DelayReplan, tuple[int, float, float]] = dataclasses.field(default_factory=dict)
+    owner: int = -1
+    actor_steps: int = 0
+    started: bool = False
+    age: int = 0
+    training_updates: int = 0
+    stock_share: float = 0.5
+    retires: int = 0
+    banks: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ExploiterState:
+    owner: int
+    model: dict[str, Tensor]
+    actor_optimizer: dict[str, object]
+    critic_optimizer: dict[str, object]
+    scheduler: dict[str, object]
+    warming: bool
+    warmup_moments: dict[DelayReplan, tuple[int, float, float]]
+    actor_steps: int
+    started: bool
+    age: int
+    training_updates: int
+    stock_share: float
+    retires: int
+    banks: int
+
+
 class Trainer:
     def __init__(self, engine: RolloutEngine, config: TrainConfig) -> None:
         if torch.are_deterministic_algorithms_enabled() != config.deterministic:
@@ -3986,16 +4069,47 @@ class Trainer:
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.actor_optimizer, lambda step: min(1.0, (step + 1) / max(1, config.warmup_steps))
         )
+        self.student = Learner(
+            self.policy,
+            self.actor_optimizer,
+            self.critic_optimizer,
+            self.scheduler,
+            config.critic_warmup_updates > 0,
+        )
         self.update = 0
         self.actor_steps = 0
         self.pool_start_update = 0
         self.warming = config.critic_warmup_updates > 0
         self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
         self.warmup_action_histogram = torch.zeros(ACTION_STATE_COUNT, dtype=torch.int64, device=self.policy.device)
+        self.warmup_slot_histograms = torch.zeros(4, ACTION_STATE_COUNT, dtype=torch.int64, device=self.policy.device)
         if set(engine.anchors) != {0}:
             raise ValueError("fresh trainer requires only pi_ref")
         self.snapshot_slots = tuple(self.reference.frozen_copy() for _ in range(3))
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
+        self.exploiters: tuple[Learner, ...] = ()
+        if config.league_selection == "exploiters":
+            if any(slot not in engine.lane_roles.values() for slot in (1, 2)):
+                raise ValueError("exploiters require lanes for both learner slots")
+            engine.learner_slots = (1, 2)
+            learners = []
+            trainable = {name for name, parameter in self.policy.model.named_parameters() if parameter.requires_grad}
+            for slot in engine.learner_slots:
+                policy = engine.anchors[slot]
+                for name, parameter in policy.model.named_parameters():
+                    parameter.requires_grad_(name in trainable)
+                exploiter_config = dataclasses.replace(
+                    config, actor_lr=1e-5, warmup_steps=config.exploiter_warmup_steps
+                )
+                actor = make_actor_optimizer(policy, exploiter_config)
+                critic = torch.optim.AdamW(policy.critic_parameters(), lr=config.critic_lr, weight_decay=0)
+                scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    actor, lambda step: min(1.0, (step + 1) / max(1, config.exploiter_warmup_steps))
+                )
+                learners.append(
+                    Learner(policy, actor, critic, scheduler, config.exploiter_critic_warmup > 0, owner=slot)
+                )
+            self.exploiters = tuple(learners)
         # Entry 0 is pi_ref. Slot 0 always holds it.
         self.league = [league_entry(0, 0, self.reference.model.state_dict())]
         self.league_stock_shares = {0: 0.5}
@@ -4009,27 +4123,58 @@ class Trainer:
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
 
     @property
+    def warming(self) -> bool:
+        return self.student.warming
+
+    @warming.setter
+    def warming(self, value: bool) -> None:
+        self.student.warming = value
+
+    @property
+    def actor_steps(self) -> int:
+        return self.student.actor_steps
+
+    @actor_steps.setter
+    def actor_steps(self, value: int) -> None:
+        self.student.actor_steps = value
+
+    @property
+    def warmup_moments(self) -> dict[DelayReplan, tuple[int, float, float]]:
+        return self.student.warmup_moments
+
+    @warmup_moments.setter
+    def warmup_moments(self, value: dict[DelayReplan, tuple[int, float, float]]) -> None:
+        self.student.warmup_moments = value
+
+    @property
     def slot_updates(self) -> dict[int, int]:
         updates = {entry.entry_id: entry.update for entry in self.league}
-        return {slot: updates[self.slot_entries[slot]] for slot in (1, 2, 3)}
+        return {
+            slot: (self.update if slot in self.engine.learner_slots else updates[self.slot_entries[slot]])
+            for slot in (1, 2, 3)
+        }
 
-    def warmup_advantage_sigma(self) -> float:
+    def warmup_advantage_sigma(self, learner: Learner | None = None) -> float:
         """Pool critic-warmup advantages, which carry no KL cost, over timing configurations."""
-        count = sum(value[0] for value in self.warmup_moments.values())
+        learner = self.student if learner is None else learner
+        count = sum(value[0] for value in learner.warmup_moments.values())
         if count < 2:
             raise ValueError("warmup advantage scale needs calibrated warmup moments")
-        mean = sum(value[1] for value in self.warmup_moments.values()) / count
-        variance = sum(value[2] for value in self.warmup_moments.values()) / count - mean**2
+        mean = sum(value[1] for value in learner.warmup_moments.values()) / count
+        variance = sum(value[2] for value in learner.warmup_moments.values()) / count - mean**2
         sigma = math.sqrt(max(0.0, variance))
         if not math.isfinite(sigma) or sigma <= 0:
             raise ValueError("warmup advantage spread must be finite and positive")
         return sigma
 
+    def slot_stock_share(self, slot: int) -> float:
+        if slot in self.engine.learner_slots:
+            return 1 - self.exploiters[slot - 1].stock_share
+        return self.league_stock_shares[self.slot_entries[slot]]
+
     def opponent_weights(self) -> Tensor:
         """Return advantage weights for anchor slots 0..3 from the student's stock-share EMA."""
-        shares = torch.tensor(
-            [self.league_stock_shares[self.slot_entries[slot]] for slot in range(4)], dtype=torch.float64
-        )
+        shares = torch.tensor([self.slot_stock_share(slot) for slot in range(4)], dtype=torch.float64)
         return (2 * (1 - shares)).pow(self.config.opponent_weight_power).clamp(0.25, 1.75)
 
     @torch.no_grad()
@@ -4057,6 +4202,13 @@ class Trainer:
         by_slot.index_add_(0, table.opponent_anchor[ids], stocks.double())
         by_entry: dict[int, tuple[float, float]] = {}
         for slot, (taken, lost) in enumerate(by_slot.tolist()):
+            if slot in self.engine.learner_slots:
+                learner = self.exploiters[slot - 1]
+                if learner.started and taken + lost:
+                    learner.stock_share += self.config.stock_share_ema_alpha * (
+                        lost / (taken + lost) - learner.stock_share
+                    )
+                continue
             previous = by_entry.get(self.slot_entries[slot], (0.0, 0.0))
             by_entry[self.slot_entries[slot]] = (previous[0] + taken, previous[1] + lost)
         for entry, (taken, lost) in by_entry.items():
@@ -4066,12 +4218,138 @@ class Trainer:
                     taken / (taken + lost) - share
                 )
 
+    @contextlib.contextmanager
+    def training_policy(self, learner: Learner) -> Iterator[LoopPolicy]:
+        """Reuse fixed-address student graphs without changing either learner's weights."""
+        if learner is self.student or self.policy.device.type != "cuda":
+            yield learner.policy
+            return
+        with self.student_training_weights(learner) as policy:
+            yield policy
+
+    @contextlib.contextmanager
+    def student_training_weights(self, learner: Learner) -> Iterator[LoopPolicy]:
+        # Captures bind parameter addresses. Copy weights, never replace Parameters
+        # or gradient storage. The student's optimizer and tick caches stay in place.
+        saved = {name: value.detach().clone() for name, value in self.policy.model.state_dict().items()}
+        try:
+            self.policy.model.load_state_dict(learner.policy.model.state_dict(), strict=True)
+            yield self.policy
+        finally:
+            self.policy.model.load_state_dict(saved, strict=True)
+
+    def learner_values(self, learner: Learner, batch: ReplayBatch) -> Tensor:
+        with self.training_policy(learner) as policy:
+            values = policy.evaluate_values(batch)
+            return values if policy is learner.policy else values.clone()
+
+    def learner_actor_step(
+        self, learner: Learner, batch: ReplayBatch, targets: ActorTargets
+    ) -> tuple[ActorLoss, ReplayOutput]:
+        with self.training_policy(learner) as policy:
+            result = policy.actor_step(batch, targets, clip_epsilon=self.config.clip_epsilon)
+            if policy is not learner.policy:
+                for target, source in zip(learner.policy.actor_parameters(), policy.actor_parameters(), strict=True):
+                    if source.grad is None:
+                        raise ValueError("captured actor parameter is missing its gradient")
+                    if target.grad is None:
+                        target.grad = source.grad.detach().clone()
+                    else:
+                        target.grad.copy_(source.grad)
+            return result
+
+    def bank_policy(self, policy: LoopPolicy, student_share: float) -> LeagueEntry:
+        entry = league_entry(self.league[-1].entry_id + 1, self.update, policy.model.state_dict())
+        self.league.append(entry)
+        self.league_stock_shares[entry.entry_id] = student_share
+        if len(self.league) > self.config.max_league_size:
+            candidates = [row.entry_id for row in self.league[4:-1] if row.entry_id != self.slot_entries[3]]
+            if not candidates:
+                candidates = [row.entry_id for row in self.league[1:-1] if row.entry_id != self.slot_entries[3]]
+            evicted = max(candidates, key=lambda entry_id: (self.league_stock_shares[entry_id], -entry_id))
+            self.league = [row for row in self.league if row.entry_id != evicted]
+            del self.league_stock_shares[evicted]
+        return entry
+
+    def reset_exploiter(self, learner: Learner) -> None:
+        learner.policy.model.load_state_dict(self.reference.model.state_dict(), strict=True)
+        learner.policy.model.zero_grad(set_to_none=True)
+        learner.actor_optimizer.state.clear()
+        learner.critic_optimizer.state.clear()
+        for group in learner.actor_optimizer.param_groups:
+            group["lr"] = group["initial_lr"] = 1e-5
+        learner.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            learner.actor_optimizer,
+            lambda step: min(1.0, (step + 1) / max(1, self.config.exploiter_warmup_steps)),
+        )
+        learner.warming = self.config.exploiter_critic_warmup > 0
+        learner.warmup_moments.clear()
+        learner.actor_steps = 0
+        learner.age = 0
+        learner.training_updates = 0
+        learner.stock_share = 0.5
+        for row in self.anchor_win_history:
+            row.pop(learner.owner, None)
+
+    def finish_exploiters(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for learner in self.exploiters:
+            prefix = f"exploiter/{learner.owner}"
+            retire = (
+                learner.started
+                and learner.training_updates >= self.config.exploiter_min_updates
+                and (
+                    learner.stock_share >= self.config.exploiter_retire_share
+                    or learner.training_updates >= self.config.exploiter_max_updates
+                )
+            )
+            bank = retire and (
+                learner.stock_share >= self.config.exploiter_retire_share
+                or learner.stock_share >= self.config.exploiter_bank_share
+            )
+            metrics.update(
+                {
+                    f"{prefix}/started": float(learner.started),
+                    f"{prefix}/warming": float(learner.warming),
+                    f"{prefix}/stock_share_ema": learner.stock_share,
+                    f"{prefix}/age": float(learner.age),
+                    f"{prefix}/training_updates": float(learner.training_updates),
+                    f"{prefix}/actor_steps": float(learner.actor_steps),
+                    f"{prefix}/retire": float(retire),
+                    f"{prefix}/bank": float(bank),
+                }
+            )
+            if retire:
+                if bank:
+                    self.bank_policy(learner.policy, 1 - learner.stock_share)
+                    learner.banks += 1
+                learner.retires += 1
+                self.reset_exploiter(learner)
+            metrics[f"{prefix}/retires"] = float(learner.retires)
+            metrics[f"{prefix}/banks"] = float(learner.banks)
+        return metrics
+
     def rotate_league(self) -> tuple[int, ...]:
         """Bank the student and replace slots by PFSP or oldest-slot promotion.
 
         PFSP preserves continuing episodes and loaded entries when possible. Latest
         selection ends episodes in the oldest slot before replacing its weights.
         """
+        if self.exploiters:
+            self.bank_policy(self.policy, 0.5)
+            weights = [
+                max(0.05, 1 - self.league_stock_shares[row.entry_id]) ** self.config.pfsp_power for row in self.league
+            ]
+            uniform = self.config.pfsp_uniform
+            mixed = [(1 - uniform) * weight / sum(weights) + uniform / len(weights) for weight in weights]
+            entry = self.league[self.engine.sampler.rng.choice(mixed, "league", self.update, 0, 0)]
+            changed = self.slot_entries[3] != entry.entry_id
+            self.engine.anchors[3].model.load_state_dict(entry.weights, strict=True)
+            self.slot_entries[3] = entry.entry_id
+            if changed:
+                for row in self.anchor_win_history:
+                    row.pop(3, None)
+            return (3,) if changed else ()
         # The newest entry is never evicted, so the last entry holds the largest id.
         entry = league_entry(self.league[-1].entry_id + 1, self.update, self.policy.model.state_dict())
         self.league.append(entry)
@@ -4137,7 +4415,7 @@ class Trainer:
         metrics = {"league/size": float(len(self.league)), "league/newest_entry": float(self.league[-1].entry_id)}
         for slot in range(4):
             metrics[f"league/slot{slot}_entry"] = float(self.slot_entries[slot])
-            metrics[f"league/slot{slot}_stock_share_ema"] = self.league_stock_shares[self.slot_entries[slot]]
+            metrics[f"league/slot{slot}_stock_share_ema"] = self.slot_stock_share(slot)
             metrics[f"league/slot{slot}_advantage_weight"] = weights[slot]
         return metrics
 
@@ -4439,15 +4717,33 @@ class Trainer:
     @torch.no_grad()
     def collapse_metrics(self, rollout: Rollout) -> dict[str, float]:
         histogram = action_state_histogram(rollout.table, rollout.ids)
+        slot_metrics: dict[str, float] = {}
+        if self.exploiters:
+            for slot in range(4):
+                counts = action_state_histogram(rollout.table, rollout.ids, slot)
+                if self.warming:
+                    self.warmup_slot_histograms[slot].add_(counts)
+                else:
+                    statistics = collapse_statistics(counts, self.warmup_slot_histograms[slot])
+                    slot_metrics[f"collapse/slot{slot}_smash_ratio"] = statistics["collapse/smash_ratio"]
+                    slot_metrics[f"collapse/slot{slot}_smash_fraction"] = statistics["collapse/smash_fraction"]
         if self.warming:
             self.warmup_action_histogram.add_(histogram)
             return {}
-        return collapse_statistics(histogram, self.warmup_action_histogram)
+        return {**collapse_statistics(histogram, self.warmup_action_histogram), **slot_metrics}
 
     @torch.no_grad()
-    def prepare(self, rollout: Rollout) -> PreparedUpdate:
+    def prepare(self, rollout: Rollout, learner: Learner | None = None, ids: Tensor | None = None) -> PreparedUpdate:
+        learner = self.student if learner is None else learner
+        policy = learner.policy
+        table = rollout.table
+        if ids is None:
+            ids = rollout.ids[table.owner[rollout.ids] == learner.owner]
+        if bool((~table.valid[ids] | (table.owner[ids] != learner.owner)).any()):
+            raise ValueError("learner rows must be valid and owned by the learner")
+        rollout = dataclasses.replace(rollout, ids=ids)
         started = time.perf_counter()
-        device = self.policy.device
+        device = policy.device
         table, ids = rollout.table, rollout.ids
         decisions = decision_batch(rollout)
         if table.evaluation is None:
@@ -4456,15 +4752,23 @@ class Trainer:
         ticks = self.engine.sampler.schedule.rollout_frames // 2
         size = ticks * players
         rows = torch.arange(size, device=device).reshape(-1, 64, players).transpose(1, 2).reshape(-1, 64)
-        windows = replay_batch(self.policy, table, rows, table.valid[rows])
+        learner_valid = table.valid & (table.owner == learner.owner)
+        compact = window_indices(ids, players)
+        if learner.owner >= 0:
+            # Retain only this learner's histories; padding belongs at the actor
+            # step boundary, where the student's captured shape is reused.
+            owned_windows = torch.nonzero(learner_valid[rows].any(-1)).flatten()
+            rows = rows[owned_windows]
+            compact = torch.searchsorted(owned_windows, compact // 64) * 64 + compact % 64
+        windows = replay_batch(policy, table, rows, learner_valid[rows])
         placement = place_windows(
             windows,
             self.engine.sampler.rng,
             rollout.update,
             self.config.decisions_per_window,
             self.config.windows_per_step,
+            separate_matches=learner.owner < 0,
         )
-        compact = window_indices(ids, players)
         old = _take_evaluation(table.evaluation, ids)
         with (
             self.memory.phase("reference"),
@@ -4473,7 +4777,7 @@ class Trainer:
         ):
             reference = (
                 None
-                if self.warming
+                if learner.warming
                 else window_evaluation(
                     self.reference.evaluate_reference(
                         windows,
@@ -4502,6 +4806,7 @@ class Trainer:
         invalid = (
             (following < 0)
             | ~exists
+            | (table.owner[linked] != learner.owner)
             | (next_meta[:, STREAM] != meta[:, STREAM])
             | (next_meta[:, EPISODE] != meta[:, EPISODE])
             | (next_meta[:, CLOCK] != meta[:, CLOCK] + table.duration[ids])
@@ -4519,8 +4824,8 @@ class Trainer:
             if not bool(valid.any()):
                 continue
             with sample(self.profile, "bootstrap", work=float(players)):
-                bootstrap_batch = replay_batch(self.policy, table, rows, valid)
-                all_values[rows[:, 0]] = self.policy.evaluate_values(bootstrap_batch).flatten()
+                bootstrap_batch = replay_batch(policy, table, rows, valid)
+                all_values[rows[:, 0]] = self.learner_values(learner, bootstrap_batch).flatten()
         next_values = torch.where(terminal, 0, all_values[following.clamp_min(0)])
         dense_rewards = torch.zeros_like(table.values)
         dense_next = torch.zeros_like(table.values)
@@ -4533,7 +4838,7 @@ class Trainer:
             table.duration[:size].reshape(ticks, players),
             ~table.terminal[:size].reshape(ticks, players),
             ~table.boundary[:size].reshape(ticks, players),
-            table.valid[:size].reshape(ticks, players),
+            learner_valid[:size].reshape(ticks, players),
             gamma=self.config.gamma,
         )
         advantages = result.advantages.flatten()[ids]
@@ -4543,7 +4848,11 @@ class Trainer:
         executed = decisions.executed_factors_JF
         opponents = table.opponent_anchor[ids]
         slot_weights = self.opponent_weights().to(device=device, dtype=advantages.dtype)
-        opponent_weights = torch.where(opponents >= 0, slot_weights[opponents.clamp_min(0)], 1)
+        opponent_weights = (
+            torch.where(opponents >= 0, slot_weights[opponents.clamp_min(0)], 1)
+            if learner.owner < 0
+            else torch.ones_like(advantages)
+        )
         metrics = {
             "policy/opponent_weight_mean": float(opponent_weights.mean()),
             "critic/explained_variance": explained_variance(values, targets),
@@ -4566,10 +4875,13 @@ class Trainer:
             "data/trained_decisions": float(selected.sum()),
         }
         for label, mask in (("self_play", opponents < 0), ("anchor", opponents >= 0)):
+            if learner.owner >= 0 and not bool(mask.any()):
+                continue
             metrics[f"critic/explained_variance_{label}"] = (
                 explained_variance(values[mask], targets[mask]) if bool(mask.any()) else math.nan
             )
-        metrics.update(self.collapse_metrics(rollout))
+        if learner.owner < 0:
+            metrics.update(self.collapse_metrics(rollout))
         log_min = math.log(self.engine.sampler.config.lambda_min)
         log_max = math.log(self.engine.sampler.config.lambda_max)
         log_values = decisions.kl_coefficient_J.log()
@@ -4597,7 +4909,7 @@ class Trainer:
         final_valid = bootstrap_valid[final_rows]
         metrics["critic/bootstrap_context_count"] = float(final_valid.sum())
         if bool(final_valid.any()):
-            shorter = replay_batch(self.policy, table, final_rows[:, None], final_valid[:, None])
+            shorter = replay_batch(policy, table, final_rows[:, None], final_valid[:, None])
             length = shorter.lengths.clamp_max(129)
             shift = shorter.lengths - length
             frame = torch.arange(256, device=device)[None]
@@ -4611,7 +4923,7 @@ class Trainer:
                 lengths=length,
                 slots=dataclasses.replace(shorter.slots, positions_WK=length[:, None] - 1),
             )
-            difference = (self.policy.evaluate_values(shorter).flatten() - all_values[final_rows]).abs()
+            difference = (self.learner_values(learner, shorter).flatten() - all_values[final_rows]).abs()
             metrics["critic/bootstrap_context_gap"] = float(
                 torch.where(final_valid, difference, 0).sum() / final_valid.sum()
             )
@@ -4632,8 +4944,8 @@ class Trainer:
             frames = executed[:, index::4]
             if bool(frames.any()):
                 metrics[f"policy/kl_{factor}_per_frame"] = float(kl[:, index::4][frames].mean())
-        if reference is not None and isinstance(self.policy, TransformerPolicy):
-            metrics.update(action_statistics(self.policy.model, old, reference, executed))
+        if reference is not None and isinstance(policy, TransformerPolicy):
+            metrics.update(action_statistics(policy.model, old, reference, executed))
         metrics.update(reward_component_metrics(rollout))
 
         ages = table.age[ids]
@@ -4669,17 +4981,21 @@ class Trainer:
             placement,
             opponent_weights,
         )
-        if self.engine.match_tracer is not None:
+        if learner.owner < 0 and self.engine.match_tracer is not None:
             self.engine.match_tracer.prepare(prepared, rewards)
         return prepared
 
-    def fit(self, batch: PreparedUpdate) -> dict[str, float]:
-        if not self.warming and batch.reference is None:
+    def fit(self, batch: PreparedUpdate, learner: Learner | None = None) -> dict[str, float]:
+        learner = self.student if learner is None else learner
+        policy = learner.policy
+        if bool((batch.rollout.table.owner[batch.rollout.ids] != learner.owner).any()):
+            raise ValueError("fit batch belongs to another learner")
+        if not learner.warming and batch.reference is None:
             raise ValueError("actor update requires a reference evaluation")
         cfg = self.config
         metrics = dict(batch.metrics)
-        actor_before = () if self.warming else tuple(p.detach().clone() for p in self.policy.actor_parameters())
-        critic_before = tuple(p.detach().clone() for p in self.policy.critic_parameters())
+        actor_before = () if learner.warming else tuple(p.detach().clone() for p in policy.actor_parameters())
+        critic_before = tuple(p.detach().clone() for p in policy.critic_parameters())
         critic_norms: list[Tensor] = []
         started = time.perf_counter()
         with (
@@ -4689,20 +5005,18 @@ class Trainer:
         ):
             features = batch.old.features.detached()
             count = len(batch.values)
-            selected = torch.ones(count, dtype=torch.bool, device=self.policy.device)
+            selected = torch.ones(count, dtype=torch.bool, device=policy.device)
             reduction = DecisionReduction(selected.sum())
             for _ in range(cfg.critic_epochs):
-                self.critic_optimizer.zero_grad(set_to_none=True)
-                loss = torch.zeros((), device=self.policy.device)
+                learner.critic_optimizer.zero_grad(set_to_none=True)
+                loss = torch.zeros((), device=policy.device)
                 # Chunks accumulate one full-batch gradient. A whole-batch pass over the
                 # anchor-heavy layout ran out of memory on a 95 GiB RTX PRO 6000.
                 for start in range(0, count, CRITIC_FIT_CHUNK):
                     rows = slice(start, start + CRITIC_FIT_CHUNK)
                     chunk = CriticFeatures(*(getattr(features, name)[rows] for name in CRITIC_FEATURE_NAMES))
                     predictions = (
-                        self.policy.values(chunk)
-                        if cfg.critic == "residual_scalar"
-                        else self.policy.value_logits(chunk)
+                        policy.values(chunk) if cfg.critic == "residual_scalar" else policy.value_logits(chunk)
                     )
                     part = critic_loss(
                         predictions, batch.targets[rows], selected[rows], reduction=reduction, critic=cfg.critic
@@ -4711,16 +5025,16 @@ class Trainer:
                     part.backward()
                     loss = loss + part.detach()
                 norm = torch.nn.utils.clip_grad_norm_(
-                    self.policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True
+                    policy.critic_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                 )
                 critic_norms.append(norm.detach())
-                self.critic_optimizer.step()
+                learner.critic_optimizer.step()
             metrics["critic/loss"] = float(loss.detach())
             metrics["systems/critic_seconds"] = time.perf_counter() - started
         metrics.update(gradient_metrics("critic", critic_norms, cfg.gradient_clip))
-        metrics.update(parameter_metrics("critic", self.critic_optimizer, critic_before, self.policy, self.reference))
-        if self.warming:
-            metrics.update(self._warmup(batch))
+        metrics.update(parameter_metrics("critic", learner.critic_optimizer, critic_before, policy, self.reference))
+        if learner.warming:
+            metrics.update(self._warmup(batch, learner))
             return metrics
         metrics["policy/empty_update"] = float(not batch.steps)
         if not batch.steps:
@@ -4733,7 +5047,7 @@ class Trainer:
         ratios: list[Tensor] = []
         old_log_ratios: list[Tensor] = []
         actor_norms: list[Tensor] = []
-        noise = GradientNoise(self.policy.actor_parameters())
+        noise = GradientNoise(policy.actor_parameters())
         table = batch.rollout.table
         dense_advantage = torch.zeros_like(table.values)
         dense_advantage[batch.rollout.ids] = batch.advantages
@@ -4741,9 +5055,9 @@ class Trainer:
         dense_weight[batch.rollout.ids] = batch.opponent_weights
         dense_target = torch.zeros_like(table.values)
         dense_target[batch.rollout.ids] = batch.targets
-        value_coefficient = torch.tensor(cfg.value_loss_coefficient, dtype=torch.float32, device=self.policy.device)
+        value_coefficient = torch.tensor(cfg.value_loss_coefficient, dtype=torch.float32, device=policy.device)
         fixed_sigma = (
-            torch.tensor(self.warmup_advantage_sigma(), dtype=torch.float32, device=self.policy.device)
+            torch.tensor(self.warmup_advantage_sigma(learner), dtype=torch.float32, device=policy.device)
             if cfg.advantage_scale == "warmup"
             else None
         )
@@ -4778,7 +5092,7 @@ class Trainer:
                     # gradients sum to the gradient of the whole step.
                     chunk = cfg.windows_per_step // cfg.actor_microbatches
                     parts: list[tuple[ActorLoss, ReplayOutput]] = []
-                    total = tuple(torch.zeros_like(p) for p in self.policy.actor_parameters())
+                    total = tuple(torch.zeros_like(p) for p in policy.actor_parameters())
                     for start in range(0, cfg.windows_per_step, chunk):
                         ids = window_ids[start : start + chunk]
                         part = batch.windows.take(ids, batch.placement.positions, ids >= 0)
@@ -4794,13 +5108,13 @@ class Trainer:
                             dense_target[part.rows],
                             value_coefficient,
                         )
-                        parts.append(self.policy.actor_step(part, targets, clip_epsilon=cfg.clip_epsilon))
+                        parts.append(self.learner_actor_step(learner, part, targets))
                         if cfg.actor_microbatches > 1:
-                            for gradient, parameter in zip(total, self.policy.actor_parameters(), strict=True):
+                            for gradient, parameter in zip(total, policy.actor_parameters(), strict=True):
                                 if parameter.grad is not None:
                                     gradient.add_(parameter.grad)
                     if cfg.actor_microbatches > 1:
-                        for gradient, parameter in zip(total, self.policy.actor_parameters(), strict=True):
+                        for gradient, parameter in zip(total, policy.actor_parameters(), strict=True):
                             if parameter.grad is None:
                                 parameter.grad = gradient
                             else:
@@ -4824,17 +5138,17 @@ class Trainer:
                             )
                         ),
                     )
-                    if self.engine.match_tracer is not None:
+                    if learner.owner < 0 and self.engine.match_tracer is not None:
                         self.engine.match_tracer.actor_step(windows.rows, selected, result.joint_ratio_WK, step)
                     noise.add(int(live.sum()), int(selected.sum()))
                     norm = torch.nn.utils.clip_grad_norm_(
-                        self.policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
+                        policy.actor_parameters(), cfg.gradient_clip, error_if_nonfinite=True
                     )
                     actor_norms.append(norm.detach())
                     with sample(self.profile, "muon", limit=0):
-                        self.actor_optimizer.step()
-                    self.scheduler.step()
-                    self.actor_steps += 1
+                        learner.actor_optimizer.step()
+                    learner.scheduler.step()
+                    learner.actor_steps += 1
                     policy_losses.append(result.policy_loss.detach())
                     kl_losses.append(result.kl_loss.detach())
                     value_losses.append(result.value_loss.detach())
@@ -4861,7 +5175,7 @@ class Trainer:
         ratio = torch.cat(ratios)
         metrics.update(gradient_metrics("actor", actor_norms, cfg.gradient_clip))
         metrics.update(noise.metrics())
-        metrics.update(parameter_metrics("actor", self.actor_optimizer, actor_before, self.policy, self.reference))
+        metrics.update(parameter_metrics("actor", learner.actor_optimizer, actor_before, policy, self.reference))
         metrics.update(
             {
                 "policy/loss": float(torch.stack(policy_losses).mean()),
@@ -4880,20 +5194,23 @@ class Trainer:
         )
         return metrics
 
-    def _warmup(self, batch: PreparedUpdate) -> dict[str, float]:
+    def _warmup(self, batch: PreparedUpdate, learner: Learner) -> dict[str, float]:
         for timing in self.engine.sampler.schedule.configurations:
             mask = (batch.decisions.delay_J == timing.delay) & (batch.decisions.replan_J == timing.replan)
             values = batch.advantages[mask].double()
-            previous = self.warmup_moments.get(timing, (0, 0.0, 0.0))
-            self.warmup_moments[timing] = (
+            previous = learner.warmup_moments.get(timing, (0, 0.0, 0.0))
+            learner.warmup_moments[timing] = (
                 previous[0] + len(values),
                 previous[1] + float(values.sum()),
                 previous[2] + float(values.square().sum()),
             )
+        if learner.owner >= 0:
+            learner.warming = learner.age + 1 < self.config.exploiter_critic_warmup
+            return {}
         if self.update + 1 < self.config.critic_warmup_updates:
             return {}
         spreads = []
-        for count, total, squares in self.warmup_moments.values():
+        for count, total, squares in learner.warmup_moments.values():
             if count < 2:
                 raise ValueError("lambda calibration needs advantages for every timing configuration")
             spreads.append(math.sqrt(max(0.0, squares / count - (total / count) ** 2)))
@@ -4917,6 +5234,13 @@ class Trainer:
             raise ValueError("previous update did not finish; restore an update-boundary checkpoint")
         self.updating = True
         started = time.perf_counter()
+        for learner in self.exploiters:
+            if (
+                not learner.started
+                and self.update
+                >= self.config.critic_warmup_updates + (learner.owner - 1) * self.config.exploiter_stagger
+            ):
+                learner.started = True
         native_shards = [
             shard for shard in self.engine.groups[self.engine.cursor] if isinstance(shard, NativeSimulatorShard)
         ]
@@ -4942,11 +5266,22 @@ class Trainer:
             batch = self.prepare(rollout)
         with self.memory.phase("optimization"):
             metrics = self.fit(batch)
+        student_rollout = batch.rollout
+        for learner in self.exploiters:
+            if not learner.started:
+                continue
+            was_warming = learner.warming
+            prepared = self.prepare(rollout, learner)
+            fitted = self.fit(prepared, learner)
+            learner.age += 1
+            learner.training_updates += int(not was_warming)
+            metrics.update({f"exploiter/{learner.owner}/{key}": value for key, value in fitted.items()})
+            del prepared
         if self.engine.match_tracer is not None:
             self.engine.match_tracer.flush()
-        metrics.update(self.completed_metrics(rollout, batch.kl))
-        self.record_league_results(rollout)
-        metrics.update(self.anchor_metrics(rollout))
+        metrics.update(self.completed_metrics(student_rollout, batch.kl))
+        self.record_league_results(student_rollout)
+        metrics.update(self.anchor_metrics(student_rollout))
         metrics.update(self.memory.metrics())
         self.memory.first_checked = True
         for index, (shard, previous) in enumerate(zip(native_shards, before, strict=True)):
@@ -4956,6 +5291,7 @@ class Trainer:
             metrics[f"systems/native_shard{index}_reset_seconds"] = shard.reset_seconds - previous[1]
             metrics[f"systems/native_shard{index}_h2d_bytes"] = float(shard.copied_bytes - previous[3])
         self.update += 1
+        metrics.update(self.finish_exploiters())
         metrics.update(
             global_step=float(self.update),
             **{
@@ -5057,6 +5393,8 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
     schema = [(name, tuple(value.shape), str(value.dtype)) for name, value in model.state_dict().items()]
     training = dataclasses.asdict(trainer.config)
     del training["deterministic"]
+    if trainer.config.league_selection != "exploiters":
+        training = {name: value for name, value in training.items() if not name.startswith("exploiter_")}
     for name in ("gamma", "damage_reward", "lane_layout", "league_selection"):
         if training[name] == getattr(TrainConfig(), name):
             del training[name]
@@ -5188,6 +5526,30 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
         "counter_rng": {"seed": engine.sampler.rng.seed, "key": engine.sampler.rng.key},
     }
+    if trainer.exploiters:
+        state["exploiters"] = {
+            "format": "hal.o65.exploiters.v1",
+            "warmup_slot_histograms": trainer.warmup_slot_histograms,
+            "learners": [
+                ExploiterState(
+                    owner=learner.owner,
+                    model=learner.policy.model.state_dict(),
+                    actor_optimizer=learner.actor_optimizer.state_dict(),
+                    critic_optimizer=learner.critic_optimizer.state_dict(),
+                    scheduler=learner.scheduler.state_dict(),
+                    warming=learner.warming,
+                    warmup_moments=learner.warmup_moments,
+                    actor_steps=learner.actor_steps,
+                    started=learner.started,
+                    age=learner.age,
+                    training_updates=learner.training_updates,
+                    stock_share=learner.stock_share,
+                    retires=learner.retires,
+                    banks=learner.banks,
+                )
+                for learner in trainer.exploiters
+            ],
+        }
     # Prepopulate deepcopy's memo so it preserves shared tensor references while
     # batching device-to-pinned-host copies on the current training stream.
     memo: dict[int, object] = {}
@@ -5413,6 +5775,57 @@ def restore_league(trainer: Trainer, saved: dict[str, object], paths: dict[str, 
     return league
 
 
+def restore_exploiters(trainer: Trainer, saved: dict[str, object]) -> None:
+    state = saved.get("exploiters")
+    if not trainer.exploiters:
+        if state is not None:
+            raise ValueError("unexpected checkpoint exploiter state")
+        return
+    if not isinstance(state, dict):
+        raise ValueError("invalid checkpoint exploiter identity")
+    state = cast(dict[str, object], state)
+    if set(state) != {"format", "warmup_slot_histograms", "learners"} or state["format"] != "hal.o65.exploiters.v1":
+        raise ValueError("invalid checkpoint exploiter identity")
+    rows, histograms = state["learners"], state["warmup_slot_histograms"]
+    if (
+        not isinstance(rows, list)
+        or len(rows) != len(trainer.exploiters)
+        or not isinstance(histograms, Tensor)
+        or histograms.shape != (4, ACTION_STATE_COUNT)
+        or histograms.dtype != torch.int64
+        or bool((histograms < 0).any())
+    ):
+        raise ValueError("invalid checkpoint exploiter schema")
+    for learner, row in zip(trainer.exploiters, rows, strict=True):
+        if not isinstance(row, ExploiterState) or row.owner != learner.owner:
+            raise ValueError("checkpoint exploiter slot mismatch")
+        if (
+            any(
+                type(value) is not int or value < 0
+                for value in (row.age, row.training_updates, row.actor_steps, row.retires, row.banks)
+            )
+            or row.training_updates > row.age
+            or not 0 <= row.stock_share <= 1
+            or type(row.warming) is not bool
+            or type(row.started) is not bool
+        ):
+            raise ValueError("invalid checkpoint exploiter progress")
+        learner.policy.model.load_state_dict(row.model, strict=True)
+        learner.actor_optimizer.load_state_dict(row.actor_optimizer)
+        learner.critic_optimizer.load_state_dict(row.critic_optimizer)
+        learner.scheduler.load_state_dict(row.scheduler)
+        learner.warming = row.warming
+        learner.warmup_moments = row.warmup_moments
+        learner.actor_steps = row.actor_steps
+        learner.started = row.started
+        learner.age = row.age
+        learner.training_updates = row.training_updates
+        learner.stock_share = row.stock_share
+        learner.retires = row.retires
+        learner.banks = row.banks
+    trainer.warmup_slot_histograms.copy_(histograms)
+
+
 def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[str, str]) -> None:
     manifest = read_training_manifest(manifest_path)
     legacy_critic = manifest["version"] == 11
@@ -5554,6 +5967,7 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     for key, policy in enumerate((reference, *trainer.snapshot_slots)):
         policy.model.load_state_dict(weights[saved["slot_entries"][key]], strict=True)
         engine.anchors[key] = policy
+    restore_exploiters(trainer, saved)
     engine.layout_anchors = [() for _ in engine.groups]
     trainer.reference = engine.anchors[0]
     for name, value in saved["reference"].items():
@@ -6794,7 +7208,7 @@ def _rng_hash() -> str:
 
 def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
     engine = trainer.engine
-    return {
+    result = {
         "model": _state_hash(trainer.policy.model.state_dict()),
         "actor_optimizer": _state_hash(trainer.actor_optimizer.state_dict()),
         "critic_optimizer": _state_hash(trainer.critic_optimizer.state_dict()),
@@ -6830,6 +7244,31 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
         ),
     }
 
+    if trainer.exploiters:
+        result["exploiters"] = _state_hash(
+            (
+                [
+                    (
+                        learner.actor_optimizer.state_dict(),
+                        learner.critic_optimizer.state_dict(),
+                        learner.scheduler.state_dict(),
+                        learner.warming,
+                        learner.warmup_moments,
+                        learner.actor_steps,
+                        learner.started,
+                        learner.age,
+                        learner.training_updates,
+                        learner.stock_share,
+                        learner.retires,
+                        learner.banks,
+                    )
+                    for learner in trainer.exploiters
+                ],
+                trainer.warmup_slot_histograms,
+            )
+        )
+    return result
+
 
 def _update_tensors(trainer: Trainer) -> dict[str, Tensor]:
     tensors: dict[str, Tensor] = {}
@@ -6848,6 +7287,10 @@ def _update_tensors(trainer: Trainer) -> dict[str, Tensor]:
     visit("model", trainer.policy.model.state_dict())
     visit("actor_optimizer", trainer.actor_optimizer.state_dict())
     visit("critic_optimizer", trainer.critic_optimizer.state_dict())
+    for learner in trainer.exploiters:
+        visit(f"exploiter{learner.owner}_model", learner.policy.model.state_dict())
+        visit(f"exploiter{learner.owner}_actor_optimizer", learner.actor_optimizer.state_dict())
+        visit(f"exploiter{learner.owner}_critic_optimizer", learner.critic_optimizer.state_dict())
     return tensors
 
 

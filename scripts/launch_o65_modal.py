@@ -52,7 +52,7 @@ BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
 ABLATION_TIMEOUT_SECONDS = 9000
-ABLATION_MAX_USD = 80.0
+ABLATION_MAX_USD = 90.0
 ABLATION_BUDGET_FORMAT = "hal.o65.modal-ablation-budget.v1"
 
 
@@ -698,7 +698,7 @@ class Args:
     secret: str = "hal"
     output: Path = Path("runs/modal")
     sweep: str | None = None
-    arms: tuple[pilot.ArmName, ...] = ("old", "reward", "critic", "scale", "matchup")
+    arms: tuple[pilot.ArmName, ...] = ("old", "reward", "critic", "scale", "matchup", "exploiters")
 
 
 def launch_ablation(args: Args, budget: Path) -> None:

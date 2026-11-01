@@ -26,7 +26,7 @@ def test_ledger_reserves_all_arms_and_refuses_over_the_cap(tmp_path: Path) -> No
     path = tmp_path / "budget.jsonl"
     launcher.reserve_ablation(path, requests())
     original = path.read_bytes()
-    assert len(original.splitlines()) == 5
+    assert len(original.splitlines()) == len(pilot.ARMS)
     with path.open() as log:
         balances = launcher.read_ablation_budget(log)
     assert set(balances) == {request.name for request in requests()}
@@ -90,7 +90,7 @@ def test_ablation_dry_run_prints_and_writes_all_full_argv_without_modal(
     launcher.main(launcher.Args(mode="ablation", sweep="collapse", output=tmp_path, dry_run=True))
     output = capsys.readouterr().out
     plan = json.loads((tmp_path / "collapse-dry-run.json").read_text())
-    assert len(plan["arms"]) == 5
+    assert len(plan["arms"]) == len(pilot.ARMS)
     for entry in plan["arms"]:
         assert entry["request"]["timeout_seconds"] == 9000
         argv = entry["trainer_argv"]
@@ -148,7 +148,7 @@ def test_launch_builds_one_image_detaches_and_reserves_before_every_spawn(
 
     def spawn(request: launcher.Request) -> Mock:
         with budget.open() as log:
-            assert len(launcher.read_ablation_budget(log)) == 5
+            assert len(launcher.read_ablation_budget(log)) == len(pilot.ARMS)
         spawned.append(request.name)
         return Mock(object_id="fc-" + request.name)
 
@@ -156,10 +156,10 @@ def test_launch_builds_one_image_detaches_and_reserves_before_every_spawn(
     launcher.launch_ablation(launcher.Args(mode="ablation", sweep="collapse", output=output), budget)
     builds.assert_called_once_with(sha, secret)
     app.run.assert_called_once_with(detach=True)
-    assert app.function.call_args.kwargs["max_containers"] == 5
+    assert app.function.call_args.kwargs["max_containers"] == len(pilot.ARMS)
     assert app.function.call_args.kwargs["timeout"] == 9000
     assert spawned == [request.name for request in requests()]
-    assert len(list(output.glob("*-call.json"))) == 5
+    assert len(list(output.glob("*-call.json"))) == len(pilot.ARMS)
     for path in output.glob("*-call.json"):
         assert json.loads(path.read_text())["call_id"].startswith("fc-collapse-")
     worker.get.assert_not_called()
@@ -226,7 +226,7 @@ def test_collect_waits_downloads_hashes_and_does_not_double_credit(
     assert budget.read_bytes() == original
     assert (tmp_path / "collapse-old/SHA256SUMS").read_bytes() == original_checksums
     assert downloads == [request.name for request in arms] * 2
-    assert len(handles) == 10
+    assert len(handles) == 2 * len(pilot.ARMS)
     for handle in handles:
         handle.get.assert_called_once_with()
     for request in arms:
