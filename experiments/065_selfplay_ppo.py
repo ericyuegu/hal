@@ -2077,7 +2077,6 @@ class RolloutEngine:
         anchors: dict[int, LoopPolicy],
         *,
         lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy",
-        learner_slots: tuple[int, ...] = (),
     ) -> None:
         if not groups or any(not group or any(not shard.match_ids for shard in group) for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
@@ -2087,13 +2086,11 @@ class RolloutEngine:
         if 0 not in anchors:
             raise ValueError("anchor zero must be the frozen reference")
         student_parameters = {id(parameter) for parameter in policy.model.parameters()}
-        if len(set(learner_slots)) != len(learner_slots) or any(slot not in (1, 2) for slot in learner_slots):
-            raise ValueError("learner slots must be distinct exploiter slots 1 and 2")
-        self.learner_slots = learner_slots
-        for slot, anchor in anchors.items():
-            if (
-                slot not in learner_slots and any(parameter.requires_grad for parameter in anchor.model.parameters())
-            ) or any(id(parameter) in student_parameters for parameter in anchor.model.parameters()):
+        self.learner_slots: tuple[int, ...] = ()
+        for anchor in anchors.values():
+            if any(parameter.requires_grad for parameter in anchor.model.parameters()) or any(
+                id(parameter) in student_parameters for parameter in anchor.model.parameters()
+            ):
                 raise ValueError("anchors must be frozen and have independent parameters")
         self.profile: UpdateProfile | None = None
         self.groups = groups
@@ -4085,10 +4082,7 @@ class Trainer:
             config.critic_warmup_updates > 0,
         )
         self.update = 0
-        self.actor_steps = 0
         self.pool_start_update = 0
-        self.warming = config.critic_warmup_updates > 0
-        self.warmup_moments: dict[DelayReplan, tuple[int, float, float]] = {}
         self.warmup_action_histogram = torch.zeros(ACTION_STATE_COUNT, dtype=torch.int64, device=self.policy.device)
         self.warmup_slot_histograms = torch.zeros(4, ACTION_STATE_COUNT, dtype=torch.int64, device=self.policy.device)
         if set(engine.anchors) != {0}:
@@ -4097,20 +4091,18 @@ class Trainer:
         engine.anchors.update(enumerate(self.snapshot_slots, start=1))
         self.exploiters: tuple[Learner, ...] = ()
         self.actor_staging: ActorStaging | None = None
-        self.training_weights: dict[str, Tensor] = {}
+        self.student_weight_backup: dict[str, Tensor] = {}
         if config.league_selection == "exploiters":
             if any(slot not in engine.lane_roles.values() for slot in (1, 2)):
                 raise ValueError("exploiters require lanes for both learner slots")
             engine.learner_slots = (1, 2)
             learners = []
             trainable = {name for name, parameter in self.policy.model.named_parameters() if parameter.requires_grad}
+            exploiter_config = dataclasses.replace(config, actor_lr=1e-5)
             for slot in engine.learner_slots:
                 policy = engine.anchors[slot]
                 for name, parameter in policy.model.named_parameters():
                     parameter.requires_grad_(name in trainable)
-                exploiter_config = dataclasses.replace(
-                    config, actor_lr=1e-5, warmup_steps=config.exploiter_warmup_steps
-                )
                 actor = make_actor_optimizer(policy, exploiter_config)
                 critic = torch.optim.AdamW(policy.critic_parameters(), lr=config.critic_lr, weight_decay=0)
                 scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -4228,23 +4220,20 @@ class Trainer:
                     taken / (taken + lost) - share
                 )
 
-    @contextlib.contextmanager
-    def training_policy(self, learner: Learner) -> Iterator[LoopPolicy]:
+    def training_policy(self, learner: Learner) -> contextlib.AbstractContextManager[LoopPolicy]:
         """Reuse fixed-address student graphs without changing either learner's weights."""
         if learner is self.student or self.policy.device.type != "cuda":
-            yield learner.policy
-            return
-        with self.student_training_weights(learner) as policy:
-            yield policy
+            return contextlib.nullcontext(learner.policy)
+        return self.student_training_weights(learner)
 
     @contextlib.contextmanager
     def student_training_weights(self, learner: Learner) -> Iterator[LoopPolicy]:
         # Captures bind parameter addresses. Copy weights, never replace Parameters
         # or gradient storage. The student's optimizer and tick caches stay in place.
         state = self.policy.model.state_dict()
-        if not self.training_weights:
-            self.training_weights = {name: torch.empty_like(value) for name, value in state.items()}
-        saved = self.training_weights
+        if not self.student_weight_backup:
+            self.student_weight_backup = {name: torch.empty_like(value) for name, value in state.items()}
+        saved = self.student_weight_backup
         for name, value in state.items():
             saved[name].copy_(value)
         try:
@@ -4317,9 +4306,8 @@ class Trainer:
                     or learner.training_updates >= self.config.exploiter_max_updates
                 )
             )
-            bank = retire and (
-                learner.stock_share >= self.config.exploiter_retire_share
-                or learner.stock_share >= self.config.exploiter_bank_share
+            bank = retire and learner.stock_share >= min(
+                self.config.exploiter_retire_share, self.config.exploiter_bank_share
             )
             metrics.update(
                 {
@@ -4355,7 +4343,8 @@ class Trainer:
                 max(0.05, 1 - self.league_stock_shares[row.entry_id]) ** self.config.pfsp_power for row in self.league
             ]
             uniform = self.config.pfsp_uniform
-            mixed = [(1 - uniform) * weight / sum(weights) + uniform / len(weights) for weight in weights]
+            total = sum(weights)
+            mixed = [(1 - uniform) * weight / total + uniform / len(weights) for weight in weights]
             entry = self.league[self.engine.sampler.rng.choice(mixed, "league", self.update, 0, 0)]
             changed = self.slot_entries[3] != entry.entry_id
             self.engine.anchors[3].model.load_state_dict(entry.weights, strict=True)
@@ -4733,8 +4722,11 @@ class Trainer:
         histogram = action_state_histogram(rollout.table, rollout.ids)
         slot_metrics: dict[str, float] = {}
         if self.exploiters:
-            for slot in range(4):
-                counts = action_state_histogram(rollout.table, rollout.ids, slot)
+            histograms = (
+                histogram,
+                *(action_state_histogram(rollout.table, rollout.ids, slot) for slot in range(1, 4)),
+            )
+            for slot, counts in enumerate(histograms):
                 if self.warming:
                     self.warmup_slot_histograms[slot].add_(counts)
                 else:
@@ -4747,18 +4739,16 @@ class Trainer:
         return {**collapse_statistics(histogram, self.warmup_action_histogram), **slot_metrics}
 
     @torch.no_grad()
-    def prepare(self, rollout: Rollout, learner: Learner | None = None, ids: Tensor | None = None) -> PreparedUpdate:
+    def prepare(self, rollout: Rollout, learner: Learner | None = None) -> PreparedUpdate:
         learner = self.student if learner is None else learner
         policy = learner.policy
         table = rollout.table
-        if ids is None:
-            ids = rollout.ids[table.owner[rollout.ids] == learner.owner]
-        if bool((~table.valid[ids] | (table.owner[ids] != learner.owner)).any()):
-            raise ValueError("decision transition rows must be valid and owned by the learner")
+        ids = rollout.ids[table.owner[rollout.ids] == learner.owner]
+        if bool((~table.valid[ids]).any()):
+            raise ValueError("decision transition rows must be valid")
         rollout = dataclasses.replace(rollout, ids=ids)
         started = time.perf_counter()
         device = policy.device
-        table, ids = rollout.table, rollout.ids
         decisions = decision_batch(rollout)
         if table.evaluation is None:
             raise ValueError("rollout is missing its behavior evaluation")
@@ -5077,13 +5067,16 @@ class Trainer:
             dense_advantage = staging.advantage.zero_()
             dense_weight = staging.weight.fill_(1)
             dense_target = staging.target.zero_()
+            dense_advantage[batch.rollout.ids] = batch.advantages
+            dense_weight[batch.rollout.ids] = batch.opponent_weights
+            dense_target[batch.rollout.ids] = batch.targets
         else:
             dense_advantage = torch.zeros_like(table.values)
+            dense_advantage[batch.rollout.ids] = batch.advantages
             dense_weight = torch.ones_like(table.values)
+            dense_weight[batch.rollout.ids] = batch.opponent_weights
             dense_target = torch.zeros_like(table.values)
-        dense_advantage[batch.rollout.ids] = batch.advantages
-        dense_weight[batch.rollout.ids] = batch.opponent_weights
-        dense_target[batch.rollout.ids] = batch.targets
+            dense_target[batch.rollout.ids] = batch.targets
         value_coefficient = torch.tensor(cfg.value_loss_coefficient, dtype=torch.float32, device=policy.device)
         fixed_sigma = (
             torch.tensor(self.warmup_advantage_sigma(learner), dtype=torch.float32, device=policy.device)
@@ -5130,13 +5123,12 @@ class Trainer:
                     for start in range(0, cfg.windows_per_step, chunk):
                         ids = window_ids[start : start + chunk]
                         part = batch.windows.take(ids, batch.placement.positions, ids >= 0)
-                        if self.actor_staging is None:
-                            reference_distributions = tuple(value[part.rows] for value in reference_dense)
-                        else:
-                            reference_rows = self.actor_staging.reference_rows[part.rows]
+                        reference_distributions: tuple[Tensor, ...] = ()
+                        if self.actor_staging is not None:
+                            reference_rows_WK = self.actor_staging.reference_rows[part.rows]
                             reference_distributions = tuple(
                                 torch.where(
-                                    (reference_rows >= 0)[..., None, None], value[reference_rows.clamp_min(0)], 0
+                                    (reference_rows_WK >= 0)[..., None, None], value[reference_rows_WK.clamp_min(0)], 0
                                 )
                                 for value in batch.reference.distributions
                             )
@@ -5145,7 +5137,11 @@ class Trainer:
                             advantages[start : start + chunk],
                             selected[start : start + chunk],
                             table.coefficients[part.rows],
-                            reference_distributions,
+                            (
+                                tuple(value[part.rows] for value in reference_dense)
+                                if self.actor_staging is None
+                                else reference_distributions
+                            ),
                             statistics.mean.float(),
                             sigma,
                             selected.sum().float(),
@@ -5320,7 +5316,7 @@ class Trainer:
             learner.training_updates += int(not was_warming)
             metrics.update({f"exploiter/{learner.owner}/{key}": value for key, value in fitted.items()})
         self.actor_staging = None
-        self.training_weights.clear()
+        self.student_weight_backup.clear()
         if self.engine.match_tracer is not None:
             self.engine.match_tracer.flush()
         metrics.update(self.completed_metrics(student_rollout, batch.kl))
