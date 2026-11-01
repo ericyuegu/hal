@@ -207,3 +207,30 @@ def test_learner_migration_uses_read_only_source_volume_and_new_run() -> None:
     for path in ("../" + source, "/" + source, source.replace("256", "255"), "o65-fixed-resume/" + source):
         with pytest.raises(ValueError):
             dataclasses.replace(request, resume_learner=path)
+
+
+def test_download_retry_skips_complete_files_and_rewrites_partial_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"run/a.bin": b"complete", "run/b.bin": b"rewritten"}
+    entries = [
+        dataclasses.make_dataclass("Entry", ["path", "type", "size"])(path, launcher.FileEntryType.FILE, len(data))
+        for path, data in files.items()
+    ]
+    read: list[str] = []
+
+    class Volume:
+        def iterdir(self, name: str, *, recursive: bool) -> list[object]:
+            return entries
+
+        def read_file(self, path: str) -> list[bytes]:
+            read.append(path)
+            return [files[path]]
+
+    monkeypatch.setattr(launcher.modal.Volume, "from_name", lambda name: Volume())
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run/a.bin").write_bytes(b"complete")
+    (tmp_path / "run/b.bin").write_bytes(b"part")
+    launcher.download("run", tmp_path)
+    assert read == ["run/b.bin"]
+    assert (tmp_path / "run/b.bin").read_bytes() == b"rewritten"

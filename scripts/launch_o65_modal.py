@@ -512,6 +512,9 @@ def download(name: str, local: Path) -> None:
         if relative.parts[0] in ("compile-cache", "inductor", "triton", "tmp"):
             continue
         target = local / name / relative
+        # A retry after a dropped connection keeps complete files; partial ones differ in size.
+        if target.is_file() and target.stat().st_size == entry.size:
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as out:
             for chunk in volume.read_file(entry.path):
