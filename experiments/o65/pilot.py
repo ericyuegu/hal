@@ -24,7 +24,17 @@ from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
 ArmName = Literal[
-    "old", "reward", "critic", "scale", "matchup", "exploiters", "exploit", "exploit-lr3", "exploit-lr10", "null"
+    "old",
+    "reward",
+    "critic",
+    "scale",
+    "matchup",
+    "exploiters",
+    "exploit",
+    "exploit-lr3",
+    "exploit-lr10",
+    "null",
+    "exploit-ref",
 ]
 
 
@@ -93,6 +103,8 @@ ARMS = (
     dataclasses.replace(EXPLOIT, name="exploit-lr10", actor_lr=1e-4, updates=320),
     # Matches old except for per-episode random reward signs.
     dataclasses.replace(OLD, name="null", null_reward=True, updates=384),
+    # Control for exploit-lr10: the same exploiter against frozen pi_ref.
+    dataclasses.replace(EXPLOIT, name="exploit-ref", actor_lr=1e-4, updates=320, opponent="pi-ref/final.pt"),
 )
 
 
