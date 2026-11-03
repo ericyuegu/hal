@@ -52,7 +52,7 @@ BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
 ABLATION_TIMEOUT_SECONDS = 12600
-ABLATION_MAX_USD = 90.0
+ABLATION_MAX_USD = 131.0
 ABLATION_BUDGET_FORMAT = "hal.o65.modal-ablation-budget.v1"
 
 

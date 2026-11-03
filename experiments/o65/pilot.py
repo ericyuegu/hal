@@ -23,7 +23,9 @@ from hal.eval.self_play_checkpoint import read_training_manifest
 from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
-ArmName = Literal["old", "reward", "critic", "scale", "matchup", "exploiters", "exploit"]
+ArmName = Literal[
+    "old", "reward", "critic", "scale", "matchup", "exploiters", "exploit", "exploit_lr3", "exploit_lr10"
+]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -40,6 +42,7 @@ class Arm:
     critic_depth: int = 0
     advantage_scale: Literal["batch", "warmup"] = "batch"
     updates: int = 672
+    actor_lr: float = 1e-5
     # Training manifest of the frozen opponent, relative to the results volume.
     opponent: str | None = None
 
@@ -80,6 +83,13 @@ ARMS = (
         updates=160,
         opponent="o65-fixed-resume/pilot/train/checkpoints/update-00002000.json",
     ),
+)
+EXPLOIT = ARMS[-1]
+# The probe at the student's step size moved KL to pi_ref only 4e-4 per frame in 110 updates.
+ARMS = (
+    *ARMS,
+    dataclasses.replace(EXPLOIT, name="exploit_lr3", actor_lr=3e-5, updates=320),
+    dataclasses.replace(EXPLOIT, name="exploit_lr10", actor_lr=1e-4, updates=320),
 )
 
 
@@ -209,6 +219,8 @@ def training_command(
                 str(treatment.critic_hidden_dim),
                 "--training.critic-depth",
                 str(treatment.critic_depth),
+                "--training.actor-lr",
+                str(treatment.actor_lr),
                 "--training.value-loss-coefficient",
                 "0",
                 "--percentile-alpha",

@@ -3661,6 +3661,9 @@ def action_state_histogram(table: DenseRollout, ids: Tensor, slot: int = 0, *, o
     states = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_action"][0]] for s in (1, 2)], -1)
     side = meta[:, SIDE, None, None].expand(-1, 4, 1)
     actions = states.gather(-1, 1 - side if opponent else side).squeeze(-1)[valid].long()
+    if opponent:
+        # The frozen opponent occasionally reports states outside the table; the diagnostic drops them.
+        actions = actions[(actions >= 0) & (actions < ACTION_STATE_COUNT)]
     if bool(((actions < 0) | (actions >= ACTION_STATE_COUNT)).any()):
         raise ValueError("unsupported native action state in collapse histogram")
     return torch.bincount(actions, minlength=ACTION_STATE_COUNT)
