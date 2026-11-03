@@ -23,14 +23,14 @@ from hal.eval.self_play_checkpoint import read_training_manifest
 from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
-ArmName = Literal["old", "reward", "critic", "scale", "matchup", "exploiters"]
+ArmName = Literal["old", "reward", "critic", "scale", "matchup", "exploiters", "exploit"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Arm:
     name: ArmName
-    lane_layout: Literal["self_play_heavy", "anchor_heavy"] = "self_play_heavy"
-    league_selection: Literal["latest", "pfsp", "exploiters"] = "latest"
+    lane_layout: Literal["self_play_heavy", "anchor_heavy", "frozen_opponent"] = "self_play_heavy"
+    league_selection: Literal["latest", "pfsp", "exploiters", "frozen"] = "latest"
     snapshot_interval: int = 256
     opponent_weight_power: float = 0
     gamma: float = 0.99855
@@ -39,6 +39,9 @@ class Arm:
     critic_hidden_dim: int = 128
     critic_depth: int = 0
     advantage_scale: Literal["batch", "warmup"] = "batch"
+    updates: int = 672
+    # Training manifest of the frozen opponent, relative to the results volume.
+    opponent: str | None = None
 
 
 OLD = Arm("old")
@@ -67,6 +70,16 @@ ARMS = (
         snapshot_interval=64,
         opponent_weight_power=1,
     ),
+    # Exploitability probe: a fresh pi_ref learner trains only against the frozen
+    # o65-fixed-resume update-2000 student, with that run's reward, critic and prior.
+    dataclasses.replace(
+        OLD,
+        name="exploit",
+        lane_layout="frozen_opponent",
+        league_selection="frozen",
+        updates=160,
+        opponent="o65-fixed-resume/pilot/train/checkpoints/update-00002000.json",
+    ),
 )
 
 
@@ -93,14 +106,16 @@ class Args:
     r2_prefix: str | None = None
     arm: ArmName | None = None
     sweep: str | None = None
+    opponent: Path | None = None
 
     def __post_init__(self) -> None:
         if self.arm is not None:
-            get_arm(self.arm)
             if self.tiny or self.resume_learner is not None:
                 raise ValueError("ablation arms require full training from the fixed bootstrap")
         elif self.sweep is not None:
             raise ValueError("a sweep requires an ablation arm")
+        if (self.opponent is not None) != (self.arm is not None and get_arm(self.arm).opponent is not None):
+            raise ValueError("only an arm with a frozen opponent takes an opponent checkpoint")
 
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
@@ -122,12 +137,21 @@ def training_command(
     compile_cache: Path | None = None,
     resume_learner: Path | None = None,
     arm: ArmName | None = None,
+    opponent: Path | None = None,
 ) -> list[str]:
     treatment = get_arm(arm) if arm is not None else None
-    if treatment is not None and (matches, groups, updates, checkpoint_every, warmup) != (64, 4, 672, 32, 32):
+    if treatment is not None and (matches, groups, updates, checkpoint_every, warmup) != (
+        64,
+        4,
+        treatment.updates,
+        32,
+        32,
+    ):
         raise ValueError(
-            "ablation arms require four groups of 1024 matches, 672 updates and 32-update checkpoints/warmup"
+            "ablation arms require four groups of 1024 matches, the arm's updates and 32-update checkpoints/warmup"
         )
+    if (opponent is not None) != (treatment is not None and treatment.opponent is not None):
+        raise ValueError("only an arm with a frozen opponent takes an opponent checkpoint")
     command = [
         sys.executable,
         str(ROOT / "experiments/065_selfplay_ppo.py"),
@@ -195,6 +219,8 @@ def training_command(
                 "4",
             )
         )
+    if opponent is not None:
+        command.extend(("--opponent", str(opponent)))
     if resume_learner is not None:
         command.extend(("--resume-learner", str(resume_learner)))
     if compile_cache is not None:
@@ -443,7 +469,7 @@ def main(args: Args) -> None:
     execute(["bash", str(ROOT / "docker/o65-build-msl.sh"), str(delivery)], output / "build.log", environment)
     protocol = ROOT / "experiments/o65/pilot-evaluation.json"
     run = output / "train"
-    updates = 672 if args.arm is not None else (4 if args.tiny else 2000)
+    updates = get_arm(args.arm).updates if args.arm is not None else (4 if args.tiny else 2000)
     checkpoint_every = 1 if args.tiny else 32
     command = training_command(
         delivery,
@@ -456,6 +482,7 @@ def main(args: Args) -> None:
         warmup=32 if args.arm is not None else (0 if args.tiny else 128),
         compile_cache=args.compile_cache,
         arm=args.arm,
+        opponent=args.opponent,
     )
     if args.wandb:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]
@@ -504,7 +531,7 @@ def main(args: Args) -> None:
     if not args.tiny and (last.get("train/warming", 1) or last.get("train/actor_steps", 0) == 0):
         raise RuntimeError("pilot ended without calibrated PPO training; inspect warmup before extending")
     if args.arm is not None and last["global_step"] != updates:
-        raise RuntimeError("ablation ended before its 640 PPO updates after warmup")
+        raise RuntimeError("ablation ended before its PPO updates after warmup")
     if args.arm is None and not args.tiny and not (output / "held-out/results.json").is_file():
         consume_held_out(output, updates, protocol)
         publish(args, output)

@@ -34,6 +34,7 @@ from torch import Tensor
 from hal.data.feature_stats import FeatureStats
 from hal.data.schema import MDS_PER_FRAME_DTYPES
 from hal.data.schema import Rank
+from hal.eval.self_play_checkpoint import CRITIC_PREFIXES
 from hal.eval.self_play_checkpoint import EVALUATION_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_FORMAT
 from hal.eval.self_play_checkpoint import TRAINING_VERSION
@@ -2068,6 +2069,21 @@ def self_play_heavy_opponent_slots(lanes: int) -> tuple[int | None, ...]:
     return tuple(roles)
 
 
+def frozen_opponent_slots(lanes: int) -> tuple[int | None, ...]:
+    """Pair every lane with slot 1, which holds the frozen opponent of an exploitability probe."""
+    if type(lanes) is not int or lanes < 1:
+        raise ValueError("shard lanes must be positive")
+    return (1,) * lanes
+
+
+LaneLayout = Literal["anchor_heavy", "self_play_heavy", "frozen_opponent"]
+LANE_LAYOUTS = {
+    "anchor_heavy": opponent_slots,
+    "self_play_heavy": self_play_heavy_opponent_slots,
+    "frozen_opponent": frozen_opponent_slots,
+}
+
+
 class RolloutEngine:
     def __init__(
         self,
@@ -2076,7 +2092,7 @@ class RolloutEngine:
         sampler: EpisodeSampler,
         anchors: dict[int, LoopPolicy],
         *,
-        lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy",
+        lane_layout: LaneLayout = "anchor_heavy",
     ) -> None:
         if not groups or any(not group or any(not shard.match_ids for shard in group) for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
@@ -2114,10 +2130,10 @@ class RolloutEngine:
         self.rings = tuple(ActionRing(len(matches), capacity, policy.device) for matches in self.group_matches)
         for ring in self.rings:
             ring.controllers.copy_(policy.device_wire_actions(ring.values))
-        if lane_layout not in ("anchor_heavy", "self_play_heavy"):
+        if lane_layout not in LANE_LAYOUTS:
             raise ValueError("unsupported lane layout")
         self.lane_layout = lane_layout
-        layout = opponent_slots if lane_layout == "anchor_heavy" else self_play_heavy_opponent_slots
+        layout = LANE_LAYOUTS[lane_layout]
         self.lane_roles = {
             match: role
             for group in groups
@@ -3056,8 +3072,9 @@ class TrainConfig:
     # A 30-second half-life covers about one stock exchange.
     gamma: float = 2 ** (-1 / 1800)
     damage_reward: float = 0.0
-    lane_layout: Literal["anchor_heavy", "self_play_heavy"] = "anchor_heavy"
-    league_selection: Literal["pfsp", "latest", "exploiters"] = "pfsp"
+    lane_layout: LaneLayout = "anchor_heavy"
+    # "frozen" trains against a fixed opponent in slot 1 and never rotates the league.
+    league_selection: Literal["pfsp", "latest", "exploiters", "frozen"] = "pfsp"
     exploiter_count: int = 2
     exploiter_stagger: int = 64
     exploiter_retire_share: float = 0.7
@@ -3108,10 +3125,15 @@ class TrainConfig:
 
     def __post_init__(self) -> None:
         _check_discount("gamma", self.gamma)
-        if self.lane_layout not in ("anchor_heavy", "self_play_heavy"):
+        if self.lane_layout not in LANE_LAYOUTS:
             raise ValueError("unsupported lane layout")
-        if self.league_selection not in ("pfsp", "latest", "exploiters"):
+        if self.league_selection not in ("pfsp", "latest", "exploiters", "frozen"):
             raise ValueError("unsupported league selection")
+        if (self.league_selection == "frozen") != (self.lane_layout == "frozen_opponent"):
+            raise ValueError("a frozen league requires frozen_opponent lanes, and only it uses them")
+        if self.league_selection == "frozen" and self.opponent_weight_power != 0:
+            # Stock-share weights would rescale every learner advantage against the one opponent.
+            raise ValueError("a frozen league requires opponent_weight_power 0")
         if type(self.exploiter_count) is not int or self.exploiter_count != 2:
             raise ValueError("the fixed league requires exactly two exploiters")
         if self.league_selection == "exploiters" and self.lane_layout != "anchor_heavy":
@@ -3626,8 +3648,8 @@ def training_frame_rewards(table: DenseRollout, ids: Tensor, damage_weight: floa
 
 
 @torch.no_grad()
-def action_state_histogram(table: DenseRollout, ids: Tensor, slot: int = 0) -> Tensor:
-    """Count post-step states once per frame on the student's side of a slot."""
+def action_state_histogram(table: DenseRollout, ids: Tensor, slot: int = 0, *, opponent: bool = False) -> Tensor:
+    """Count post-step states once per frame on the student's side of a slot, or on the slot's side."""
     ids = ids[(table.owner[ids] < 0) & (table.opponent_anchor[ids] == slot)]
     meta = table.integers[ids]
     frames = torch.arange(4, device=ids.device)[None]
@@ -3638,7 +3660,7 @@ def action_state_histogram(table: DenseRollout, ids: Tensor, slot: int = 0) -> T
     columns = records[..., : 4 * len(native.OBSERVATION_FIELDS)].contiguous().view(torch.int32)
     states = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_action"][0]] for s in (1, 2)], -1)
     side = meta[:, SIDE, None, None].expand(-1, 4, 1)
-    actions = states.gather(-1, side).squeeze(-1)[valid].long()
+    actions = states.gather(-1, 1 - side if opponent else side).squeeze(-1)[valid].long()
     if bool(((actions < 0) | (actions >= ACTION_STATE_COUNT)).any()):
         raise ValueError("unsupported native action state in collapse histogram")
     return torch.bincount(actions, minlength=ACTION_STATE_COUNT)
@@ -3821,6 +3843,20 @@ def league_entry(entry_id: int, update: int, state: dict[str, Tensor]) -> League
     weights = {name: value.detach().to(device="cpu", copy=True) for name, value in state.items()}
     digest = hashlib.sha256(league_payload(entry_id, update, weights)).hexdigest()
     return LeagueEntry(entry_id, update, weights, digest)
+
+
+def frozen_opponent_weights(slot: dict[str, Tensor], opponent: dict[str, Tensor]) -> dict[str, Tensor]:
+    """Combine an opponent's actor tensors with a slot's critic tensors on the host."""
+    actor = {name for name in slot if not name.startswith(CRITIC_PREFIXES)}
+    if actor != {name for name in opponent if not name.startswith(CRITIC_PREFIXES)}:
+        raise ValueError("frozen opponent actor tensors differ from the slot's")
+    weights = {}
+    for name, value in slot.items():
+        source = opponent[name] if name in actor else value
+        if source.shape != value.shape or source.dtype != value.dtype:
+            raise ValueError(f"frozen opponent tensor {name} differs in shape or dtype")
+        weights[name] = source.detach().to(device="cpu", copy=True)
+    return weights
 
 
 def load_league_entry(path: Path, entry_id: int, update: int, digest: str, names: set[str]) -> LeagueEntry:
@@ -4123,6 +4159,43 @@ class Trainer:
         self.episode_metrics: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self.partial_episodes: set[tuple[int, int]] = set()
         self.anchor_win_history: list[dict[int, tuple[int, int]]] = []
+        # Stocks the student took from and lost to each slot, per update.
+        self.anchor_stock_history: list[dict[int, tuple[float, float]]] = []
+
+    def forget_slot_history(self, slot: int) -> None:
+        """Restart a slot's rolling win and stock counts when its weights change."""
+        for history in (self.anchor_win_history, self.anchor_stock_history):
+            for row in history:
+                row.pop(slot, None)
+
+    def install_frozen_opponent(self, opponent: dict[str, Tensor]) -> None:
+        """Load an actor into slot 1 as league entry 1 before the pool starts.
+
+        Slot 1 keeps its own critic tensors, which never affect sampled actions.
+        """
+        if self.config.league_selection != "frozen":
+            raise ValueError("a frozen opponent requires the frozen league")
+        if self.update or self.engine._initialized or len(self.league) != 1:
+            raise ValueError("the frozen opponent must load before the pool starts")
+        slot = self.engine.anchors[1]
+        entry = league_entry(1, 0, frozen_opponent_weights(slot.model.state_dict(), opponent))
+        slot.model.load_state_dict(entry.weights, strict=True)
+        self.league.append(entry)
+        self.league_stock_shares[1] = 0.5
+        self.slot_entries[1] = 1
+
+    def check_frozen_opponent(self, opponent: dict[str, Tensor]) -> None:
+        """Reject a resumed run whose slot 1 holds a different actor."""
+        if len(self.league) != 2 or self.slot_entries[1] != 1:
+            raise ValueError("a frozen run must hold pi_ref and its opponent only")
+        stored = self.league[1].weights
+        expected = frozen_opponent_weights(stored, opponent)
+        loaded = self.engine.anchors[1].model.state_dict()
+        if any(
+            not torch.equal(value, stored[name]) or not torch.equal(loaded[name].cpu(), value)
+            for name, value in expected.items()
+        ):
+            raise ValueError("resumed frozen opponent differs from the requested actor")
 
     @property
     def warming(self) -> bool:
@@ -4291,8 +4364,7 @@ class Trainer:
         learner.age = 0
         learner.training_updates = 0
         learner.stock_share = 0.5
-        for row in self.anchor_win_history:
-            row.pop(learner.owner, None)
+        self.forget_slot_history(learner.owner)
 
     def finish_exploiters(self) -> dict[str, float]:
         metrics: dict[str, float] = {}
@@ -4350,8 +4422,7 @@ class Trainer:
             self.engine.anchors[3].model.load_state_dict(entry.weights, strict=True)
             self.slot_entries[3] = entry.entry_id
             if changed:
-                for row in self.anchor_win_history:
-                    row.pop(3, None)
+                self.forget_slot_history(3)
             return (3,) if changed else ()
         # The newest entry is never evicted, so the last entry holds the largest id.
         entry = league_entry(self.league[-1].entry_id + 1, self.update, self.policy.model.state_dict())
@@ -4380,8 +4451,7 @@ class Trainer:
                     self.partial_episodes.discard((2 * match + side, number))
             self.engine.anchors[promoted].model.load_state_dict(entry.weights, strict=True)
             self.slot_entries[promoted] = entry.entry_id
-            for row in self.anchor_win_history:
-                row.pop(promoted, None)
+            self.forget_slot_history(promoted)
             return (promoted,)
         others = [row.entry_id for row in self.league if row is not entry]
         targets = [entry.entry_id]
@@ -4408,9 +4478,7 @@ class Trainer:
         for slot, entry_id in zip(changed, targets, strict=True):
             self.engine.anchors[slot].model.load_state_dict(weights_by_id[entry_id], strict=True)
             self.slot_entries[slot] = entry_id
-            # Rolling win counts restart with each new entry in a slot.
-            for row in self.anchor_win_history:
-                row.pop(slot, None)
+            self.forget_slot_history(slot)
         return tuple(changed)
 
     def league_metrics(self) -> dict[str, float]:
@@ -4585,11 +4653,9 @@ class Trainer:
         valid = frames < table.duration[ids, None]
         losses, damage, _ = frame_components(table, ids)
         rows = torch.arange(len(ids), device=ids.device)[:, None]
+        taken, lost = losses[rows, frames, 1 - side[:, None]], losses[rows, frames, side[:, None]]
         net = torch.stack(
-            [
-                value[rows, frames, 1 - side[:, None]] - value[rows, frames, side[:, None]]
-                for value in (losses, damage)
-            ],
+            [taken - lost, damage[rows, frames, 1 - side[:, None]] - damage[rows, frames, side[:, None]], taken, lost],
             -1,
         )
         totals = torch.where(valid[..., None], net, 0).sum(1)
@@ -4622,14 +4688,25 @@ class Trainer:
             .cpu()
             .tolist()
         )
+        self.anchor_stock_history.append(
+            {anchor: (row[2], row[3]) for anchor, row in zip(anchors, exposure, strict=True) if row[4]}
+        )
+        self.anchor_stock_history = self.anchor_stock_history[-32:]
         metrics: dict[str, float] = {
             f"gameplay/anchor{slot}_weights_update": float(update) for slot, update in self.slot_updates.items()
         }
-        for anchor, (stocks, damage_total, duration) in zip(anchors, exposure, strict=True):
+        for anchor, (stocks, damage_total, stocks_taken, stocks_lost, duration) in zip(anchors, exposure, strict=True):
             prefix = "gameplay/pi_ref" if anchor == 0 else f"gameplay/anchor{anchor}"
             if duration:
                 metrics[f"{prefix}_net_stocks_per_min"] = stocks * 3600 / duration
                 metrics[f"{prefix}_net_damage_per_min"] = damage_total * 3600 / duration
+                metrics[f"{prefix}_stocks_taken"] = stocks_taken
+                metrics[f"{prefix}_stocks_lost"] = stocks_lost
+            recent_taken = sum(row.get(anchor, (0.0, 0.0))[0] for row in self.anchor_stock_history)
+            recent_lost = sum(row.get(anchor, (0.0, 0.0))[1] for row in self.anchor_stock_history)
+            if recent_taken + recent_lost:
+                # Stocks taken over stocks taken and lost; rollouts need not finish a match.
+                metrics[f"{prefix}_stock_share_32_updates"] = recent_taken / (recent_taken + recent_lost)
             wins, count = completed.get(anchor, (0, 0))
             metrics[f"{prefix}_count"] = float(count)
             if count:
@@ -4719,8 +4796,17 @@ class Trainer:
 
     @torch.no_grad()
     def collapse_metrics(self, rollout: Rollout) -> dict[str, float]:
-        histogram = action_state_histogram(rollout.table, rollout.ids)
+        # A frozen league has lanes only for slot 1, so its warmup baseline is pi_ref against that opponent.
+        frozen = self.config.league_selection == "frozen"
+        histogram = action_state_histogram(rollout.table, rollout.ids, 1 if frozen else 0)
         slot_metrics: dict[str, float] = {}
+        if frozen:
+            # Log both sides every update, including warmup, where the student still plays pi_ref.
+            opponent = action_state_histogram(rollout.table, rollout.ids, 1, opponent=True)
+            for name, counts in (("student", histogram), ("opponent", opponent)):
+                total = int(counts.sum())
+                smashes = float(counts[list(SMASH_ACTION_STATES)].sum())
+                slot_metrics[f"collapse/{name}_smash_fraction"] = smashes / total if total else math.nan
         if self.exploiters:
             histograms = (
                 histogram,
@@ -4735,7 +4821,7 @@ class Trainer:
                     slot_metrics[f"collapse/slot{slot}_smash_fraction"] = statistics["collapse/smash_fraction"]
         if self.warming:
             self.warmup_action_histogram.add_(histogram)
-            return {}
+            return slot_metrics
         return {**collapse_statistics(histogram, self.warmup_action_histogram), **slot_metrics}
 
     @torch.no_grad()
@@ -4959,6 +5045,8 @@ class Trainer:
         metrics["data/episode_age_mean_frames"] = float(ages.float().mean())
         u_bins = torch.bucketize(table.conditions[ids, 2], table.conditions.new_tensor((0.5, 0.75, 0.9, 0.97)))
         entropy = torch.stack([-(p * torch.where(p > 0, p, 1).log()).sum(-1) for p in old.distributions]).sum(0)
+        if bool(executed[:, ::4].any()):
+            metrics["policy/entropy"] = float(entropy[executed[:, ::4]].mean())
         for index in range(5):
             mask = u_bins == index
             frames = executed[:, ::4] & mask[:, None]
@@ -5340,7 +5428,11 @@ class Trainer:
                 "train/lambda_max": self.engine.sampler.lambda_max,
             },
         )
-        if not self.warming and self.update % self.config.snapshot_interval == 0:
+        if (
+            not self.warming
+            and self.config.league_selection != "frozen"
+            and self.update % self.config.snapshot_interval == 0
+        ):
             snapshot_started = time.perf_counter()
             rotated = self.rotate_league()
             if self.policy.device.type == "cuda":
@@ -5566,6 +5658,7 @@ def capture_checkpoint(trainer: Trainer, provenance: dict[str, str]) -> Checkpoi
         "episode_metrics": trainer.episode_metrics,
         "partial_episodes": sorted(trainer.partial_episodes),
         "anchor_win_history": trainer.anchor_win_history,
+        "anchor_stock_history": trainer.anchor_stock_history,
         "memory_guard": (trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks),
         "evaluation_cursor": trainer.evaluation_cursor,
         "python_rng": random.getstate(),
@@ -6044,6 +6137,8 @@ def restore_checkpoint(trainer: Trainer, manifest_path: Path, provenance: dict[s
     trainer.episode_metrics = saved["episode_metrics"]
     trainer.partial_episodes = set(cast(list[tuple[int, int]], partial))
     trainer.anchor_win_history = saved["anchor_win_history"]
+    # Checkpoints written before stock-share instrumentation have no stock history.
+    trainer.anchor_stock_history = saved.get("anchor_stock_history", [])
     trainer.memory.first_checked, trainer.memory.actor_checked, trainer.memory.peaks = saved["memory_guard"]
     trainer.evaluation_cursor = saved["evaluation_cursor"]
     trainer.policy.clear_caches()
@@ -6211,6 +6306,19 @@ def print_progress(metrics: dict[str, float], *, warming: bool) -> None:
         f"peak_reserved_gib={metrics.get('systems/peak_reserved_bytes', 0) / gib:.3f}",
         flush=True,
     )
+    if "collapse/opponent_smash_fraction" in metrics:
+        print(
+            f"frozen_opponent update={int(metrics['global_step'])} "
+            f"win32={metrics.get('gameplay/anchor1_win_rate_32_updates', math.nan):.3f} "
+            f"games32={int(metrics.get('gameplay/anchor1_count_32_updates', 0))} "
+            f"stock_share32={metrics.get('gameplay/anchor1_stock_share_32_updates', math.nan):.3f} "
+            f"net_stocks/min={metrics.get('gameplay/anchor1_net_stocks_per_min', math.nan):.3f} "
+            f"student_smash={metrics['collapse/student_smash_fraction']:.4f} "
+            f"opponent_smash={metrics['collapse/opponent_smash_fraction']:.4f} "
+            f"entropy={metrics.get('policy/entropy', math.nan):.4f} "
+            f"clip={metrics.get('policy/clip_fraction', math.nan):.4f}",
+            flush=True,
+        )
 
 
 def run_training(
@@ -6333,6 +6441,8 @@ class NativeCli:
     max_frame: int = 28800
     resume: Path | None = None
     resume_learner: Path | None = None
+    # An O65 training manifest or evaluation actor; slot 1 plays it on every lane of a frozen league.
+    opponent: Path | None = None
     training: TrainConfig = TrainConfig()
     verify_resume: bool = False
     verify_only: bool = False
@@ -6352,6 +6462,10 @@ class NativeCli:
             raise ValueError("trace matches must be a nonnegative integer")
         if self.trace_matches and (self.profiling is not None or self.verify_only):
             raise ValueError("match tracing requires a training run")
+        if (self.opponent is not None) != (self.training.league_selection == "frozen"):
+            raise ValueError("a frozen league requires an opponent, and only it accepts one")
+        if self.opponent is not None and (self.resume_learner is not None or self.profiling is not None):
+            raise ValueError("a frozen opponent requires training from pi_ref or an exact resume")
         if self.resume_learner is not None and (
             self.resume is not None or self.verify_resume or self.profiling is not None
         ):
@@ -6527,6 +6641,19 @@ def train_native(config: NativeCli) -> None:
             lane_layout=config.training.lane_layout,
         )
         trainer = Trainer(engine, config.training)
+        opponent = None
+        if config.opponent is not None:
+            opponent = load_evaluation_checkpoint(
+                config.opponent, device=torch.device("cpu"), decoder_precision=config.decoder_precision
+            )
+            if (opponent.model.cfg, opponent.model.ranges, opponent.statistics) != (
+                checkpoint.model.cfg,
+                checkpoint.model.ranges,
+                checkpoint.statistics,
+            ):
+                raise ValueError("frozen opponent architecture, conditioning or statistics differ from pi_ref")
+            if config.resume is None:
+                trainer.install_frozen_opponent(opponent.model.state_dict())
         head_start = None
         trainer.compilation_counter = resources.enter_context(count_compilation_starts())
         if config.resume_learner is not None:
@@ -6538,6 +6665,8 @@ def train_native(config: NativeCli) -> None:
                 head_start = trainer.head_start()
         else:
             restore_checkpoint(trainer, config.resume, provenance)
+            if opponent is not None:
+                trainer.check_frozen_opponent(opponent.model.state_dict())
             trainer.capture_startup()
         if config.verify_only:
             verify_checkpoint_resume(trainer, config.output, provenance)
@@ -6550,6 +6679,12 @@ def train_native(config: NativeCli) -> None:
         native_config = json.loads(json.dumps(dataclasses.asdict(config), default=str))
         native_config["simulator_manifest_sha256"] = sha256(config.data_dir / "raw" / "manifest.json")
         native_config["sampler_sha256"] = sha256(config.sampler)
+        if opponent is not None:
+            native_config["opponent_identity"] = {
+                "checkpoint_sha256": opponent.checkpoint_sha256,
+                "policy_sha256": opponent.policy_sha256,
+                "provenance": opponent.provenance,
+            }
         native_config["startup_capture_seconds"] = trainer.startup_seconds
         native_config["startup_seconds"] = time.perf_counter() - startup_started
         native_config["compile_cache_status"] = {
@@ -7288,6 +7423,7 @@ def _resume_state_hashes(trainer: Trainer) -> dict[str, str]:
                 trainer.episode_metrics,
                 sorted(trainer.partial_episodes),
                 trainer.anchor_win_history,
+                trainer.anchor_stock_history,
             )
         ),
     }

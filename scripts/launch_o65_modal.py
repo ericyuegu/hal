@@ -231,6 +231,9 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
         ]
         if request.arm is not None:
             argv.extend(("--arm", request.arm, "--sweep", str(request.sweep)))
+            opponent = pilot.get_arm(request.arm).opponent
+            if opponent is not None:
+                argv.extend(("--opponent", str(RESULTS / opponent)))
         if request.resume_learner is not None:
             argv.extend(("--resume-learner", str(RESULTS / request.resume_learner)))
         return argv
@@ -746,11 +749,12 @@ def launch_ablation(args: Args, budget: Path) -> None:
             tuple(range(16)),
             matches=64,
             groups=4,
-            updates=672,
+            updates=pilot.get_arm(request.arm).updates if request.arm is not None else 672,
             checkpoint_every=32,
             warmup=32,
             compile_cache=ablation_compile_cache(request.name),
             arm=request.arm,
+            opponent=pilot_args.opponent,
         )
         trainer_argv[0:2] = ["/opt/venv/bin/python", str(REMOTE_ROOT / "experiments/065_selfplay_ppo.py")]
         trainer_argv[trainer_argv.index("--sampler") + 1] = str(REMOTE_ROOT / "experiments/o65/pilot-sampler.json")

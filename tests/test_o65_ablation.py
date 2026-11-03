@@ -1,4 +1,5 @@
 import dataclasses
+import functools
 import json
 import os
 from pathlib import Path
@@ -188,3 +189,36 @@ def test_default_pilot_command_keeps_its_current_settings() -> None:
     assert "--training.gamma" not in flags
     assert "--percentile-alpha" not in flags
     assert dataclasses.replace(pilot.OLD, name="scale", advantage_scale="warmup") == pilot.get_arm("scale")
+
+
+def test_exploit_arm_trains_only_against_the_frozen_student() -> None:
+    opponent = Path("/o65-results/o65-fixed-resume/pilot/train/checkpoints/update-00002000.json")
+    build = functools.partial(
+        pilot.training_command,
+        Path("delivery"),
+        Path("train"),
+        tuple(range(16)),
+        matches=64,
+        groups=4,
+        updates=160,
+        checkpoint_every=32,
+        warmup=32,
+        arm="exploit",
+    )
+    command = build(opponent=opponent)
+    changes = {
+        "--training.lane-layout": "frozen_opponent",
+        "--training.league-selection": "frozen",
+        "--updates": "160",
+        "--opponent": str(opponent),
+    }
+    assert flag_values(command) == flag_values(arm_command("old")) | changes
+    with pytest.raises(ValueError, match="frozen opponent"):
+        build()
+    with pytest.raises(ValueError, match="frozen opponent"):
+        pilot.Args(Path("run"), arm="exploit", sweep="probe")
+    with pytest.raises(ValueError, match="frozen opponent"):
+        pilot.Args(Path("run"), arm="old", sweep="probe", opponent=opponent)
+    request = launcher.Request("probe-exploit", "a" * 40, mode="ablation", arm="exploit", sweep="probe")
+    argv = launcher.command(request, tuple(range(16)))
+    assert argv[argv.index("--opponent") + 1] == str(launcher.RESULTS / str(pilot.get_arm("exploit").opponent))
