@@ -215,10 +215,11 @@ def training_command(
                 "5",
                 "--percentile-beta",
                 "1.3",
-                "--trace-matches",
-                "4",
             )
         )
+        # The match tracer samples group-zero pi_ref and self-play lanes, which a frozen-opponent layout lacks.
+        if treatment.lane_layout != "frozen_opponent":
+            command.extend(("--trace-matches", "4"))
     if opponent is not None:
         command.extend(("--opponent", str(opponent)))
     if resume_learner is not None:

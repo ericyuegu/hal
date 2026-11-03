@@ -212,7 +212,10 @@ def test_exploit_arm_trains_only_against_the_frozen_student() -> None:
         "--updates": "160",
         "--opponent": str(opponent),
     }
-    assert flag_values(command) == flag_values(arm_command("old")) | changes
+    expected = flag_values(arm_command("old")) | changes
+    # Match tracing samples pi_ref and self-play lanes, which this layout lacks.
+    del expected["--trace-matches"]
+    assert flag_values(command) == expected
     with pytest.raises(ValueError, match="frozen opponent"):
         build()
     with pytest.raises(ValueError, match="frozen opponent"):
