@@ -3072,6 +3072,9 @@ class TrainConfig:
     # A 30-second half-life covers about one stock exchange.
     gamma: float = 2 ** (-1 / 1800)
     damage_reward: float = 0.0
+    # Null control: flip the sign of each episode's task reward by a coin keyed on the episode.
+    # The reward keeps its scale and loses its dependence on play.
+    null_reward: bool = False
     lane_layout: LaneLayout = "anchor_heavy"
     # "frozen" trains against a fixed opponent in slot 1 and never rotates the league.
     league_selection: Literal["pfsp", "latest", "exploiters", "frozen"] = "pfsp"
@@ -4887,6 +4890,10 @@ class Trainer:
             else factor_kl(old, reference, decisions.executed_factors_JF)
         )
         frame_rewards = training_frame_rewards(table, ids, self.config.damage_reward)
+        if self.config.null_reward:
+            episode_key = table.integers[ids, STREAM] * 1_000_003 + table.integers[ids, EPISODE]
+            flip = torch.bitwise_and(torch.bitwise_right_shift(episode_key * 2_654_435_761, 16), 1)
+            frame_rewards = frame_rewards * (1 - 2 * flip)[:, None]
         rewards = regularized_reward(decisions, frame_rewards, kl, gamma=self.config.gamma)
         values = table.values[ids]
         following = table.following[ids]

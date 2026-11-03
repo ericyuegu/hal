@@ -24,7 +24,7 @@ from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
 ArmName = Literal[
-    "old", "reward", "critic", "scale", "matchup", "exploiters", "exploit", "exploit-lr3", "exploit-lr10"
+    "old", "reward", "critic", "scale", "matchup", "exploiters", "exploit", "exploit-lr3", "exploit-lr10", "null"
 ]
 
 
@@ -43,6 +43,7 @@ class Arm:
     advantage_scale: Literal["batch", "warmup"] = "batch"
     updates: int = 672
     actor_lr: float = 1e-5
+    null_reward: bool = False
     # Training manifest of the frozen opponent, relative to the results volume.
     opponent: str | None = None
 
@@ -90,6 +91,8 @@ ARMS = (
     *ARMS,
     dataclasses.replace(EXPLOIT, name="exploit-lr3", actor_lr=3e-5, updates=320),
     dataclasses.replace(EXPLOIT, name="exploit-lr10", actor_lr=1e-4, updates=320),
+    # Matches old except for per-episode random reward signs.
+    dataclasses.replace(OLD, name="null", null_reward=True, updates=384),
 )
 
 
@@ -230,6 +233,8 @@ def training_command(
             )
         )
         # The match tracer samples group-zero pi_ref and self-play lanes, which a frozen-opponent layout lacks.
+        if treatment.null_reward:
+            command.append("--training.null-reward")
         if treatment.lane_layout != "frozen_opponent":
             command.extend(("--trace-matches", "4"))
     if opponent is not None:
