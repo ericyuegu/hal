@@ -24,7 +24,7 @@ from hal.training.self_play_publication import compact_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
 ArmName = Literal[
-    "old", "reward", "critic", "scale", "matchup", "exploiters", "exploit", "exploit_lr3", "exploit_lr10"
+    "old", "reward", "critic", "scale", "matchup", "exploiters", "exploit", "exploit-lr3", "exploit-lr10"
 ]
 
 
@@ -88,8 +88,8 @@ EXPLOIT = ARMS[-1]
 # The probe at the student's step size moved KL to pi_ref only 4e-4 per frame in 110 updates.
 ARMS = (
     *ARMS,
-    dataclasses.replace(EXPLOIT, name="exploit_lr3", actor_lr=3e-5, updates=320),
-    dataclasses.replace(EXPLOIT, name="exploit_lr10", actor_lr=1e-4, updates=320),
+    dataclasses.replace(EXPLOIT, name="exploit-lr3", actor_lr=3e-5, updates=320),
+    dataclasses.replace(EXPLOIT, name="exploit-lr10", actor_lr=1e-4, updates=320),
 )
 
 
