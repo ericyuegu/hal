@@ -35,6 +35,7 @@ ArmName = Literal[
     "exploit-lr10",
     "null",
     "exploit-ref",
+    "fox-ditto",
 ]
 
 
@@ -56,6 +57,14 @@ class Arm:
     null_reward: bool = False
     # Training manifest of the frozen opponent, relative to the results volume.
     opponent: str | None = None
+    sampler: str = "pilot-sampler.json"
+    windows_per_step: int = 512
+    actor_microbatches: int = 4
+    update_kl_limit: float | None = None
+    lambda_fixed: float | None = None
+    percentile_fixed: float | None = None
+    # The only (delay, replan) pair the arm trains with.
+    timing: tuple[int, int] | None = None
 
 
 OLD = Arm("old")
@@ -105,6 +114,21 @@ ARMS = (
     dataclasses.replace(OLD, name="null", null_reward=True, updates=384),
     # Control for exploit-lr10: the same exploiter against frozen pi_ref.
     dataclasses.replace(EXPLOIT, name="exploit-ref", actor_lr=1e-4, updates=320, opponent="pi-ref/final.pt"),
+    # Latitude probe: old on the Fox ditto alone with fixed conditions, a 10x actor step size,
+    # 4x the actor steps per update, and a limit on how far an update moves the policy.
+    dataclasses.replace(
+        OLD,
+        name="fox-ditto",
+        updates=2048,
+        actor_lr=1e-4,
+        sampler="fox-ditto-sampler.json",
+        windows_per_step=128,
+        actor_microbatches=1,
+        update_kl_limit=4e-4,
+        lambda_fixed=0.1,
+        percentile_fixed=0.95,
+        timing=(8, 4),
+    ),
 )
 
 
@@ -184,7 +208,7 @@ def training_command(
         "--checkpoint",
         str(delivery / "payloads/final.pt"),
         "--sampler",
-        str(ROOT / "experiments/o65/pilot-sampler.json"),
+        str(ROOT / "experiments/o65" / (treatment.sampler if treatment is not None else "pilot-sampler.json")),
         "--data-dir",
         str(delivery / "inputs/msl/data"),
         "--output",
@@ -198,9 +222,9 @@ def training_command(
         "--updates",
         str(updates),
         "--training.windows-per-step",
-        "512",
+        str(treatment.windows_per_step if treatment is not None else 512),
         "--training.actor-microbatches",
-        "4",
+        str(treatment.actor_microbatches if treatment is not None else 4),
         "--training.seed",
         "65",
         "--training.critic-warmup-updates",
@@ -244,6 +268,14 @@ def training_command(
                 "1.3",
             )
         )
+        if treatment.update_kl_limit is not None:
+            command.extend(("--training.update-kl-limit", str(treatment.update_kl_limit)))
+        if treatment.lambda_fixed is not None:
+            command.extend(("--lambda-fixed", str(treatment.lambda_fixed)))
+        if treatment.percentile_fixed is not None:
+            command.extend(("--percentile-fixed", str(treatment.percentile_fixed)))
+        if treatment.timing is not None:
+            command.extend(("--timing", *(str(value) for value in treatment.timing)))
         # The match tracer samples group-zero pi_ref and self-play lanes, which a frozen-opponent layout lacks.
         if treatment.null_reward:
             command.append("--training.null-reward")

@@ -551,8 +551,12 @@ class SamplerConfig:
     # High-u prior: low-percentile conditioning anchors pi_ref to weaker human play.
     percentile_alpha: float = 15.0
     percentile_beta: float = 1.2
+    # Every player takes this percentile when set, and the Beta prior goes unused.
+    percentile_fixed: float | None = None
 
     def __post_init__(self) -> None:
+        if self.percentile_fixed is not None and not 0.1 <= self.percentile_fixed <= 0.999:
+            raise ValueError("fixed percentile must be in [0.1, 0.999]")
         if (
             not self.identities
             or not self.matchups
@@ -674,13 +678,17 @@ class EpisodeSampler:
                 rng.choice([1.0] * len(self.schedule.configurations), "timing", stream, episode, 0)
             ]
             percent = cfg.percents[rng.choice([1.0] * len(cfg.percents), "percent", stream, episode, 0)]
-            percentile = float(
-                np.clip(
-                    betaincinv(
-                        cfg.percentile_alpha, cfg.percentile_beta, rng.uniform("percentile", stream, episode, 0)
-                    ),
-                    0.1,
-                    0.999,
+            percentile = (
+                cfg.percentile_fixed
+                if cfg.percentile_fixed is not None
+                else float(
+                    np.clip(
+                        betaincinv(
+                            cfg.percentile_alpha, cfg.percentile_beta, rng.uniform("percentile", stream, episode, 0)
+                        ),
+                        0.1,
+                        0.999,
+                    )
                 )
             )
             players.append(
@@ -3099,6 +3107,10 @@ class TrainConfig:
     actor_microbatches: int = 1
     decisions_per_window: int = 16
     clip_epsilon: float = 0.2
+    # An update stops taking actor steps once the per-decision KL from the rollout
+    # policy has grown by this much over its value at the first step. That first
+    # value is about 2e-4 with no parameter change, so the limit applies to the growth.
+    update_kl_limit: float | None = None
     gradient_clip: float = 1.0
     # Weight of the critic's HL-Gauss loss in the actor step, which trains the trunk;
     # the critic heads train only in critic fitting.
@@ -3207,6 +3219,8 @@ class TrainConfig:
                 raise ValueError(f"{name} must be finite and positive")
         if not 0 < self.clip_epsilon < 1:
             raise ValueError("invalid clip epsilon")
+        if self.update_kl_limit is not None and not (math.isfinite(self.update_kl_limit) and self.update_kl_limit > 0):
+            raise ValueError("update KL limit must be finite and positive")
         if self.actor_optimizer not in ("muon", "adam"):
             raise ValueError("unsupported actor optimizer")
 
@@ -5147,6 +5161,7 @@ class Trainer:
         old_log_ratios: list[Tensor] = []
         actor_norms: list[Tensor] = []
         noise = GradientNoise(policy.actor_parameters())
+        first_kl = step_kl = 0.0
         table = batch.rollout.table
         if self.exploiters:
             if self.actor_staging is None:
@@ -5306,7 +5321,14 @@ class Trainer:
                     previous = _take_evaluation(table.evaluation, windows.rows.flatten())
                     mask = (current.factor_mask_WKF & selected[..., None]).flatten(0, 1)
                     old_kl = factor_kl(new, previous, mask)
-                    metrics[f"policy/old_kl_step{step}"] = float(torch.where(mask, old_kl, 0).sum() / selected.sum())
+                    step_kl = float(torch.where(mask, old_kl, 0).sum() / selected.sum())
+                    metrics[f"policy/old_kl_step{step}"] = step_kl
+                    if step == 0:
+                        first_kl = step_kl
+                    if cfg.update_kl_limit is not None and step_kl - first_kl > cfg.update_kl_limit:
+                        break
+        metrics["policy/actor_steps_taken"] = float(len(actor_norms))
+        metrics["policy/old_kl_growth"] = step_kl - first_kl
         ratio = torch.cat(ratios)
         metrics.update(gradient_metrics("actor", actor_norms, cfg.gradient_clip))
         metrics.update(noise.metrics())
@@ -5542,12 +5564,15 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
     del training["deterministic"]
     if trainer.config.league_selection != "exploiters":
         training = {name: value for name, value in training.items() if not name.startswith("exploiter_")}
-    for name in ("gamma", "damage_reward", "lane_layout", "league_selection"):
+    for name in ("gamma", "damage_reward", "lane_layout", "league_selection", "update_kl_limit"):
         if training[name] == getattr(TrainConfig(), name):
             del training[name]
+    sampling = dataclasses.asdict(engine.sampler.config)
+    if sampling["percentile_fixed"] is None:
+        del sampling["percentile_fixed"]
     identity: dict[str, object] = {
         "train": training,
-        "sampler": dataclasses.asdict(engine.sampler.config),
+        "sampler": sampling,
         "schedule": dataclasses.asdict(engine.sampler.schedule),
         "seed": engine.sampler.rng.seed,
         "schema": schema,
@@ -6181,7 +6206,7 @@ def legacy_pilot_digest(trainer: Trainer) -> str:
         "snapshot_interval": 256,
     }
     identity["sampler"] = {
-        **dataclasses.asdict(trainer.engine.sampler.config),
+        **cast(dict[str, object], identity["sampler"]),
         "anchor_rate": 0.15,
         "percentile_alpha": 5.0,
         "percentile_beta": 1.3,
@@ -6460,6 +6485,10 @@ class NativeCli:
     publication: self_play_publication.Args | None = None
     percentile_alpha: float = 15.0
     percentile_beta: float = 1.2
+    # Each of these replaces a sampled per-player condition with a single value.
+    percentile_fixed: float | None = None
+    lambda_fixed: float | None = None
+    timing: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if any(not math.isfinite(value) or value <= 0 for value in (self.percentile_alpha, self.percentile_beta)):
@@ -6514,7 +6543,14 @@ class NativeCli:
             raise ValueError("profiling must warm every group and run exactly two measured updates")
 
 
-def read_native_sampler(path: Path, *, percentile_alpha: float = 15.0, percentile_beta: float = 1.2) -> SamplerConfig:
+def read_native_sampler(
+    path: Path,
+    *,
+    percentile_alpha: float = 15.0,
+    percentile_beta: float = 1.2,
+    percentile_fixed: float | None = None,
+    lambda_fixed: float | None = None,
+) -> SamplerConfig:
     raw = json.loads(path.read_text())
     if (
         not isinstance(raw, dict)
@@ -6545,7 +6581,7 @@ def read_native_sampler(path: Path, *, percentile_alpha: float = 15.0, percentil
             raise ValueError("invalid sampler matchup fields")
         matchups.append(Matchup((row["characters"][0], row["characters"][1]), row["weight"]))
     stocks = tuple(raw["stocks"])
-    return SamplerConfig(
+    sampler = SamplerConfig(
         tuple(identities),
         tuple(matchups),
         tuple(raw["stages"]),
@@ -6557,7 +6593,11 @@ def read_native_sampler(path: Path, *, percentile_alpha: float = 15.0, percentil
         deployment_rate=raw["deployment_rate"],
         percentile_alpha=percentile_alpha,
         percentile_beta=percentile_beta,
+        percentile_fixed=percentile_fixed,
     )
+    if lambda_fixed is None:
+        return sampler
+    return dataclasses.replace(sampler, lambda_min=lambda_fixed, lambda_max=lambda_fixed)
 
 
 def train_native(config: NativeCli) -> None:
@@ -6602,9 +6642,15 @@ def train_native(config: NativeCli) -> None:
     checkpoint.model.requires_grad_(True)
     checkpoint.model.percentile_head.requires_grad_(False)
     schedule = development_config(checkpoint.model.head_offsets)
+    if config.timing is not None:
+        schedule = ScheduleConfig((DelayReplan(*config.timing),), schedule.supervised_offsets, schedule.rollout_frames)
     policy = TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics)
     sampling = read_native_sampler(
-        config.sampler, percentile_alpha=config.percentile_alpha, percentile_beta=config.percentile_beta
+        config.sampler,
+        percentile_alpha=config.percentile_alpha,
+        percentile_beta=config.percentile_beta,
+        percentile_fixed=config.percentile_fixed,
+        lambda_fixed=config.lambda_fixed,
     )
     for row in sampling.identities:
         if row.identity >= policy.model.cfg.player_vocab_size:

@@ -1,0 +1,422 @@
+{
+  "format": "hal.o65.sampler.v2",
+  "identities": [
+    {
+      "identity": 1,
+      "character": 0,
+      "count": 646
+    },
+    {
+      "identity": 1,
+      "character": 1,
+      "count": 21398
+    },
+    {
+      "identity": 1,
+      "character": 2,
+      "count": 8487
+    },
+    {
+      "identity": 1,
+      "character": 3,
+      "count": 516
+    },
+    {
+      "identity": 1,
+      "character": 4,
+      "count": 220
+    },
+    {
+      "identity": 1,
+      "character": 5,
+      "count": 136
+    },
+    {
+      "identity": 1,
+      "character": 6,
+      "count": 800
+    },
+    {
+      "identity": 1,
+      "character": 7,
+      "count": 8810
+    },
+    {
+      "identity": 1,
+      "character": 8,
+      "count": 585
+    },
+    {
+      "identity": 1,
+      "character": 9,
+      "count": 6500
+    },
+    {
+      "identity": 1,
+      "character": 10,
+      "count": 1522
+    },
+    {
+      "identity": 1,
+      "character": 12,
+      "count": 502
+    },
+    {
+      "identity": 1,
+      "character": 13,
+      "count": 2273
+    },
+    {
+      "identity": 1,
+      "character": 14,
+      "count": 885
+    },
+    {
+      "identity": 1,
+      "character": 15,
+      "count": 4237
+    },
+    {
+      "identity": 1,
+      "character": 16,
+      "count": 562
+    },
+    {
+      "identity": 1,
+      "character": 17,
+      "count": 1447
+    },
+    {
+      "identity": 1,
+      "character": 18,
+      "count": 11667
+    },
+    {
+      "identity": 1,
+      "character": 19,
+      "count": 143
+    },
+    {
+      "identity": 1,
+      "character": 20,
+      "count": 747
+    },
+    {
+      "identity": 1,
+      "character": 21,
+      "count": 926
+    },
+    {
+      "identity": 1,
+      "character": 22,
+      "count": 20407
+    },
+    {
+      "identity": 1,
+      "character": 23,
+      "count": 106
+    },
+    {
+      "identity": 1,
+      "character": 24,
+      "count": 394
+    },
+    {
+      "identity": 1,
+      "character": 25,
+      "count": 1445
+    },
+    {
+      "identity": 1,
+      "character": 26,
+      "count": 675
+    },
+    {
+      "identity": 2,
+      "character": 0,
+      "count": 346
+    },
+    {
+      "identity": 2,
+      "character": 1,
+      "count": 12999
+    },
+    {
+      "identity": 2,
+      "character": 2,
+      "count": 3502
+    },
+    {
+      "identity": 2,
+      "character": 3,
+      "count": 131
+    },
+    {
+      "identity": 2,
+      "character": 4,
+      "count": 32
+    },
+    {
+      "identity": 2,
+      "character": 5,
+      "count": 422
+    },
+    {
+      "identity": 2,
+      "character": 6,
+      "count": 422
+    },
+    {
+      "identity": 2,
+      "character": 7,
+      "count": 3820
+    },
+    {
+      "identity": 2,
+      "character": 8,
+      "count": 1406
+    },
+    {
+      "identity": 2,
+      "character": 9,
+      "count": 2896
+    },
+    {
+      "identity": 2,
+      "character": 10,
+      "count": 1466
+    },
+    {
+      "identity": 2,
+      "character": 12,
+      "count": 458
+    },
+    {
+      "identity": 2,
+      "character": 13,
+      "count": 2035
+    },
+    {
+      "identity": 2,
+      "character": 14,
+      "count": 541
+    },
+    {
+      "identity": 2,
+      "character": 15,
+      "count": 3355
+    },
+    {
+      "identity": 2,
+      "character": 16,
+      "count": 893
+    },
+    {
+      "identity": 2,
+      "character": 17,
+      "count": 781
+    },
+    {
+      "identity": 2,
+      "character": 18,
+      "count": 5615
+    },
+    {
+      "identity": 2,
+      "character": 19,
+      "count": 163
+    },
+    {
+      "identity": 2,
+      "character": 20,
+      "count": 188
+    },
+    {
+      "identity": 2,
+      "character": 21,
+      "count": 937
+    },
+    {
+      "identity": 2,
+      "character": 22,
+      "count": 13339
+    },
+    {
+      "identity": 2,
+      "character": 23,
+      "count": 36
+    },
+    {
+      "identity": 2,
+      "character": 24,
+      "count": 785
+    },
+    {
+      "identity": 2,
+      "character": 25,
+      "count": 1144
+    },
+    {
+      "identity": 2,
+      "character": 26,
+      "count": 206
+    },
+    {
+      "identity": 3,
+      "character": 0,
+      "count": 96
+    },
+    {
+      "identity": 3,
+      "character": 1,
+      "count": 17565
+    },
+    {
+      "identity": 3,
+      "character": 2,
+      "count": 4732
+    },
+    {
+      "identity": 3,
+      "character": 3,
+      "count": 499
+    },
+    {
+      "identity": 3,
+      "character": 4,
+      "count": 19
+    },
+    {
+      "identity": 3,
+      "character": 5,
+      "count": 257
+    },
+    {
+      "identity": 3,
+      "character": 6,
+      "count": 734
+    },
+    {
+      "identity": 3,
+      "character": 7,
+      "count": 5055
+    },
+    {
+      "identity": 3,
+      "character": 8,
+      "count": 232
+    },
+    {
+      "identity": 3,
+      "character": 9,
+      "count": 3291
+    },
+    {
+      "identity": 3,
+      "character": 10,
+      "count": 2248
+    },
+    {
+      "identity": 3,
+      "character": 12,
+      "count": 1795
+    },
+    {
+      "identity": 3,
+      "character": 13,
+      "count": 2634
+    },
+    {
+      "identity": 3,
+      "character": 14,
+      "count": 2412
+    },
+    {
+      "identity": 3,
+      "character": 15,
+      "count": 4977
+    },
+    {
+      "identity": 3,
+      "character": 16,
+      "count": 173
+    },
+    {
+      "identity": 3,
+      "character": 17,
+      "count": 1331
+    },
+    {
+      "identity": 3,
+      "character": 18,
+      "count": 7594
+    },
+    {
+      "identity": 3,
+      "character": 19,
+      "count": 46
+    },
+    {
+      "identity": 3,
+      "character": 20,
+      "count": 193
+    },
+    {
+      "identity": 3,
+      "character": 21,
+      "count": 835
+    },
+    {
+      "identity": 3,
+      "character": 22,
+      "count": 11172
+    },
+    {
+      "identity": 3,
+      "character": 23,
+      "count": 10
+    },
+    {
+      "identity": 3,
+      "character": 24,
+      "count": 372
+    },
+    {
+      "identity": 3,
+      "character": 25,
+      "count": 2080
+    },
+    {
+      "identity": 3,
+      "character": 26,
+      "count": 70
+    }
+  ],
+  "matchups": [
+    {
+      "characters": [
+        1,
+        1
+      ],
+      "weight": 1
+    }
+  ],
+  "stages": [
+    25,
+    24,
+    18,
+    26,
+    8,
+    6
+  ],
+  "stocks": [
+    4
+  ],
+  "percents": [
+    0.0
+  ],
+  "data_floor": 1,
+  "tempering": 1.0,
+  "masked_rate": 0.1,
+  "deployment_rate": 0.0
+}

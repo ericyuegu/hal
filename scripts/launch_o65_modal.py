@@ -52,7 +52,8 @@ BUDGET_FORMAT = "hal.o65.modal-budget.v1"
 RESULT_FORMAT = "hal.o65.modal-result.v1"
 MODAL_SDK = "1.5.3"
 ABLATION_TIMEOUT_SECONDS = 12600
-ABLATION_MAX_USD = 131.0
+ABLATION_MAX_TIMEOUT_SECONDS = 36000
+ABLATION_MAX_USD = 150.0
 ABLATION_BUDGET_FORMAT = "hal.o65.modal-ablation-budget.v1"
 
 
@@ -158,7 +159,7 @@ class Request:
         if type(self.timeout_seconds) is not int or not 60 <= self.timeout_seconds <= (
             PILOT_TIMEOUT_SECONDS
             if self.mode == "pilot"
-            else (ABLATION_TIMEOUT_SECONDS if self.mode == "ablation" else 6600)
+            else (ABLATION_MAX_TIMEOUT_SECONDS if self.mode == "ablation" else 6600)
         ):
             raise ValueError(f"timeout must be 60..6600 seconds (pilot: at most {PILOT_TIMEOUT_SECONDS})")
         if (
@@ -757,7 +758,8 @@ def launch_ablation(args: Args, budget: Path) -> None:
             opponent=pilot_args.opponent,
         )
         trainer_argv[0:2] = ["/opt/venv/bin/python", str(REMOTE_ROOT / "experiments/065_selfplay_ppo.py")]
-        trainer_argv[trainer_argv.index("--sampler") + 1] = str(REMOTE_ROOT / "experiments/o65/pilot-sampler.json")
+        sampler = pilot.get_arm(request.arm).sampler if request.arm is not None else "pilot-sampler.json"
+        trainer_argv[trainer_argv.index("--sampler") + 1] = str(REMOTE_ROOT / "experiments/o65" / sampler)
         trainer_argv.extend(("--wandb-project", "hal-o65"))
         trainer_argv.extend(pilot.publication_arguments(pilot_args, pilot_args.output))
         plans.append({"request": dataclasses.asdict(request), "command": pilot_argv, "trainer_argv": trainer_argv})
