@@ -88,6 +88,47 @@ def test_stock_check_rejects_swapped_student_side_and_corrupted_reward() -> None
         run.prepare(rollout)
 
 
+@pytest.mark.parametrize(
+    ("stocks", "percents", "reward"),
+    [((3, 1), (90.0, 10.0), 120 * 1 + 50), ((2, 2), (40.0, 35.0), -(120 * 2 + 50)), ((2, 2), (40.0, 40.0), 0)],
+)
+def test_timeout_charges_the_player_behind_on_stocks_then_percent(
+    stocks: tuple[int, int], percents: tuple[float, float], reward: int
+) -> None:
+    records = np.zeros((8, 1), dtype=exp.native.FRAME_DTYPE)
+    for side in range(2):
+        for name, value in (("stock", np.int32(stocks[side])), ("percent", np.float32(percents[side]))):
+            records["columns"][:, 0, exp.NATIVE_COLUMN_LAYOUT[f"p{side + 1}_{name}"][0]] = value.view(np.uint32)
+    store = exp.FrameStore(8, 1, torch.device("cpu"))
+    store.records.copy_(torch.from_numpy(records.view(np.uint8).reshape(8, 1, -1)))
+    table = exp.DenseRollout(64, store)
+    ids = torch.arange(2)
+    table.integers[ids, exp.START] = 1
+    table.integers[ids, exp.LENGTH] = 2
+    table.integers[ids, exp.SIDE] = ids
+    table.duration[ids] = torch.tensor([4, 3])
+    assert not exp.training_frame_rewards(table, ids, 0.25).any()
+    table.timed_out[ids] = True
+    expected = torch.zeros(2, 4)
+    expected[0, 3], expected[1, 2] = reward, -reward
+    torch.testing.assert_close(exp.training_frame_rewards(table, ids, 0.25), expected, atol=0, rtol=0)
+
+
+def test_timeout_loss_ends_the_episode_without_a_bootstrap() -> None:
+    for timeout_loss in (False, True):
+        run = trainer(length=23, timeout=True)
+        run.engine.timeout_loss = timeout_loss
+        rollout = run.engine.collect(0)
+        table = rollout.table
+        assert rollout.timeouts
+        assert bool(table.timed_out.any()) == timeout_loss
+        assert bool((table.timed_out & ~table.terminal).any()) is False
+        assert bool(table.bootstrap[table.following[table.boundary & ~table.terminal]].all())
+        if timeout_loss:
+            assert bool((table.following[table.timed_out] < 0).all())
+        run.prepare(rollout)
+
+
 def test_missing_stock_sentinel_does_not_count_as_a_loss() -> None:
     table, ids, _, _ = reward_table()
     columns = table.store.records.view(torch.int32)

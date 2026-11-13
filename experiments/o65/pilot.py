@@ -37,6 +37,7 @@ ArmName = Literal[
     "exploit-ref",
     "fox-ditto",
     "fox-exploit",
+    "fox-exploit-timeout",
 ]
 
 
@@ -56,6 +57,7 @@ class Arm:
     updates: int = 672
     actor_lr: float = 1e-5
     null_reward: bool = False
+    timeout_loss: bool = False
     # Training manifest of the frozen opponent, relative to the results volume.
     opponent: str | None = None
     sampler: str = "pilot-sampler.json"
@@ -147,6 +149,8 @@ ARMS = (
         opponent="fox1-fox-ditto/pilot/train/checkpoints/update-00001088.json",
     ),
 )
+# The fox-exploit learner stalled to the timer, which paid nothing. This arm charges the timeout as a loss.
+ARMS = (*ARMS, dataclasses.replace(ARMS[-1], name="fox-exploit-timeout", timeout_loss=True))
 
 
 def get_arm(name: str) -> Arm:
@@ -296,6 +300,8 @@ def training_command(
         # The match tracer samples group-zero pi_ref and self-play lanes, which a frozen-opponent layout lacks.
         if treatment.null_reward:
             command.append("--training.null-reward")
+        if treatment.timeout_loss:
+            command.append("--training.timeout-loss")
         if treatment.lane_layout != "frozen_opponent":
             command.extend(("--trace-matches", "4"))
     if opponent is not None:

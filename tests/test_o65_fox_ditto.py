@@ -105,3 +105,26 @@ def test_kl_ignores_categories_outside_the_policy_support() -> None:
     assert torch.isfinite(policy.grad).all()
     with pytest.raises(ValueError, match="cover the policy's support"):
         exp.categorical_kl(reference, policy.detach())
+
+
+def test_timeout_arm_differs_from_fox_exploit_by_the_timeout_flag() -> None:
+    def command(arm: pilot.ArmName) -> list[str]:
+        return list(
+            pilot.training_command(
+                Path("delivery"),
+                Path("train"),
+                tuple(range(16)),
+                matches=64,
+                groups=4,
+                updates=640,
+                checkpoint_every=32,
+                warmup=32,
+                arm=arm,
+                opponent=Path("opponent.json"),
+            )
+        )
+
+    timeout = command("fox-exploit-timeout")
+    assert "--training.timeout-loss" in timeout
+    timeout.remove("--training.timeout-loss")
+    assert timeout == command("fox-exploit")

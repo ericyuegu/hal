@@ -1215,6 +1215,8 @@ class DenseRollout:
         self.duration = torch.zeros(capacity, dtype=torch.long, device=self.device)
         self.remaining = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.terminal = torch.zeros(capacity, dtype=torch.bool, device=self.device)
+        # Final rows of an episode that reached the timer while the engine charges timeouts as losses.
+        self.timed_out = torch.zeros(capacity, dtype=torch.bool, device=self.device)
         self.boundary = torch.zeros(capacity, dtype=torch.bool, device=self.device)
         self.following = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
         self.values = torch.zeros(capacity, device=self.device)
@@ -1251,6 +1253,7 @@ class DenseRollout:
         self.rewards.zero_()
         self.remaining.fill_(-1)
         self.terminal.zero_()
+        self.timed_out.zero_()
         self.boundary.zero_()
         self.following.fill_(-1)
         self.queue_error.zero_()
@@ -2102,6 +2105,7 @@ class RolloutEngine:
         anchors: dict[int, LoopPolicy],
         *,
         lane_layout: LaneLayout = "anchor_heavy",
+        timeout_loss: bool = False,
     ) -> None:
         if not groups or any(not group or any(not shard.match_ids for shard in group) for group in groups):
             raise ValueError("rollout groups and shards must be nonempty")
@@ -2142,6 +2146,7 @@ class RolloutEngine:
         if lane_layout not in LANE_LAYOUTS:
             raise ValueError("unsupported lane layout")
         self.lane_layout = lane_layout
+        self.timeout_loss = timeout_loss
         layout = LANE_LAYOUTS[lane_layout]
         self.lane_roles = {
             match: role
@@ -2807,12 +2812,15 @@ class RolloutEngine:
             valid_pending = pending_ids >= 0
             target = pending_ids[valid_pending]
             table.boundary[target] = True
-            table.terminal[target] = bool(terminals[source])
+            # A timeout charged as a loss ends the episode for training, so it takes no bootstrap row.
+            charged = bool(truncations[source]) and self.timeout_loss
+            table.terminal[target] = bool(terminals[source]) or charged
+            table.timed_out[target] = charged
             episode_rows = (table.integers[:, MATCH] == match) & (table.integers[:, EPISODE] == state.episode.number)
             episode_rows &= table.valid
             ended_rows = torch.nonzero(episode_rows).flatten()
             table.remaining[ended_rows] = end_clock - table.integers[ended_rows, CLOCK]
-            if truncations[source]:
+            if truncations[source] and not charged:
                 boot = (
                     self.sampler.schedule.rollout_frames // 2 + (end_clock - self.clocks[group] - 1) // 128
                 ) * players + match_slots
@@ -3084,6 +3092,9 @@ class TrainConfig:
     # Null control: flip the sign of each episode's task reward by a coin keyed on the episode.
     # The reward keeps its scale and loses its dependence on play.
     null_reward: bool = False
+    # At the timer, charge the player behind on stocks, then on percent, as if it lost its remaining stocks
+    # and the game. The episode ends there for training.
+    timeout_loss: bool = False
     lane_layout: LaneLayout = "anchor_heavy"
     # "frozen" trains against a fixed opponent in slot 1 and never rotates the league.
     league_selection: Literal["pfsp", "latest", "exploiters", "frozen"] = "pfsp"
@@ -3631,7 +3642,8 @@ def action_statistics(
 
 
 @torch.no_grad()
-def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def frame_stocks(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor]:
+    """Read stocks and percent for the frame before each row and the four frames it can step."""
     meta = table.integers[ids]
     positions = meta[:, START] + meta[:, LENGTH] - 1
     lane = meta[:, LANE]
@@ -3642,6 +3654,12 @@ def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, 
     percent = torch.stack([columns[..., NATIVE_COLUMN_LAYOUT[f"p{s}_percent"][0]] for s in (1, 2)], -1).view(
         torch.float32
     )
+    return stock, percent
+
+
+@torch.no_grad()
+def frame_components(table: DenseRollout, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    stock, percent = frame_stocks(table, ids)
     present = (stock[:, 1:] != torch.iinfo(torch.int32).max) & (stock[:, :-1] != torch.iinfo(torch.int32).max)
     losses = ((stock[:, 1:] < stock[:, :-1]) & present).float()
     increase = percent[:, 1:] - percent[:, :-1]
@@ -3662,7 +3680,32 @@ def training_frame_rewards(table: DenseRollout, ids: Tensor, damage_weight: floa
     if bool((valid & (stored != expected)).any()):
         raise ValueError("stored stock reward disagrees with stock columns and student side")
     net_damage = damage.gather(-1, 1 - side).squeeze(-1) - damage.gather(-1, side).squeeze(-1)
-    return torch.where(valid, stored + damage_weight * net_damage, 0)
+    rewards = torch.where(valid, stored + damage_weight * net_damage, 0)
+    timed_out = torch.nonzero(table.timed_out[ids]).flatten()
+    if len(timed_out):
+        rewards[timed_out, table.duration[ids[timed_out]] - 1] += timeout_rewards(table, ids[timed_out])
+    return rewards
+
+
+@torch.no_grad()
+def timeout_rewards(table: DenseRollout, ids: Tensor) -> Tensor:
+    """Pay each row's side for a game that ended at the timer.
+
+    The player with fewer stocks is behind. With equal stocks, the player with more percent is behind.
+    The player behind pays 120 for each stock it still holds plus the 50 for the game, and the leader
+    receives the same amount. An exact tie pays zero.
+    """
+    stock, percent = frame_stocks(table, ids)
+    last = table.duration[ids, None, None].expand(-1, 1, 2)
+    stock, percent = stock.gather(1, last).squeeze(1), percent.gather(1, last).squeeze(1)
+    tied = stock[:, 0] == stock[:, 1]
+    if bool((stock == torch.iinfo(torch.int32).max).any()) or not bool(torch.isfinite(percent[tied]).all()):
+        raise ValueError("timed-out episode has no final stocks or percent")
+    side = table.integers[ids, SIDE, None]
+    own, other = stock.gather(-1, side).squeeze(-1), stock.gather(-1, 1 - side).squeeze(-1)
+    own_percent, other_percent = percent.gather(-1, side).squeeze(-1), percent.gather(-1, 1 - side).squeeze(-1)
+    lead = torch.where(own != other, own - other, torch.sign(other_percent - own_percent).long()).sign()
+    return torch.where(lead > 0, 120.0 * other + 50, torch.where(lead < 0, -(120.0 * own + 50), 0.0))
 
 
 @torch.no_grad()
@@ -5565,7 +5608,7 @@ def _configuration_identity(trainer: Trainer) -> dict[str, object]:
     del training["deterministic"]
     if trainer.config.league_selection != "exploiters":
         training = {name: value for name, value in training.items() if not name.startswith("exploiter_")}
-    for name in ("gamma", "damage_reward", "lane_layout", "league_selection", "update_kl_limit"):
+    for name in ("gamma", "damage_reward", "timeout_loss", "lane_layout", "league_selection", "update_kl_limit"):
         if training[name] == getattr(TrainConfig(), name):
             del training[name]
     sampling = dataclasses.asdict(engine.sampler.config)
@@ -6693,6 +6736,7 @@ def train_native(config: NativeCli) -> None:
             EpisodeSampler(sampling, schedule, CounterRng(config.training.seed)),
             {0: policy.frozen_copy()},
             lane_layout=config.training.lane_layout,
+            timeout_loss=config.training.timeout_loss,
         )
         trainer = Trainer(engine, config.training)
         opponent = None
