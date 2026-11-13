@@ -36,6 +36,7 @@ ArmName = Literal[
     "null",
     "exploit-ref",
     "fox-ditto",
+    "fox-exploit",
 ]
 
 
@@ -128,6 +129,22 @@ ARMS = (
         lambda_fixed=0.1,
         percentile_fixed=0.95,
         timing=(8, 4),
+    ),
+)
+FOX_DITTO = ARMS[-1]
+ARMS = (
+    *ARMS,
+    # Punish probe: a fresh pi_ref learner with the fox-ditto settings trains only against the
+    # frozen fox-ditto update-1088 student. The reward has a 30 s half-life and a damage weight of 0.25.
+    dataclasses.replace(
+        FOX_DITTO,
+        name="fox-exploit",
+        lane_layout="frozen_opponent",
+        league_selection="frozen",
+        updates=640,
+        gamma=2 ** (-1 / 1800),
+        damage_reward=0.25,
+        opponent="fox1-fox-ditto/pilot/train/checkpoints/update-00001088.json",
     ),
 )
 

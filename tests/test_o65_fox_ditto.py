@@ -3,6 +3,8 @@
 import dataclasses
 from pathlib import Path
 
+import pytest
+import torch
 from test_065_loop import exp
 from test_065_loop import sampler
 from test_065_loop import trainer
@@ -65,3 +67,41 @@ def test_fox_ditto_arm_command() -> None:
     fox = exp.read_native_sampler(ROOT / "experiments/o65/fox-ditto-sampler.json", lambda_fixed=0.1)
     assert [matchup.characters for matchup in fox.matchups] == [(1, 1)]
     assert (fox.lambda_min, fox.lambda_max) == (0.1, 0.1)
+
+
+def test_fox_exploit_arm_command() -> None:
+    opponent = Path("/o65-results") / str(pilot.get_arm("fox-exploit").opponent)
+    command = pilot.training_command(
+        Path("delivery"),
+        Path("train"),
+        tuple(range(16)),
+        matches=64,
+        groups=4,
+        updates=640,
+        checkpoint_every=32,
+        warmup=32,
+        arm="fox-exploit",
+        opponent=opponent,
+    )
+    flags = flag_values(command)
+    expected = {
+        "--sampler": str(pilot.ROOT / "experiments/o65/fox-ditto-sampler.json"),
+        "--training.update-kl-limit": "0.0004",
+        "--training.lane-layout": "frozen_opponent",
+        "--training.league-selection": "frozen",
+        "--training.damage-reward": "0.25",
+        "--opponent": str(opponent),
+    }
+    assert {flag: flags[flag] for flag in expected} == expected
+    assert float(flags["--training.gamma"]) == pytest.approx(2 ** (-1 / 1800))
+
+
+def test_kl_ignores_categories_outside_the_policy_support() -> None:
+    reference = torch.tensor([0.5, 0.25, 0.25]).log()
+    policy = torch.tensor([0.5, 0.5, 0.0]).log().requires_grad_()
+    kl = exp.categorical_kl(policy, reference)
+    assert kl.item() == pytest.approx(0.5 * torch.log(torch.tensor(2.0)).item())
+    kl.backward()
+    assert torch.isfinite(policy.grad).all()
+    with pytest.raises(ValueError, match="cover the policy's support"):
+        exp.categorical_kl(reference, policy.detach())

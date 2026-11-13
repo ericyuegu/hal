@@ -270,9 +270,10 @@ class DecisionBatch:
 
 
 def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
-    """Sum forward KL on shared support, detaching the reference.
+    """Sum forward KL over the policy's support, detaching the reference.
 
-    Illegal categories use -inf log-probabilities and contribute zero gradients.
+    Categories with a -inf policy log-probability have zero mass and contribute zero KL and zero gradients.
+    The reference must give finite mass to every category in the policy's support.
     """
     _check_tensor("reference", reference_log_probs, tuple(log_probs.shape), "float", log_probs.device)
     if not log_probs.is_floating_point() or log_probs.ndim < 1 or log_probs.shape[-1] < 1:
@@ -280,8 +281,8 @@ def categorical_kl(log_probs: Tensor, reference_log_probs: Tensor) -> Tensor:
     log_probs = _loss_precision(log_probs)
     reference_log_probs = _loss_precision(reference_log_probs.detach())
     legal = torch.isfinite(log_probs)
-    if not torch.equal(legal, torch.isfinite(reference_log_probs)):
-        raise ValueError("policy and reference must have identical support")
+    if bool((legal & ~torch.isfinite(reference_log_probs)).any()):
+        raise ValueError("reference must cover the policy's support")
     for value in (log_probs, reference_log_probs):
         if bool((torch.isnan(value) | torch.isposinf(value)).any()) or not bool(
             torch.isclose(value.logsumexp(-1), torch.zeros_like(value[..., 0]), atol=1e-5).all()
