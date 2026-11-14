@@ -400,7 +400,9 @@ class Architecture:
 
     @property
     def parameter_count_contract(self) -> dict[str, int]:
-        if self == Architecture():
+        # The prediction offsets select rows of a fixed embedding table, so they leave every count unchanged.
+        shape = replace(self, head_offsets=HEAD_OFFSETS)
+        if shape == Architecture():
             return {
                 "trunk": 150_994_944,
                 "temporal_decoder": 81_300_464,
@@ -423,7 +425,7 @@ class Architecture:
             group_head_dim=256,
             value_hidden_dim=128,
         )
-        if self == proxy:
+        if shape == proxy:
             return {
                 "trunk": 9_437_184,
                 "temporal_decoder": 5_195_504,
