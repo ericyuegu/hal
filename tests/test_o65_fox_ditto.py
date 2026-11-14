@@ -128,3 +128,34 @@ def test_timeout_arm_differs_from_fox_exploit_by_the_timeout_flag() -> None:
     assert "--training.timeout-loss" in timeout
     timeout.remove("--training.timeout-loss")
     assert timeout == command("fox-exploit")
+
+
+def test_delay16_arm_differs_from_fox_ditto_by_the_timing_and_the_reference() -> None:
+    def command(arm: pilot.ArmName, reference: Path | None) -> list[str]:
+        return list(
+            pilot.training_command(
+                Path("delivery"),
+                Path("train"),
+                tuple(range(16)),
+                matches=64,
+                groups=4,
+                updates=pilot.get_arm(arm).updates,
+                checkpoint_every=32,
+                warmup=32,
+                arm=arm,
+                reference=reference,
+            )
+        )
+
+    delayed = command("fox-ditto-delay16", Path("dense.pt"))
+    base = command("fox-ditto", None)
+    changed = {
+        flag
+        for flag in ("--checkpoint", "--timing", "--updates")
+        if flag_values(delayed)[flag] != flag_values(base)[flag]
+    }
+    assert changed == {"--checkpoint", "--timing", "--updates"}
+    assert delayed[delayed.index("--timing") + 1 : delayed.index("--timing") + 3] == ["16", "4"]
+    assert len(delayed) == len(base)
+    with pytest.raises(ValueError, match="own reference"):
+        command("fox-ditto-delay16", None)

@@ -235,6 +235,9 @@ def command(request: Request, cpus: tuple[int, ...]) -> list[str]:
             opponent = pilot.get_arm(request.arm).opponent
             if opponent is not None:
                 argv.extend(("--opponent", str(RESULTS / opponent)))
+            reference = pilot.get_arm(request.arm).reference
+            if reference is not None:
+                argv.extend(("--reference", str(RESULTS / reference)))
         if request.resume_learner is not None:
             argv.extend(("--resume-learner", str(RESULTS / request.resume_learner)))
         return argv
@@ -756,6 +759,7 @@ def launch_ablation(args: Args, budget: Path) -> None:
             compile_cache=ablation_compile_cache(request.name),
             arm=request.arm,
             opponent=pilot_args.opponent,
+            reference=pilot_args.reference,
         )
         trainer_argv[0:2] = ["/opt/venv/bin/python", str(REMOTE_ROOT / "experiments/065_selfplay_ppo.py")]
         sampler = pilot.get_arm(request.arm).sampler if request.arm is not None else "pilot-sampler.json"

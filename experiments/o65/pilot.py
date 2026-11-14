@@ -38,6 +38,7 @@ ArmName = Literal[
     "fox-ditto",
     "fox-exploit",
     "fox-exploit-timeout",
+    "fox-ditto-delay16",
 ]
 
 
@@ -68,6 +69,8 @@ class Arm:
     percentile_fixed: float | None = None
     # The only (delay, replan) pair the arm trains with.
     timing: tuple[int, int] | None = None
+    # BC checkpoint the arm starts from, relative to the results volume. The delivered proxy is the default.
+    reference: str | None = None
 
 
 OLD = Arm("old")
@@ -151,6 +154,18 @@ ARMS = (
 )
 # The fox-exploit learner stalled to the timer, which paid nothing. This arm charges the timeout as a loss.
 ARMS = (*ARMS, dataclasses.replace(ARMS[-1], name="fox-exploit-timeout", timeout_loss=True))
+# Reaction-time probe: fox-ditto at a delay of 16 frames. The reference is the proxy after 2,048 more BC
+# updates with every offset to 24 supervised, since the delivered proxy never supervised offsets 17 to 19.
+ARMS = (
+    *ARMS,
+    dataclasses.replace(
+        FOX_DITTO,
+        name="fox-ditto-delay16",
+        updates=1024,
+        timing=(16, 4),
+        reference="pi-ref-dense/final.pt",
+    ),
+)
 
 
 def get_arm(name: str) -> Arm:
@@ -177,6 +192,7 @@ class Args:
     arm: ArmName | None = None
     sweep: str | None = None
     opponent: Path | None = None
+    reference: Path | None = None
 
     def __post_init__(self) -> None:
         if self.arm is not None:
@@ -186,6 +202,8 @@ class Args:
             raise ValueError("a sweep requires an ablation arm")
         if (self.opponent is not None) != (self.arm is not None and get_arm(self.arm).opponent is not None):
             raise ValueError("only an arm with a frozen opponent takes an opponent checkpoint")
+        if (self.reference is not None) != (self.arm is not None and get_arm(self.arm).reference is not None):
+            raise ValueError("only an arm with its own reference takes a reference checkpoint")
 
 
 def execute(command: list[str], log: Path, environment: dict[str, str]) -> None:
@@ -208,6 +226,7 @@ def training_command(
     resume_learner: Path | None = None,
     arm: ArmName | None = None,
     opponent: Path | None = None,
+    reference: Path | None = None,
 ) -> list[str]:
     treatment = get_arm(arm) if arm is not None else None
     if treatment is not None and (matches, groups, updates, checkpoint_every, warmup) != (
@@ -222,12 +241,14 @@ def training_command(
         )
     if (opponent is not None) != (treatment is not None and treatment.opponent is not None):
         raise ValueError("only an arm with a frozen opponent takes an opponent checkpoint")
+    if (reference is not None) != (treatment is not None and treatment.reference is not None):
+        raise ValueError("only an arm with its own reference takes a reference checkpoint")
     command = [
         sys.executable,
         str(ROOT / "experiments/065_selfplay_ppo.py"),
         "train",
         "--checkpoint",
-        str(delivery / "payloads/final.pt"),
+        str(reference if reference is not None else delivery / "payloads/final.pt"),
         "--sampler",
         str(ROOT / "experiments/o65" / (treatment.sampler if treatment is not None else "pilot-sampler.json")),
         "--data-dir",
@@ -568,6 +589,7 @@ def main(args: Args) -> None:
         compile_cache=args.compile_cache,
         arm=args.arm,
         opponent=args.opponent,
+        reference=args.reference,
     )
     if args.wandb:
         identity = hashlib.sha256(str(output).encode()).hexdigest()[:10]

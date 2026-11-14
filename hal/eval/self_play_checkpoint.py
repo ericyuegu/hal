@@ -9,6 +9,7 @@ import uuid
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import fields
+from dataclasses import replace
 from pathlib import Path
 from typing import TypedDict
 from typing import cast
@@ -34,6 +35,7 @@ EVALUATION_FORMAT = "hal.o65.evaluation.v4"
 CRITIC_PREFIXES = ("critic.", "critic_residual.")
 TRAINING_FORMAT = "hal.o65.training.v12"
 TRAINING_VERSION = 12
+DENSE_HEAD_OFFSETS = (*range(1, 25), 28)
 
 
 class CheckpointShard(TypedDict):
@@ -281,6 +283,8 @@ def load_evaluation_checkpoint(
             or saved["return_conditioning"] is not True
         ):
             raise ValueError("O63 representation or return conditioning differs")
+        # The dense delay fork of the proxy supervises every offset to 24, so it can act at delays up to 20.
+        dense = saved["architecture"]["head_offsets"] == DENSE_HEAD_OFFSETS
         cfg = ActionSequenceConfig(
             d_model=256,
             n_layers=12,
@@ -292,9 +296,11 @@ def load_evaluation_checkpoint(
             group_head_dim=256,
             value_hidden_dim=128,
         )
+        if dense:
+            cfg = replace(cfg, head_offsets=DENSE_HEAD_OFFSETS)
         if saved["architecture"] != {name: getattr(cfg, name) for name in saved["architecture"]}:
             raise ValueError("O63 proxy architecture differs")
-        ranges = ConditioningRanges((math.log(0.01), math.log(100)), (8, 10), (2, 4))
+        ranges = ConditioningRanges((math.log(0.01), math.log(100)), (8, 20) if dense else (8, 10), (2, 4))
         paths = source_stats_paths(tuple(saved["source_names"]), None)
         if len(paths) != 1:
             raise ValueError("O63 development requires a single statistics source")
@@ -307,7 +313,7 @@ def load_evaluation_checkpoint(
             "data_manifests": raw["provenance"]["source_manifest_sha256"],
             "statistics_sha256": statistics_digest,
         }
-        queue = 14
+        queue = 24 if dense else 14
         kind = "hl_gauss" if critic_kind is None else critic_kind
         width = 128 if critic_hidden_dim is None else critic_hidden_dim
         depth = 0 if critic_depth is None else critic_depth
