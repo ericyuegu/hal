@@ -842,3 +842,60 @@ def test_offline_validation_uses_percentile_inputs_without_advancing_training_rn
     torch.testing.assert_close(captured[0][0], exp.condition_value(u))
     assert torch.equal(captured[0][1], available)
     assert torch.equal(generator_state, torch.get_rng_state())
+
+
+def test_dense_offset_fork_continues_a_checkpoint_and_trains_the_added_offsets():
+    cfg = _cfg(batch_size=1)
+    dense_cfg = replace(cfg, arch=replace(cfg.arch, head_offsets=exp.DENSE_HEAD_OFFSETS))
+    added = [13, 14, 15, 17, 18, 19, 21, 22, 23]
+    batch = _batch(cfg)
+
+    def setup(config, saved=None):
+        torch.manual_seed(0)
+        model = exp.make_model(config)
+        optimizer = exp.make_optimizer(model, config)
+        scheduler = exp.LearningRateScheduler(optimizer, exp.lr_schedule(config))
+        if saved is not None:
+            model.load_state_dict(saved["model"])
+            optimizer.load_state_dict(saved["optimizer"])
+            scheduler.load_state_dict(saved["scheduler"])
+        trunk_fn, temporal_fn = exp._training_functions(model, config)
+        return model, optimizer, scheduler, trunk_fn, temporal_fn
+
+    def update(state, config, step):
+        model, optimizer, scheduler, trunk_fn, temporal_fn = state
+        return exp.train_step(
+            model,
+            batch,
+            config,
+            step=step,
+            update=step + 1,
+            valid_prefixes=32,
+            trunk_fn=trunk_fn,
+            temporal_fn=temporal_fn,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            prefix_sampler=exp.PrefixSampler(7, "cpu"),
+            percentile_labeler=exp.PercentileLabeler(config.seed, "cpu"),
+        )
+
+    parent = setup(cfg)
+    initial = parent[0].temporal.offset_embedding.weight.detach().clone()
+    for step in range(4096, 4100):
+        update(parent, cfg, step)
+    trained = parent[0].temporal.offset_embedding.weight.detach().clone()
+    torch.testing.assert_close(trained[added], initial[added])
+    saved = {"model": parent[0].state_dict(), "optimizer": parent[1].state_dict(), "scheduler": parent[2].state_dict()}
+
+    fork = setup(dense_cfg, copy.deepcopy(saved))
+    rows = [exp.DENSE_HEAD_OFFSETS.index(offset) for offset in added]
+    first = update(fork, dense_cfg, 4100).nll_sum.sum(dim=-1)[rows]
+    for step in range(4101, 4140):
+        last = update(fork, dense_cfg, step).nll_sum.sum(dim=-1)[rows]
+    embedding = fork[0].temporal.offset_embedding.weight.detach()
+    assert (embedding[added] != trained[added]).any(dim=1).all()
+    assert torch.isfinite(last).all() and (last < first).all()
+    proxy = exp.proxy_config("bootstrap30")
+    exp.validate_config(replace(proxy, arch=replace(proxy.arch, head_offsets=exp.DENSE_HEAD_OFFSETS)))
+    with pytest.raises(ValueError, match="frozen set or the dense"):
+        exp.validate_config(replace(proxy, arch=replace(proxy.arch, head_offsets=(*range(1, 26), 28))))

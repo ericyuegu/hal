@@ -171,6 +171,16 @@ OFFSET_LOSS_WEIGHTS: Final[tuple[float, ...]] = (
     0.015,
     0.015,
 )
+HEAD_OFFSETS: Final[tuple[int, ...]] = (*range(1, 13), 16, 20, 24, 28)
+# A delay fork supervises every offset to 24, so that a policy can act at any delay up to 20 with replan 4.
+DENSE_HEAD_OFFSETS: Final[tuple[int, ...]] = (*range(1, 25), 28)
+
+
+def offset_loss_weights(n_offsets: int) -> tuple[float, ...]:
+    """Give the offsets added by a delay fork the coefficient of the other far offsets."""
+    if n_offsets not in (len(HEAD_OFFSETS), len(DENSE_HEAD_OFFSETS)):
+        raise ValueError(f"expected {len(HEAD_OFFSETS)} or {len(DENSE_HEAD_OFFSETS)} offsets, got {n_offsets}")
+    return OFFSET_LOSS_WEIGHTS + (OFFSET_LOSS_WEIGHTS[-1],) * (n_offsets - len(OFFSET_LOSS_WEIGHTS))
 
 
 RETURN_HORIZON: Final[int] = 60
@@ -361,7 +371,7 @@ class Architecture:
     L_ctx: int = 256
 
     sample_chunk_length: int = 28
-    head_offsets: tuple[int, ...] = (*range(1, 13), 16, 20, 24, 28)
+    head_offsets: tuple[int, ...] = HEAD_OFFSETS
     temporal_d_model: int = 1024
     temporal_layers: int = 6
     temporal_heads: int = 16
@@ -626,7 +636,7 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("unsupported training compile mode")
     production = Architecture()
     proxy = proxy_config(cfg.arm).arch
-    if cfg.arch not in (production, proxy):
+    if replace(cfg.arch, head_offsets=HEAD_OFFSETS) not in (production, proxy):
         raise ValueError("O63 architecture must be the production shape or its fixed proxy")
     if cfg.batch_size != 512 or cfg.seed != 0:
         raise ValueError("O63 freezes batch_size=512 and seed=0")
@@ -668,8 +678,8 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("head_offsets extend beyond sample_chunk_length")
     if offsets[: cfg.awr.near_offsets] != tuple(range(1, cfg.awr.near_offsets + 1)):
         raise ValueError("the near bucket must be the dense offset prefix 1..6")
-    if offsets != (*range(1, 13), 16, 20, 24, 28):
-        raise ValueError("O63 prediction offsets are frozen")
+    if offsets not in (HEAD_OFFSETS, DENSE_HEAD_OFFSETS):
+        raise ValueError("O63 prediction offsets are the frozen set or the dense delay-fork set")
     if cfg.arch == Architecture() and cfg.minimum_replay_frames != 291:
         raise ValueError("eight distinct O63 windows require at least 291 replay frames")
     if (cfg.prediction_frames, cfg.delay_frames, cfg.replan_interval_frames) != (4, 2, 2):
@@ -797,7 +807,7 @@ def validate_config(cfg: TrainConfig) -> None:
         )
         if any(value is None for value in lineage):
             raise ValueError("a decay fork requires explicit parent checkpoint lineage")
-    elif any(
+    elif offsets != DENSE_HEAD_OFFSETS and any(
         value is not None
         for value in (
             cfg.parent_run_name,
@@ -806,7 +816,7 @@ def validate_config(cfg: TrainConfig) -> None:
             cfg.parent_wandb_id,
         )
     ):
-        raise ValueError("parent checkpoint lineage is only valid for a decay fork")
+        raise ValueError("parent checkpoint lineage is only valid for a decay fork or a dense-offset fork")
 
 
 def proxy_config(arm: PercentileArm) -> TrainConfig:
@@ -1474,14 +1484,11 @@ def temporal_objective_parts(
     valid: Bool[Tensor, "*prefix"],
 ) -> tuple[Float[Tensor, ""], Float[Tensor, ""], Float[Tensor, ""]]:
     """Apply the preregistered per-offset coefficients exactly once."""
-    n_offsets = nll.shape[-2]
-    if n_offsets != len(OFFSET_LOSS_WEIGHTS):
-        raise ValueError(f"expected {len(OFFSET_LOSS_WEIGHTS)} offsets, got {n_offsets}")
     joint_nll = nll.float().sum(dim=-1)
     joint_nll = torch.where(valid[..., None], joint_nll, 0)
     awr_weights = weight.float()[..., None]
     near_offsets = AWRCalibration.near_offsets
-    coefficients = torch.tensor(OFFSET_LOSS_WEIGHTS, device=nll.device)
+    coefficients = torch.tensor(offset_loss_weights(nll.shape[-2]), device=nll.device)
     near = (joint_nll[..., :near_offsets] * awr_weights * coefficients[:near_offsets]).sum() / valid_prefixes
     far = (joint_nll[..., near_offsets:] * coefficients[near_offsets:]).sum() / valid_prefixes
     total = near + far
@@ -1498,9 +1505,9 @@ def projection_local_target_gradient_l1(
 ) -> dict[str, Tensor]:
     """Attribute the exact policy gradient on each target logit."""
     near_offsets = AWRCalibration.near_offsets
-    if len(offsets) != len(OFFSET_LOSS_WEIGHTS) or nll.shape[-2] != len(offsets):
+    if nll.shape[-2] != len(offsets):
         raise ValueError("gradient attribution requires all O63 offsets")
-    offset_coefficients = torch.tensor(OFFSET_LOSS_WEIGHTS, device=nll.device)
+    offset_coefficients = torch.tensor(offset_loss_weights(len(offsets)), device=nll.device)
     coefficients = offset_coefficients.expand(*weight.shape, -1).clone()
     coefficients[..., :near_offsets] *= weight.detach().float()[..., None]
     coefficients /= valid_prefixes
@@ -1668,7 +1675,7 @@ def nll_mean_metrics(
         raise ValueError(
             f"the {AWRCalibration.near_offsets} near offsets must leave at least one far offset, got {len(offsets)}"
         )
-    coefficients = torch.tensor(OFFSET_LOSS_WEIGHTS, device=mean_nll.device)
+    coefficients = torch.tensor(offset_loss_weights(len(offsets)), device=mean_nll.device)
     near = (joint[: AWRCalibration.near_offsets] * coefficients[: AWRCalibration.near_offsets]).sum()
     far = (joint[AWRCalibration.near_offsets :] * coefficients[AWRCalibration.near_offsets :]).sum()
     total = near + far
@@ -3378,7 +3385,8 @@ def _log_training_summary(
         wandb.run.summary["lineage/parent_run_name"] = cfg.parent_run_name
         wandb.run.summary["lineage/parent_checkpoint_name"] = cfg.parent_checkpoint_name
         wandb.run.summary["lineage/parent_checkpoint_sha256"] = cfg.parent_checkpoint_sha256
-        wandb.run.summary["lineage/parent_update"] = cfg.decay_start_update
+        if cfg.decay_start_update is not None:
+            wandb.run.summary["lineage/parent_update"] = cfg.decay_start_update
     if device_name is not None:
         wandb.run.summary["hardware/gpu_name"] = device_name
     if peak_flops is not None:
@@ -3825,6 +3833,7 @@ def train(
     resume_state: dict | None = None,
     source_transition: ResumeLineage | None = None,
     resume_checkpoint_sha256: str | None = None,
+    offset_fork: bool = False,
     smoke: bool = False,
     proxy: bool = False,
     stop_after_update: int | None = None,
@@ -3914,9 +3923,19 @@ def train(
         rng = resume_state.get("rng")
         if not isinstance(rng, Mapping):
             raise ValueError("resume checkpoint has no global RNG state")
+        stored_provenance = resume_state.get("provenance")
+        current_provenance = run_provenance(cfg, corpus)
+        if offset_fork and isinstance(stored_provenance, dict):
+            # A dense-offset fork changes the objective, so its source and environment can differ from the parent's.
+            # The data and optimizer identities must still match.
+            stored_provenance = {
+                **stored_provenance,
+                "git_sha": current_provenance["git_sha"],
+                "environment": current_provenance["environment"],
+            }
         validate_resume_provenance(
-            resume_state.get("provenance"),
-            run_provenance(cfg, corpus),
+            stored_provenance,
+            current_provenance,
             transition=source_transition,
             parent_checkpoint_sha256=resume_checkpoint_sha256,
         )
@@ -4459,6 +4478,8 @@ class TrainArgs:
     resume_as: str | None = None
     resume_num_workers: int | None = None
     decay_duration: int | None = None
+    dense_offsets: bool = False
+    """Fork the resumed checkpoint to supervise every offset from 1 to 24, and 28."""
     smoke: bool = False
     stop_after_update: int | None = None
     eval_max_parallel: int | None = None
@@ -4543,6 +4564,8 @@ def main(args: Command) -> None:
         raise SystemExit("--resume-num-workers requires --resume")
     if args.resume is None and args.decay_duration is not None:
         raise SystemExit("--decay-duration requires --resume and --resume-as")
+    if args.dense_offsets and (args.resume is None or args.resume_as is None):
+        raise SystemExit("--dense-offsets requires --resume and --resume-as to protect the parent run")
     if args.resume is not None:
         checkpoint = Path(args.resume_checkpoint)
         if (
@@ -4568,7 +4591,8 @@ def main(args: Command) -> None:
         if cfg.arm != requested_arm:
             raise SystemExit("--cfg.arm must match the resumed checkpoint arm")
         proxy = proxy_config(cfg.arm)
-        if args.proxy != (cfg.arch == proxy.arch and cfg.target_positions == proxy.target_positions):
+        resumed_arch = replace(cfg.arch, head_offsets=HEAD_OFFSETS)
+        if args.proxy != (resumed_arch == proxy.arch and cfg.target_positions == proxy.target_positions):
             raise SystemExit("--proxy must match the resumed checkpoint treatment")
         if args.resume_as is not None:
             if Path(args.resume_as).name != args.resume_as or args.resume_as in ("", ".", ".."):
@@ -4598,6 +4622,21 @@ def main(args: Command) -> None:
                     parent_checkpoint_sha256=checkpoint_sha256(checkpoint_path),
                     parent_wandb_id=cast(str | None, resume_state.get("wandb_id")),
                 )
+            if args.dense_offsets:
+                if args.resume_checkpoint == "latest.pt":
+                    raise SystemExit("a dense-offset fork requires an explicit immutable --resume-checkpoint")
+                if cfg.arch.head_offsets != HEAD_OFFSETS or args.resume_source_transition is not None:
+                    raise SystemExit(
+                        "--dense-offsets forks a checkpoint with the frozen offsets, without a transition"
+                    )
+                cfg = replace(
+                    cfg,
+                    arch=replace(cfg.arch, head_offsets=DENSE_HEAD_OFFSETS),
+                    parent_run_name=args.resume,
+                    parent_checkpoint_name=args.resume_checkpoint,
+                    parent_checkpoint_sha256=checkpoint_sha256(Path("runs") / args.resume / args.resume_checkpoint),
+                    parent_wandb_id=cast(str | None, resume_state.get("wandb_id")),
+                )
             resume_state = {**resume_state, "wandb_id": None}
         elif args.decay_duration is not None:
             raise SystemExit("--decay-duration requires --resume-as to protect the stable parent")
@@ -4621,6 +4660,7 @@ def main(args: Command) -> None:
         resume_state=resume_state,
         source_transition=source_transition,
         resume_checkpoint_sha256=resume_checkpoint_sha,
+        offset_fork=args.dense_offsets,
         smoke=args.smoke,
         proxy=args.proxy,
         stop_after_update=args.stop_after_update,
