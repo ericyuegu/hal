@@ -159,3 +159,33 @@ def test_delay16_arm_differs_from_fox_ditto_by_the_timing_and_the_reference() ->
     assert len(delayed) == len(base)
     with pytest.raises(ValueError, match="own reference"):
         command("fox-ditto-delay16", None)
+
+
+def test_exploiter_timing_goes_to_the_exploiter_slots_alone() -> None:
+    sampling = sampler()
+    student, exploiter = exp.DelayReplan(16, 4), exp.DelayReplan(8, 4)
+    schedule = exp.ScheduleConfig((student, exploiter), tuple(range(1, 25)))
+    asymmetric = exp.EpisodeSampler(sampling.config, schedule, sampling.rng, exploiter_timing=exploiter)
+    for slot in (None, 0, 1, 2, 3):
+        players = [player for match in range(32) for player in asymmetric.sample(match, 0, slot).players]
+        owned = {player.timing for player in players if player.anchor is not None}
+        assert {player.timing for player in players if player.anchor is None} == {student}
+        assert owned == ({exploiter} if slot in (1, 2) else {student} if slot is not None else set())
+
+
+def test_fast_exploiter_arm_differs_from_its_control_by_the_exploiter_timing() -> None:
+    arms = {arm.name: arm for arm in pilot.ARMS}
+    control, fast = arms["fox-delay16-exploiters"], arms["fox-delay16-fast-exploiters"]
+    assert dataclasses.replace(fast, name=control.name, exploiter_timing=None) == control
+    assert (
+        dataclasses.replace(
+            control,
+            name="fox-ditto-delay16",
+            updates=1024,
+            lane_layout="self_play_heavy",
+            league_selection="latest",
+            snapshot_interval=256,
+            exploiter_reset_updates=None,
+        )
+        == arms["fox-ditto-delay16"]
+    )

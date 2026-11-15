@@ -629,10 +629,23 @@ class Episode:
 
 
 class EpisodeSampler:
-    def __init__(self, config: SamplerConfig, schedule: ScheduleConfig, rng: CounterRng) -> None:
+    def __init__(
+        self,
+        config: SamplerConfig,
+        schedule: ScheduleConfig,
+        rng: CounterRng,
+        *,
+        exploiter_timing: DelayReplan | None = None,
+    ) -> None:
+        if exploiter_timing is not None and (
+            exploiter_timing not in schedule.configurations or len(schedule.configurations) < 2
+        ):
+            raise ValueError("exploiter timing must be one of several schedule configurations")
         self.config = config
         self.schedule = schedule
         self.rng = rng
+        # An exploiter timing belongs to slots 1 and 2 alone. Every other player draws from the rest.
+        self.exploiter_timing = exploiter_timing
         self.lambda_max = config.lambda_max
         self.cursor = 0
 
@@ -647,6 +660,7 @@ class EpisodeSampler:
         anchor_side = None
         if anchor is not None:
             anchor_side = rng.choice((1.0, 1.0), "anchor_side", match_id, episode, 0)
+        timings = [t for t in self.schedule.configurations if t != self.exploiter_timing]
         players: list[PlayerEpisode] = []
         characters = matchup.characters
         if rng.uniform("orientation", match_id, episode, 0) < 0.5:
@@ -675,9 +689,9 @@ class EpisodeSampler:
             log_lambda = math.log(cfg.lambda_min) + rng.uniform("lambda", stream, episode, 0) * (
                 math.log(self.lambda_max) - math.log(cfg.lambda_min)
             )
-            timing = self.schedule.configurations[
-                rng.choice([1.0] * len(self.schedule.configurations), "timing", stream, episode, 0)
-            ]
+            timing = timings[rng.choice([1.0] * len(timings), "timing", stream, episode, 0)]
+            if self.exploiter_timing is not None and side == anchor_side and anchor in (1, 2):
+                timing = self.exploiter_timing
             percent = cfg.percents[rng.choice([1.0] * len(cfg.percents), "percent", stream, episode, 0)]
             percentile = (
                 cfg.percentile_fixed
@@ -4195,12 +4209,11 @@ class Trainer:
             engine.learner_slots = (1, 2)
             learners = []
             trainable = {name for name, parameter in self.policy.model.named_parameters() if parameter.requires_grad}
-            exploiter_config = dataclasses.replace(config, actor_lr=1e-5)
             for slot in engine.learner_slots:
                 policy = engine.anchors[slot]
                 for name, parameter in policy.model.named_parameters():
                     parameter.requires_grad_(name in trainable)
-                actor = make_actor_optimizer(policy, exploiter_config)
+                actor = make_actor_optimizer(policy, config)
                 critic = torch.optim.AdamW(policy.critic_parameters(), lr=config.critic_lr, weight_decay=0)
                 scheduler = torch.optim.lr_scheduler.LambdaLR(
                     actor, lambda step: min(1.0, (step + 1) / max(1, config.exploiter_warmup_steps))
@@ -4414,7 +4427,7 @@ class Trainer:
         learner.actor_optimizer.state.clear()
         learner.critic_optimizer.state.clear()
         for group in learner.actor_optimizer.param_groups:
-            group["lr"] = group["initial_lr"] = 1e-5
+            group["lr"] = group["initial_lr"] = self.config.actor_lr
         learner.scheduler = torch.optim.lr_scheduler.LambdaLR(
             learner.actor_optimizer,
             lambda step: min(1.0, (step + 1) / max(1, self.config.exploiter_warmup_steps)),
@@ -5398,6 +5411,9 @@ class Trainer:
     def _warmup(self, batch: PreparedUpdate, learner: Learner) -> dict[str, float]:
         for timing in self.engine.sampler.schedule.configurations:
             mask = (batch.decisions.delay_J == timing.delay) & (batch.decisions.replan_J == timing.replan)
+            # A learner with its own timing never decides at the other learners' timings.
+            if self.engine.sampler.exploiter_timing is not None and not bool(mask.any()):
+                continue
             values = batch.advantages[mask].double()
             previous = learner.warmup_moments.get(timing, (0, 0.0, 0.0))
             learner.warmup_moments[timing] = (
@@ -6533,8 +6549,14 @@ class NativeCli:
     percentile_fixed: float | None = None
     lambda_fixed: float | None = None
     timing: tuple[int, int] | None = None
+    # The league's two exploiters decide at this timing. Every other player keeps `timing`.
+    exploiter_timing: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
+        if self.exploiter_timing is not None and (
+            self.timing is None or self.training.league_selection != "exploiters"
+        ):
+            raise ValueError("an exploiter timing requires a fixed timing and the exploiter league")
         if any(not math.isfinite(value) or value <= 0 for value in (self.percentile_alpha, self.percentile_beta)):
             raise ValueError("percentile Beta parameters must be finite and positive")
         validate_decoder_precision(self.decoder_precision)
@@ -6687,7 +6709,8 @@ def train_native(config: NativeCli) -> None:
     checkpoint.model.percentile_head.requires_grad_(False)
     schedule = development_config(checkpoint.model.head_offsets)
     if config.timing is not None:
-        schedule = ScheduleConfig((DelayReplan(*config.timing),), schedule.supervised_offsets, schedule.rollout_frames)
+        timings = dict.fromkeys(DelayReplan(*t) for t in (config.timing, config.exploiter_timing) if t is not None)
+        schedule = ScheduleConfig(tuple(timings), schedule.supervised_offsets, schedule.rollout_frames)
     policy = TransformerPolicy(checkpoint.model, schedule, checkpoint.statistics)
     sampling = read_native_sampler(
         config.sampler,
@@ -6733,7 +6756,12 @@ def train_native(config: NativeCli) -> None:
         engine = RolloutEngine(
             tuple(groups),
             policy,
-            EpisodeSampler(sampling, schedule, CounterRng(config.training.seed)),
+            EpisodeSampler(
+                sampling,
+                schedule,
+                CounterRng(config.training.seed),
+                exploiter_timing=None if config.exploiter_timing is None else DelayReplan(*config.exploiter_timing),
+            ),
             {0: policy.frozen_copy()},
             lane_layout=config.training.lane_layout,
             timeout_loss=config.training.timeout_loss,

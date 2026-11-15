@@ -39,6 +39,8 @@ ArmName = Literal[
     "fox-exploit",
     "fox-exploit-timeout",
     "fox-ditto-delay16",
+    "fox-delay16-exploiters",
+    "fox-delay16-fast-exploiters",
 ]
 
 
@@ -71,6 +73,11 @@ class Arm:
     timing: tuple[int, int] | None = None
     # BC checkpoint the arm starts from, relative to the results volume. The delivered proxy is the default.
     reference: str | None = None
+    # Timing of the league's two exploiters. They share the arm's timing by default.
+    exploiter_timing: tuple[int, int] | None = None
+    # Training updates before an exploiter resets to pi_ref. With this set, a high stock share
+    # no longer retires an exploiter, and no exploiter enters the bank.
+    exploiter_reset_updates: int | None = None
 
 
 OLD = Arm("old")
@@ -166,6 +173,22 @@ ARMS = (
         reference="pi-ref-dense/final.pt",
     ),
 )
+# Punish probe at a delay of 16: the student shares 12 of every 64 lanes with each of two exploiters,
+# which train against it from pi_ref at the student's step size and reset every 256 training updates.
+# The fast arm differs only in the exploiters' delay of 8, so they can react to a move the student commits to.
+ARMS = (
+    *ARMS,
+    dataclasses.replace(
+        ARMS[-1],
+        name="fox-delay16-exploiters",
+        updates=768,
+        lane_layout="anchor_heavy",
+        league_selection="exploiters",
+        snapshot_interval=64,
+        exploiter_reset_updates=256,
+    ),
+)
+ARMS = (*ARMS, dataclasses.replace(ARMS[-1], name="fox-delay16-fast-exploiters", exploiter_timing=(8, 4)))
 
 
 def get_arm(name: str) -> Arm:
@@ -318,6 +341,19 @@ def training_command(
             command.extend(("--percentile-fixed", str(treatment.percentile_fixed)))
         if treatment.timing is not None:
             command.extend(("--timing", *(str(value) for value in treatment.timing)))
+        if treatment.exploiter_timing is not None:
+            command.extend(("--exploiter-timing", *(str(value) for value in treatment.exploiter_timing)))
+        if treatment.exploiter_reset_updates is not None:
+            command.extend(
+                (
+                    "--training.exploiter-retire-share",
+                    "1",
+                    "--training.exploiter-bank-share",
+                    "1",
+                    "--training.exploiter-max-updates",
+                    str(treatment.exploiter_reset_updates),
+                )
+            )
         # The match tracer samples group-zero pi_ref and self-play lanes, which a frozen-opponent layout lacks.
         if treatment.null_reward:
             command.append("--training.null-reward")
